@@ -1,0 +1,24 @@
+# Core dependencies
+emoji==2.12.1
+requests==2.32.3
+PyYAML==6.0.1
+google-auth>=2.31.0
+google-api-python-client==2.136.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+tqdm==4.66.4
+slackblocks==1.1.1
+pydantic==2.11.7
+types-requests>=2.32.0
+types-PyYAML>=6.0.1
+
+# Development dependencies
+pytest==8.4.1
+black==24.3.0
+mypy==1.9.0
+isort==5.13.2
+flake8==7.0.0
+
+# Documentation
+mkdocs==1.5.3
+mkdocs-material==9.5.13

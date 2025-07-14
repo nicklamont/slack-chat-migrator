@@ -1,0 +1,38 @@
+# Slack to Google Chat Migration Configuration
+
+# Folder where attachments will be stored in Google Drive
+attachments_folder: "Slack Attachments"
+
+# Optional: Channels to exclude from migration (by name)
+exclude_channels:
+  - "random"        # Example: Skip the random channel
+  - "shitposting"   # Example: Skip off-topic channels
+  # - "general"     # Uncomment to exclude more channels as needed
+
+# Optional: Override email domains for user mapping
+# If not specified, emails from users.json will be used directly
+# RECOMMENDED: Set this to your Google Workspace domain (e.g., "company.com")
+# to ensure all mapped users are from your workspace
+email_domain_override: ""  # e.g. "company.com"
+
+# Optional: User mapping overrides
+# Use this to manually map specific Slack user IDs to Google Workspace emails
+# This takes precedence over the automatic mapping from users.json
+# You can find Slack user IDs in the users.json file from your export
+user_mapping_overrides:
+  # U12345678: "user@example.com"
+  # U87654321: "another_user@example.com"
+
+# Advanced options
+
+# Debug mode - will log more detailed information
+debug: false
+
+# Maximum number of retry attempts for API calls
+max_retries: 5
+
+# Initial delay between retry attempts (in seconds)
+initial_retry_delay: 1.0
+
+# Batch size for message processing
+batch_size: 100

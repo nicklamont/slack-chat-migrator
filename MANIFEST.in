@@ -1,0 +1,13 @@
+include LICENSE
+include README.md
+include requirements.txt
+include pyproject.toml
+include config.yaml.example
+include setup_permissions.sh
+include slack_migrator/py.typed
+
+recursive-exclude __pycache__ *
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
+recursive-exclude * *.so
+recursive-exclude * *.dylib 

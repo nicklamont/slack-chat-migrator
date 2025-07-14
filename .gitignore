@@ -1,0 +1,30 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+*.log
+
+# Virtual environments
+venv/
+env/
+
+# IDE/editor files
+.idea/
+.vscode/
+*.swp
+
+# Credentials and secrets
+*.json
+secrets/
+config.yaml
+
+# Output files
+slack_export_output/
+
+# System files
+.DS_Store
