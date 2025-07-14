@@ -59,9 +59,20 @@ def channel_has_external_users(migrator, channel: str) -> bool:
             continue
             
         # Check if this is an external user (not a bot)
-        users_without_email = getattr(migrator, "users_without_email", [])
-        user_info = next((u for u in users_without_email if u.get("id") == user_id), None)
-        is_bot = user_info.get("is_bot", False) or user_info.get("is_app_user", False) if user_info else False
+        # Ensure users_without_email is a list before iterating
+        users_without_email = getattr(migrator, "users_without_email", []) or []
+        
+        # Find user info in users_without_email
+        user_info = None
+        for u in users_without_email:
+            if u.get("id") == user_id:
+                user_info = u
+                break
+                
+        # Check if user is a bot
+        is_bot = False
+        if user_info:
+            is_bot = user_info.get("is_bot", False) or user_info.get("is_app_user", False)
         
         if migrator._is_external_user(email) and not is_bot:
             logger.info(f"Channel {channel} has external user {user_id} with email {email}")
