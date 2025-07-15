@@ -428,17 +428,22 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
         # Generate a consistent message ID based on the timestamp and channel
         # This ensures the same message always gets the same ID
         clean_ts = ts.replace(".", "-")
-        message_id_base = f"{channel}-{clean_ts}"
         
-        # Create a consistent hash for this specific message
-        hash_obj = hashlib.md5(message_id_base.encode())
-        hash_digest = hash_obj.hexdigest()[:8]
-        message_id = f"slack-{clean_ts}-{hash_digest}"
+        # Add current timestamp and random string to ensure uniqueness even during retries
+        import time
+        import random
+        import string
+        
+        current_ms = int(time.time() * 1000)
+        random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        message_id = f"client-slack-{clean_ts}-{current_ms}-{random_suffix}"
         
         # Ensure the ID is within the 63-character limit
         if len(message_id) > 63:
-            # Use a shorter ID format with just the hash
-            message_id = f"slack-{hash_digest}"
+            # Hash the timestamp and use a shorter ID format
+            hash_obj = hashlib.md5(ts.encode())
+            hash_digest = hash_obj.hexdigest()[:10]
+            message_id = f"client-slack-{hash_digest}-{random_suffix[:4]}"
         
         # Prepare API call parameters
         request_params = {
