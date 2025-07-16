@@ -23,6 +23,7 @@ def main():
     parser.add_argument('--config', required=True, help='Path to config YAML')
     parser.add_argument('--slack_token', help='Slack token for downloading files (optional, will be extracted from URLs if not provided)')
     parser.add_argument('--dry_run', action='store_true', help='Dry run mode - no changes will be made')
+    parser.add_argument('--update_mode', action='store_true', help='Update mode - update existing spaces instead of creating new ones')
     parser.add_argument('--report_file', help='Path to save the dry run report (default: migration_report.yaml)')
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose (debug) logging')
     parser.add_argument('--debug_api', action='store_true', help='Enable detailed API request/response logging (generates large log files)')
@@ -49,6 +50,7 @@ def main():
         logger.info(f"- Workspace admin: {args.workspace_admin}")
         logger.info(f"- Config: {args.config}")
         logger.info(f"- Dry run: {args.dry_run}")
+        logger.info(f"- Update mode: {args.update_mode}")
         logger.info(f"- Verbose logging: {args.verbose}")
         logger.info(f"- Debug API calls: {args.debug_api}")
         
@@ -68,7 +70,8 @@ def main():
             args.config,
             args.slack_token,
             args.dry_run,
-            args.verbose
+            args.verbose,
+            args.update_mode
         )
         
         # Run the migration

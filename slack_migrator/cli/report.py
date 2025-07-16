@@ -14,7 +14,7 @@ from typing import Dict, Any, List, Optional
 from slack_migrator.utils.logging import logger
 
 
-def print_dry_run_summary(migrator):
+def print_dry_run_summary(migrator, report_file=None):
     """Print a summary of the dry run to the console."""
     print("\n" + "=" * 80)
     print("DRY RUN SUMMARY")
@@ -36,9 +36,13 @@ def print_dry_run_summary(migrator):
         print(f"\nExternal users detected: {external_users}")
         print("These users will be handled with external user support")
     
-    # Get the output directory
-    output_dir = migrator.output_dir if hasattr(migrator, "output_dir") else "."
-    print(f"\nDetailed report saved to {os.path.join(output_dir, 'migration_report.yaml')}")
+    # Get the report file path
+    if report_file is None:
+        # Get the output directory
+        output_dir = migrator.output_dir if hasattr(migrator, "output_dir") else "."
+        report_file = os.path.join(output_dir, 'migration_report.yaml')
+    
+    print(f"\nDetailed report saved to {report_file}")
     print("=" * 80)
     print("\nTo perform the actual migration, run again without --dry-run")
     print("=" * 80)

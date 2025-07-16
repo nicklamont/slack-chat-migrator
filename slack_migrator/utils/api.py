@@ -39,28 +39,54 @@ def retry(
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             delay = initial_delay
+            last_exception = None
+            
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
                 except HttpError as e:
+                    last_exception = e
+                    # Don't retry client errors (4xx) except rate limits (429)
                     if e.resp.status // 100 == 4 and e.resp.status != 429:
                         logger.warning(
                             f"Client error ({e.resp.status}) not retried: {e}"
                         )
                         raise
+                    
                     log_with_context(
                         logging.WARNING,
                         f"Encountered {e.resp.status} {e.resp.reason}",
                         module="http",
                     )
+                    
                     if attempt < max_retries:
                         sleep_time = min(delay * (backoff_factor**attempt), max_delay)
                         logger.info(f"Retrying in {sleep_time:.1f} seconds...")
                         time.sleep(sleep_time)
                     else:
                         logger.error(f"Max retries reached. Last error: {e}")
+                        raise
+                except AttributeError as e:
+                    # Special handling for 'Resource' object has no attribute 'create'
+                    last_exception = e
+                    if "has no attribute 'create'" in str(e):
+                        log_with_context(
+                            logging.WARNING,
+                            f"API client error: {e}",
+                            module="http",
+                        )
+                        if attempt < max_retries:
+                            sleep_time = min(delay * (backoff_factor**attempt), max_delay)
+                            logger.info(f"Retrying in {sleep_time:.1f} seconds...")
+                            time.sleep(sleep_time)
+                        else:
+                            logger.error(f"Max retries reached. Last error: {e}")
+                            raise
+                    else:
+                        # Re-raise other attribute errors
                         raise
                 except Exception as e:
+                    last_exception = e
                     if attempt < max_retries:
                         sleep_time = min(delay * (backoff_factor**attempt), max_delay)
                         logger.info(f"Retrying in {sleep_time:.1f} seconds...")
@@ -68,6 +94,9 @@ def retry(
                     else:
                         logger.error(f"Max retries reached. Last error: {e}")
                         raise
+                        
+            if last_exception:
+                raise last_exception
             raise RuntimeError("Exited retry loop unexpectedly.")
 
         return wrapper

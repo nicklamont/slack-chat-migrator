@@ -213,12 +213,44 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
             # https://developers.google.com/workspace/chat/import-data
             reaction_body = {"emoji": {"unicode": emo}}
 
-            user_batches[email].add(
-                svc.spaces()
-                .messages()
-                .reactions()
-                .create(parent=message_name, body=reaction_body)
-            )
+            try:
+                # Make sure we're using the correct API method format
+                # The Google Chat API expects spaces().messages().reactions().create()
+                request = svc.spaces().messages().reactions().create(
+                    parent=message_name, 
+                    body=reaction_body
+                )
+                user_batches[email].add(request)
+            except AttributeError as e:
+                # Handle the 'Resource' object has no attribute 'create' error
+                log_with_context(
+                    logging.WARNING,
+                    f"Failed to create reaction request: {e}. Falling back to direct API call.",
+                    message_id=message_id,
+                    user=email,
+                    emoji=emo
+                )
+                # Fall back to direct API call
+                try:
+                    result = svc.spaces().messages().reactions().create(
+                        parent=message_name, body=reaction_body
+                    ).execute()
+                    
+                    log_api_response(
+                        200, 
+                        "chat.spaces.messages.reactions.create", 
+                        result, 
+                        message_id=message_id,
+                        user=email
+                    )
+                except Exception as inner_e:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Failed to add reaction in fallback mode: {inner_e}",
+                        message_id=message_id,
+                        user=email,
+                        emoji=emo
+                    )
 
     for email, batch in user_batches.items():
         try:
@@ -262,18 +294,34 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     if not hasattr(migrator, "sent_messages"):
         migrator.sent_messages = set()
         
+    # Ensure message_id_map exists to track Slack ts -> Google Chat message name mapping
+    if not hasattr(migrator, "message_id_map"):
+        migrator.message_id_map = {}
+        
     # Extract basic message info for logging
     ts = message.get("ts", "")
     user_id = message.get("user", "")
     thread_ts = message.get("thread_ts")
     channel = migrator.current_channel
     
-    # Check if this message has already been sent successfully
+    # Check for edited messages
+    edited = message.get("edited", {})
+    edited_ts = edited.get("ts", "") if edited else ""
+    is_edited = bool(edited_ts)
+    
+    # Create a message key that includes edit information if present
     message_key = f"{channel}:{ts}"
-    if message_key in migrator.sent_messages:
+    if is_edited:
+        message_key = f"{channel}:{ts}:edited:{edited_ts}"
+        
+    # Check if this message has already been sent successfully, but only in update mode
+    # In create mode, we always send messages regardless of what was sent before
+    is_update_mode = getattr(migrator, "update_mode", False)
+    
+    if is_update_mode and message_key in migrator.sent_messages:
         log_with_context(
             logging.INFO,
-            f"Skipping already sent message TS={ts} from user={user_id}",
+            f"[UPDATE MODE] Skipping already sent message TS={ts} from user={user_id}",
             channel=channel,
             ts=ts,
             user_id=user_id
@@ -287,9 +335,13 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
         migrator.migration_summary["messages_created"] += 1
     
     if migrator.dry_run:
+        mode_prefix = "[DRY RUN]"
+        if is_update_mode:
+            mode_prefix = "[DRY RUN] [UPDATE MODE]"
+            
         log_with_context(
             logging.DEBUG,
-            f"[DRY RUN] Would send message TS={ts} from user={user_id}",
+            f"{mode_prefix} Would send message TS={ts} from user={user_id}",
             channel=channel,
             ts=ts,
             user_id=user_id,
@@ -341,6 +393,11 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     if not formatted_text.strip() and "files" in message:
         formatted_text = "Shared a file"
     
+    # For edited messages, add an edit indicator
+    if is_edited:
+        edit_time = datetime.datetime.fromtimestamp(float(edited_ts)).strftime("%Y-%m-%d %H:%M:%S")
+        formatted_text = f"{formatted_text}\n\n_(edited at {edit_time})_"
+    
     # Convert Slack timestamp to RFC3339 format for Google Chat
     create_time = slack_ts_to_rfc3339(ts)
 
@@ -390,9 +447,14 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
             ts=ts
         )
 
+    # Log with appropriate mode indicator
+    mode_prefix = ""
+    if is_update_mode:
+        mode_prefix = "[UPDATE MODE] "
+        
     log_with_context(
         logging.DEBUG,
-        f"Sending message TS={ts} from user={user_id}{' (thread reply)' if is_thread_reply else ''}",
+        f"{mode_prefix}Sending message TS={ts} from user={user_id}{' (thread reply)' if is_thread_reply else ''}",
         channel=channel,
         ts=ts,
         user_id=user_id,
@@ -425,27 +487,51 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
                     user_id=user_id
                 )
         
-        # Generate a consistent message ID based on the timestamp and channel
-        # This ensures the same message always gets the same ID
-        clean_ts = ts.replace(".", "-")
-        
-        # Add current timestamp and random string to ensure uniqueness even during retries
+        # Generate a message ID that's unique for each attempt
+        # This avoids conflicts when retrying
         import time
         import random
         import string
+        import uuid
         
+        # Create a truly unique ID by combining:
+        # 1. A prefix to identify the source
+        # 2. The timestamp from Slack (cleaned)
+        # 3. Current execution time to ensure uniqueness across retries
+        # 4. A UUID to guarantee uniqueness
+        clean_ts = ts.replace(".", "-")
         current_ms = int(time.time() * 1000)
-        random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-        message_id = f"client-slack-{clean_ts}-{current_ms}-{random_suffix}"
+        unique_id = str(uuid.uuid4()).replace("-", "")[:8]
+        
+        # For edited messages, include the edited timestamp in the message ID
+        if is_edited:
+            # Use a different format for edited messages to avoid conflicts
+            clean_edited_ts = edited_ts.replace(".", "-")
+            # Include both timestamps to ensure uniqueness
+            message_id = f"client-slack-edit-{clean_ts}-{current_ms}-{unique_id}"
+        else:
+            message_id = f"client-slack-{clean_ts}-{current_ms}-{unique_id}"
         
         # Ensure the ID is within the 63-character limit
         if len(message_id) > 63:
-            # Hash the timestamp and use a shorter ID format
-            hash_obj = hashlib.md5(ts.encode())
-            hash_digest = hash_obj.hexdigest()[:10]
-            message_id = f"client-slack-{hash_digest}-{random_suffix[:4]}"
+            # Hash the timestamps and use a shorter ID format
+            hash_input = ts
+            if is_edited:
+                hash_input = f"{ts}:{edited_ts}"
+                
+            hash_obj = hashlib.md5(hash_input.encode())
+            hash_digest = hash_obj.hexdigest()[:8]
+            
+            # Create a shorter ID that still maintains uniqueness
+            if is_edited:
+                message_id = f"client-slack-edit-{hash_digest}-{current_ms}-{unique_id[:4]}"
+            else:
+                message_id = f"client-slack-{hash_digest}-{current_ms}-{unique_id[:4]}"
         
-        # Prepare API call parameters
+        result = None
+        
+        # Create a new message with the Google Chat API
+        # In import mode, we create separate messages for edits
         request_params = {
             "parent": space,
             "body": payload,
@@ -463,6 +549,22 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
 
         message_name = result.get("name")
         
+        # Store the message ID mapping for potential future edits
+        if message_name:
+            # For edited messages, store with a special key that includes the edit timestamp
+            if is_edited:
+                edit_key = f"{ts}:edited:{edited_ts}"
+                migrator.message_id_map[edit_key] = message_name
+                log_with_context(
+                    logging.DEBUG,
+                    f"Stored message ID mapping for edited message: {edit_key} -> {message_name}",
+                    channel=channel,
+                    ts=ts,
+                    edited_ts=edited_ts
+                )
+            else:
+                migrator.message_id_map[ts] = message_name
+            
         # Store thread mapping for the parent message
         if message_name and not is_thread_reply:
             thread_name = result.get("thread", {}).get("name")
@@ -521,7 +623,6 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
         )
         
         # Mark this message as successfully sent to avoid duplicates
-        message_key = f"{channel}:{ts}"
         migrator.sent_messages.add(message_key)
         
         return message_name
@@ -556,7 +657,10 @@ def track_message_stats(migrator, m):
     """Handle tracking message stats in both dry run and normal mode."""
     # Get the current channel being processed
     channel = migrator.current_channel
-    ts = m.get("ts", "unknown")
+    ts = m.get("ts", "")
+    
+    # Check if we're in update mode
+    is_update_mode = getattr(migrator, "update_mode", False)
     
     # Initialize channel stats if not already done
     if not hasattr(migrator, "channel_stats"):
@@ -568,6 +672,25 @@ def track_message_stats(migrator, m):
             "reaction_count": 0,
             "file_count": 0
         }
+    
+    # In update mode, we might need to skip stats tracking for messages
+    # that have already been processed
+    if is_update_mode:
+        message_key = f"{channel}:{ts}"
+        edited = m.get("edited", {})
+        edited_ts = edited.get("ts", "") if edited else ""
+        if edited_ts:
+            message_key = f"{channel}:{ts}:edited:{edited_ts}"
+            
+        # If this message has already been sent in a previous run, don't count it
+        if message_key in migrator.sent_messages:
+            log_with_context(
+                logging.DEBUG,
+                f"[UPDATE MODE] Skipping stats for already sent message {ts}",
+                channel=channel,
+                ts=ts
+            )
+            return
     
     # Increment message count for this channel
     migrator.channel_stats[channel]["message_count"] += 1
@@ -582,9 +705,14 @@ def track_message_stats(migrator, m):
         # (in normal mode this is done by process_reactions_batch)
         if migrator.dry_run:
             migrator.migration_summary["reactions_created"] += reaction_count
+            
+            mode_prefix = "[DRY RUN]"
+            if is_update_mode:
+                mode_prefix = "[DRY RUN] [UPDATE MODE]"
+                
             log_with_context(
                 logging.DEBUG,
-                f"[DRY RUN] Counted {reaction_count} reactions for message {ts}",
+                f"{mode_prefix} Counted {reaction_count} reactions for message {ts}",
                 channel=channel,
                 ts=ts
             )
@@ -592,9 +720,13 @@ def track_message_stats(migrator, m):
     # Track files
     file_count = len(m.get("files", []))
     if file_count > 0:
+        mode_prefix = ""
+        if is_update_mode:
+            mode_prefix = "[UPDATE MODE] "
+            
         log_with_context(
             logging.DEBUG,
-            f"Found {file_count} files to process in message {ts}",
+            f"{mode_prefix}Found {file_count} files to process in message {ts}",
             channel=channel,
             ts=ts
         )
@@ -668,16 +800,24 @@ def save_thread_mappings(migrator, channel: str):
                 channel_thread_map[str(ts)] = thread_name
                 channel_count += 1
         
+        # Create a data structure that includes space ID
+        save_data = {
+            "space_id": space_id,
+            "space_name": space_name,
+            "thread_map": channel_thread_map
+        }
+        
         log_with_context(
             logging.INFO,
-            f"Saving {channel_count} thread mappings for channel {channel}",
+            f"Saving {channel_count} thread mappings for channel {channel} (space: {space_id})",
             channel=channel,
+            space_id=space_id,
             file=str(thread_map_file)
         )
         
-        # Save only this channel's thread mappings
+        # Save the data structure
         with open(thread_map_file, 'w') as f:
-            json.dump(channel_thread_map, f)
+            json.dump(save_data, f)
         
         log_with_context(
             logging.INFO, 
@@ -685,11 +825,108 @@ def save_thread_mappings(migrator, channel: str):
             channel=channel,
             file=str(thread_map_file)
         )
+        
+        # Save message ID mappings
+        save_message_id_mappings(migrator, channel)
             
     except Exception as e:
         log_with_context(
             logging.WARNING,
             f"Failed to save thread mappings for {channel}: {e}",
+            channel=channel,
+            error=str(e)
+        )
+
+
+def save_message_id_mappings(migrator, channel: str):
+    """Save message ID mappings to a file for this channel.
+    
+    This allows messages to be properly tracked across multiple migration runs.
+    """
+    if migrator.dry_run:
+        log_with_context(
+            logging.INFO,
+            f"[DRY RUN] Would save message ID mappings for channel {channel}",
+            channel=channel
+        )
+        return
+        
+    try:
+        # Make sure message_id_map exists
+        if not hasattr(migrator, "message_id_map") or migrator.message_id_map is None:
+            migrator.message_id_map = {}
+            
+        # Use the thread_mappings directory in the output structure if available
+        if hasattr(migrator, "output_dirs") and "thread_mappings" in migrator.output_dirs:
+            message_map_dir = migrator.output_dirs["thread_mappings"]
+            os.makedirs(message_map_dir, exist_ok=True)
+            message_map_file = os.path.join(message_map_dir, f"{channel}_message_map.json")
+        else:
+            # Fallback to the old location
+            message_map_file = migrator.export_root / f".{channel}_message_map.json"
+        
+        # Get the space ID associated with this channel
+        space_name = migrator.created_spaces.get(channel)
+        if not space_name:
+            log_with_context(
+                logging.WARNING,
+                f"No space found for channel {channel}, cannot filter message ID mappings",
+                channel=channel
+            )
+            return
+            
+        # Extract the space ID from the space name (format: spaces/SPACE_ID)
+        space_id = space_name.split('/')[-1]
+        
+        # Filter message ID mappings for this channel only by matching the space ID
+        channel_message_map = {}
+        channel_count = 0
+        
+        for ts, message_name in migrator.message_id_map.items():
+            # Check if this message belongs to the current channel's space
+            if space_id in str(message_name):
+                # Always store as string keys
+                channel_message_map[str(ts)] = message_name
+                channel_count += 1
+        
+        # Also save the sent_messages set to track which messages have been sent
+        # This is important for tracking edited messages
+        sent_messages_for_channel = []
+        for message_key in migrator.sent_messages:
+            if message_key.startswith(f"{channel}:"):
+                sent_messages_for_channel.append(message_key)
+        
+        # Create a combined data structure to save
+        save_data = {
+            "space_id": space_id,
+            "space_name": space_name,
+            "message_id_map": channel_message_map,
+            "sent_messages": sent_messages_for_channel
+        }
+        
+        log_with_context(
+            logging.INFO,
+            f"Saving {channel_count} message ID mappings for channel {channel} (space: {space_id})",
+            channel=channel,
+            space_id=space_id,
+            file=str(message_map_file)
+        )
+        
+        # Save the combined data
+        with open(message_map_file, 'w') as f:
+            json.dump(save_data, f)
+        
+        log_with_context(
+            logging.INFO, 
+            f"Saved {channel_count} message ID mappings for channel {channel}",
+            channel=channel,
+            file=str(message_map_file)
+        )
+            
+    except Exception as e:
+        log_with_context(
+            logging.WARNING,
+            f"Failed to save message ID mappings for {channel}: {e}",
             channel=channel,
             error=str(e)
         )
@@ -732,18 +969,60 @@ def load_thread_mappings(migrator, channel: str):
         # If found in either location, load it
         if thread_map_file and (os.path.exists(thread_map_file) if isinstance(thread_map_file, str) else thread_map_file.exists()):
             with open(thread_map_file) as f:
-                loaded_map = json.load(f)
+                loaded_data = json.load(f)
                 
-                # Update the thread map with the loaded mappings
-                for ts, thread_name in loaded_map.items():
-                    # Store as string keys for consistency
-                    migrator.thread_map[str(ts)] = thread_name
-            
-            log_with_context(
-                logging.INFO,
-                f"Loaded {len(loaded_map)} thread mappings from {thread_map_file}",
-                channel=channel
-            )
+                # Check if we're using the new format with space_id
+                if isinstance(loaded_data, dict) and "space_id" in loaded_data:
+                    loaded_space_id = loaded_data.get("space_id")
+                    loaded_space_name = loaded_data.get("space_name")
+                    loaded_map = loaded_data.get("thread_map", {})
+                    
+                    # Check if we're in update mode and if the space matches
+                    is_update_mode = getattr(migrator, "update_mode", False)
+                    current_space = migrator.created_spaces.get(channel)
+                    
+                    if is_update_mode and current_space == loaded_space_name:
+                        # We're updating the same space, so use the thread mappings
+                        for ts, thread_name in loaded_map.items():
+                            # Store as string keys for consistency
+                            migrator.thread_map[str(ts)] = thread_name
+                            
+                        log_with_context(
+                            logging.INFO,
+                            f"Loaded {len(loaded_map)} thread mappings from {thread_map_file} for update mode",
+                            channel=channel,
+                            space_id=loaded_space_id
+                        )
+                    elif is_update_mode:
+                        log_with_context(
+                            logging.WARNING,
+                            f"Space mismatch in update mode. Found {loaded_space_name}, but current is {current_space}",
+                            channel=channel
+                        )
+                    else:
+                        log_with_context(
+                            logging.INFO,
+                            f"Not in update mode, ignoring saved thread mappings",
+                            channel=channel
+                        )
+                else:
+                    # Old format without space_id, only use if specified
+                    if getattr(migrator, "use_legacy_mappings", False):
+                        for ts, thread_name in loaded_data.items():
+                            # Store as string keys for consistency
+                            migrator.thread_map[str(ts)] = thread_name
+                        
+                        log_with_context(
+                            logging.INFO,
+                            f"Loaded {len(loaded_data)} thread mappings from legacy format",
+                            channel=channel
+                        )
+                    else:
+                        log_with_context(
+                            logging.INFO,
+                            f"Found legacy thread mapping format, ignoring (use_legacy_mappings=False)",
+                            channel=channel
+                        )
             
             # Debug log to verify thread mappings
             log_with_context(
@@ -757,6 +1036,9 @@ def load_thread_mappings(migrator, channel: str):
                 f"No thread map file found for channel {channel}",
                 channel=channel
             )
+        
+        # Load message ID mappings
+        load_message_id_mappings(migrator, channel)
             
     except Exception as e:
         log_with_context(
@@ -770,8 +1052,166 @@ def load_thread_mappings(migrator, channel: str):
             migrator.thread_map = {}
 
 
+def load_message_id_mappings(migrator, channel: str):
+    """Load message ID mappings from a file for this channel.
+    
+    This allows messages to be properly tracked across multiple migration runs.
+    """
+    try:
+        # Ensure message ID map is initialized
+        if not hasattr(migrator, "message_id_map") or migrator.message_id_map is None:
+            migrator.message_id_map = {}
+            
+        # Ensure sent_messages set is initialized
+        if not hasattr(migrator, "sent_messages"):
+            migrator.sent_messages = set()
+            
+        # Check first in the thread_mappings directory in the output structure
+        message_map_file = None
+        if hasattr(migrator, "output_dirs") and "thread_mappings" in migrator.output_dirs:
+            message_map_dir = migrator.output_dirs["thread_mappings"]
+            message_map_file_new = os.path.join(message_map_dir, f"{channel}_message_map.json")
+            if os.path.exists(message_map_file_new):
+                message_map_file = message_map_file_new
+                log_with_context(
+                    logging.DEBUG,
+                    f"Found message ID map file in new location: {message_map_file}",
+                    channel=channel
+                )
+        
+        # If not found, try the old location
+        if not message_map_file:
+            message_map_file_old = migrator.export_root / f".{channel}_message_map.json"
+            if message_map_file_old.exists():
+                message_map_file = message_map_file_old
+                log_with_context(
+                    logging.DEBUG,
+                    f"Found message ID map file in old location: {message_map_file}",
+                    channel=channel
+                )
+        
+        # If found in either location, load it
+        if message_map_file and (os.path.exists(message_map_file) if isinstance(message_map_file, str) else message_map_file.exists()):
+            with open(message_map_file) as f:
+                try:
+                    loaded_data = json.load(f)
+                    
+                    # Check if we're using the new format with space_id
+                    if isinstance(loaded_data, dict) and "space_id" in loaded_data:
+                        loaded_space_id = loaded_data.get("space_id")
+                        loaded_space_name = loaded_data.get("space_name")
+                        loaded_map = loaded_data.get("message_id_map", {})
+                        sent_messages = loaded_data.get("sent_messages", [])
+                        
+                        # Check if we're in update mode and if the space matches
+                        is_update_mode = getattr(migrator, "update_mode", False)
+                        current_space = migrator.created_spaces.get(channel)
+                        
+                        if is_update_mode and current_space == loaded_space_name:
+                            # We're updating the same space, so use the message ID mappings
+                            for ts, message_name in loaded_map.items():
+                                # Store as string keys for consistency
+                                migrator.message_id_map[str(ts)] = message_name
+                            
+                            # Add sent messages to the set
+                            for message_key in sent_messages:
+                                migrator.sent_messages.add(message_key)
+                                
+                            log_with_context(
+                                logging.INFO,
+                                f"Loaded {len(loaded_map)} message ID mappings from {message_map_file} for update mode",
+                                channel=channel,
+                                space_id=loaded_space_id
+                            )
+                        elif is_update_mode:
+                            log_with_context(
+                                logging.WARNING,
+                                f"Space mismatch in update mode. Found {loaded_space_name}, but current is {current_space}",
+                                channel=channel
+                            )
+                        else:
+                            log_with_context(
+                                logging.INFO,
+                                f"Not in update mode, ignoring saved message ID mappings",
+                                channel=channel
+                            )
+                    else:
+                        # Try to handle the old format (no space ID)
+                        if getattr(migrator, "use_legacy_mappings", False):
+                            # Check if it's the intermediate format with message_id_map and sent_messages
+                            if isinstance(loaded_data, dict) and "message_id_map" in loaded_data:
+                                loaded_map = loaded_data.get("message_id_map", {})
+                                sent_messages = loaded_data.get("sent_messages", [])
+                                
+                                # Update the message ID map with the loaded mappings
+                                for ts, message_name in loaded_map.items():
+                                    # Store as string keys for consistency
+                                    migrator.message_id_map[str(ts)] = message_name
+                                
+                                # Add sent messages to the set only if using legacy mappings
+                                for message_key in sent_messages:
+                                    migrator.sent_messages.add(message_key)
+                            else:
+                                # Oldest format (just the message ID map)
+                                for ts, message_name in loaded_data.items():
+                                    # Store as string keys for consistency
+                                    migrator.message_id_map[str(ts)] = message_name
+                                
+                            log_with_context(
+                                logging.INFO,
+                                f"Loaded legacy format message ID mappings",
+                                channel=channel
+                            )
+                        else:
+                            log_with_context(
+                                logging.INFO,
+                                f"Found legacy message ID mapping format, ignoring (use_legacy_mappings=False)",
+                                channel=channel
+                            )
+                except json.JSONDecodeError:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Failed to parse message ID map file {message_map_file}, starting with empty map",
+                        channel=channel
+                    )
+            
+            # Debug log to verify message ID mappings
+            log_with_context(
+                logging.DEBUG,
+                f"Message ID map after loading: {json.dumps(dict(list(migrator.message_id_map.items())[:5]), indent=2)} (showing first 5 items)",
+                channel=channel
+            )
+        else:
+            log_with_context(
+                logging.INFO,
+                f"No message ID map file found for channel {channel}",
+                channel=channel
+            )
+            
+    except Exception as e:
+        log_with_context(
+            logging.WARNING,
+            f"Failed to load message ID mappings for {channel}: {e}",
+            channel=channel,
+            error=str(e)
+        )
+        # Initialize empty message ID map if loading failed
+        if not hasattr(migrator, "message_id_map") or migrator.message_id_map is None:
+            migrator.message_id_map = {}
+
+
 def send_intro(migrator, space: str, channel: str):
     """Send an intro message with channel metadata."""
+    # Check if we're in update mode - if so, don't send intro message again
+    is_update_mode = getattr(migrator, "update_mode", False)
+    if is_update_mode:
+        log_with_context(
+            logging.INFO,
+            f"[UPDATE MODE] Skipping intro message for channel {channel}",
+            channel=channel
+        )
+        return
+        
     # Get channel metadata
     meta = migrator.channels_meta.get(channel, {})
 
@@ -841,3 +1281,115 @@ def send_intro(migrator, space: str, channel: str):
             channel=channel,
             error=str(e)
         ) 
+
+
+def save_space_mappings(migrator):
+    """Save space mappings to enable update mode in future runs.
+    
+    This saves the mapping between Slack channel names and Google Chat space IDs.
+    """
+    if migrator.dry_run:
+        log_with_context(
+            logging.INFO,
+            "[DRY RUN] Would save space mappings for update mode"
+        )
+        return
+        
+    try:
+        # Use the thread_mappings directory in the output structure if available
+        if hasattr(migrator, "output_dirs") and "thread_mappings" in migrator.output_dirs:
+            space_map_dir = migrator.output_dirs["thread_mappings"]
+            os.makedirs(space_map_dir, exist_ok=True)
+            space_map_file = os.path.join(space_map_dir, "space_mappings.json")
+        else:
+            # Fallback to the old location
+            space_map_file = migrator.export_root / ".space_mappings.json"
+        
+        # Save the space mappings
+        if hasattr(migrator, "created_spaces") and migrator.created_spaces:
+            log_with_context(
+                logging.INFO,
+                f"Saving {len(migrator.created_spaces)} space mappings for update mode",
+                file=str(space_map_file)
+            )
+            
+            with open(space_map_file, 'w') as f:
+                json.dump(migrator.created_spaces, f)
+                
+            log_with_context(
+                logging.INFO,
+                f"Saved space mappings successfully",
+                file=str(space_map_file)
+            )
+        else:
+            log_with_context(
+                logging.WARNING,
+                "No space mappings to save"
+            )
+            
+    except Exception as e:
+        log_with_context(
+            logging.WARNING,
+            f"Failed to save space mappings: {e}",
+            error=str(e)
+        )
+
+
+def load_space_mappings(migrator):
+    """Load space mappings for update mode.
+    
+    This loads the mapping between Slack channel names and Google Chat space IDs
+    to enable updating existing spaces in update mode.
+    
+    Returns:
+        dict: Mapping from channel names to space IDs, or empty dict if not found
+    """
+    try:
+        # Check first in the thread_mappings directory in the output structure
+        space_map_file = None
+        if hasattr(migrator, "output_dirs") and "thread_mappings" in migrator.output_dirs:
+            space_map_dir = migrator.output_dirs["thread_mappings"]
+            space_map_file_new = os.path.join(space_map_dir, "space_mappings.json")
+            if os.path.exists(space_map_file_new):
+                space_map_file = space_map_file_new
+                log_with_context(
+                    logging.DEBUG,
+                    f"Found space mappings file in new location: {space_map_file}"
+                )
+        
+        # If not found, try the old location
+        if not space_map_file:
+            space_map_file_old = migrator.export_root / ".space_mappings.json"
+            if space_map_file_old.exists():
+                space_map_file = space_map_file_old
+                log_with_context(
+                    logging.DEBUG,
+                    f"Found space mappings file in old location: {space_map_file}"
+                )
+        
+        # If found in either location, load it
+        if space_map_file and (os.path.exists(space_map_file) if isinstance(space_map_file, str) else space_map_file.exists()):
+            with open(space_map_file) as f:
+                space_mappings = json.load(f)
+                
+            log_with_context(
+                logging.INFO,
+                f"Loaded {len(space_mappings)} space mappings for update mode",
+                file=str(space_map_file)
+            )
+            
+            return space_mappings
+        else:
+            log_with_context(
+                logging.INFO,
+                "No space mappings file found"
+            )
+            return {}
+                
+    except Exception as e:
+        log_with_context(
+            logging.WARNING,
+            f"Failed to load space mappings: {e}",
+            error=str(e)
+        )
+        return {} 
