@@ -276,4 +276,5 @@ def generate_report(migrator, output_file: str = "migration_report.yaml"):
     # Log that the report was generated
     logger.info(f"Migration report generated: {report_path}")
     
-    return report 
+    # Return the report file path instead of the report content
+    return report_path 
