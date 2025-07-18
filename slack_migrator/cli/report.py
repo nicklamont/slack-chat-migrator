@@ -144,12 +144,26 @@ def generate_report(migrator, output_file: str = "migration_report.yaml"):
         "spaces": {},
         "skipped_channels": [],
         "failed_channels": list(failed_by_channel.keys()),
+        "high_failure_rate_channels": {},
         "users": {
             "external_users": {},
             "users_without_email": {},
         },
         "recommendations": []
     }
+    
+    # Add high failure rate channels to the report
+    if hasattr(migrator, "high_failure_rate_channels"):
+        report["high_failure_rate_channels"] = migrator.high_failure_rate_channels
+        
+        # Add recommendation for high failure rate channels
+        if migrator.high_failure_rate_channels:
+            max_failure_percentage = migrator.config.get("max_failure_percentage", 10)
+            report['recommendations'].append({
+                'type': 'high_failure_rate',
+                'message': f"Found {len(migrator.high_failure_rate_channels)} channels with failure rates exceeding {max_failure_percentage}%. Check the detailed logs for more information.",
+                'severity': 'warning'
+            })
 
     # Add detailed info for each space
     for channel in migrator.migration_summary["channels_processed"]:

@@ -4,22 +4,16 @@ Main migrator class for the Slack to Google Chat migration tool
 
 import json
 import logging
-import sys
-import time
-import datetime
-import os
-from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Set
+import time
+from typing import Dict, List, Optional, Any
 
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
-from googleapiclient.http import BatchHttpRequest
 from tqdm import tqdm
 
-from slack_migrator.utils.logging import logger, log_with_context, setup_logger
-from slack_migrator.utils.api import get_gcp_service, retry, slack_ts_to_rfc3339
-from slack_migrator.utils.formatting import convert_formatting
+from slack_migrator.utils.logging import logger, log_with_context
+from slack_migrator.utils.api import get_gcp_service, set_global_retry_config
 
 from slack_migrator.services.user import generate_user_map
 from slack_migrator.services.file import FileHandler
@@ -35,10 +29,7 @@ from slack_migrator.services.space import (
 )
 from slack_migrator.services.message import (
     send_message,
-    process_reactions_batch,
     track_message_stats,
-    save_thread_mappings,
-    load_thread_mappings
 )
 from slack_migrator.cli.report import (
     generate_report,
@@ -106,6 +97,9 @@ class SlackToChatMigrator:
                 else:
                     import yaml  # Import yaml here to avoid dependency issues if not used
                     self.config = yaml.safe_load(f)
+                    
+        # Set global retry config for all API calls
+        set_global_retry_config(self.config)
 
         # Generate user mapping from users.json
         self.user_map, self.users_without_email = generate_user_map(self.export_root, self.config)
@@ -220,19 +214,38 @@ class SlackToChatMigrator:
     def _should_abort_import(
         self, channel: str, processed_count: int, failed_count: int
     ) -> bool:
-        """Ask the user if they want to abort the import after errors in the first channel."""
+        """Determine if we should abort the import after errors in a channel.
+        
+        This can be configured in the config file with abort_on_error: true|false
+        """
         if self.dry_run:
             return False
 
-        log_with_context(
-            logging.WARNING,
-            f"Channel '{channel}' had {failed_count} message import errors.",
-            channel=channel
-        )
-        log_with_context(
-            logging.WARNING,
-            "Continuing with migration automatically. To change this, modify _should_abort_import."
-        )
+        # Only consider aborting if we had failures
+        if failed_count > 0:
+            log_with_context(
+                logging.WARNING,
+                f"Channel '{channel}' had {failed_count} message import errors.",
+                channel=channel
+            )
+            
+            # Check config for abort_on_error setting
+            should_abort = self.config.get("abort_on_error", False)
+            
+            if should_abort:
+                log_with_context(
+                    logging.WARNING,
+                    f"Aborting import due to errors (abort_on_error is enabled in config)",
+                    channel=channel
+                )
+                return True
+            else:
+                log_with_context(
+                    logging.WARNING,
+                    f"Continuing with migration despite errors (abort_on_error is disabled in config)",
+                    channel=channel
+                )
+        
         return False
 
     def _delete_space_if_errors(self, space_name, channel):
@@ -543,6 +556,12 @@ class SlackToChatMigrator:
                 
             processed_count = 0
             failed_count = 0
+            
+            # Get failure threshold configuration
+            max_failure_percentage = self.config.get("max_failure_percentage", 10)
+            
+            # Track failures for this channel
+            channel_failures = []
 
             pbar = tqdm(msgs, desc=f"{ch.name} - Messages")
             for m in pbar:
@@ -573,10 +592,35 @@ class SlackToChatMigrator:
                         processed_count += 1
                 else:
                     failed_count += 1
-                    channel_had_errors = True
-
+                    channel_failures.append(ts)
+                    
+                    # Check if we've exceeded our failure threshold
+                    if processed_count > 0:  # Avoid division by zero
+                        failure_percentage = (failed_count / (processed_count + failed_count)) * 100
+                        if failure_percentage > max_failure_percentage:
+                            log_with_context(
+                                logging.WARNING,
+                                f"Failure rate {failure_percentage:.1f}% exceeds threshold {max_failure_percentage}% for channel {ch.name}",
+                                channel=ch.name
+                            )
+                            # Flag the channel as having a high error rate, but don't break the loop
+                            channel_had_errors = True
+                            # Track channels with high failure rates
+                            if not hasattr(self, "high_failure_rate_channels"):
+                                self.high_failure_rate_channels = {}
+                            self.high_failure_rate_channels[ch.name] = failure_percentage
+                            # Don't break the loop - continue processing messages
+                            # break  # This line is commented out to continue processing
+                    
                 # Add a small delay between messages to avoid rate limits
                 time.sleep(0.05)
+
+            # Record failures for reporting
+            if channel_failures:
+                if not hasattr(self, "failed_messages_by_channel"):
+                    self.failed_messages_by_channel = {}
+                self.failed_messages_by_channel[ch.name] = channel_failures
+                channel_had_errors = True
 
             log_with_context(
                 logging.INFO,
@@ -596,25 +640,81 @@ class SlackToChatMigrator:
                     channel=ch.name
                 )
                 
-                # Only complete import if there were no errors
-                if not channel_had_errors and not self.dry_run:
+                # Get the completion strategy from config
+                completion_strategy = self.config.get("import_completion_strategy", "skip_on_error")
+                
+                # Only complete import if there were no errors or we're using force_complete strategy
+                if (not channel_had_errors or completion_strategy == "force_complete") and not self.dry_run:
                     try:
-                        result = self.chat.spaces().completeImport(
-                            name=space
-                        ).execute()
-                        
                         log_with_context(
                             logging.INFO,
-                            f"Successfully completed import for space {space}",
+                            f"Attempting to complete import mode for space {space}",
                             channel=ch.name
                         )
-                    except HttpError as e:
+                        
+                        # Add retry logic for completeImport
+                        max_retries = 3
+                        retry_delay = 2  # seconds
+                        success = False
+                        
+                        for retry_count in range(max_retries):
+                            try:
+                                result = self.chat.spaces().completeImport(
+                                    name=space
+                                ).execute()
+                                
+                                log_with_context(
+                                    logging.INFO,
+                                    f"Successfully completed import for space {space}",
+                                    channel=ch.name
+                                )
+                                success = True
+                                break
+                            except HttpError as e:
+                                log_with_context(
+                                    logging.WARNING,
+                                    f"Retry {retry_count+1}/{max_retries}: Failed to complete import: {e}",
+                                    channel=ch.name
+                                )
+                                if retry_count < max_retries - 1:
+                                    time.sleep(retry_delay)
+                        
+                        if not success:
+                            log_with_context(
+                                logging.ERROR,
+                                f"Failed to complete import after {max_retries} retries",
+                                channel=ch.name
+                            )
+                            channel_had_errors = True
+                            
+                            # Track spaces that failed to complete import
+                            if not hasattr(self, "incomplete_import_spaces"):
+                                self.incomplete_import_spaces = []
+                            self.incomplete_import_spaces.append((space, ch.name))
+                            
+                    except Exception as e:
                         log_with_context(
                             logging.ERROR,
                             f"Failed to complete import for space {space}: {e}",
                             channel=ch.name
                         )
                         channel_had_errors = True
+                        
+                        # Track spaces that failed to complete import
+                        if not hasattr(self, "incomplete_import_spaces"):
+                            self.incomplete_import_spaces = []
+                        self.incomplete_import_spaces.append((space, ch.name))
+                elif channel_had_errors and not self.dry_run:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Skipping import completion for space {space} due to errors (strategy: {completion_strategy})",
+                        channel=ch.name
+                    )
+                    
+                    # Track spaces that weren't completed due to errors
+                    if not hasattr(self, "incomplete_import_spaces"):
+                        self.incomplete_import_spaces = []
+                    self.incomplete_import_spaces.append((space, ch.name))
             else:
                 log_with_context(
                     logging.INFO,
@@ -677,7 +777,8 @@ class SlackToChatMigrator:
                 # Check if space is in import mode
                 try:
                     space_info = self.chat.spaces().get(name=space_name).execute()
-                    if space_info.get("importState") == "IN_PROGRESS":
+                    # Use the correct field name: importMode (boolean) instead of importState
+                    if space_info.get("importMode") == True:
                         import_mode_spaces.append((space_name, space_info))
                 except Exception as e:
                     log_with_context(
@@ -687,96 +788,133 @@ class SlackToChatMigrator:
                     )
 
             # Attempt to complete import mode for these spaces
-            pbar = tqdm(import_mode_spaces, desc="Completing import mode for spaces")
-            for space_name, space_info in pbar:
+            if import_mode_spaces:
                 log_with_context(
-                    logging.WARNING,
-                    f"Found space in import mode during cleanup: {space_name}"
+                    logging.INFO,
+                    f"Found {len(import_mode_spaces)} spaces still in import mode. Attempting to complete import."
                 )
-
-                try:
-                    # Check if external users are allowed in this space
-                    external_users_allowed = space_info.get(
-                        "externalUserAllowed", False
+                
+                pbar = tqdm(import_mode_spaces, desc="Completing import mode for spaces")
+                for space_name, space_info in pbar:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Found space in import mode during cleanup: {space_name}"
                     )
-                    
-                    # Also check if this space has external users based on our tracking
-                    if not external_users_allowed and hasattr(self, "spaces_with_external_users"):
-                        external_users_allowed = self.spaces_with_external_users.get(space_name, False)
+
+                    try:
+                        # Check if external users are allowed in this space
+                        external_users_allowed = space_info.get(
+                            "externalUserAllowed", False
+                        )
                         
-                        # If we detect external users but the flag isn't set, log this
-                        if external_users_allowed:
-                            log_with_context(
-                                logging.INFO,
-                                f"Space {space_name} has external users but flag not set, will enable after import",
-                                space_name=space_name
-                            )
+                        # Also check if this space has external users based on our tracking
+                        if not external_users_allowed and hasattr(self, "spaces_with_external_users"):
+                            external_users_allowed = self.spaces_with_external_users.get(space_name, False)
+                            
+                            # If we detect external users but the flag isn't set, log this
+                            if external_users_allowed:
+                                log_with_context(
+                                    logging.INFO,
+                                    f"Space {space_name} has external users but flag not set, will enable after import",
+                                    space_name=space_name
+                                )
 
-                    log_with_context(
-                        logging.INFO,
-                        f"Attempting to complete import mode for space: {space_name}"
-                    )
-                    self.chat.spaces().completeImport(name=space_name).execute()
-                    log_with_context(
-                        logging.INFO,
-                        f"Successfully completed import mode for space: {space_name}"
-                    )
-
-                    # Ensure external user setting is preserved after import completion
-                    if external_users_allowed:
-                        try:
-                            # Update space to ensure externalUserAllowed is set
-                            update_body = {
-                                "externalUserAllowed": True
-                            }
-                            update_mask = "externalUserAllowed"
-                            self.chat.spaces().patch(
-                                name=space_name,
-                                updateMask=update_mask,
-                                body=update_body,
-                            ).execute()
-                            log_with_context(
-                                logging.INFO,
-                                f"Preserved external user access for space: {space_name}"
-                            )
-                        except Exception as e:
-                            log_with_context(
-                                logging.WARNING,
-                                f"Failed to preserve external user access: {e}",
-                                space_name=space_name
-                            )
-
-                    # Try to find the channel name from space display name
-                    display_name = space_info.get("displayName", "")
-
-                    # Try to extract channel name based on our naming convention
-                    channel_name = None
-                    for ch in self._get_all_channel_names():
-                        ch_name = self._get_space_name(ch)
-                        if ch_name in display_name:
-                            channel_name = ch
-                            break
-
-                    if channel_name:
-                        # Add regular members back to the space
                         log_with_context(
                             logging.INFO,
-                            f"Adding regular members to space after completing import: {space_name}"
+                            f"Attempting to complete import mode for space: {space_name}"
                         )
-                        add_regular_members(self, space_name, channel_name)
-                    else:
+                        
+                        # Add retry logic for completeImport
+                        max_retries = 3
+                        retry_delay = 2  # seconds
+                        success = False
+                        
+                        for retry_count in range(max_retries):
+                            try:
+                                self.chat.spaces().completeImport(name=space_name).execute()
+                                log_with_context(
+                                    logging.INFO,
+                                    f"Successfully completed import mode for space: {space_name}"
+                                )
+                                success = True
+                                break
+                            except Exception as e:
+                                log_with_context(
+                                    logging.WARNING,
+                                    f"Retry {retry_count+1}/{max_retries}: Failed to complete import: {e}",
+                                    space_name=space_name
+                                )
+                                if retry_count < max_retries - 1:
+                                    time.sleep(retry_delay)
+                        
+                        if not success:
+                            log_with_context(
+                                logging.ERROR,
+                                f"Failed to complete import after {max_retries} retries",
+                                space_name=space_name
+                            )
+                            continue
+
+                        # Ensure external user setting is preserved after import completion
+                        if external_users_allowed:
+                            try:
+                                # Update space to ensure externalUserAllowed is set
+                                update_body = {
+                                    "externalUserAllowed": True
+                                }
+                                update_mask = "externalUserAllowed"
+                                self.chat.spaces().patch(
+                                    name=space_name,
+                                    updateMask=update_mask,
+                                    body=update_body,
+                                ).execute()
+                                log_with_context(
+                                    logging.INFO,
+                                    f"Preserved external user access for space: {space_name}"
+                                )
+                            except Exception as e:
+                                log_with_context(
+                                    logging.WARNING,
+                                    f"Failed to preserve external user access: {e}",
+                                    space_name=space_name
+                                )
+
+                        # Try to find the channel name from space display name
+                        display_name = space_info.get("displayName", "")
+
+                        # Try to extract channel name based on our naming convention
+                        channel_name = None
+                        for ch in self._get_all_channel_names():
+                            ch_name = self._get_space_name(ch)
+                            if ch_name in display_name:
+                                channel_name = ch
+                                break
+
+                        if channel_name:
+                            # Add regular members back to the space
+                            log_with_context(
+                                logging.INFO,
+                                f"Adding regular members to space after completing import: {space_name}"
+                            )
+                            add_regular_members(self, space_name, channel_name)
+                        else:
+                            log_with_context(
+                                logging.WARNING,
+                                f"Could not determine channel name for space {space_name}, skipping adding members",
+                                space_name=space_name
+                            )
+
+                    except Exception as e:
                         log_with_context(
-                            logging.WARNING,
-                            f"Could not determine channel name for space {space_name}, skipping adding members",
+                            logging.ERROR,
+                            f"Failed to complete import mode for space {space_name} during cleanup: {e}",
                             space_name=space_name
                         )
-
-                except Exception as e:
-                    log_with_context(
-                        logging.ERROR,
-                        f"Failed to complete import mode for space {space_name} during cleanup: {e}",
-                        space_name=space_name
-                    )
+            else:
+                log_with_context(
+                    logging.INFO,
+                    "No spaces found in import mode during cleanup."
+                )
 
         except Exception as e:
             log_with_context(

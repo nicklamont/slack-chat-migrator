@@ -23,6 +23,28 @@ user_mapping_overrides:
   # U12345678: "user@example.com"
   # U87654321: "another_user@example.com"
 
+# Error handling options
+
+# Whether to abort the entire migration after encountering errors in a channel
+# If true, migration will stop after the first channel with errors
+# If false, migration will continue to process other channels even if errors occur
+abort_on_error: false
+
+# Maximum percentage of failed messages allowed before skipping a channel
+# If the failure rate exceeds this percentage, the channel processing will stop
+max_failure_percentage: 10
+
+# Strategy for completing import mode when errors occur
+# Options:
+#   "skip_on_error" - Don't complete import mode if there were errors (default)
+#   "force_complete" - Complete import mode even if there were errors
+import_completion_strategy: "skip_on_error"
+
+# Whether to delete spaces that had errors during migration
+# If true, spaces with errors will be deleted during cleanup
+# If false, spaces with errors will be kept (you can complete import manually)
+cleanup_on_error: true
+
 # Advanced options
 
 # Debug mode - will log more detailed information

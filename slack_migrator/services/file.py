@@ -7,13 +7,13 @@ import io
 import logging
 import mimetypes
 import requests
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional
 
 from googleapiclient.http import MediaIoBaseUpload
 from googleapiclient.errors import HttpError
 
-from slack_migrator.utils.logging import logger, setup_logger, log_with_context, log_api_request, log_api_response
-from slack_migrator.utils.api import retry
+from slack_migrator.utils.logging import logger, log_with_context, log_api_request, log_api_response
+from slack_migrator.utils.api import retry, set_global_retry_config
 
 
 class FileHandler:
@@ -41,6 +41,10 @@ class FileHandler:
         
         # Initialize the set to track processed files
         self.processed_files = set()
+        
+        # Get retry configuration from migrator if available
+        if hasattr(migrator, 'config'):
+            set_global_retry_config(migrator.config)
         
         if self.verbose:
             logger.debug("FileHandler initialized with verbose logging")

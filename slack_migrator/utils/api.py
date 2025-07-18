@@ -5,7 +5,7 @@ API utilities for the Slack to Google Chat migration tool
 import functools
 import logging
 import time
-from typing import Callable, Any, Dict
+from typing import Any, Dict, Optional
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -26,14 +26,39 @@ REQUIRED_SCOPES = [
 # Cache for service instances
 _service_cache: Dict[str, Any] = {}
 
+# Global config for retry settings
+_retry_config = None
+
+def set_global_retry_config(config):
+    """Set global retry configuration for all retry decorators."""
+    global _retry_config
+    _retry_config = config
+    logger.debug(f"Set global retry config: max_retries={config.get('max_retries', 3)}, retry_delay={config.get('retry_delay', 2)}")
+
 
 def retry(
     max_retries: int = 3,
     initial_delay: float = 1,
     max_delay: float = 60,
     backoff_factor: float = 2.0,
+    config: Optional[Dict[str, Any]] = None,
 ):
-    """Decorator for retrying API calls with exponential backoff."""
+    """Decorator for retrying API calls with exponential backoff.
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay between retries in seconds
+        max_delay: Maximum delay between retries in seconds
+        backoff_factor: Factor by which the delay increases
+        config: Configuration dictionary that may contain retry settings
+    """
+    # Use config values if provided, or fall back to global config
+    global _retry_config
+    effective_config = config or _retry_config
+    
+    if effective_config:
+        max_retries = effective_config.get('max_retries', max_retries)
+        initial_delay = effective_config.get('retry_delay', initial_delay)
 
     def decorator(func):
         @functools.wraps(func)

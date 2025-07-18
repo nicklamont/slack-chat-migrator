@@ -4,7 +4,7 @@ Configuration module for the Slack to Google Chat migration tool
 
 import yaml
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 from slack_migrator.utils.logging import logger
 
@@ -42,6 +42,16 @@ def load_config(config_path: Path) -> Dict[str, Any]:
     config.setdefault('attachments_folder', 'Slack Attachments')
     config.setdefault('email_domain_override', '')
     
+    # Set default values for error handling options
+    config.setdefault('abort_on_error', False)
+    config.setdefault('max_failure_percentage', 10)
+    config.setdefault('import_completion_strategy', 'skip_on_error')
+    config.setdefault('cleanup_on_error', False)
+    
+    # Set default values for retry options
+    config.setdefault('max_retries', 3)
+    config.setdefault('retry_delay', 2)
+    
     return config
 
 
@@ -70,7 +80,15 @@ def create_default_config(output_path: Path) -> bool:
             "UEXAMPLE1": "user1@example.com",
             "UEXAMPLE2": "user2@example.com",
             "UEXAMPLE3": "work@company.com"  # Example of mapping an external email
-        }
+        },
+        # Error handling options
+        "abort_on_error": False,
+        "max_failure_percentage": 10,
+        "import_completion_strategy": "skip_on_error",
+        "cleanup_on_error": False,
+        # Retry options
+        "max_retries": 3,
+        "retry_delay": 2
     }
     
     try:

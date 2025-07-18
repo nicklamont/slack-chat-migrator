@@ -81,6 +81,31 @@ user_mapping_overrides:
   "U12345678": "user@example.com"
   # Map bot accounts that don't have emails
   "U87654321": "slackbot@company.com"
+
+# Error handling configuration
+# Whether to abort the entire migration if errors are encountered in a channel
+abort_on_error: false
+
+# Maximum percentage of message failures allowed per channel before skipping
+# If more than this percentage of messages fail in a channel, the channel will be skipped
+max_failure_percentage: 10
+
+# Strategy for completing import mode when errors occur
+# Options:
+#   - "skip_on_error": Skip completing import mode if channel had errors (default)
+#   - "force_complete": Complete import mode even if errors occurred
+#   - "always_skip": Never complete import mode (useful for testing)
+import_completion_strategy: "skip_on_error"
+
+# Whether to delete spaces that had errors during migration
+# If true, spaces with errors will be deleted during cleanup
+cleanup_on_error: false
+
+# Maximum number of retries for API calls
+max_retries: 3
+
+# Delay between retries (in seconds)
+retry_delay: 2
 ```
 
 ### Usage
@@ -159,15 +184,50 @@ The migration process follows these steps for each channel:
 5. **Complete Import**: Finishes the import mode for the space
 6. **Add Regular Members**: Adds all members back to the space as regular members
 
+#### Error Handling
+
+The tool provides several configurable options for handling errors during migration:
+
+1. **Abort on Error**: When enabled (`abort_on_error: true`), the migration will stop after encountering errors in a channel. When disabled (default), the migration will continue processing other channels even if errors occur.
+
+2. **Maximum Failure Percentage**: Controls how many message failures are tolerated within a channel before skipping the rest of that channel (`max_failure_percentage: 10` by default). If the failure rate exceeds this percentage, the channel processing will stop.
+
+3. **Import Completion Strategy**: Determines how to handle import mode completion when errors occur:
+   - `skip_on_error` (default): Don't complete import mode if there were errors
+   - `force_complete`: Complete import mode even if there were errors
+   - `always_skip`: Never complete import mode (useful for testing)
+
+4. **Cleanup on Error**: When enabled (`cleanup_on_error: true`), spaces with errors will be deleted during cleanup. When disabled (default), spaces with errors will be kept (allowing manual completion).
+
+5. **API Retry Settings**: Configure how API calls are retried when errors occur:
+   - `max_retries: 3` (default): Maximum number of retry attempts for failed API calls
+   - `retry_delay: 2` (default): Initial delay in seconds between retry attempts
+
+These options can be configured in your `config.yaml` file:
+
+```yaml
+# Error handling configuration
+abort_on_error: false
+max_failure_percentage: 10
+import_completion_strategy: "skip_on_error"
+cleanup_on_error: false
+
+# API retry settings
+max_retries: 3
+retry_delay: 2
+```
+
+#### Cleanup Process
+
 After all channels are processed, a **cleanup process** runs to ensure all spaces are properly out of import mode. This cleanup:
 
 1. Lists all spaces created by the migration tool
 2. Identifies any spaces still in "import mode" that weren't properly completed
-3. Completes the import mode for these spaces
+3. Completes the import mode for these spaces with retry logic
 4. Preserves external user access settings where applicable
 5. Adds regular members to these spaces
 
-The cleanup process is important because spaces in import mode have limitations and need to be properly completed for normal usage.
+The cleanup process is important because spaces in import mode have limitations and will be automatically deleted after 90 days if not properly completed.
 
 ### Migration Reports
 
@@ -264,9 +324,9 @@ The codebase is organized into the following modules:
   - `slack_migrator/cli/report.py` - Report generation
   - `slack_migrator/cli/permission.py` - Permission checking
 - `slack_migrator/utils/` - Utility functions
-  - `slack_migrator/utils/logging.py` - Logging utilities
-  - `slack_migrator/utils/api.py` - API and retry utilities
-  - `slack_migrator/utils/formatting.py` - Message formatting utilities
+    - `slack_migrator/utils/logging.py` - Logging utilities
+    - `slack_migrator/utils/api.py` - API and retry utilities
+    - `slack_migrator/utils/formatting.py` - Message formatting utilities
 
 
 ### GCP on Cloud Run

@@ -11,7 +11,6 @@ import datetime
 import os
 import hashlib
 
-from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 from googleapiclient.http import BatchHttpRequest
 
@@ -274,6 +273,10 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
 @retry()
 def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     """Send a message to a Google Chat space.
+    
+    # Ensure global retry config is set
+    if hasattr(migrator, 'config'):
+        set_global_retry_config(migrator.config)
 
     This method handles converting a Slack message to a Google Chat message format
     and sending it to the specified space.

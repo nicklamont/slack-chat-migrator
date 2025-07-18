@@ -7,15 +7,13 @@ import logging
 import sys
 import time
 import datetime
-from typing import Dict, Any, Set, List
-from pathlib import Path
+from typing import Dict, Any, Set
 
-from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
 from slack_migrator.utils.logging import logger, log_with_context
-from slack_migrator.utils.api import retry, slack_ts_to_rfc3339
+from slack_migrator.utils.api import retry, slack_ts_to_rfc3339, set_global_retry_config
 from slack_migrator.utils.formatting import convert_formatting
 
 
@@ -84,6 +82,9 @@ def channel_has_external_users(migrator, channel: str) -> bool:
 @retry()
 def create_space(migrator, channel: str) -> str:
     """Create a Google Chat space for a Slack channel in import mode."""
+    # Ensure global retry config is set
+    if hasattr(migrator, 'config'):
+        set_global_retry_config(migrator.config)
     # Get channel metadata
     meta = migrator.channels_meta.get(channel, {})
     display_name = f"Slack #{channel}"
@@ -206,6 +207,9 @@ def create_space(migrator, channel: str) -> str:
 @retry()
 def send_intro(migrator, space: str, channel: str):
     """Send an introductory message with channel purpose and topic."""
+    # Ensure global retry config is set
+    if hasattr(migrator, 'config'):
+        set_global_retry_config(migrator.config)
     # Skip if space couldn't be created due to permissions
     if space.startswith("ERROR_NO_PERMISSION_") or space.startswith("DRY_"):
         return
