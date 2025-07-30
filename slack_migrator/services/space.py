@@ -488,13 +488,13 @@ def add_users_to_space(migrator, space: str, channel: str):
         # In dry run mode, just count and return
         return
 
-    # Get the space creation time for reference
-    try:
-        space_info = migrator.chat.spaces().get(name=space).execute()
-        space_create_time = space_info.get("createTime")
-    except Exception as e:
-        logger.warning(f"Failed to get space info: {e}")
-        space_create_time = None
+    # Get channel creation time from metadata to use as fallback
+    # (We can't get space info in import mode and don't need to try)
+    channel_creation_time = None
+    meta = migrator.channels_meta.get(channel, {})
+    if meta.get("created"):
+        channel_creation_time = slack_ts_to_rfc3339(f"{meta['created']}.000000")
+        logger.debug(f"Using channel creation time as fallback: {channel_creation_time}")
 
     # Set import time (current time minus 5 seconds) as the deleteTime for all historical memberships
     # According to Google Chat API, in import mode all memberships must have deleteTime in the past
@@ -508,46 +508,61 @@ def add_users_to_space(migrator, space: str, channel: str):
         f"Using {historical_delete_time} as historical membership delete time for import mode"
     )
     
-    # Set default times for users missing join/leave times
+    # Find the earliest message time across all users as the ultimate fallback
+    earliest_message_time = None
+    for _, membership in user_membership.items():
+        if membership.get("first_message_time"):
+            if earliest_message_time is None or membership["first_message_time"] < earliest_message_time:
+                earliest_message_time = membership["first_message_time"]
+    
+    # Default join time cascade:
+    # 1. Explicit channel_join event (already set)
+    # 2. User's first message time minus 1 minute
+    # 3. Channel creation time from metadata
+    # 4. Earliest message time in the channel minus 2 minutes
+    # 5. Last resort default time
+    default_join_time = "2020-01-01T00:00:00Z"
+    if earliest_message_time:
+        try:
+            # Convert to datetime, subtract 2 minutes for safety, and convert back
+            if earliest_message_time.endswith("Z"):
+                earliest_message_time = earliest_message_time[:-1] + "+00:00"
+            earliest_dt = datetime.datetime.fromisoformat(earliest_message_time)
+            earliest_join_dt = earliest_dt - datetime.timedelta(minutes=2)
+            default_join_time = earliest_join_dt.isoformat().replace("+00:00", "Z")
+            logger.debug(f"Using earliest message time minus 2 minutes as default join time: {default_join_time}")
+        except ValueError:
+            # Keep the default if parsing fails
+            pass
+    elif channel_creation_time:
+        default_join_time = channel_creation_time
+    
+    # Set join times for users missing them
     for user_id, membership in user_membership.items():
-        # If no join time is found, use their first message time minus 1 minute
-        # This ensures the membership is created before any messages from this user
         if not membership["join_time"]:
+            # If user has messages, use first message time minus 1 minute
             if membership.get("first_message_time"):
-                # Parse the timestamp, subtract 60 seconds, and convert back
                 try:
-                    first_msg_time = membership["first_message_time"]
-                    # Remove Z and handle timezone
-                    if first_msg_time.endswith("Z"):
-                        first_msg_time = first_msg_time[:-1] + "+00:00"
-
-                    dt = datetime.datetime.fromisoformat(first_msg_time)
-                    join_dt = dt - datetime.timedelta(minutes=1)  # 1 minute earlier
-                    membership["join_time"] = join_dt.isoformat().replace(
-                        "+00:00", "Z"
-                    )
-
-                    logger.debug(
-                        f"Setting join time to 1 minute before first message: {membership['join_time']}"
-                    )
-                except ValueError as e:
-                    # Fallback to space creation time if parsing fails
-                    logger.warning(
-                        f"Failed to adjust timestamp: {e}, using space creation time"
-                    )
-                    membership["join_time"] = (
-                        space_create_time or "2020-01-01T00:00:00Z"
-                    )
+                    msg_time = membership["first_message_time"]
+                    if msg_time.endswith("Z"):
+                        msg_time = msg_time[:-1] + "+00:00"
+                    dt = datetime.datetime.fromisoformat(msg_time)
+                    join_dt = dt - datetime.timedelta(minutes=1)
+                    membership["join_time"] = join_dt.isoformat().replace("+00:00", "Z")
+                    logger.debug(f"User {user_id}: Setting join time to 1 minute before first message")
+                except ValueError:
+                    # If parsing fails, use the default join time
+                    membership["join_time"] = default_join_time
             else:
-                # If no first message found, use space creation time
-                membership["join_time"] = (
-                    space_create_time or "2020-01-01T00:00:00Z"
-                )
+                # No messages from this user, use default join time
+                membership["join_time"] = default_join_time
 
         # For import mode: ALL memberships must have a deleteTime in the PAST
-        # Set deleteTime to current time minus a few seconds for all users
+        # If the user has an explicit leave time from a channel_leave event, use it
+        # Otherwise, set deleteTime to current time minus a few seconds for all users
         # We'll re-add active users after import completes
-        membership["leave_time"] = historical_delete_time
+        if not membership["leave_time"]:
+            membership["leave_time"] = historical_delete_time
 
     # Add each user to the space as historical membership
     added_count = 0
