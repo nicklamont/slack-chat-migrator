@@ -17,10 +17,33 @@ from slack_migrator.utils.logging import logger
 
 def _parse_rich_text_elements(elements: List[Dict]) -> str:
     """
-    Helper function to parse a list of rich text elements.
+    Helper function to parse a list of rich text elements from Slack's block kit format.
+    
+    This function processes different types of rich text elements (text, links, emojis, user mentions)
+    and applies appropriate styling (bold, italic, strikethrough) based on the element's style
+    attributes.
+    
+    Args:
+        elements: A list of dictionaries representing rich text elements from Slack's block kit
+    
+    Returns:
+        A string with the processed rich text content including all formatting
     """
     def _apply_styles(text: str, style: dict) -> str:
-        """Applies markdown styling to a string based on a style object."""
+        """
+        Applies markdown styling to a string based on a style object.
+        
+        Takes a style dictionary containing boolean flags for different styling options
+        (bold, italic, strikethrough) and applies the appropriate markdown formatting
+        to the text.
+        
+        Args:
+            text: The text content to style
+            style: A dictionary with style flags (e.g., {'bold': True, 'italic': True})
+            
+        Returns:
+            The text with markdown styling applied
+        """
         if not style:
             return text
         markers = ""
@@ -70,6 +93,25 @@ def _parse_rich_text_elements(elements: List[Dict]) -> str:
 def parse_slack_blocks(message: Dict) -> str:
     """
     Parse Slack block kit format from a message to extract rich text content.
+    
+    This function handles various Slack block types including sections, rich text blocks, 
+    headers, context blocks, and dividers. For each block type, it extracts the text content
+    and applies appropriate formatting. Rich text blocks are processed recursively to handle
+    nested formatting.
+    
+    Supported block types:
+    - section: Basic text blocks and fields
+    - rich_text: Complex formatted text including sections, lists, quotes, and code blocks
+    - header: Converted to bold text
+    - context: Small text elements typically shown below a message
+    - divider: Horizontal line separator
+    
+    Args:
+        message: A dictionary containing a Slack message with 'blocks' and/or 'text' fields
+        
+    Returns:
+        A string with all the formatted text content from the message blocks,
+        or the raw text field if no blocks are present or no content could be extracted
     """
     if 'blocks' not in message or not message['blocks']:
         return message.get('text', '')
@@ -145,6 +187,13 @@ def parse_slack_blocks(message: Dict) -> str:
 def convert_formatting(text: str, user_map: Dict[str, str]) -> str:
     """
     Convert Slack-specific markdown to Google Chat compatible format.
+    
+    Args:
+        text: The Slack message text to convert
+        user_map: A dictionary mapping Slack user IDs to Google Chat user IDs/emails
+    
+    Returns:
+        The formatted text with Slack mentions converted to Google Chat format
     """
     if not text:
         return ""
@@ -154,6 +203,7 @@ def convert_formatting(text: str, user_map: Dict[str, str]) -> str:
     def replace_user_mention(match: re.Match) -> str:
         slack_user_id = match.group(1)
         gchat_user_id = user_map.get(slack_user_id)
+            
         if gchat_user_id:
             return f"<users/{gchat_user_id}>"
         logger.warning(f"Could not map Slack user ID: {slack_user_id}")
@@ -163,6 +213,19 @@ def convert_formatting(text: str, user_map: Dict[str, str]) -> str:
     text = re.sub(r'<#C[A-Z0-9]+\|([^>]+)>', r'#\1', text)
 
     def replace_link(match: re.Match) -> str:
+        """
+        Replace Slack-formatted links with appropriate formatting for Google Chat.
+        
+        In Slack, links are formatted as <url|text>. If the URL and display text
+        are identical, this function returns just the URL. Otherwise, it maintains
+        the link format expected by Google Chat.
+        
+        Args:
+            match: A regex match object containing the URL and link text
+            
+        Returns:
+            Properly formatted link for Google Chat
+        """
         url, link_text = match.group(1), match.group(2)
         return url if url == link_text else f'<{url}|{link_text}>'
 
