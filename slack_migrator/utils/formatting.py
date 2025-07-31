@@ -19,29 +19,51 @@ def _parse_rich_text_elements(elements: List[Dict]) -> str:
     """
     Helper function to parse a list of rich text elements.
     """
+    def _apply_styles(text: str, style: dict) -> str:
+        """Applies markdown styling to a string based on a style object."""
+        if not style:
+            return text
+        markers = ""
+        if style.get('strike'): markers += "~"
+        if style.get('italic'): markers += "_"
+        if style.get('bold'): markers += "*"
+        if markers:
+            return f"{markers}{text}{markers[::-1]}"
+        return text
+
     output_parts = []
-    for text_el in elements:
-        el_type = text_el.get('type')
+    for el in elements:
+        el_type = el.get('type')
+        style = el.get('style', {})
+
         if el_type == 'text':
-            text_content = text_el.get('text', '')
-            if style := text_el.get('style'):
-                if style.get('bold'):
-                    text_content = f"*{text_content}*"
-                if style.get('italic'):
-                    text_content = f"_{text_content}_"
-                if style.get('strike'):
-                    text_content = f"~{text_content}~"
-                if style.get('code'):
-                    text_content = f"`{text_content}`"
-            output_parts.append(text_content)
+            text_content = el.get('text', '')
+            # Separate content from surrounding whitespace
+            leading_space = text_content[:len(text_content) - len(text_content.lstrip())]
+            trailing_space = text_content[len(text_content.rstrip()):]
+            content = text_content.strip()
+
+            if content:
+                # Apply styles only to the text content
+                content = _apply_styles(content, style)
+            
+            # Re-attach whitespace outside the markdown
+            output_parts.append(f"{leading_space}{content}{trailing_space}")
+
         elif el_type == 'link':
-            url = text_el.get('url', '')
-            text = text_el.get('text', url)
-            output_parts.append(f"<{url}|{text}>")
+            url = el.get('url', '')
+            text = el.get('text', url)
+            # Create the base link markdown
+            link_markdown = f"<{url}|{text}>"
+            # Apply styles to the entire link
+            output_parts.append(_apply_styles(link_markdown, style))
+
         elif el_type == 'emoji':
-            output_parts.append(f":{text_el.get('name', '')}:")
+            output_parts.append(f":{el.get('name', '')}:")
+
         elif el_type == 'user':
-            output_parts.append(f"<@{text_el.get('user_id', '')}>")
+            output_parts.append(f"<@{el.get('user_id', '')}>")
+            
     return ''.join(output_parts)
 
 
@@ -70,7 +92,9 @@ def parse_slack_blocks(message: Dict) -> str:
                 element_type = element.get('type')
 
                 if element_type == 'rich_text_section':
-                    texts.append(_parse_rich_text_elements(element.get('elements', [])))
+                    rich_text_content = _parse_rich_text_elements(element.get('elements', []))
+                    if rich_text_content.strip():  # Only add non-empty content
+                        texts.append(rich_text_content)
 
                 elif element_type == 'rich_text_list':
                     list_items = []
@@ -108,8 +132,14 @@ def parse_slack_blocks(message: Dict) -> str:
         elif block_type == 'divider':
             texts.append('---')
     
-    stripped_texts = [s.strip() for s in texts]
-    return '\n\n'.join(filter(None, stripped_texts)) or message.get('text', '')
+    # Filter out empty texts and join
+    result = '\n\n'.join(text.strip() for text in texts if text and text.strip())
+    
+    # If we didn't get any meaningful content from blocks, fall back to text field
+    if not result:
+        return message.get('text', '')
+    
+    return result
 
 
 def convert_formatting(text: str, user_map: Dict[str, str]) -> str:
