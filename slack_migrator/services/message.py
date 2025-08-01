@@ -844,6 +844,10 @@ def track_message_stats(migrator, m):
     # In update mode, we might need to skip stats tracking for messages
     # that have already been processed
     if is_update_mode:
+        # Ensure sent_messages tracking set exists
+        if not hasattr(migrator, "sent_messages"):
+            migrator.sent_messages = set()
+            
         message_key = f"{channel}:{ts}"
         edited = m.get("edited", {})
         edited_ts = edited.get("ts", "") if edited else ""
@@ -1048,25 +1052,26 @@ def load_space_mappings(migrator):
         # Look for space_mapping overrides in config
         if "space_mapping" in migrator.config:
             space_mapping = migrator.config["space_mapping"]
-            log_with_context(
-                logging.INFO,
-                f"Found {len(space_mapping)} space mapping overrides in config"
-            )
-            
-            # Apply space mappings from config (overriding API discovery)
-            for channel_name, space_id in space_mapping.items():
-                channel_id = migrator.channel_name_to_id.get(channel_name, "")
-                if channel_id:
-                    # Override any discovered mapping with the config value
-                    migrator.channel_id_to_space_id[channel_id] = space_id
-                    
-                    # Also update the name-based mapping for backward compatibility
-                    discovered_spaces[channel_name] = f"spaces/{space_id}"
-                else:
-                    log_with_context(
-                        logging.WARNING,
-                        f"Channel '{channel_name}' in space_mapping config not found in workspace"
-                    )
+            if space_mapping:  # Only proceed if space_mapping is not None or empty
+                log_with_context(
+                    logging.INFO,
+                    f"Found {len(space_mapping)} space mapping overrides in config"
+                )
+                
+                # Apply space mappings from config (overriding API discovery)
+                for channel_name, space_id in space_mapping.items():
+                    channel_id = migrator.channel_name_to_id.get(channel_name, "")
+                    if channel_id:
+                        # Override any discovered mapping with the config value
+                        migrator.channel_id_to_space_id[channel_id] = space_id
+                        
+                        # Also update the name-based mapping for backward compatibility
+                        discovered_spaces[channel_name] = f"spaces/{space_id}"
+                    else:
+                        log_with_context(
+                            logging.WARNING,
+                            f"Channel '{channel_name}' in space_mapping config not found in workspace"
+                        )
         
         return discovered_spaces if discovered_spaces else {}
                 

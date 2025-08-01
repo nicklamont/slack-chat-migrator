@@ -297,9 +297,10 @@ display_next_steps() {
   echo 
   echo "   https://www.googleapis.com/auth/chat.import"
   echo "   https://www.googleapis.com/auth/chat.spaces"
-  echo "   https://www.googleapis.com/auth/drive"
-  echo "   https://www.googleapis.com/auth/chat.spaces.readonly"
   echo "   https://www.googleapis.com/auth/chat.messages"
+  echo "   https://www.googleapis.com/auth/chat.spaces.readonly"
+  echo "   https://www.googleapis.com/auth/chat.memberships.readonly"
+  echo "   https://www.googleapis.com/auth/drive"
   echo 
   echo "6️⃣ Click 'Authorize'"
   echo "======================================================================"

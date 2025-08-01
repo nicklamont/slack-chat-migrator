@@ -26,7 +26,6 @@ from slack_migrator.services.space import (
     send_intro, 
     add_users_to_space, 
     add_regular_members,
-    test_space_creation
 )
 from slack_migrator.services.message import (
     send_message,
@@ -144,9 +143,8 @@ class SlackToChatMigrator:
         # Track message statistics per channel
         self.channel_stats: Dict[str, Dict[str, int]] = {}
 
-        # Test space creation to verify permissions
-        if not dry_run:
-            test_space_creation(self)
+        # Permission validation is now handled by the CLI layer to avoid duplicates
+        # The CLI will call validate_permissions() unless --skip_permission_check is used
             
         if verbose:
             logger.debug("Migrator initialized with verbose logging enabled")
@@ -1131,7 +1129,7 @@ class SlackToChatMigrator:
             # Check if we have any spaces with duplicate names that need disambiguation
             if duplicate_spaces:
                 # Check config for space_mapping to disambiguate
-                space_mapping = self.config.get("space_mapping", {})
+                space_mapping = self.config.get("space_mapping") or {}
                 
                 log_with_context(
                     logging.WARNING,
@@ -1144,7 +1142,7 @@ class SlackToChatMigrator:
                 
                 for channel_name, spaces in duplicate_spaces.items():
                     # Check if this channel has a mapping in the config
-                    if channel_name in space_mapping:
+                    if space_mapping and channel_name in space_mapping:
                         # Get the space ID from the config
                         configured_space_id = space_mapping[channel_name]
                         

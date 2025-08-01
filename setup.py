@@ -58,7 +58,6 @@ setup(
     entry_points={
         'console_scripts': [
             'slack-migrator=slack_migrator.__main__:main',
-            'slack-migrator-check-permissions=slack_migrator.cli.permission:main',
         ],
     },
     

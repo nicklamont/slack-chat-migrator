@@ -31,6 +31,9 @@ This tool migrates Slack JSON exports into Google Chat spaces via the Chat Impor
 - Service account w/ domain-wide delegation and scopes:
   - https://www.googleapis.com/auth/chat.import
   - https://www.googleapis.com/auth/chat.spaces
+  - https://www.googleapis.com/auth/chat.messages
+  - https://www.googleapis.com/auth/chat.spaces.readonly
+  - https://www.googleapis.com/auth/chat.memberships.readonly
   - https://www.googleapis.com/auth/drive (for file uploads and shared drive creation)
 - Slack export folder:
   ```
@@ -547,6 +550,9 @@ If you prefer not to use the setup script, follow these steps manually:
    - Grant these OAuth scopes:
      - https://www.googleapis.com/auth/chat.import
      - https://www.googleapis.com/auth/chat.spaces
+     - https://www.googleapis.com/auth/chat.messages
+     - https://www.googleapis.com/auth/chat.spaces.readonly
+     - https://www.googleapis.com/auth/chat.memberships.readonly
      - https://www.googleapis.com/auth/drive
 
 #### Migration Issues

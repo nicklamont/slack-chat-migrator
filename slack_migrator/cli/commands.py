@@ -16,7 +16,7 @@ from slack_migrator.utils.logging import logger, setup_logger
 from slack_migrator.core.migrator import SlackToChatMigrator
 from slack_migrator.core.config import load_config
 from slack_migrator.cli.report import generate_report, print_dry_run_summary
-from slack_migrator.cli.permission import check_permissions
+from slack_migrator.utils.permissions import validate_permissions
 
 
 def main() -> NoReturn:
@@ -75,15 +75,7 @@ def main() -> NoReturn:
         logger.info(f"- Verbose logging: {args.verbose}")
         logger.info(f"- Debug API calls: {args.debug_api}")
         
-        # Run permission checks before proceeding
-        if not args.skip_permission_check:
-            logger.info("Checking permissions before proceeding...")
-            if not check_permissions(args.creds_path, args.workspace_admin):
-                logger.error("Permission checks failed. Fix the issues or run with --skip_permission_check if you're sure.")
-                sys.exit(1)
-        else:
-            logger.warning("Permission checks skipped. This may cause issues during migration.")
-        
+        # Initialize migrator first
         migrator = SlackToChatMigrator(
             args.creds_path, 
             args.export_path, 
@@ -94,6 +86,19 @@ def main() -> NoReturn:
             args.update_mode,
             args.debug_api
         )
+        
+        # Run permission checks before proceeding
+        if not args.skip_permission_check:
+            logger.info("Checking permissions before proceeding...")
+            try:
+                validate_permissions(migrator)
+                logger.info("Permission checks passed!")
+            except Exception as e:
+                logger.error(f"Permission checks failed: {e}")
+                logger.error("Fix the issues or run with --skip_permission_check if you're sure.")
+                sys.exit(1)
+        else:
+            logger.warning("Permission checks skipped. This may cause issues during migration.")
         
         # Run the migration
         migrator.migrate()
