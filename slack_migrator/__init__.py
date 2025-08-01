@@ -3,7 +3,7 @@
 Slack to Google Chat migration tool
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from slack_migrator.cli.permission import check_permissions
 
