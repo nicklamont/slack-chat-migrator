@@ -48,7 +48,6 @@ class SlackToChatMigrator:
         export_path: str,
         workspace_admin: str,
         config_path: str,
-        slack_token: Optional[str] = None,
         dry_run: bool = False,
         verbose: bool = False,
         update_mode: bool = False,
@@ -59,7 +58,6 @@ class SlackToChatMigrator:
         self.export_root = Path(export_path)
         self.workspace_admin = workspace_admin
         self.config_path = Path(config_path)
-        self.slack_token = slack_token
         self.dry_run = dry_run
         self.verbose = verbose
         self.debug_api = debug_api
@@ -94,16 +92,10 @@ class SlackToChatMigrator:
         # Initialize API clients
         self._validate_export_format()
 
-        # Load config
-        self.config = {}
-        if self.config_path.exists():
-            with open(self.config_path) as f:
-                if str(self.config_path).endswith(".json"):
-                    self.config = json.load(f)
-                else:
-                    import yaml  # Import yaml here to avoid dependency issues if not used
-                    self.config = yaml.safe_load(f)
-                    
+        # Load config using the shared load_config function
+        from slack_migrator.core.config import load_config
+        self.config = load_config(self.config_path)
+        
         # Set global retry config for all API calls
         set_global_retry_config(self.config)
 
@@ -125,7 +117,7 @@ class SlackToChatMigrator:
 
         # Initialize file handler
         self.file_handler = FileHandler(
-            self.drive, self.chat, folder_id=None, migrator=self, slack_token=self.slack_token, dry_run=self.dry_run
+            self.drive, self.chat, folder_id=None, migrator=self, dry_run=self.dry_run
         )
         # FileHandler now handles its own drive folder initialization automatically
         

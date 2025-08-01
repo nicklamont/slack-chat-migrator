@@ -89,13 +89,13 @@ def create_output_directory(migrator):
     return run_output_dir
 
 
-def generate_report(migrator, output_file: str = "migration_report.yaml"):
+def generate_report(migrator):
     """Generate a detailed migration report."""
     # Get the output directory
     output_dir = migrator.output_dir if hasattr(migrator, "output_dir") else "."
     
     # Set the output file path in the run directory
-    report_path = os.path.join(output_dir, output_file)
+    report_path = os.path.join(output_dir, "migration_report.yaml")
     
     # Group failed messages by channel
     failed_by_channel = {}

@@ -29,7 +29,7 @@ class FileHandler:
     # Note: 200MB is Drive API limit, but Chat direct uploads are much smaller
     DIRECT_UPLOAD_MAX_SIZE = 25 * 1024 * 1024  # 25MB
     
-    def __init__(self, drive_service, chat_service, folder_id: str, migrator, slack_token: Optional[str] = None, dry_run: bool = False):
+    def __init__(self, drive_service, chat_service, folder_id: str, migrator, dry_run: bool = False):
         """Initialize the FileHandler.
         
         Args:
@@ -37,13 +37,11 @@ class FileHandler:
             chat_service: The Chat API service instance
             folder_id: The ID of the root folder in Drive to store files (can be None for auto-creation)
             migrator: The parent Migrator instance
-            slack_token: Optional Slack token for downloading files
             dry_run: Whether to run in dry run mode
         """
         self.drive_service = drive_service
         self.chat_service = chat_service
         self.migrator = migrator
-        self.slack_token = slack_token
         self.dry_run = dry_run
         
         # Initialize the dictionary to track processed files
@@ -994,16 +992,12 @@ class FileHandler:
                 file_name=name
             )
             
-            # For files in the export, the URL might contain a token
-            # We'll try to download using requests
+            # For files in the export, the URL might already contain a token
+            # We'll try to download using requests with default headers
             headers = {}
-            if self.slack_token:
-                headers['Authorization'] = f'Bearer {self.slack_token}'
-                log_with_context(
-                    logging.DEBUG,
-                    "Using Slack token for authenticated download",
-                    file_id=file_id
-                )
+            
+            # Note: Slack token authentication removed as not needed
+            # Export URLs already contain authentication tokens
                 
             response = requests.get(url_private, headers=headers, stream=True)
             

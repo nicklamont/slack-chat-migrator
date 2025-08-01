@@ -1,22 +1,31 @@
 """
-Configuration module for the Slack to Google Chat migration tool
+Configuration module for the Slack to Google Chat migration tool.
+
+This module provides functions for loading and manipulating configuration
+settings from YAML files, creating default configurations, and determining
+which Slack channels should be processed based on the configuration.
 """
 
 import yaml
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List, Set, Optional, Union
 
 from slack_migrator.utils.logging import logger
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
-    """Load configuration from YAML file.
+    """
+    Load configuration from YAML file and apply default values.
+    
+    Loads the configuration from the specified YAML file and applies default
+    values for any missing configuration options. If the file doesn't exist
+    or is invalid, appropriate warnings are logged and default settings are used.
     
     Args:
         config_path: Path to the config YAML file
         
     Returns:
-        Dictionary of configuration settings
+        Dictionary of configuration settings with all necessary defaults applied
     """
     config = {}
     
@@ -55,13 +64,19 @@ def load_config(config_path: Path) -> Dict[str, Any]:
 
 
 def create_default_config(output_path: Path) -> bool:
-    """Create a default configuration file.
+    """
+    Create a default configuration file with recommended settings.
+    
+    This function creates a new configuration file with sensible defaults at
+    the specified location. It includes all supported configuration options
+    with example values and comments. The function will not overwrite an
+    existing configuration file.
     
     Args:
         output_path: Path where the default config should be saved
         
     Returns:
-        True if successful, False otherwise
+        True if the config file was created successfully, False otherwise
     """
     if output_path.exists():
         logger.warning(f"Config file {output_path} already exists, not overwriting")
@@ -104,14 +119,20 @@ def create_default_config(output_path: Path) -> bool:
 
 
 def should_process_channel(channel_name: str, config: Dict[str, Any]) -> bool:
-    """Determine if a channel should be processed based on config.
+    """
+    Determine if a Slack channel should be processed based on configuration filters.
+    
+    This function applies inclusion and exclusion rules from the configuration:
+    1. If an include_channels list is specified, only those channels are processed
+    2. If no include_channels list is specified, all channels are processed except 
+       those in the exclude_channels list
     
     Args:
         channel_name: The name of the Slack channel
-        config: The configuration dictionary
+        config: The configuration dictionary containing include_channels and exclude_channels lists
         
     Returns:
-        True if the channel should be processed, False otherwise
+        True if the channel should be processed, False if it should be skipped
     """
     logger.debug(f"CHANNEL CHECK: Checking if channel '{channel_name}' should be processed")
     logger.debug(f"CHANNEL CHECK: include_channels={config.get('include_channels', [])}, exclude_channels={config.get('exclude_channels', [])}")

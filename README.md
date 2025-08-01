@@ -19,8 +19,14 @@ This tool migrates Slack JSON exports into Google Chat spaces via the Chat Impor
 
 ### Prerequisites
 
-- Python 3.9+
-- Google Cloud SDK (`gcloud`)
+- Python 3.9+ (with `venv` module for virtual environment management)
+- Google Cloud SDK (`gcloud`) (optional, only needed for automated setup)
+  - Required only if using the `setup_permissions.sh` script for automated permission setup
+  - All permissions can also be configured manually through the Google Cloud Console
+  - If installing:
+    - macOS: `brew install --cask google-cloud-sdk`
+    - Linux/Windows: [Official installation guide](https://cloud.google.com/sdk/docs/install)
+    - After installation: Run `gcloud init` to configure
 - GCP project with Chat & Drive APIs enabled
 - Service account w/ domain-wide delegation and scopes:
   - https://www.googleapis.com/auth/chat.import
@@ -35,6 +41,9 @@ This tool migrates Slack JSON exports into Google Chat spaces via the Chat Impor
       YYYY-MM-DD.json
   ```
 
+> **Note:** Using a Python virtual environment is recommended for Python dependency management.
+> The Google Cloud SDK is a system-level component that cannot be installed via pip.
+
 ### Installation
 
 ```bash
@@ -42,15 +51,53 @@ This tool migrates Slack JSON exports into Google Chat spaces via the Chat Impor
 git clone https://github.com/nicklamont/slack-chat-migrator.git
 cd slack-chat-migrator
 
+# Create and activate a virtual environment (recommended)
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
 # Install the Python package in development mode
-python -m venv venv && source venv/bin/activate
 pip install -e .
 
-# Or install directly from repository
+# Or install directly from repository (still recommended to use a virtual environment)
 pip install git+https://github.com/nicklamont/slack-chat-migrator.git
 ```
 
 > Note: The `setup.py` file is used by pip during installation and shouldn't be run directly.
+
+### Setting Up Permissions
+
+Before running your first migration, you need to set up the Google Cloud permissions. The `setup_permissions.sh` script automates most of this process:
+
+```bash
+# Ensure the Google Cloud SDK (gcloud) is installed first
+# Then run the permissions setup script
+./setup_permissions.sh
+```
+
+**When to run setup_permissions.sh:**
+- Once during initial setup, after installing the package
+- If you're setting up the tool in a new Google Cloud project
+- If you encounter permission errors during migration
+- If you need to create a new service account
+
+**Important Prerequisites:**
+1. The script provides **automated** setup, but all steps can be done manually in the Google Cloud Console
+2. If using the script, Google Cloud SDK must be installed as a system component (not via pip)
+3. As an alternative to the script, follow the manual setup steps in the Troubleshooting section
+
+**What the script does:**
+1. Checks for the Google Cloud SDK installation (if using the automated approach)
+2. Enables required Google Cloud APIs
+3. Creates a service account with necessary permissions
+4. Downloads a service account key file
+5. Provides instructions for manual steps in Google Workspace admin console
+
+**Important Notes:**
+- The script is **optional** - all steps can be performed manually in the Google Cloud Console
+- If you choose to use the script:
+  - You need the Google Cloud SDK installed as a system component (not via pip)
+  - After running the script, you'll still need to complete the domain-wide delegation setup in Google Workspace
+- See the Troubleshooting section for manual setup instructions if you prefer not to use the script
 
 ### Configuration
 
@@ -117,65 +164,144 @@ max_retries: 3
 retry_delay: 2
 ```
 
-### Usage
+### Command-Line Reference
+
+The `slack-migrator` command provides several options for different migration scenarios:
+
+#### Available Command-Line Options
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--creds_path` | Yes | Path to the service account credentials JSON file |
+| `--export_path` | Yes | Path to the Slack export directory |
+| `--workspace_admin` | Yes | Email of workspace admin to impersonate |
+| `--config` | No | Path to config YAML (default: config.yaml) |
+| `--dry_run` | No | Dry run mode - no changes will be made |
+| `--update_mode` | No | Update mode - update existing spaces instead of creating new ones |
+| `--verbose` or `-v` | No | Enable verbose (debug) logging |
+| `--debug_api` | No | Enable detailed API request/response logging (generates large log files) |
+| `--skip_permission_check` | No | Skip permission checks (not recommended) |
+
+> **Note:** The `--skip_permission_check` option bypasses validation of service account permissions. Only use this if you're certain your service account is properly configured and you're encountering false positives in the permission check.
+
+#### Basic Command Example
 
 ```bash
-# Perform a dry run and generate a comprehensive report
-slack-migrator \
-  --creds_path $GOOGLE_APPLICATION_CREDENTIALS \
-  --export_path ./export_root \
-  --workspace_admin admin@domain.com \
-  --config config.yaml \
-  --dry_run \
-  --report_file migration_report.yaml
-
-# Execute the migration
-slack-migrator \
-  --creds_path $GOOGLE_APPLICATION_CREDENTIALS \
-  --export_path ./export_root \
-  --workspace_admin admin@domain.com \
-  --config config.yaml \
-  --slack_token xoxp-...   # optional
-
-# Run with verbose (debug) logging
-slack-migrator \
-  --creds_path $GOOGLE_APPLICATION_CREDENTIALS \
-  --export_path ./export_root \
-  --workspace_admin admin@domain.com \
-  --config config.yaml \
-  --verbose  # or -v
+slack-migrator migrate \
+  --creds_path ./slack-chat-migrator-sa-key.json \
+  --export_path ./slack_export \
+  --workspace_admin admin@company.com \
+  --verbose
 ```
 
-For backward compatibility, you can also use the wrapper script:
+**Example commands for different scenarios:**
 
 ```bash
-python slack_to_chat_migration.py \
-  --creds_path $GOOGLE_APPLICATION_CREDENTIALS \
-  --export_path ./export_root \
-  --workspace_admin admin@domain.com \
-  --config config.yaml
+# Check permissions before migration (highly recommended)
+slack-migrator-check-permissions \
+  --creds_path /path/to/key.json \
+  --workspace_admin admin@company.com
+
+# Perform a dry run to validate before migration
+slack-migrator \
+  --creds_path /path/to/key.json \
+  --export_path ./slack_export \
+  --workspace_admin admin@company.com \
+  --dry_run
+
+# Execute the full migration
+slack-migrator \
+  --creds_path /path/to/key.json \
+  --export_path ./slack_export \
+  --workspace_admin admin@company.com
+
+# Resume an interrupted migration
+slack-migrator \
+  --creds_path /path/to/key.json \
+  --export_path ./slack_export \
+  --workspace_admin admin@company.com \
+  --update_mode
+
+# Debug a problematic migration
+slack-migrator \
+  --creds_path /path/to/key.json \
+  --export_path ./slack_export \
+  --workspace_admin admin@company.com \
+  --verbose
 ```
 
-### Permission Setup
+> **Note:** For backward compatibility, you can also use `python slack_to_chat_migration.py` with the same arguments.
 
-Before running the migration, you need to set up the proper Google Cloud and Google Workspace permissions:
+### Migration Workflow
 
-1. Run the permission setup script (requires Google Cloud SDK):
+For a successful migration, follow this recommended workflow:
+
+> **Note:** Using a Python virtual environment is recommended for Python package dependencies, but the Google Cloud SDK must be installed as a system component outside of any virtual environment.
+
+1. **Install the Google Cloud SDK** (one-time system setup):
    ```bash
-   ./setup_permissions.sh
-   ```
+   # macOS
+   brew install --cask google-cloud-sdk
    
-   You can customize the setup with these options:
+   # Linux/Windows: Follow the instructions at https://cloud.google.com/sdk/docs/install
+   # After installation, run:
+   gcloud init
+   ```
+
+2. **Set up permissions** (one-time setup):
    ```bash
+   # Run with default settings
+   ./setup_permissions.sh
+   
+   # Or customize the setup
    ./setup_permissions.sh --project your-project-id --sa-name custom-sa-name --key-file custom-key.json
    ```
+   
+   After running the script, complete the domain-wide delegation setup in Google Workspace Admin Console as instructed.
 
-2. Follow the instructions to configure domain-wide delegation in the Google Workspace Admin Console.
-
-3. After setting up permissions with the script above, verify your setup using the permission checker tool:
+2. **Verify permissions** (recommended before each migration):
    ```bash
-   slack-migrator-check-permissions --creds_path /path/to/credentials.json --workspace_admin admin@domain.com
+   slack-migrator-check-permissions \
+     --creds_path /path/to/credentials.json \
+     --workspace_admin admin@domain.com
    ```
+
+3. **Configure migration settings** (before first migration):
+   ```bash
+   # Create and edit your configuration
+   cp config.yaml.example config.yaml
+   nano config.yaml  # or your preferred editor
+   ```
+
+4. **Run a dry run** (recommended before actual migration):
+   ```bash
+   slack-migrator \
+     --creds_path /path/to/credentials.json \
+     --export_path ./slack_export \
+     --workspace_admin admin@domain.com \
+     --dry_run
+   ```
+   Review the generated report to identify potential issues.
+
+5. **Execute the migration**:
+   ```bash
+   slack-migrator \
+     --creds_path /path/to/credentials.json \
+     --export_path ./slack_export \
+     --workspace_admin admin@domain.com
+   ```
+
+6. **If migration is interrupted** (optional):
+   ```bash
+   # Resume migration with update mode
+   slack-migrator \
+     --creds_path /path/to/credentials.json \
+     --export_path ./slack_export \
+     --workspace_admin admin@domain.com \
+     --update_mode
+   ```
+
+> **Note:** You only need to run the permissions setup script once, unless you change Google Cloud projects, need a new service account, or encounter permission errors.
 
 4. The migration tool will automatically check permissions before running. If you want to skip this check:
    ```bash
@@ -359,6 +485,68 @@ The codebase is organized into the following modules:
    ```
 
 5. Create & execute Cloud Run job (mount export & map via Cloud Storage or volume).
+
+### Troubleshooting
+
+#### Google Cloud SDK Issues
+
+- **Error: "No matching distribution found for google-cloud-sdk"**:
+  - The Google Cloud SDK cannot be installed via pip in a virtual environment
+  - Install the SDK using system package managers:
+    - macOS: `brew install --cask google-cloud-sdk`
+    - Linux/Windows: Use the [Official Installation Guide](https://cloud.google.com/sdk/docs/install)
+  - After installation, run `gcloud init` to configure your environment
+  
+- **Permission denied when running setup_permissions.sh**:
+  - Make the script executable: `chmod +x setup_permissions.sh`
+  - Run as: `./setup_permissions.sh`
+  
+#### Manual Google Cloud Setup (Without Using the Script)
+
+If you prefer not to use the setup script, follow these steps manually:
+
+1. **Enable required APIs in Google Cloud Console**:
+   - Go to [Google Cloud Console](https://console.cloud.google.com/)
+   - Navigate to "APIs & Services" > "Library"
+   - Search for and enable these APIs:
+     - Google Chat API
+     - Google Drive API
+
+2. **Create a Service Account**:
+   - Go to "IAM & Admin" > "Service Accounts"
+   - Click "Create Service Account"
+   - Give it a name (e.g., "slack-chat-migrator")
+   - Grant these roles:
+     - Chat Service Agent
+     - Drive File Organizer
+
+3. **Create and Download a Key**:
+   - In the service account details page, go to the "Keys" tab
+   - Click "Add Key" > "Create new key"
+   - Select JSON format and download it
+   - Save this file as `slack-chat-migrator-sa-key.json` in your project directory
+
+4. **Set Up Domain-Wide Delegation**:
+   - Go to your Google Workspace Admin Console
+   - Navigate to Security > API Controls > Domain-wide Delegation
+   - Add a new API client with the client ID from your service account
+   - Grant these OAuth scopes:
+     - https://www.googleapis.com/auth/chat.import
+     - https://www.googleapis.com/auth/chat.spaces
+     - https://www.googleapis.com/auth/drive
+
+#### Migration Issues
+
+- **Permission Errors during migration**:
+  - Ensure the service account has proper domain-wide delegation configured
+  - Check that all required APIs are enabled
+  - Verify your config.yaml has the correct service account key file path
+  - Run `slack-migrator check-permissions` to validate permissions
+
+- **Files/Attachments Not Migrating**:
+  - Ensure you have the `drive` scope in your service account permissions
+  - Check for errors in the migration log related to file access
+  - Verify shared drive settings if using a shared drive for storage
 
 ### License
 
