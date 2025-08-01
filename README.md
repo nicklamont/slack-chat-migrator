@@ -300,6 +300,20 @@ For a successful migration, follow this recommended workflow:
      --workspace_admin admin@domain.com \
      --update_mode
    ```
+   
+   Update mode will find existing spaces and only import messages that are newer than the last message 
+   in each space. This approach is simple and reliable but has a known limitation: thread replies to
+   older messages may be posted as new standalone messages instead of being properly threaded.
+   
+   If multiple Google Chat spaces exist with the same name (e.g., multiple "Slack #general" spaces), 
+   the tool will detect this conflict and show you the details of each space. You'll need to add a 
+   `space_mapping` section to your config.yaml file to specify which space to use for each channel:
+   
+   ```yaml
+   space_mapping:
+     "general": "AAAAAgcE123"  # Use this space ID for the general channel
+     "random": "AAAABbTr456"   # Use this space ID for the random channel
+   ```
 
 > **Note:** You only need to run the permissions setup script once, unless you change Google Cloud projects, need a new service account, or encounter permission errors.
 

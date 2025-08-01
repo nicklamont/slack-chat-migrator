@@ -18,6 +18,22 @@ exclude_channels:
   - "shitposting"   # Example: Skip off-topic channels
   # - "general"     # Uncomment to exclude more channels as needed
 
+# Space mapping configuration
+# The migrator uses the Google Chat API to discover existing spaces. If multiple spaces
+# have the same channel name, you need to specify which space ID to use for which channel.
+# 
+# When duplicate spaces are found, the migrator will:
+# 1. Skip those specific channels (not abort the entire migration)
+# 2. Mark these channels as failed in the migration report
+# 3. Log detailed information about each space to help you choose
+# 4. Provide exact configuration entries to copy into this file
+#
+# You can then add the mappings below and re-run the migration for just those channels.
+space_mapping:
+  # Format: "channel_name": "space_id"  (without the "spaces/" prefix)
+  # Example for channel "general" with space ID "AAAAAgcE123":
+  # "general": "AAAAAgcE123"
+
 # Optional: Override email domains for user mapping
 # If not specified, emails from users.json will be used directly
 # RECOMMENDED: Set this to your Google Workspace domain (e.g., "company.com")

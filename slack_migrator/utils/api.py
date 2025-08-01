@@ -14,12 +14,13 @@ from googleapiclient.errors import HttpError
 from slack_migrator.utils.logging import logger, log_with_context
 
 # THE FIX: This is the definitive list of scopes the application MUST request.
-# It now includes 'chat.spaces.readonly' to guarantee the GetSpace method is allowed.
+# Updated to include all required permissions for complete functionality.
 REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/chat.import",
     "https://www.googleapis.com/auth/chat.spaces",
     "https://www.googleapis.com/auth/chat.messages",
     "https://www.googleapis.com/auth/chat.spaces.readonly",
+    "https://www.googleapis.com/auth/chat.memberships.readonly",  # For reading space member lists
     "https://www.googleapis.com/auth/drive",  # Full Drive scope covers all drive.file permissions plus shared drives
 ]
 

@@ -79,11 +79,7 @@ def create_output_directory(migrator):
     migrator.output_dir = run_output_dir
     migrator.output_dirs = {
         "channel_logs": os.path.join(run_output_dir, "channel_logs"),
-        "thread_mappings": os.path.join("slack_export_output", "thread_mappings"),
     }
-    
-    # Create thread mappings directory if it doesn't exist
-    os.makedirs(migrator.output_dirs["thread_mappings"], exist_ok=True)
     
     logger.info(f"Created output directory structure at {run_output_dir}")
     return run_output_dir
@@ -170,6 +166,8 @@ def generate_report(migrator):
         "skipped_channels": [],
         "failed_channels": list(failed_by_channel.keys()),
         "high_failure_rate_channels": {},
+        "channel_issues": getattr(migrator, "migration_issues", {}),
+        "duplicate_space_conflicts": list(getattr(migrator, "channel_conflicts", set())),
         "users": {
             "external_users": {},
             "users_without_email": {},
@@ -190,6 +188,15 @@ def generate_report(migrator):
                 'message': f"Found {len(migrator.high_failure_rate_channels)} channels with failure rates exceeding {max_failure_percentage}%. Check the detailed logs for more information.",
                 'severity': 'warning'
             })
+            
+    # Add recommendation for duplicate space conflicts
+    if hasattr(migrator, "channel_conflicts") and migrator.channel_conflicts:
+        report['recommendations'].append({
+            'type': 'duplicate_space_conflicts',
+            'message': f"Found {len(migrator.channel_conflicts)} channels with duplicate space conflicts. "
+                      f"These channels were skipped. Add entries to space_mapping in config.yaml to resolve: {', '.join(migrator.channel_conflicts)}",
+            'severity': 'error'
+        })
 
     # Add detailed info for each space
     for channel in migrator.migration_summary["channels_processed"]:

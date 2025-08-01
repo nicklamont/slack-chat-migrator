@@ -112,8 +112,15 @@ class SlackToChatMigrator:
         self.chat_delegates: Dict[str, Any] = {}
         self.valid_users: Dict[str, bool] = {}
         self.channel_to_space: Dict[str, str] = {}
+        
+        # Initialize channel ID mapping
+        self.channel_id_to_space_id: Dict[str, str] = {}
 
-        self.channels_meta = self._load_channels_meta()
+        # Load channel metadata from channels.json
+        self.channels_meta, self.channel_id_to_name = self._load_channels_meta()
+        
+        # Create reverse mapping for convenience
+        self.channel_name_to_id = {name: id for id, name in self.channel_id_to_name.items()}
 
         # Initialize file handler
         self.file_handler = FileHandler(
@@ -170,13 +177,26 @@ class SlackToChatMigrator:
                     f"No JSON files found in channel directory {ch_dir.name}"
                 )
 
-    def _load_channels_meta(self) -> Dict[str, Dict]:
-        """Load channel metadata from channels.json file."""
+    def _load_channels_meta(self):
+        """
+        Load channel metadata from channels.json file.
+        
+        Returns:
+            tuple: (name_to_data, id_to_name) where:
+                - name_to_data: Dict mapping channel names to their metadata
+                - id_to_name: Dict mapping channel IDs to channel names
+        """
         f = self.export_root / "channels.json"
+        name_to_data = {}
+        id_to_name = {}
+        
         if f.exists():
             with open(f) as f_in:
-                return {ch["name"]: ch for ch in json.load(f_in)}
-        return {}
+                channels = json.load(f_in)
+                name_to_data = {ch["name"]: ch for ch in channels}
+                id_to_name = {ch["id"]: ch["name"] for ch in channels}
+                
+        return name_to_data, id_to_name
 
     def _get_delegate(self, email: str):
         """Get a Google Chat API service with user impersonation."""
@@ -206,13 +226,57 @@ class SlackToChatMigrator:
 
         return self.chat_delegates.get(email, self.chat)
 
-    def _save_progress(self, channel: str, processed_ts: List[str]):
-        """Save migration progress to resume later if needed."""
-        pass
-
-    def _load_progress(self, channel: str) -> List[str]:
-        """Load previously processed message timestamps."""
-        return []
+    def _discover_channel_resources(self, channel: str):
+        """
+        Find the last message timestamp in a space to determine where to resume migration.
+        
+        This approach simply finds the timestamp of the last message in the space and 
+        only imports messages after that time.
+        
+        Args:
+            channel: The Slack channel name
+        """
+        # Check if we have a space for this channel
+        space_name = self.channel_to_space.get(channel)
+        if not space_name:
+            log_with_context(
+                logging.WARNING,
+                f"No space found for channel {channel}, cannot determine last message timestamp",
+                channel=channel
+            )
+            return
+            
+        # Import discovery functions
+        from slack_migrator.services.discovery import get_last_message_timestamp
+        
+        # Initialize the last_processed_timestamps dict if it doesn't exist
+        if not hasattr(self, "last_processed_timestamps"):
+            self.last_processed_timestamps = {}
+        
+        # Get the timestamp of the last message in the space
+        last_timestamp = get_last_message_timestamp(self, channel, space_name)
+        
+        if last_timestamp > 0:
+            log_with_context(
+                logging.INFO,
+                f"Found last message timestamp for channel {channel}: {last_timestamp}",
+                channel=channel
+            )
+            
+            # Store the last timestamp for this channel
+            self.last_processed_timestamps[channel] = last_timestamp
+            
+            # Initialize an empty thread_map so we don't try to load it again
+            if not hasattr(self, "thread_map") or self.thread_map is None:
+                self.thread_map = {}
+        else:
+            # If no messages were found, log it but don't set a last timestamp
+            # This will cause all messages to be imported
+            log_with_context(
+                logging.INFO,
+                f"No existing messages found in space for channel {channel}, will import all messages",
+                channel=channel
+            )
 
     def _should_abort_import(
         self, channel: str, processed_count: int, failed_count: int
@@ -393,20 +457,20 @@ class SlackToChatMigrator:
             "files_created": 0,
         }
 
-        # In update mode, load existing space mappings
+        # In update mode, discover existing spaces via API
         if self.update_mode:
             from slack_migrator.services.message import load_space_mappings
-            existing_spaces = load_space_mappings(self)
-            if existing_spaces:
+            discovered_spaces = load_space_mappings(self)
+            if discovered_spaces:
                 log_with_context(
                     logging.INFO,
-                    f"[UPDATE MODE] Loaded {len(existing_spaces)} existing space mappings"
+                    f"[UPDATE MODE] Discovered {len(discovered_spaces)} existing spaces via API"
                 )
-                self.created_spaces = existing_spaces
+                self.created_spaces = discovered_spaces
             else:
                 log_with_context(
                     logging.WARNING,
-                    f"[UPDATE MODE] No existing space mappings found. Will create new spaces."
+                    f"[UPDATE MODE] No existing spaces found via API. Will create new spaces."
                 )
 
         # Get all channel directories
@@ -444,6 +508,19 @@ class SlackToChatMigrator:
                     channel=ch.name
                 )
                 continue
+                
+            # Check if this channel has unresolved space conflicts
+            if hasattr(self, "channel_conflicts") and ch.name in self.channel_conflicts:
+                log_with_context(
+                    logging.ERROR,
+                    f"Skipping channel {ch.name} due to unresolved duplicate space conflict",
+                    channel=ch.name
+                )
+                # Mark this channel as having a conflict in the migration report
+                if not hasattr(self, "migration_issues"):
+                    self.migration_issues = {}
+                self.migration_issues[ch.name] = "Skipped due to duplicate space conflict - requires disambiguation in config.yaml"
+                continue
 
             # Setup channel-specific logging for channels that will be processed
             from slack_migrator.utils.logging import setup_channel_logger, is_debug_api_enabled
@@ -457,17 +534,19 @@ class SlackToChatMigrator:
             # Check if we're in update mode and already have a space for this channel
             if self.update_mode and ch.name in self.created_spaces:
                 space = self.created_spaces[ch.name]
+                space_id = space.split('/')[-1] if space.startswith('spaces/') else space
                 log_with_context(
                     logging.INFO,
-                    f"[UPDATE MODE] Using existing space {space} for channel {ch.name}",
+                    f"[UPDATE MODE] Using existing space {space_id} for channel {ch.name}",
                     channel=ch.name
                 )
                 self.space_cache[ch.name] = space
             else:
-                # Step 1: Create space in import mode
+                # Create new space (either in import mode, or update mode with no existing space)
+                action_desc = "Creating new import mode space" if not self.update_mode else "Creating new space (none found in update mode)"
                 log_with_context(
                     logging.INFO,
-                    f"{'[DRY RUN] ' if self.dry_run else ''}Step 1/5: Creating import mode space for {ch.name}",
+                    f"{'[DRY RUN] ' if self.dry_run else ''}Step 1/5: {action_desc} for {ch.name}",
                     channel=ch.name
                 )
                 space = self.space_cache.get(ch.name) or create_space(self, ch.name)
@@ -564,12 +643,11 @@ class SlackToChatMigrator:
                 self.migration_summary["messages_created"] += message_count
 
             # Load previously processed messages and thread mappings
-            processed_ts = [] if self.dry_run else self._load_progress(ch.name)
+            processed_ts = []
             
-            # In update mode, always load thread mappings
+            # Discover existing resources (find the last message timestamp) from Google Chat
             if not self.dry_run or self.update_mode:
-                from slack_migrator.services.message import load_thread_mappings
-                load_thread_mappings(self, ch.name)
+                self._discover_channel_resources(ch.name)
                 
             processed_count = 0
             failed_count = 0
@@ -603,9 +681,8 @@ class SlackToChatMigrator:
 
                 if result:
                     if result != "SKIPPED":
-                        # Save progress after each successful message
+                        # Message was sent successfully
                         processed_ts.append(ts)
-                        self._save_progress(ch.name, processed_ts)
                         processed_count += 1
                 else:
                     failed_count += 1
@@ -644,10 +721,6 @@ class SlackToChatMigrator:
                 f"Channel {ch.name} message import: processed {processed_count}, failed {failed_count}",
                 channel=ch.name
             )
-            
-            # Save thread mappings for this channel
-            from slack_migrator.services.message import save_thread_mappings
-            save_thread_mappings(self, ch.name)
 
             # Step 5: Complete import mode (only if not in update mode)
             if not self.update_mode:
@@ -788,9 +861,9 @@ class SlackToChatMigrator:
             if channel_had_errors and not self.dry_run and not self.update_mode:
                 self._delete_space_if_errors(space_name, ch.name)
 
-        # Save space mappings for future update mode runs
-        from slack_migrator.services.message import save_space_mappings
-        save_space_mappings(self)
+        # Log any space mapping conflicts that should be added to config
+        from slack_migrator.services.message import log_space_mapping_conflicts
+        log_space_mapping_conflicts(self)
         
         # Generate report
         report_file = generate_report(self)
@@ -1023,28 +1096,188 @@ class SlackToChatMigrator:
         log_with_context(logging.INFO, "Cleanup completed")
 
     def _load_existing_space_mappings(self):
-        """Load existing space mappings from saved files for update mode or file attachments."""
+        """
+        Load existing space mappings from Google Chat API.
+        
+        This method only discovers spaces when in update mode. In regular import mode,
+        we want to create new spaces, not reuse existing ones.
+        """
+        # Only discover existing spaces in update mode
+        if not self.update_mode:
+            log_with_context(
+                logging.INFO,
+                "Import mode: Will create new spaces (not discovering existing spaces)"
+            )
+            return
+            
         try:
-            # Check if there's a space mappings file
-            from slack_migrator.services.message import load_space_mappings
+            # Import the discovery module
+            from slack_migrator.services.discovery import discover_existing_spaces
             
-            # Load existing space mappings
-            space_mappings = load_space_mappings(self)
+            # Discover existing spaces from Google Chat API
+            log_with_context(
+                logging.INFO,
+                "[UPDATE MODE] Discovering existing Google Chat spaces"
+            )
             
-            if space_mappings:
-                logger.info(f"Loaded {len(space_mappings)} existing space mappings")
+            # Query Google Chat API to find spaces that match our naming pattern
+            # This will also detect duplicate spaces with the same channel name
+            discovered_spaces, duplicate_spaces = discover_existing_spaces(self)
+            
+            # Initialize conflict tracking
+            if not hasattr(self, "channel_conflicts"):
+                self.channel_conflicts = set()
                 
+            # Check if we have any spaces with duplicate names that need disambiguation
+            if duplicate_spaces:
+                # Check config for space_mapping to disambiguate
+                space_mapping = self.config.get("space_mapping", {})
+                
+                log_with_context(
+                    logging.WARNING,
+                    f"Found {len(duplicate_spaces)} channels with duplicate spaces"
+                )
+                
+                # Initialize arrays to track conflicts
+                unresolved_conflicts = []
+                resolved_conflicts = []
+                
+                for channel_name, spaces in duplicate_spaces.items():
+                    # Check if this channel has a mapping in the config
+                    if channel_name in space_mapping:
+                        # Get the space ID from the config
+                        configured_space_id = space_mapping[channel_name]
+                        
+                        # Find the space with matching ID
+                        matching_space = None
+                        for space_info in spaces:
+                            if space_info["space_id"] == configured_space_id:
+                                matching_space = space_info
+                                break
+                        
+                        if matching_space:
+                            # Replace the automatically selected space with the configured one
+                            log_with_context(
+                                logging.INFO,
+                                f"Using configured space mapping for channel '{channel_name}': {configured_space_id}"
+                            )
+                            discovered_spaces[channel_name] = matching_space["space_name"]
+                            resolved_conflicts.append(channel_name)
+                        else:
+                            # The configured space ID doesn't match any of the duplicates
+                            unresolved_conflicts.append(channel_name)
+                            self.channel_conflicts.add(channel_name)
+                            log_with_context(
+                                logging.ERROR,
+                                f"Configured space ID for channel '{channel_name}' ({configured_space_id}) "
+                                f"doesn't match any discovered spaces"
+                            )
+                    else:
+                        # No mapping in config - this is an unresolved conflict
+                        unresolved_conflicts.append(channel_name)
+                        self.channel_conflicts.add(channel_name)
+                        log_with_context(
+                            logging.ERROR,
+                            f"Channel '{channel_name}' has {len(spaces)} duplicate spaces and no mapping in config"
+                        )
+                        # Print information about each space to help the user decide
+                        log_with_context(
+                            logging.ERROR,
+                            "Please add a space_mapping entry to config.yaml to disambiguate:"
+                        )
+                        log_with_context(
+                            logging.ERROR,
+                            'space_mapping:'
+                        )
+                        for space_info in spaces:
+                            log_with_context(
+                                logging.ERROR,
+                                f"  # {space_info['display_name']} (Members: {space_info['member_count']}, Created: {space_info['create_time']})"
+                            )
+                            log_with_context(
+                                logging.ERROR,
+                                f'  "{channel_name}": "{space_info["space_id"]}"'
+                            )
+                
+                # Mark unresolved conflicts but don't abort the entire migration
+                if unresolved_conflicts:
+                    if not hasattr(self, "migration_issues"):
+                        self.migration_issues = {}
+                    
+                    for channel in unresolved_conflicts:
+                        self.migration_issues[channel] = "Duplicate spaces found - requires disambiguation in config.yaml"
+                    
+                    log_with_context(
+                        logging.ERROR,
+                        f"Found unresolved duplicate space conflicts for channels: {', '.join(unresolved_conflicts)}. "
+                        "These channels will be marked as failed. Add space_mapping entries to config.yaml to resolve."
+                    )
+                    
+                if resolved_conflicts:
+                    log_with_context(
+                        logging.INFO,
+                        f"Successfully resolved space conflicts for channels: {', '.join(resolved_conflicts)}"
+                    )
+            
+            if discovered_spaces:
+                log_with_context(
+                    logging.INFO,
+                    f"Found {len(discovered_spaces)} existing spaces in Google Chat"
+                )
+                
+                # Log detailed information about what will happen with each discovered space
+                for channel, space_name in discovered_spaces.items():
+                    space_id = space_name.split('/')[-1] if space_name.startswith('spaces/') else space_name
+                    
+                    mode_info = "[UPDATE MODE] " if self.update_mode else ""
+                    log_with_context(
+                        logging.INFO,
+                        f"{mode_info}Will use existing space {space_id} for channel '{channel}'",
+                        channel=channel
+                    )
+                
+                # Initialize channel_id_to_space_id mapping if it doesn't exist
+                if not hasattr(self, "channel_id_to_space_id"):
+                    self.channel_id_to_space_id = {}
+                    
                 # Update the channel_to_space mapping
-                for channel, space_name in space_mappings.items():
+                for channel, space_name in discovered_spaces.items():
+                    # Store the space name for backward compatibility
                     self.channel_to_space[channel] = space_name
+                    
+                    # Extract space ID from space_name (format: spaces/{space_id})
+                    space_id = space_name.split('/')[-1] if space_name.startswith('spaces/') else space_name
+                    
+                    # Look up the channel ID if available
+                    channel_id = self.channel_name_to_id.get(channel, "")
+                    if channel_id:
+                        # Store using channel ID -> space ID mapping for more robust identification
+                        self.channel_id_to_space_id[channel_id] = space_id
+                        
+                        log_with_context(
+                            logging.DEBUG,
+                            f"Mapped channel ID {channel_id} to space ID {space_id}"
+                        )
                     
                     # Also update created_spaces for consistency
                     if self.update_mode:
                         self.created_spaces[channel] = space_name
                 
-                logger.debug(f"Updated channel_to_space mapping with {len(self.channel_to_space)} entries")
+                log_with_context(
+                    logging.INFO,
+                    f"Space discovery complete: {len(self.channel_to_space)} channels have existing spaces, others will create new spaces"
+                )
             else:
-                logger.debug("No existing space mappings found")
+                log_with_context(
+                    logging.INFO,
+                    "No existing spaces found in Google Chat"
+                )
+                
         except Exception as e:
-            logger.warning(f"Failed to load existing space mappings: {e}")
-            # Continue without mappings
+            log_with_context(
+                logging.ERROR,
+                f"Failed to load existing space mappings: {e}"
+            )
+            if not self.dry_run:
+                # In dry run, continue even with errors
+                raise

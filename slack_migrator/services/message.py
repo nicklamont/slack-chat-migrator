@@ -323,6 +323,26 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     # In create mode, we always send messages regardless of what was sent before
     is_update_mode = getattr(migrator, "update_mode", False)
     
+    # First, check if this message is older than the last processed timestamp
+    if is_update_mode and hasattr(migrator, "last_processed_timestamps"):
+        last_timestamp = migrator.last_processed_timestamps.get(channel, 0)
+        if last_timestamp > 0:
+            # Import the function to check if we should process this message
+            from slack_migrator.services.discovery import should_process_message
+            
+            if not should_process_message(last_timestamp, ts):
+                log_with_context(
+                    logging.INFO,
+                    f"[UPDATE MODE] Skipping message TS={ts} from user={user_id} (older than last processed timestamp)",
+                    channel=channel,
+                    ts=ts,
+                    user_id=user_id,
+                    last_timestamp=last_timestamp
+                )
+                # Return a placeholder to indicate success
+                return "ALREADY_SENT"
+    
+    # Also check the sent_messages set for additional protection
     if is_update_mode and message_key in migrator.sent_messages:
         log_with_context(
             logging.INFO,
@@ -886,464 +906,6 @@ def track_message_stats(migrator, m):
     # We don't need to process files here - they are handled in send_message
 
 
-def save_thread_mappings(migrator, channel: str):
-    """Save thread mappings to a file for this channel.
-    
-    This allows thread relationships to be maintained across multiple migration runs.
-    """
-    if migrator.dry_run:
-        log_with_context(
-            logging.INFO,
-            f"[DRY RUN] Would save thread mappings for channel {channel}",
-            channel=channel
-        )
-        return
-        
-    try:
-        # Make sure thread_map exists
-        if not hasattr(migrator, "thread_map") or migrator.thread_map is None:
-            migrator.thread_map = {}
-            
-        # Debug: log the thread map contents before saving
-        log_with_context(
-            logging.DEBUG,
-            f"Thread map before saving: {json.dumps(migrator.thread_map, indent=2)}",
-            channel=channel
-        )
-        
-        # Use the thread_mappings directory in the output structure if available
-        if hasattr(migrator, "output_dirs") and "thread_mappings" in migrator.output_dirs:
-            thread_map_dir = migrator.output_dirs["thread_mappings"]
-            os.makedirs(thread_map_dir, exist_ok=True)
-            thread_map_file = os.path.join(thread_map_dir, f"{channel}_thread_map.json")
-        else:
-            # Fallback to the old location
-            thread_map_file = migrator.export_root / f".{channel}_thread_map.json"
-        
-        # Get the space ID associated with this channel
-        space_name = migrator.created_spaces.get(channel)
-        if not space_name:
-            log_with_context(
-                logging.WARNING,
-                f"No space found for channel {channel}, cannot filter thread mappings",
-                channel=channel
-            )
-            return
-            
-        # Extract the space ID from the space name (format: spaces/SPACE_ID)
-        space_id = space_name.split('/')[-1]
-        
-        # Filter thread mappings for this channel only by matching the space ID
-        channel_thread_map = {}
-        channel_count = 0
-        
-        for ts, thread_name in migrator.thread_map.items():
-            # Check if this thread belongs to the current channel's space
-            if space_id in str(thread_name):
-                # Always store as string keys
-                channel_thread_map[str(ts)] = thread_name
-                channel_count += 1
-        
-        # Create a data structure that includes space ID
-        save_data = {
-            "space_id": space_id,
-            "space_name": space_name,
-            "thread_map": channel_thread_map
-        }
-        
-        log_with_context(
-            logging.INFO,
-            f"Saving {channel_count} thread mappings for channel {channel} (space: {space_id})",
-            channel=channel,
-            space_id=space_id,
-            file=str(thread_map_file)
-        )
-        
-        # Save the data structure
-        with open(thread_map_file, 'w') as f:
-            json.dump(save_data, f)
-        
-        log_with_context(
-            logging.INFO, 
-            f"Saved {channel_count} thread mappings for channel {channel}",
-            channel=channel,
-            file=str(thread_map_file)
-        )
-        
-        # Save message ID mappings
-        save_message_id_mappings(migrator, channel)
-            
-    except Exception as e:
-        log_with_context(
-            logging.WARNING,
-            f"Failed to save thread mappings for {channel}: {e}",
-            channel=channel,
-            error=str(e)
-        )
-
-
-def save_message_id_mappings(migrator, channel: str):
-    """Save message ID mappings to a file for this channel.
-    
-    This allows messages to be properly tracked across multiple migration runs.
-    """
-    if migrator.dry_run:
-        log_with_context(
-            logging.INFO,
-            f"[DRY RUN] Would save message ID mappings for channel {channel}",
-            channel=channel
-        )
-        return
-        
-    try:
-        # Make sure message_id_map exists
-        if not hasattr(migrator, "message_id_map") or migrator.message_id_map is None:
-            migrator.message_id_map = {}
-            
-        # Use the thread_mappings directory in the output structure if available
-        if hasattr(migrator, "output_dirs") and "thread_mappings" in migrator.output_dirs:
-            message_map_dir = migrator.output_dirs["thread_mappings"]
-            os.makedirs(message_map_dir, exist_ok=True)
-            message_map_file = os.path.join(message_map_dir, f"{channel}_message_map.json")
-        else:
-            # Fallback to the old location
-            message_map_file = migrator.export_root / f".{channel}_message_map.json"
-        
-        # Get the space ID associated with this channel
-        space_name = migrator.created_spaces.get(channel)
-        if not space_name:
-            log_with_context(
-                logging.WARNING,
-                f"No space found for channel {channel}, cannot filter message ID mappings",
-                channel=channel
-            )
-            return
-            
-        # Extract the space ID from the space name (format: spaces/SPACE_ID)
-        space_id = space_name.split('/')[-1]
-        
-        # Filter message ID mappings for this channel only by matching the space ID
-        channel_message_map = {}
-        channel_count = 0
-        
-        for ts, message_name in migrator.message_id_map.items():
-            # Check if this message belongs to the current channel's space
-            if space_id in str(message_name):
-                # Always store as string keys
-                channel_message_map[str(ts)] = message_name
-                channel_count += 1
-        
-        # Also save the sent_messages set to track which messages have been sent
-        # This is important for tracking edited messages
-        sent_messages_for_channel = []
-        for message_key in migrator.sent_messages:
-            if message_key.startswith(f"{channel}:"):
-                sent_messages_for_channel.append(message_key)
-        
-        # Create a combined data structure to save
-        save_data = {
-            "space_id": space_id,
-            "space_name": space_name,
-            "message_id_map": channel_message_map,
-            "sent_messages": sent_messages_for_channel
-        }
-        
-        log_with_context(
-            logging.INFO,
-            f"Saving {channel_count} message ID mappings for channel {channel} (space: {space_id})",
-            channel=channel,
-            space_id=space_id,
-            file=str(message_map_file)
-        )
-        
-        # Save the combined data
-        with open(message_map_file, 'w') as f:
-            json.dump(save_data, f)
-        
-        log_with_context(
-            logging.INFO, 
-            f"Saved {channel_count} message ID mappings for channel {channel}",
-            channel=channel,
-            file=str(message_map_file)
-        )
-            
-    except Exception as e:
-        log_with_context(
-            logging.WARNING,
-            f"Failed to save message ID mappings for {channel}: {e}",
-            channel=channel,
-            error=str(e)
-        )
-
-
-def load_thread_mappings(migrator, channel: str):
-    """Load thread mappings from a file for this channel.
-    
-    This allows thread relationships to be maintained across multiple migration runs.
-    """
-    try:
-        # Ensure thread map is initialized
-        if not hasattr(migrator, "thread_map") or migrator.thread_map is None:
-            migrator.thread_map = {}
-            
-        # Check first in the thread_mappings directory in the output structure
-        thread_map_file = None
-        if hasattr(migrator, "output_dirs") and "thread_mappings" in migrator.output_dirs:
-            thread_map_dir = migrator.output_dirs["thread_mappings"]
-            thread_map_file_new = os.path.join(thread_map_dir, f"{channel}_thread_map.json")
-            if os.path.exists(thread_map_file_new):
-                thread_map_file = thread_map_file_new
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found thread map file in new location: {thread_map_file}",
-                    channel=channel
-                )
-        
-        # If not found, try the old location
-        if not thread_map_file:
-            thread_map_file_old = migrator.export_root / f".{channel}_thread_map.json"
-            if thread_map_file_old.exists():
-                thread_map_file = thread_map_file_old
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found thread map file in old location: {thread_map_file}",
-                    channel=channel
-                )
-        
-        # If found in either location, load it
-        if thread_map_file and (os.path.exists(thread_map_file) if isinstance(thread_map_file, str) else thread_map_file.exists()):
-            with open(thread_map_file) as f:
-                loaded_data = json.load(f)
-                
-                # Check if we're using the new format with space_id
-                if isinstance(loaded_data, dict) and "space_id" in loaded_data:
-                    loaded_space_id = loaded_data.get("space_id")
-                    loaded_space_name = loaded_data.get("space_name")
-                    loaded_map = loaded_data.get("thread_map", {})
-                    
-                    # Check if we're in update mode and if the space matches
-                    is_update_mode = getattr(migrator, "update_mode", False)
-                    current_space = migrator.created_spaces.get(channel)
-                    
-                    if is_update_mode and current_space == loaded_space_name:
-                        # We're updating the same space, so use the thread mappings
-                        for ts, thread_name in loaded_map.items():
-                            # Store as string keys for consistency
-                            migrator.thread_map[str(ts)] = thread_name
-                            
-                        log_with_context(
-                            logging.INFO,
-                            f"Loaded {len(loaded_map)} thread mappings from {thread_map_file} for update mode",
-                            channel=channel,
-                            space_id=loaded_space_id
-                        )
-                    elif is_update_mode:
-                        log_with_context(
-                            logging.WARNING,
-                            f"Space mismatch in update mode. Found {loaded_space_name}, but current is {current_space}",
-                            channel=channel
-                        )
-                    else:
-                        log_with_context(
-                            logging.INFO,
-                            f"Not in update mode, ignoring saved thread mappings",
-                            channel=channel
-                        )
-                else:
-                    # Old format without space_id, only use if specified
-                    if getattr(migrator, "use_legacy_mappings", False):
-                        for ts, thread_name in loaded_data.items():
-                            # Store as string keys for consistency
-                            migrator.thread_map[str(ts)] = thread_name
-                        
-                        log_with_context(
-                            logging.INFO,
-                            f"Loaded {len(loaded_data)} thread mappings from legacy format",
-                            channel=channel
-                        )
-                    else:
-                        log_with_context(
-                            logging.INFO,
-                            f"Found legacy thread mapping format, ignoring (use_legacy_mappings=False)",
-                            channel=channel
-                        )
-            
-            # Debug log to verify thread mappings
-            log_with_context(
-                logging.DEBUG,
-                f"Thread map after loading: {json.dumps(dict(list(migrator.thread_map.items())[:5]), indent=2)} (showing first 5 items)",
-                channel=channel
-            )
-        else:
-            log_with_context(
-                logging.INFO,
-                f"No thread map file found for channel {channel}",
-                channel=channel
-            )
-        
-        # Load message ID mappings
-        load_message_id_mappings(migrator, channel)
-            
-    except Exception as e:
-        log_with_context(
-            logging.WARNING,
-            f"Failed to load thread mappings for {channel}: {e}",
-            channel=channel,
-            error=str(e)
-        )
-        # Initialize empty thread map if loading failed
-        if not hasattr(migrator, "thread_map") or migrator.thread_map is None:
-            migrator.thread_map = {}
-
-
-def load_message_id_mappings(migrator, channel: str):
-    """Load message ID mappings from a file for this channel.
-    
-    This allows messages to be properly tracked across multiple migration runs.
-    """
-    try:
-        # Ensure message ID map is initialized
-        if not hasattr(migrator, "message_id_map") or migrator.message_id_map is None:
-            migrator.message_id_map = {}
-            
-        # Ensure sent_messages set is initialized
-        if not hasattr(migrator, "sent_messages"):
-            migrator.sent_messages = set()
-            
-        # Check first in the thread_mappings directory in the output structure
-        message_map_file = None
-        if hasattr(migrator, "output_dirs") and "thread_mappings" in migrator.output_dirs:
-            message_map_dir = migrator.output_dirs["thread_mappings"]
-            message_map_file_new = os.path.join(message_map_dir, f"{channel}_message_map.json")
-            if os.path.exists(message_map_file_new):
-                message_map_file = message_map_file_new
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found message ID map file in new location: {message_map_file}",
-                    channel=channel
-                )
-        
-        # If not found, try the old location
-        if not message_map_file:
-            message_map_file_old = migrator.export_root / f".{channel}_message_map.json"
-            if message_map_file_old.exists():
-                message_map_file = message_map_file_old
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found message ID map file in old location: {message_map_file}",
-                    channel=channel
-                )
-        
-        # If found in either location, load it
-        if message_map_file and (os.path.exists(message_map_file) if isinstance(message_map_file, str) else message_map_file.exists()):
-            with open(message_map_file) as f:
-                try:
-                    loaded_data = json.load(f)
-                    
-                    # Check if we're using the new format with space_id
-                    if isinstance(loaded_data, dict) and "space_id" in loaded_data:
-                        loaded_space_id = loaded_data.get("space_id")
-                        loaded_space_name = loaded_data.get("space_name")
-                        loaded_map = loaded_data.get("message_id_map", {})
-                        sent_messages = loaded_data.get("sent_messages", [])
-                        
-                        # Check if we're in update mode and if the space matches
-                        is_update_mode = getattr(migrator, "update_mode", False)
-                        current_space = migrator.created_spaces.get(channel)
-                        
-                        if is_update_mode and current_space == loaded_space_name:
-                            # We're updating the same space, so use the message ID mappings
-                            for ts, message_name in loaded_map.items():
-                                # Store as string keys for consistency
-                                migrator.message_id_map[str(ts)] = message_name
-                            
-                            # Add sent messages to the set
-                            for message_key in sent_messages:
-                                migrator.sent_messages.add(message_key)
-                                
-                            log_with_context(
-                                logging.INFO,
-                                f"Loaded {len(loaded_map)} message ID mappings from {message_map_file} for update mode",
-                                channel=channel,
-                                space_id=loaded_space_id
-                            )
-                        elif is_update_mode:
-                            log_with_context(
-                                logging.WARNING,
-                                f"Space mismatch in update mode. Found {loaded_space_name}, but current is {current_space}",
-                                channel=channel
-                            )
-                        else:
-                            log_with_context(
-                                logging.INFO,
-                                f"Not in update mode, ignoring saved message ID mappings",
-                                channel=channel
-                            )
-                    else:
-                        # Try to handle the old format (no space ID)
-                        if getattr(migrator, "use_legacy_mappings", False):
-                            # Check if it's the intermediate format with message_id_map and sent_messages
-                            if isinstance(loaded_data, dict) and "message_id_map" in loaded_data:
-                                loaded_map = loaded_data.get("message_id_map", {})
-                                sent_messages = loaded_data.get("sent_messages", [])
-                                
-                                # Update the message ID map with the loaded mappings
-                                for ts, message_name in loaded_map.items():
-                                    # Store as string keys for consistency
-                                    migrator.message_id_map[str(ts)] = message_name
-                                
-                                # Add sent messages to the set only if using legacy mappings
-                                for message_key in sent_messages:
-                                    migrator.sent_messages.add(message_key)
-                            else:
-                                # Oldest format (just the message ID map)
-                                for ts, message_name in loaded_data.items():
-                                    # Store as string keys for consistency
-                                    migrator.message_id_map[str(ts)] = message_name
-                                
-                            log_with_context(
-                                logging.INFO,
-                                f"Loaded legacy format message ID mappings",
-                                channel=channel
-                            )
-                        else:
-                            log_with_context(
-                                logging.INFO,
-                                f"Found legacy message ID mapping format, ignoring (use_legacy_mappings=False)",
-                                channel=channel
-                            )
-                except json.JSONDecodeError:
-                    log_with_context(
-                        logging.WARNING,
-                        f"Failed to parse message ID map file {message_map_file}, starting with empty map",
-                        channel=channel
-                    )
-            
-            # Debug log to verify message ID mappings
-            log_with_context(
-                logging.DEBUG,
-                f"Message ID map after loading: {json.dumps(dict(list(migrator.message_id_map.items())[:5]), indent=2)} (showing first 5 items)",
-                channel=channel
-            )
-        else:
-            log_with_context(
-                logging.INFO,
-                f"No message ID map file found for channel {channel}",
-                channel=channel
-            )
-            
-    except Exception as e:
-        log_with_context(
-            logging.WARNING,
-            f"Failed to load message ID mappings for {channel}: {e}",
-            channel=channel,
-            error=str(e)
-        )
-        # Initialize empty message ID map if loading failed
-        if not hasattr(migrator, "message_id_map") or migrator.message_id_map is None:
-            migrator.message_id_map = {}
-
-
 def send_intro(migrator, space: str, channel: str):
     """Send an intro message with channel metadata."""
     # Check if we're in update mode - if so, don't send intro message again
@@ -1427,108 +989,86 @@ def send_intro(migrator, space: str, channel: str):
         ) 
 
 
-def save_space_mappings(migrator):
-    """Save space mappings to enable update mode in future runs.
-    
-    This saves the mapping between Slack channel names and Google Chat space IDs.
+def log_space_mapping_conflicts(migrator):
+    """
+    Log information about space mapping conflicts that need to be resolved.
     """
     if migrator.dry_run:
         log_with_context(
             logging.INFO,
-            "[DRY RUN] Would save space mappings for update mode"
+            "[DRY RUN] Checking for space mapping conflicts"
         )
-        return
-        
-    try:
-        # Use the thread_mappings directory in the output structure if available
-        if hasattr(migrator, "output_dirs") and "thread_mappings" in migrator.output_dirs:
-            space_map_dir = migrator.output_dirs["thread_mappings"]
-            os.makedirs(space_map_dir, exist_ok=True)
-            space_map_file = os.path.join(space_map_dir, "space_mappings.json")
-        else:
-            # Fallback to the old location
-            space_map_file = migrator.export_root / ".space_mappings.json"
-        
-        # Save the space mappings
-        if hasattr(migrator, "created_spaces") and migrator.created_spaces:
-            log_with_context(
-                logging.INFO,
-                f"Saving {len(migrator.created_spaces)} space mappings for update mode",
-                file=str(space_map_file)
-            )
-            
-            with open(space_map_file, 'w') as f:
-                json.dump(migrator.created_spaces, f)
-                
-            log_with_context(
-                logging.INFO,
-                f"Saved space mappings successfully",
-                file=str(space_map_file)
-            )
-        else:
-            log_with_context(
-                logging.WARNING,
-                "No space mappings to save"
-            )
-            
-    except Exception as e:
+    
+    # Log any conflicts that should be added to config
+    if hasattr(migrator, "channel_conflicts") and migrator.channel_conflicts:
         log_with_context(
             logging.WARNING,
-            f"Failed to save space mappings: {e}",
-            error=str(e)
+            f"Found {len(migrator.channel_conflicts)} channels with duplicate space conflicts"
         )
+        log_with_context(
+            logging.WARNING,
+            "Add the following entries to your config.yaml to resolve conflicts:"
+        )
+        log_with_context(
+            logging.WARNING,
+            "space_mapping:"
+        )
+        for channel_name in migrator.channel_conflicts:
+            log_with_context(
+                logging.WARNING,
+                f'  "{channel_name}": "<space_id>"  # Replace with the desired space ID'
+            )
 
 
 def load_space_mappings(migrator):
     """Load space mappings for update mode.
     
-    This loads the mapping between Slack channel names and Google Chat space IDs
-    to enable updating existing spaces in update mode.
+    This uses the Google Chat API for discovery and the config file for overrides.
+    No persisted mapping files are used anymore.
     
     Returns:
         dict: Mapping from channel names to space IDs, or empty dict if not found
     """
     try:
-        # Check first in the thread_mappings directory in the output structure
-        space_map_file = None
-        if hasattr(migrator, "output_dirs") and "thread_mappings" in migrator.output_dirs:
-            space_map_dir = migrator.output_dirs["thread_mappings"]
-            space_map_file_new = os.path.join(space_map_dir, "space_mappings.json")
-            if os.path.exists(space_map_file_new):
-                space_map_file = space_map_file_new
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found space mappings file in new location: {space_map_file}"
-                )
+        # Initialize the channel_id_to_space_id mapping if not present
+        if not hasattr(migrator, "channel_id_to_space_id"):
+            migrator.channel_id_to_space_id = {}
         
-        # If not found, try the old location
-        if not space_map_file:
-            space_map_file_old = migrator.export_root / ".space_mappings.json"
-            if space_map_file_old.exists():
-                space_map_file = space_map_file_old
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found space mappings file in old location: {space_map_file}"
-                )
+        # Use API discovery to find spaces
+        from slack_migrator.services.discovery import discover_existing_spaces
+        discovered_spaces, duplicate_spaces = discover_existing_spaces(migrator)
         
-        # If found in either location, load it
-        if space_map_file and (os.path.exists(space_map_file) if isinstance(space_map_file, str) else space_map_file.exists()):
-            with open(space_map_file) as f:
-                space_mappings = json.load(f)
-                
+        # Log the discovery results
+        if discovered_spaces:
             log_with_context(
                 logging.INFO,
-                f"Loaded {len(space_mappings)} space mappings for update mode",
-                file=str(space_map_file)
+                f"Discovered {len(discovered_spaces)} existing spaces via API"
             )
             
-            return space_mappings
-        else:
+        # Look for space_mapping overrides in config
+        if "space_mapping" in migrator.config:
+            space_mapping = migrator.config["space_mapping"]
             log_with_context(
                 logging.INFO,
-                "No space mappings file found"
+                f"Found {len(space_mapping)} space mapping overrides in config"
             )
-            return {}
+            
+            # Apply space mappings from config (overriding API discovery)
+            for channel_name, space_id in space_mapping.items():
+                channel_id = migrator.channel_name_to_id.get(channel_name, "")
+                if channel_id:
+                    # Override any discovered mapping with the config value
+                    migrator.channel_id_to_space_id[channel_id] = space_id
+                    
+                    # Also update the name-based mapping for backward compatibility
+                    discovered_spaces[channel_name] = f"spaces/{space_id}"
+                else:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Channel '{channel_name}' in space_mapping config not found in workspace"
+                    )
+        
+        return discovered_spaces if discovered_spaces else {}
                 
     except Exception as e:
         log_with_context(
