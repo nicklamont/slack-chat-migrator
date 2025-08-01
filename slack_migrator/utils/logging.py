@@ -31,12 +31,13 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(data)
 
 
-def setup_main_log_file(output_dir: str) -> logging.FileHandler:
+def setup_main_log_file(output_dir: str, debug_api: bool = False) -> logging.FileHandler:
     """
     Set up a file handler for the main log file that contains non-channel-specific logs.
     
     Args:
         output_dir: The output directory path
+        debug_api: If True, enable detailed API request/response logging
     
     Returns:
         The file handler for the main log file
@@ -51,22 +52,25 @@ def setup_main_log_file(output_dir: str) -> logging.FileHandler:
     file_handler = logging.FileHandler(log_file, mode='w')
     file_handler.setLevel(logging.DEBUG)  # Always use DEBUG level for file handlers
     
-    # Create formatter
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    # Create formatter - always use EnhancedFormatter but conditionally include API details
+    formatter = EnhancedFormatter(
+        '%(asctime)s - %(levelname)s - %(message)s', 
+        include_api_details=debug_api
+    )
     file_handler.setFormatter(formatter)
     
     # Create a filter to include logs that don't have a channel attribute
-    # and logs for channels that don't have their own log handler
+    # or the channel attribute is empty
     class MainLogFilter(logging.Filter):
         def filter(self, record):
             # Check if the record has a channel attribute
             record_channel = getattr(record, 'channel', None)
             
-            # If no channel attribute, include in main log
-            if record_channel is None:
+            # If no channel attribute or empty channel, include in main log
+            if record_channel is None or record_channel == '':
                 return True
                 
-            # If record has a channel attribute, exclude from main log
+            # If record has a non-empty channel attribute, exclude from main log
             # Channel-specific logs should go to their respective channel log files
             return False
     
@@ -80,6 +84,40 @@ def setup_main_log_file(output_dir: str) -> logging.FileHandler:
     
     logger.info(f"Main log file created at: {log_file}")
     return file_handler
+
+
+# Define an enhanced formatter class that can handle both verbose formatting and API details
+class EnhancedFormatter(logging.Formatter):
+    """
+    Custom formatter that supports both verbose mode (with additional context information)
+    and API debug mode (with request/response data)
+    """
+    
+    def __init__(self, fmt=None, datefmt=None, style='%', verbose=False, include_api_details=False):
+        # Use more detailed format for verbose mode
+        if verbose:
+            fmt = '%(asctime)s - %(name)s - %(levelname)s - [%(module)s:%(lineno)d] - %(message)s'
+        elif not fmt:
+            fmt = '%(asctime)s - %(levelname)s - %(message)s'
+            
+        super().__init__(fmt, datefmt, style)
+        self.include_api_details = include_api_details
+    
+    def format(self, record):
+        # First apply the base format
+        result = super().format(record)
+        
+        # Only include API details if explicitly enabled
+        if self.include_api_details:
+            # Add API data if present
+            if hasattr(record, 'api_data') and record.api_data:
+                result += f"\nAPI Data: {record.api_data}"
+                
+            # Add response data if present
+            if hasattr(record, 'response') and record.response:
+                result += f"\nResponse: {record.response}"
+                
+        return result
 
 
 def setup_logger(verbose: bool = False, debug_api: bool = False, output_dir: Optional[str] = None) -> logging.Logger:
@@ -110,18 +148,20 @@ def setup_logger(verbose: bool = False, debug_api: bool = False, output_dir: Opt
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
 
-    # Create formatter with more detailed information
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    if verbose:
-        # More detailed format for verbose mode
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [%(module)s:%(lineno)d] - %(message)s')
-
+    # Create the enhanced formatter that handles both verbose and API details
+    formatter = EnhancedFormatter(
+        verbose=verbose,
+        include_api_details=debug_api
+    )
+    
+    # Set the formatter for the console handler
     console_handler.setFormatter(formatter)
+        
     logger.addHandler(console_handler)
     
     # Set up main log file if output directory is provided
     if output_dir:
-        setup_main_log_file(output_dir)
+        setup_main_log_file(output_dir, debug_api)
     
     # Configure API debugging if enabled
     if debug_api:
@@ -132,12 +172,30 @@ def setup_logger(verbose: bool = False, debug_api: bool = False, output_dir: Opt
         
         # Add a handler to log HTTP traffic to a separate file if output_dir is provided
         if output_dir:
+            # Create formatter for API logs with API details always enabled
+            api_formatter = EnhancedFormatter(include_api_details=True)
+            
+            # Set up API debug log file for HTTP client logs
             api_log_file = os.path.join(output_dir, "api_debug.log")
             api_handler = logging.FileHandler(api_log_file, mode='w')
             api_handler.setLevel(logging.DEBUG)
-            api_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
             api_handler.setFormatter(api_formatter)
             http_logger.addHandler(api_handler)
+            
+            # Create a separate file specifically for our structured API logs
+            structured_api_log_file = os.path.join(output_dir, "structured_api_debug.log")
+            structured_api_handler = logging.FileHandler(structured_api_log_file, mode='w')
+            structured_api_handler.setLevel(logging.DEBUG)
+            structured_api_handler.setFormatter(api_formatter)
+            
+            # Only include records that have api_data or response attributes
+            def api_filter(record):
+                return hasattr(record, 'api_data') or hasattr(record, 'response')
+            
+            structured_api_handler.addFilter(api_filter)
+            logger.addHandler(structured_api_handler)
+            
+            logger.info(f"API debug logging enabled, writing to {api_log_file} and {structured_api_log_file}")
             
             # Patch http.client to log complete request/response data
             _patch_http_client_for_debug()
@@ -182,7 +240,7 @@ def _patch_http_client_for_debug():
     http.client.HTTPConnection.putheader = _debug_putheader
 
 
-def setup_channel_logger(output_dir: str, channel: str, verbose: bool = False) -> logging.FileHandler:
+def setup_channel_logger(output_dir: str, channel: str, verbose: bool = False, debug_api: bool = False) -> logging.FileHandler:
     """
     Set up a file handler for channel-specific logging.
     
@@ -205,8 +263,11 @@ def setup_channel_logger(output_dir: str, channel: str, verbose: bool = False) -
     file_handler = logging.FileHandler(log_file, mode='w')
     file_handler.setLevel(logging.DEBUG)  # Always use DEBUG level for file handlers
     
-    # Create formatter
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    # Create formatter - use EnhancedFormatter with appropriate settings
+    formatter = EnhancedFormatter(
+        verbose=verbose,
+        include_api_details=debug_api
+    )
     file_handler.setFormatter(formatter)
     
     # Create a filter to only include logs for this specific channel
@@ -270,8 +331,18 @@ def log_with_context(level: int, message: str, **kwargs: Any) -> None:
     # Filter out None values from kwargs
     filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
     
+    # Make sure extra attributes don't cause issues with standard formatters
+    # by ensuring all potentially missing attributes have default values
+    default_extras = {'api_data': '', 'response': ''}
+    
+    # Only add defaults for API-related logs to avoid unnecessary processing
+    if 'api_data' in filtered_kwargs or 'response' in filtered_kwargs:
+        extras = {**default_extras, **filtered_kwargs}
+    else:
+        extras = filtered_kwargs
+    
     logger = logging.getLogger("slack_migrator")
-    logger.log(level, message, extra=filtered_kwargs)
+    logger.log(level, message, extra=extras)
 
 
 def log_api_request(method: str, url: str, data: Optional[Dict] = None, **kwargs: Any) -> None:
@@ -288,7 +359,10 @@ def log_api_request(method: str, url: str, data: Optional[Dict] = None, **kwargs
     if not is_debug_api_enabled():
         return
         
-    # Redact sensitive information
+    # Always log the basic request info
+    log_context = kwargs.copy()
+    
+    # Add detailed data if available
     if data and isinstance(data, dict):
         data_copy = data.copy()
         # Redact any tokens or sensitive fields
@@ -296,18 +370,15 @@ def log_api_request(method: str, url: str, data: Optional[Dict] = None, **kwargs
             if any(sensitive in key.lower() for sensitive in ['token', 'auth', 'password', 'secret', 'key']):
                 data_copy[key] = '[REDACTED]'
         
-        log_with_context(
-            logging.DEBUG,
-            f"API Request: {method} {url}",
-            api_data=json.dumps(data_copy, indent=2),
-            **kwargs
-        )
-    else:
-        log_with_context(
-            logging.DEBUG,
-            f"API Request: {method} {url}",
-            **kwargs
-        )
+        # Add API data to the log context
+        log_context['api_data'] = json.dumps(data_copy, indent=2)
+    
+    # Log with all available context
+    log_with_context(
+        logging.DEBUG,
+        f"API Request: {method} {url}",
+        **log_context
+    )
 
 
 def log_api_response(status_code: int, url: str, response_data: Any = None, **kwargs: Any) -> None:
@@ -323,7 +394,11 @@ def log_api_response(status_code: int, url: str, response_data: Any = None, **kw
     # Only log detailed API responses if in debug mode
     if not is_debug_api_enabled():
         return
-        
+    
+    # Always log the basic response info
+    log_context = kwargs.copy()
+    
+    # Process and add response data if available
     if response_data:
         try:
             if isinstance(response_data, dict) or isinstance(response_data, list):
@@ -338,24 +413,18 @@ def log_api_response(status_code: int, url: str, response_data: Any = None, **kw
                 if len(response_str) > 1000:
                     response_str = response_str[:1000] + "... [truncated]"
                     
-            log_with_context(
-                logging.DEBUG,
-                f"API Response: {status_code} from {url}",
-                response=response_str,
-                **kwargs
-            )
+            # Add response data to the log context
+            log_context['response'] = response_str
         except Exception as e:
-            log_with_context(
-                logging.DEBUG,
-                f"API Response: {status_code} from {url} (error formatting response: {e})",
-                **kwargs
-            )
-    else:
-        log_with_context(
-            logging.DEBUG,
-            f"API Response: {status_code} from {url}",
-            **kwargs
-        )
+            # If there's an error formatting the response, include that info
+            log_context['response'] = f"Error formatting response: {e}"
+    
+    # Log with all available context
+    log_with_context(
+        logging.DEBUG,
+        f"API Response: {status_code} from {url}",
+        **log_context
+    )
 
 
 def log_failed_message(channel: str, failed_msg: Dict[str, Any]) -> None:

@@ -22,7 +22,7 @@ from slack_migrator.utils.logging import logger, log_with_context
 REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/chat.import",
     "https://www.googleapis.com/auth/chat.spaces",
-    "https://www.googleapis.com/auth/drive.file"
+    "https://www.googleapis.com/auth/drive"  # Full Drive scope covers all drive.file permissions plus shared drives
 ]
 
 class PermissionChecker:

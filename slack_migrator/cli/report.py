@@ -25,6 +25,23 @@ def print_dry_run_summary(migrator, report_file=None):
     print(f"Reactions that would be migrated: {migrator.migration_summary['reactions_created']}")
     print(f"Files that would be migrated: {migrator.migration_summary['files_created']}")
     
+    # Show file upload details if available
+    if hasattr(migrator, 'file_handler') and hasattr(migrator.file_handler, 'get_file_statistics'):
+        try:
+            file_stats = migrator.file_handler.get_file_statistics()
+            if file_stats['total_files_processed'] > 0:
+                print(f"\nFile Upload Details:")
+                print(f"  Total files processed: {file_stats['total_files_processed']}")
+                print(f"  Successful uploads: {file_stats['successful_uploads']}")
+                print(f"  Failed uploads: {file_stats['failed_uploads']}")
+                print(f"  Drive uploads: {file_stats['drive_uploads']}")
+                print(f"  Direct uploads: {file_stats['direct_uploads']}")
+                print(f"  External user files: {file_stats['external_user_files']}")
+                print(f"  Ownership transferred: {file_stats['ownership_transferred']}")
+                print(f"  Success rate: {file_stats['success_rate']:.1f}%")
+        except Exception as e:
+            print(f"  (Could not retrieve detailed file statistics: {e})")
+    
     # Show users without email
     if hasattr(migrator, 'users_without_email') and migrator.users_without_email:
         print(f"\nUsers without email: {len(migrator.users_without_email)}")
@@ -126,6 +143,14 @@ def generate_report(migrator, output_file: str = "migration_report.yaml"):
                     logger.error(f"Failed to write detailed failure log for channel {channel}: {e}")
     
     # Create a report dictionary
+    # Get detailed file statistics if available
+    file_stats = {}
+    if hasattr(migrator, 'file_handler') and hasattr(migrator.file_handler, 'get_file_statistics'):
+        try:
+            file_stats = migrator.file_handler.get_file_statistics()
+        except Exception as e:
+            print(f"Warning: Could not retrieve detailed file statistics: {e}")
+    
     report = {
         "migration_summary": {
             "timestamp": datetime.datetime.now().isoformat(),
@@ -149,6 +174,7 @@ def generate_report(migrator, output_file: str = "migration_report.yaml"):
             "external_users": {},
             "users_without_email": {},
         },
+        "file_upload_details": file_stats,
         "recommendations": []
     }
     

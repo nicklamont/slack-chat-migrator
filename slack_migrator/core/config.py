@@ -38,8 +38,7 @@ def load_config(config_path: Path) -> Dict[str, Any]:
     config.setdefault('include_channels', [])
     config.setdefault('user_mapping_overrides', {})
     
-    # Set default values
-    config.setdefault('attachments_folder', 'Slack Attachments')
+    # Set default values (attachments_folder no longer needed with shared drive approach)
     config.setdefault('email_domain_override', '')
     
     # Set default values for error handling options
@@ -69,7 +68,10 @@ def create_default_config(output_path: Path) -> bool:
         return False
         
     default_config = {
-        "attachments_folder": "Slack Attachments",
+        # Shared drive configuration replaces the old attachments_folder approach
+        "shared_drive": {
+            "name": "Imported Slack Attachments"
+        },
         "exclude_channels": [
             "random",
             "shitposting"

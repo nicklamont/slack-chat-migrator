@@ -1,7 +1,16 @@
 # Slack to Google Chat Migration Configuration
 
-# Folder where attachments will be stored in Google Drive
-attachments_folder: "Slack Attachments"
+# Shared Drive configuration for storing attachments
+# Using a shared drive is recommended for organization-wide access
+shared_drive:
+  # Option 1: Specify an existing shared drive by ID
+  # id: "0AInA6b6Ej1Q2Uk9PVA"  # Replace with your shared drive ID
+  
+  # Option 2: Specify a shared drive by name (will be created if it doesn't exist)
+  name: "Imported Slack Attachments"
+  
+  # If neither id nor name is specified, the tool will create a new shared drive
+  # with the name "Imported Slack Attachments"
 
 # Optional: Channels to exclude from migration (by name)
 exclude_channels:

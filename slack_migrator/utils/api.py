@@ -17,10 +17,10 @@ from slack_migrator.utils.logging import logger, log_with_context
 # It now includes 'chat.spaces.readonly' to guarantee the GetSpace method is allowed.
 REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/chat.import",
-    "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/chat.spaces",
     "https://www.googleapis.com/auth/chat.messages",
     "https://www.googleapis.com/auth/chat.spaces.readonly",
+    "https://www.googleapis.com/auth/drive",  # Full Drive scope covers all drive.file permissions plus shared drives
 ]
 
 # Cache for service instances

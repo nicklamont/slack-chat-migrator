@@ -25,7 +25,7 @@ This tool migrates Slack JSON exports into Google Chat spaces via the Chat Impor
 - Service account w/ domain-wide delegation and scopes:
   - https://www.googleapis.com/auth/chat.import
   - https://www.googleapis.com/auth/chat.spaces
-  - https://www.googleapis.com/auth/drive.file
+  - https://www.googleapis.com/auth/drive (for file uploads and shared drive creation)
 - Slack export folder:
   ```
   export_root/
@@ -57,8 +57,17 @@ pip install git+https://github.com/nicklamont/slack-chat-migrator.git
 Create a `config.yaml` file:
 
 ```yaml
-# Folder where attachments will be stored in Google Drive
-attachments_folder: "Slack Attachments"
+# Shared Drive configuration for storing attachments
+# Using a shared drive is recommended for organization-wide access
+shared_drive:
+  # Option 1: Specify an existing shared drive by ID
+  # id: "0AInA6b6Ej1Q2Uk9PVA"  # Replace with your shared drive ID
+  
+  # Option 2: Specify a shared drive by name (will be created if it doesn't exist)
+  name: "Imported Slack Attachments"
+  
+  # If neither id nor name is specified, a new shared drive will be created
+  # with the name "Imported Slack Attachments"
 
 # Optional: Channels to exclude from migration (by name)
 exclude_channels:
@@ -339,7 +348,7 @@ The codebase is organized into the following modules:
 2. Create service account & grant roles:
    ```bash
    gcloud iam service-accounts create slack-migrator-sa
-   # grant chat.admin and drive.file
+   # grant chat.admin and drive permissions
    ```
 
 3. Domain-wide delegation in Admin console with above scopes.

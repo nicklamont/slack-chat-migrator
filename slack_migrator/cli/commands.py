@@ -71,7 +71,8 @@ def main():
             args.slack_token,
             args.dry_run,
             args.verbose,
-            args.update_mode
+            args.update_mode,
+            args.debug_api
         )
         
         # Run the migration

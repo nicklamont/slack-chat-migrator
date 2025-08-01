@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 import time
+import traceback
 from typing import Dict, List, Optional, Any
 
 from google.auth.exceptions import RefreshError
@@ -51,6 +52,7 @@ class SlackToChatMigrator:
         dry_run: bool = False,
         verbose: bool = False,
         update_mode: bool = False,
+        debug_api: bool = False,
     ):
         """Initialize the migrator with the required parameters."""
         self.creds_path = creds_path
@@ -60,12 +62,14 @@ class SlackToChatMigrator:
         self.slack_token = slack_token
         self.dry_run = dry_run
         self.verbose = verbose
+        self.debug_api = debug_api
         self.update_mode = update_mode
+        self.import_mode = not update_mode  # Set import_mode to True when not in update mode
         
-        # Set up logger with verbosity
+        # Set up logger with verbosity and debug_api flag
         from slack_migrator.utils.logging import setup_logger
         global logger
-        logger = setup_logger(verbose)
+        logger = setup_logger(verbose, debug_api)
         
         if self.update_mode:
             logger.info(f"Running in update mode - will update existing spaces")
@@ -81,6 +85,8 @@ class SlackToChatMigrator:
         self.users_without_email = []  # List of users without email mappings
         self.failed_messages = []  # List of failed message details
         self.channel_handlers = {}  # Store channel-specific log handlers
+        self.channel_to_space = {}  # channel -> space_name for file attachments
+        self.current_space = None  # Current space being processed
         
         # Extract workspace domain from admin email for external user detection
         self.workspace_domain = self.workspace_admin.split('@')[1] if '@' in self.workspace_admin else None
@@ -118,12 +124,14 @@ class SlackToChatMigrator:
         self.channels_meta = self._load_channels_meta()
 
         # Initialize file handler
-        folder_name = self.config.get("attachments_folder", "Slack Attachments")
         self.file_handler = FileHandler(
-            self.drive, "placeholder", self, self.slack_token, self.dry_run
+            self.drive, self.chat, folder_id=None, migrator=self, slack_token=self.slack_token, dry_run=self.dry_run
         )
-        self.drive_folder_id = self.file_handler.ensure_drive_folder(folder_name)
-        self.file_handler.drive_folder_id = self.drive_folder_id
+        # FileHandler now handles its own drive folder initialization automatically
+        
+        # Initialize message attachment processor
+        from slack_migrator.services.message_attachments import MessageAttachmentProcessor
+        self.attachment_processor = MessageAttachmentProcessor(self.file_handler, dry_run=self.dry_run)
 
         # Initialize caches and state tracking
         self.created_spaces: Dict[str, str] = {}  # channel -> space_name
@@ -143,6 +151,9 @@ class SlackToChatMigrator:
             
         if verbose:
             logger.debug("Migrator initialized with verbose logging enabled")
+            
+        # Load existing space mappings for update mode or file attachments
+        self._load_existing_space_mappings()
 
     def _validate_export_format(self):
         """Validate that the export directory has the expected structure."""
@@ -376,7 +387,7 @@ class SlackToChatMigrator:
         
         # Set up main log file in the output directory
         from slack_migrator.utils.logging import setup_main_log_file
-        self.main_log_handler = setup_main_log_file(self.output_dir)
+        self.main_log_handler = setup_main_log_file(self.output_dir, debug_api=self.debug_api)
         
         # Initialize dictionary to store channel-specific log handlers
         self.channel_handlers = {}
@@ -443,8 +454,8 @@ class SlackToChatMigrator:
                 continue
 
             # Setup channel-specific logging for channels that will be processed
-            from slack_migrator.utils.logging import setup_channel_logger
-            channel_handler = setup_channel_logger(self.output_dir, ch.name, self.verbose)
+            from slack_migrator.utils.logging import setup_channel_logger, is_debug_api_enabled
+            channel_handler = setup_channel_logger(self.output_dir, ch.name, self.verbose, is_debug_api_enabled())
             self.channel_handlers[ch.name] = channel_handler
 
             # Initialize error tracking variables
@@ -478,6 +489,20 @@ class SlackToChatMigrator:
                     channel=ch.name
                 )
                 continue
+
+            # Set current space for file attachments
+            self.current_space = space
+            self.channel_to_space[ch.name] = space
+            
+            # Store in created_spaces for future reference
+            self.created_spaces[ch.name] = space
+            
+            # Log that we're setting the current space
+            log_with_context(
+                logging.INFO,  # Changed from DEBUG to INFO for better visibility
+                f"Setting current space to {space} for channel {ch.name} and storing in channel_to_space mapping",
+                channel=ch.name
+            )
 
             # In update mode, skip adding users and sending intro message
             if not self.update_mode:
@@ -668,6 +693,35 @@ class SlackToChatMigrator:
                                     f"Successfully completed import for space {space}",
                                     channel=ch.name
                                 )
+                                
+                                # Add regular members back to the space
+                                log_with_context(
+                                    logging.INFO,
+                                    f"Adding regular members to space after completing import: {space}",
+                                    channel=ch.name
+                                )
+                                
+                                try:
+                                    from slack_migrator.services.space import add_regular_members
+                                    add_regular_members(self, space, ch.name)
+                                    log_with_context(
+                                        logging.INFO,
+                                        f"Successfully added regular members to space {space} for channel {ch.name}",
+                                        channel=ch.name
+                                    )
+                                except Exception as e:
+                                    log_with_context(
+                                        logging.ERROR,
+                                        f"Error adding regular members to space {space}: {e}",
+                                        channel=ch.name
+                                    )
+                                    import traceback
+                                    log_with_context(
+                                        logging.DEBUG,
+                                        f"Exception traceback: {traceback.format_exc()}",
+                                        channel=ch.name
+                                    )
+                                
                                 success = True
                                 break
                             except HttpError as e:
@@ -794,6 +848,18 @@ class SlackToChatMigrator:
                     f"Found {len(import_mode_spaces)} spaces still in import mode. Attempting to complete import."
                 )
                 
+                # Log the current channel_to_space mapping
+                log_with_context(
+                    logging.INFO,
+                    f"Current channel_to_space mapping: {self.channel_to_space}"
+                )
+                
+                # Log the created_spaces mapping
+                log_with_context(
+                    logging.INFO,
+                    f"Current created_spaces mapping: {self.created_spaces}"
+                )
+                
                 pbar = tqdm(import_mode_spaces, desc="Completing import mode for spaces")
                 for space_name, space_info in pbar:
                     log_with_context(
@@ -879,16 +945,35 @@ class SlackToChatMigrator:
                                     space_name=space_name
                                 )
 
-                        # Try to find the channel name from space display name
-                        display_name = space_info.get("displayName", "")
-
-                        # Try to extract channel name based on our naming convention
+                        # First try to find the channel using our channel_to_space mapping
                         channel_name = None
-                        for ch in self._get_all_channel_names():
-                            ch_name = self._get_space_name(ch)
-                            if ch_name in display_name:
+                        for ch, sp in self.channel_to_space.items():
+                            if sp == space_name:
                                 channel_name = ch
+                                log_with_context(
+                                    logging.INFO,
+                                    f"Found channel {channel_name} for space {space_name} using channel_to_space mapping"
+                                )
                                 break
+                                
+                        # If not found in channel_to_space, try the space display name
+                        if not channel_name:
+                            display_name = space_info.get("displayName", "")
+                            log_with_context(
+                                logging.DEBUG,
+                                f"Attempting to extract channel name from display name: {display_name}"
+                            )
+                            
+                            # Try to extract channel name based on our naming convention
+                            for ch in self._get_all_channel_names():
+                                ch_name = self._get_space_name(ch)
+                                if ch_name in display_name:
+                                    channel_name = ch
+                                    log_with_context(
+                                        logging.INFO,
+                                        f"Found channel {channel_name} for space {space_name} using display name"
+                                    )
+                                    break
 
                         if channel_name:
                             # Add regular members back to the space
@@ -896,7 +981,24 @@ class SlackToChatMigrator:
                                 logging.INFO,
                                 f"Adding regular members to space after completing import: {space_name}"
                             )
-                            add_regular_members(self, space_name, channel_name)
+                            try:
+                                add_regular_members(self, space_name, channel_name)
+                                log_with_context(
+                                    logging.INFO,
+                                    f"Successfully added regular members to space {space_name} for channel {channel_name}"
+                                )
+                            except Exception as e:
+                                log_with_context(
+                                    logging.ERROR,
+                                    f"Error adding regular members to space {space_name}: {e}",
+                                    channel=channel_name
+                                )
+                                import traceback
+                                log_with_context(
+                                    logging.DEBUG,
+                                    f"Exception traceback: {traceback.format_exc()}",
+                                    channel=channel_name
+                                )
                         else:
                             log_with_context(
                                 logging.WARNING,
@@ -927,3 +1029,30 @@ class SlackToChatMigrator:
             logger.removeHandler(self.main_log_handler)
 
         log_with_context(logging.INFO, "Cleanup completed")
+
+    def _load_existing_space_mappings(self):
+        """Load existing space mappings from saved files for update mode or file attachments."""
+        try:
+            # Check if there's a space mappings file
+            from slack_migrator.services.message import load_space_mappings
+            
+            # Load existing space mappings
+            space_mappings = load_space_mappings(self)
+            
+            if space_mappings:
+                logger.info(f"Loaded {len(space_mappings)} existing space mappings")
+                
+                # Update the channel_to_space mapping
+                for channel, space_name in space_mappings.items():
+                    self.channel_to_space[channel] = space_name
+                    
+                    # Also update created_spaces for consistency
+                    if self.update_mode:
+                        self.created_spaces[channel] = space_name
+                
+                logger.debug(f"Updated channel_to_space mapping with {len(self.channel_to_space)} entries")
+            else:
+                logger.debug("No existing space mappings found")
+        except Exception as e:
+            logger.warning(f"Failed to load existing space mappings: {e}")
+            # Continue without mappings

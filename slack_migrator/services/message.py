@@ -4,6 +4,7 @@ Functions for handling message processing during Slack to Google Chat migration
 
 import json
 import logging
+import re
 import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Any
@@ -16,7 +17,8 @@ from googleapiclient.http import BatchHttpRequest
 
 from slack_migrator.utils.logging import logger, log_with_context, log_api_request, log_api_response
 from slack_migrator.utils.api import retry, slack_ts_to_rfc3339
-from slack_migrator.utils.formatting import convert_formatting
+from slack_migrator.utils.formatting import convert_formatting, parse_slack_blocks
+from slack_migrator.services.message_attachments import MessageAttachmentProcessor
 
 
 def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], message_id: str):
@@ -376,7 +378,8 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
             )
             return "SKIPPED"
 
-    text = message.get("text", "")
+    # Extract text from Slack blocks (rich formatting) or fallback to plain text
+    text = parse_slack_blocks(message)
 
     # Skip empty messages
     if not text.strip() and "files" not in message:
@@ -389,12 +392,16 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
         )
         return None
         
-    # Convert Slack formatting to Google Chat formatting
-    formatted_text = convert_formatting(text, migrator.user_map)
-    
-    # Add placeholder text for messages with files but no text
-    if not formatted_text.strip() and "files" in message:
-        formatted_text = "Shared a file"
+    # Create a mapping dictionary that has all user mapping overrides applied for ALL users
+    user_map_with_overrides = {}
+
+    # Map ALL user IDs with their proper overrides by iterating over .items()
+    # This ensures we never miss any mentions and handles all potential edge cases
+    for slack_user_id, email in migrator.user_map.items():
+        user_map_with_overrides[slack_user_id] = migrator._get_internal_email(slack_user_id, email)
+
+    # Convert Slack formatting to Google Chat formatting using the correct mapping
+    formatted_text = convert_formatting(text, user_map_with_overrides)
     
     # For edited messages, add an edit indicator
     if is_edited:
@@ -418,6 +425,14 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     # Add message text
     payload["text"] = formatted_text
     
+    # Log the final payload for debugging
+    log_with_context(
+        logging.DEBUG,
+        f"Final formatted text for message {ts}: '{formatted_text}'",
+        channel=channel,
+        ts=ts
+    )
+    
     # Handle thread replies
     is_thread_reply = False
     message_reply_option = None
@@ -428,18 +443,42 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
         # Convert thread_ts to string for consistent lookup
         thread_ts_str = str(thread_ts)
         
-        # Use thread.thread_key for all thread replies
-        payload["thread"] = {"thread_key": thread_ts_str}
-        # Set message reply option to fallback to new thread if needed
-        message_reply_option = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+        # Check if we have the thread name from a previous message
+        existing_thread_name = migrator.thread_map.get(thread_ts_str)
         
         log_with_context(
             logging.DEBUG,
-            f"Message {ts} is a reply to thread {thread_ts_str}",
+            f"Processing thread reply: ts={ts}, thread_ts={thread_ts_str}, existing_thread_name={existing_thread_name}",
             channel=channel,
             ts=ts,
             thread_ts=thread_ts_str
         )
+        
+        if existing_thread_name:
+            # Use the existing thread name to reply to the correct thread
+            payload["thread"] = {"name": existing_thread_name}
+            log_with_context(
+                logging.DEBUG,
+                f"Message {ts} is replying to existing thread {existing_thread_name} (original ts={thread_ts_str})",
+                channel=channel,
+                ts=ts,
+                thread_ts=thread_ts_str,
+                thread_name=existing_thread_name
+            )
+        else:
+            # Fallback to thread_key if we don't have the thread name yet
+            # This might happen if messages are processed out of order
+            payload["thread"] = {"thread_key": thread_ts_str}
+            log_with_context(
+                logging.WARNING,
+                f"Message {ts} is replying to thread {thread_ts_str} but no thread name found, using thread_key fallback",
+                channel=channel,
+                ts=ts,
+                thread_ts=thread_ts_str
+            )
+        
+        # Set message reply option to fallback to new thread if needed
+        message_reply_option = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
     else:
         # For new thread starters, use their own timestamp as the thread_key
         payload["thread"] = {"thread_key": str(ts)}
@@ -533,6 +572,78 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
         
         result = None
         
+        # Process file attachments using the user's service to avoid permission issues
+        # This ensures that the attachment tokens are created by the same user who will send the message
+        
+        # For impersonated users, ensure they have access to any drive files
+        sender_email = None
+        if user_email and not migrator._is_external_user(user_email):
+            sender_email = user_email
+            
+        # Process file attachments with the sender's email to ensure proper permissions
+        attachments = migrator.attachment_processor.process_message_attachments(
+            message, channel, space, user_id, chat_service, sender_email=sender_email
+        )
+        
+        # TEMPORARY SOLUTION: For Drive files, append links to message text instead of using attachments
+        # This is because the Drive file attachment method is not working correctly
+        drive_links = []
+        non_drive_attachments = []
+        
+        if attachments:
+            for attachment in attachments:
+                if 'driveDataRef' in attachment:
+                    # This is a Drive file attachment
+                    drive_file_id = attachment.get('driveDataRef', {}).get('driveFileId')
+                    if drive_file_id:
+                        # Construct standard Drive link from the file ID
+                        drive_link = f"https://drive.google.com/file/d/{drive_file_id}/view"
+                        drive_links.append(drive_link)
+                        log_with_context(
+                            logging.DEBUG,
+                            f"Converting Drive attachment to link: {drive_link}",
+                            channel=channel,
+                            ts=ts,
+                            drive_file_id=drive_file_id
+                        )
+                else:
+                    # Keep non-Drive attachments as they are
+                    non_drive_attachments.append(attachment)
+            
+            # If we have Drive links, append them to the message text
+            if drive_links:
+                # Only add newlines if the message text is not empty
+                if payload["text"].strip():
+                    links_text = "\n\n" + "\n".join([f"📎 {link}" for link in drive_links])
+                else:
+                    # If message is empty, don't add extra newlines
+                    links_text = "\n".join([f"📎 {link}" for link in drive_links])
+                
+                payload["text"] = payload["text"] + links_text
+                log_with_context(
+                    logging.DEBUG,
+                    f"Appended {len(drive_links)} Drive links to message text for {ts}",
+                    channel=channel,
+                    ts=ts
+                )
+            
+            # Only add non-Drive attachments to the payload
+            if non_drive_attachments:
+                payload["attachment"] = non_drive_attachments
+                log_with_context(
+                    logging.DEBUG,
+                    f"Added {len(non_drive_attachments)} non-Drive attachments to message payload for {ts}",
+                    channel=channel,
+                    ts=ts
+                )
+        else:
+            log_with_context(
+                logging.DEBUG,
+                f"No attachments processed for message {ts}",
+                channel=channel,
+                ts=ts
+            )
+        
         # Create a new message with the Google Chat API
         # In import mode, we create separate messages for edits
         request_params = {
@@ -546,6 +657,12 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
             request_params["messageReplyOption"] = message_reply_option
         
         # Send the message using the appropriate service
+        log_with_context(
+            logging.DEBUG,
+            f"Complete message payload for {ts}: {payload}",
+            channel=channel,
+            ts=ts
+        )
         log_api_request("POST", "chat.spaces.messages.create", payload, channel=channel, ts=ts)
         result = chat_service.spaces().messages().create(**request_params).execute()
         log_api_response(200, "chat.spaces.messages.create", result, channel=channel, ts=ts)
@@ -568,23 +685,64 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
             else:
                 migrator.message_id_map[ts] = message_name
             
-        # Store thread mapping for the parent message
-        if message_name and not is_thread_reply:
+        # Store thread mapping for both parent messages and thread replies
+        if message_name:
             thread_name = result.get("thread", {}).get("name")
             
+            # Debug log the thread information from the API response
+            log_with_context(
+                logging.DEBUG,
+                f"API response thread info - name: {thread_name}, is_thread_reply: {is_thread_reply}, thread_ts: {thread_ts}",
+                channel=channel,
+                ts=ts
+            )
+            
             if thread_name:
-                # Store using string keys for consistency
-                migrator.thread_map[str(ts)] = thread_name
-                log_with_context(
-                    logging.DEBUG,
-                    f"Stored new thread mapping: {ts} -> {thread_name}",
-                    channel=channel,
-                    ts=ts,
-                )
+                if not is_thread_reply:
+                    # For new thread starters, store the mapping using their own timestamp
+                    migrator.thread_map[str(ts)] = thread_name
+                    log_with_context(
+                        logging.DEBUG,
+                        f"Stored new thread mapping: {ts} -> {thread_name}",
+                        channel=channel,
+                        ts=ts,
+                    )
+                else:
+                    # For thread replies, ensure the original thread timestamp mapping exists
+                    thread_ts_str = str(thread_ts)
+                    if thread_ts_str not in migrator.thread_map:
+                        # Store the mapping using the original thread timestamp
+                        migrator.thread_map[thread_ts_str] = thread_name
+                        log_with_context(
+                            logging.DEBUG,
+                            f"Stored thread mapping from reply: {thread_ts_str} -> {thread_name}",
+                            channel=channel,
+                            ts=ts,
+                            thread_ts=thread_ts_str
+                        )
+                    else:
+                        # Verify the mapping is consistent
+                        existing_thread_name = migrator.thread_map[thread_ts_str]
+                        if existing_thread_name != thread_name:
+                            log_with_context(
+                                logging.WARNING,
+                                f"Thread name mismatch! Expected {existing_thread_name}, got {thread_name} for thread {thread_ts_str}",
+                                channel=channel,
+                                ts=ts,
+                                thread_ts=thread_ts_str
+                            )
+                        else:
+                            log_with_context(
+                                logging.DEBUG,
+                                f"Confirmed existing thread mapping: {thread_ts_str} -> {thread_name}",
+                                channel=channel,
+                                ts=ts,
+                                thread_ts=thread_ts_str
+                            )
             else:
                 log_with_context(
                     logging.WARNING,
-                    f"No thread name returned in API response for new thread starter",
+                    f"No thread name returned in API response for message {ts} {'(thread reply)' if is_thread_reply else '(new thread)'}",
                     channel=channel,
                     ts=ts
                 )
@@ -602,19 +760,6 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
             )
             process_reactions_batch(
                 migrator, message_name, message["reactions"], final_message_id
-            )
-
-        # Process file attachments if any
-        if "files" in message and message_name and len(message["files"]) > 0:
-            log_with_context(
-                logging.DEBUG,
-                f"Processing {len(message['files'])} file attachments for message {ts}",
-                channel=channel,
-                ts=ts,
-                message_id=message_name.split("/")[-1]
-            )
-            migrator.file_handler.process_attachments(
-                chat_service, message_name, message_name.split("/")[-1], message["files"], channel
             )
 
         log_with_context(
@@ -720,8 +865,8 @@ def track_message_stats(migrator, m):
                 ts=ts
             )
     
-    # Track files
-    file_count = len(m.get("files", []))
+    # Track files using attachment processor
+    file_count = migrator.attachment_processor.count_message_files(m)
     if file_count > 0:
         mode_prefix = ""
         if is_update_mode:
@@ -736,13 +881,9 @@ def track_message_stats(migrator, m):
         migrator.channel_stats[channel]["file_count"] += file_count
         
         # Also increment the global file count
-        if migrator.dry_run:
-            migrator.migration_summary["files_created"] += file_count
+        migrator.migration_summary["files_created"] += file_count
         
-    # Process files if not in dry run mode
-    if not migrator.dry_run and file_count > 0:
-        for fobj in m.get("files", []):
-            migrator.file_handler.upload_file(fobj, channel)
+    # We don't need to process files here - they are handled in send_message
 
 
 def save_thread_mappings(migrator, channel: str):
