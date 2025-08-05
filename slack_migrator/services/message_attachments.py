@@ -21,6 +21,16 @@ class MessageAttachmentProcessor:
         self.file_handler = file_handler
         self.dry_run = dry_run
         
+    def _get_current_channel(self):
+        """Helper method to get the current channel from the migrator.
+        
+        Returns:
+            Current channel name or None if not available
+        """
+        if hasattr(self, 'file_handler') and hasattr(self.file_handler, 'migrator') and hasattr(self.file_handler.migrator, 'current_channel'):
+            return self.file_handler.migrator.current_channel
+        return None
+        
     def process_message_attachments(
         self, 
         message: Dict[str, Any], 
@@ -131,10 +141,16 @@ class MessageAttachmentProcessor:
             Google Chat attachment object or None if failed
         """
         if not upload_result or not isinstance(upload_result, dict):
+            # Try to get channel from parent migrator
+            current_channel = None
+            if hasattr(self, 'file_handler') and hasattr(self.file_handler, 'migrator') and hasattr(self.file_handler.migrator, 'current_channel'):
+                current_channel = self.file_handler.migrator.current_channel
+                
             log_with_context(
                 logging.WARNING,
                 f"Invalid upload result: {upload_result}",
-                upload_result_type=type(upload_result).__name__
+                upload_result_type=type(upload_result).__name__,
+                channel=current_channel
             )
             return None
             
@@ -143,7 +159,8 @@ class MessageAttachmentProcessor:
         log_with_context(
             logging.DEBUG,
             f"Creating attachment from upload result: type={upload_type}, result={upload_result}",
-            upload_type=upload_type
+            upload_type=upload_type,
+            channel=self._get_current_channel()
         )
         
         if upload_type == 'drive':
@@ -164,7 +181,8 @@ class MessageAttachmentProcessor:
                 logging.DEBUG,
                 f"Processing Drive attachment: ref={ref}, drive_id={drive_id}, file_name={file_name}",
                 drive_id=drive_id,
-                file_name=file_name
+                file_name=file_name,
+                channel=self._get_current_channel()
             )
             
             if drive_id:
@@ -180,14 +198,16 @@ class MessageAttachmentProcessor:
                     logging.DEBUG,
                     f"Created Drive attachment with driveFileId: {drive_id}",
                     drive_id=drive_id,
-                    file_name=file_name
+                    file_name=file_name,
+                    channel=self._get_current_channel()
                 )
                 
                 return attachment
             else:
                 log_with_context(
                     logging.WARNING,
-                    f"Drive upload result missing drive file ID in both drive_id and ref.driveFileId: {upload_result}"
+                    f"Drive upload result missing drive file ID in both drive_id and ref.driveFileId: {upload_result}",
+                    channel=self._get_current_channel()
                 )
                 
         elif upload_type == 'direct':
@@ -198,18 +218,21 @@ class MessageAttachmentProcessor:
                 log_with_context(
                     logging.DEBUG,
                     f"Using direct upload attachment: {attachment_ref}",
-                    attachment_ref=attachment_ref
+                    attachment_ref=attachment_ref,
+                    channel=self._get_current_channel()
                 )
                 return attachment_ref
             else:
                 log_with_context(
                     logging.WARNING,
-                    f"Direct upload result missing or invalid ref: {upload_result}"
+                    f"Direct upload result missing or invalid ref: {upload_result}",
+                    channel=self._get_current_channel()
                 )
         else:
             log_with_context(
                 logging.WARNING,
-                f"Unknown upload result type: {upload_type} in result: {upload_result}"
+                f"Unknown upload result type: {upload_type} in result: {upload_result}",
+                channel=self._get_current_channel()
             )
                 
         return None

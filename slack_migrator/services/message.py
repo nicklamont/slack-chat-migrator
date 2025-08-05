@@ -32,6 +32,7 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
                 error=str(exception),
                 message_id=message_id,
                 request_id=request_id,
+                channel=getattr(migrator, 'current_channel', None)
             )
         else:
             log_with_context(
@@ -39,6 +40,7 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
                 "Successfully added reaction in batch",
                 message_id=message_id,
                 request_id=request_id,
+                channel=getattr(migrator, 'current_channel', None)
             )
 
     # Group reactions by user for batch processing
@@ -48,7 +50,8 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
     log_with_context(
         logging.DEBUG,
         f"Processing {len(reactions)} reaction types for message {message_id}",
-        message_id=message_id
+        message_id=message_id,
+        channel=getattr(migrator, 'current_channel', None)
     )
     
     for react in reactions:
@@ -64,7 +67,8 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
                 logging.DEBUG,
                 f"Processing emoji :{emoji_name}: with {len(emoji_users)} users",
                 message_id=message_id,
-                emoji=emoji_name
+                emoji=emoji_name,
+                channel=getattr(migrator, 'current_channel', None)
             )
             
             for uid in emoji_users:
@@ -85,7 +89,8 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
                 logging.WARNING,
                 f"Failed to process reaction {react.get('name')}: {str(e)}",
                 message_id=message_id,
-                error=str(e)
+                error=str(e),
+                channel=getattr(migrator, 'current_channel', None)
             )
     
     # Always increment the reaction count, regardless of dry run mode
@@ -95,14 +100,16 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
         log_with_context(
             logging.DEBUG,
             f"[DRY RUN] Would add {reaction_count} reactions from {len(requests_by_user)} users to message {message_id}",
-            message_id=message_id
+            message_id=message_id,
+            channel=getattr(migrator, 'current_channel', None)
         )
         return
     
     log_with_context(
         logging.DEBUG,
         f"Adding {reaction_count} reactions from {len(requests_by_user)} users to message {message_id}",
-        message_id=message_id
+        message_id=message_id,
+        channel=getattr(migrator, 'current_channel', None)
     )
         
     user_batches: Dict[str, BatchHttpRequest] = {}
@@ -114,7 +121,8 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
                 logging.DEBUG,
                 f"Adding {len(emojis)} reactions from external user {email} using admin account",
                 message_id=message_id,
-                user=email
+                user=email,
+                channel=getattr(migrator, 'current_channel', None)
             )
             # For external users, use the admin account to add reactions
             for emo in emojis:
@@ -199,7 +207,8 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
             logging.DEBUG,
             f"Creating batch request for user {email} with {len(emojis)} reactions",
             message_id=message_id,
-            user=email
+            user=email,
+            channel=getattr(migrator, 'current_channel', None)
         )
         
         if email not in user_batches:
@@ -227,7 +236,8 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
                     f"Failed to create reaction request: {e}. Falling back to direct API call.",
                     message_id=message_id,
                     user=email,
-                    emoji=emo
+                    emoji=emo,
+                    channel=getattr(migrator, 'current_channel', None)
                 )
                 # Fall back to direct API call
                 try:

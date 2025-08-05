@@ -31,6 +31,17 @@ class DriveFileUploader:
         self.service_account_email = service_account_email
         self.file_hash_cache = {}
         self.folders_pre_cached = set()
+        self.migrator = None  # Will be set by the FileHandler when it's created
+        
+    def _get_current_channel(self):
+        """Helper method to get the current channel from the migrator.
+        
+        Returns:
+            Current channel name or None if not available
+        """
+        if hasattr(self, 'migrator') and hasattr(self.migrator, 'current_channel'):
+            return self.migrator.current_channel
+        return None
         
     def _calculate_file_hash(self, file_path: str) -> str:
         """Calculate MD5 hash of a file.
@@ -66,21 +77,24 @@ class DriveFileUploader:
         if folder_id in self.folders_pre_cached:
             log_with_context(
                 logging.DEBUG,
-                f"Folder {folder_id} already pre-cached, skipping"
+                f"Folder {folder_id} already pre-cached, skipping",
+                channel=self._get_current_channel()
             )
             return 0
             
         if self.dry_run:
             log_with_context(
                 logging.INFO,
-                f"[DRY RUN] Would pre-cache file hashes from folder {folder_id}"
+                f"[DRY RUN] Would pre-cache file hashes from folder {folder_id}",
+                channel=self._get_current_channel()
             )
             return 0
             
         try:
             log_with_context(
                 logging.INFO,
-                f"Pre-caching file hashes from folder {folder_id}"
+                f"Pre-caching file hashes from folder {folder_id}",
+                channel=self._get_current_channel()
             )
             
             query = f"'{folder_id}' in parents and trashed=false"

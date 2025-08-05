@@ -24,6 +24,17 @@ class ChatFileUploader:
         """
         self.chat_service = chat_service
         self.dry_run = dry_run
+        self.migrator = None  # Will be set by the migrator when this service is used
+        
+    def _get_current_channel(self):
+        """Helper method to get the current channel from the migrator.
+        
+        Returns:
+            Current channel name or None if not available
+        """
+        if hasattr(self, 'migrator') and hasattr(self.migrator, 'current_channel'):
+            return self.migrator.current_channel
+        return None
         
     @retry()
     def upload_file_to_chat(self, file_path: str, filename: str, parent_space: Optional[str] = None) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
@@ -55,7 +66,8 @@ class ChatFileUploader:
                 
             log_with_context(
                 logging.DEBUG,
-                f"Uploading file {filename} directly to Chat API (size: {file_size}, MIME: {mime_type})"
+                f"Uploading file {filename} directly to Chat API (size: {file_size}, MIME: {mime_type})",
+                channel=self._get_current_channel()
             )
             
             # Chat API has file size limits - typically 200MB
@@ -63,7 +75,8 @@ class ChatFileUploader:
             if file_size > max_size:
                 log_with_context(
                     logging.WARNING,
-                    f"File {filename} ({file_size} bytes) exceeds Chat API limit ({max_size} bytes)"
+                    f"File {filename} ({file_size} bytes) exceeds Chat API limit ({max_size} bytes)",
+                    channel=self._get_current_channel()
                 )
                 return (None, None)
                 
@@ -100,7 +113,8 @@ class ChatFileUploader:
                     "parent_space": parent_space,
                     "resumable": file_size > 5 * 1024 * 1024,
                     "file_size_mb": round(file_size / (1024 * 1024), 2)
-                })
+                }),
+                channel=self._get_current_channel()
             )
             
             # Execute the upload
@@ -119,7 +133,8 @@ class ChatFileUploader:
             
             log_with_context(
                 logging.INFO,
-                f"Successfully uploaded file {filename} to Chat API"
+                f"Successfully uploaded file {filename} to Chat API",
+                channel=self._get_current_channel()
             )
             
             # Return the complete upload response as per Google Chat API documentation
@@ -139,7 +154,8 @@ class ChatFileUploader:
             log_with_context(
                 logging.ERROR,
                 f"Failed to upload file {filename} to Chat API: {e}",
-                api_data=json.dumps(error_info)
+                api_data=json.dumps(error_info),
+                channel=self._get_current_channel()
             )
             
             # Log as API response error with appropriate status code
@@ -179,7 +195,8 @@ class ChatFileUploader:
             api_data=json.dumps({
                 "upload_response_type": type(upload_response).__name__,
                 "attachment_metadata": attachment_metadata
-            })
+            }),
+            channel=self._get_current_channel()
         )
         
         # Check if this is a Drive file attachment (which has a different format)
@@ -188,7 +205,8 @@ class ChatFileUploader:
             log_with_context(
                 logging.DEBUG,
                 "Creating Drive attachment reference",
-                api_data=json.dumps(upload_response)
+                api_data=json.dumps(upload_response),
+                channel=self._get_current_channel()
             )
             
             # Check if there's a nested driveFileId
@@ -205,7 +223,8 @@ class ChatFileUploader:
                 log_with_context(
                     logging.DEBUG,
                     "Formatted Drive attachment for message",
-                    api_data=json.dumps(attachment)
+                    api_data=json.dumps(attachment),
+                    channel=self._get_current_channel()
                 )
                 return attachment
         
@@ -213,7 +232,8 @@ class ChatFileUploader:
         log_with_context(
             logging.DEBUG,
             "Using direct upload attachment for message",
-            api_data=json.dumps(upload_response)
+            api_data=json.dumps(upload_response),
+            channel=self._get_current_channel()
         )
         
         # Return the complete upload response object
@@ -264,13 +284,15 @@ class ChatFileUploader:
             api_data=json.dumps({
                 "filename": filename,
                 "detected_mime_type": mime_type or "None"
-            })
+            }),
+            channel=self._get_current_channel()
         )
         
         if not mime_type:
             log_with_context(
                 logging.DEBUG,
-                f"Could not determine MIME type for {filename}, defaulting to unsupported"
+                f"Could not determine MIME type for {filename}, defaulting to unsupported",
+                channel=self._get_current_channel()
             )
             return False
         
@@ -278,7 +300,8 @@ class ChatFileUploader:
         if not supported:
             log_with_context(
                 logging.DEBUG,
-                f"MIME type {mime_type} for {filename} is not supported by Chat API"
+                f"MIME type {mime_type} for {filename} is not supported by Chat API",
+                channel=self._get_current_channel()
             )
             
         return supported
@@ -300,14 +323,16 @@ class ChatFileUploader:
                 "filename": filename,
                 "file_size": file_size,
                 "file_size_mb": round(file_size / (1024 * 1024), 2)
-            })
+            }),
+            channel=self._get_current_channel()
         )
         
         # Check MIME type support
         if not self.is_supported_file_type(filename):
             log_with_context(
                 logging.DEBUG,
-                f"File {filename} has unsupported MIME type for direct Chat API upload"
+                f"File {filename} has unsupported MIME type for direct Chat API upload",
+                channel=self._get_current_channel()
             )
             return False
             
@@ -317,12 +342,14 @@ class ChatFileUploader:
         if file_size > max_direct_upload_size:
             log_with_context(
                 logging.DEBUG,
-                f"File {filename} exceeds size limit for direct Chat API upload: {file_size} bytes > {max_direct_upload_size} bytes"
+                f"File {filename} exceeds size limit for direct Chat API upload: {file_size} bytes > {max_direct_upload_size} bytes",
+                channel=self._get_current_channel()
             )
             return False
         
         log_with_context(
             logging.DEBUG,
-            f"File {filename} is suitable for direct Chat API upload"
+            f"File {filename} is suitable for direct Chat API upload",
+            channel=self._get_current_channel()
         )    
         return True

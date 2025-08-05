@@ -459,5 +459,19 @@ def is_debug_api_enabled() -> bool:
     return _DEBUG_API_ENABLED
 
 
-# Initialize logger with default verbosity (will be updated in __main__)
-logger = setup_logger() 
+def get_logger():
+    """Get the slack_migrator logger, creating it with defaults if needed."""
+    slack_logger = logging.getLogger("slack_migrator")
+    if not slack_logger.handlers:
+        # If no handlers, set up a basic logger
+        slack_logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        formatter = EnhancedFormatter()
+        handler.setFormatter(formatter)
+        slack_logger.addHandler(handler)
+    return slack_logger
+
+
+# Module logger - will be properly initialized when setup_logger is called
+logger = get_logger() 

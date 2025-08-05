@@ -175,6 +175,8 @@ class MigrationOrchestrator:
         if self.args.dry_run:
             # Explicit dry run mode
             try:
+                # Set up output directory and update logger
+                self._setup_output_logging()
                 self.migrator.migrate()
                 
                 if self.check_unmapped_users(self.migrator):
@@ -197,6 +199,8 @@ class MigrationOrchestrator:
                 
                 if self.get_user_confirmation():
                     try:
+                        # Set up output directory and update logger
+                        self._setup_output_logging()
                         self.migrator.migrate()
                         logger.info("")
                         logger.info("🎉 Migration completed successfully!")
@@ -207,6 +211,24 @@ class MigrationOrchestrator:
                 else:
                     logger.info("Migration cancelled by user.")
                     sys.exit(0)
+    
+    def _setup_output_logging(self):
+        """Set up output directory and update logger with file logging."""
+        from slack_migrator.cli.report import create_output_directory
+        from slack_migrator.utils.logging import setup_main_log_file
+        
+        # Create output directory (this will be used by the migrator)
+        output_dir = create_output_directory(self.migrator)
+        
+        # Set the output directory on the migrator so it doesn't create its own
+        self.migrator.output_dir = output_dir
+        
+        # Update the logger to include file logging
+        global logger
+        logger = setup_logger(self.args.verbose, self.args.debug_api, output_dir)
+        
+        logger.info(f"Output directory created: {output_dir}")
+    
     
     def cleanup(self):
         """Perform cleanup operations."""

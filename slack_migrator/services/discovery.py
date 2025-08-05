@@ -30,7 +30,8 @@ def discover_existing_spaces(migrator):
     """
     log_with_context(
         logging.INFO, 
-        "Discovering existing Google Chat spaces that may have been created by previous migrations"
+        "Discovering existing Google Chat spaces that may have been created by previous migrations",
+        channel=None  # This is a global operation, not channel-specific
     )
     
     # Track all spaces by channel name to detect duplicates
@@ -171,18 +172,21 @@ def discover_existing_spaces(migrator):
         log_with_context(
             logging.WARNING,
             f"Error discovering spaces: {e}",
-            error=str(e)
+            error=str(e),
+            channel=None  # Global operation
         )
     
     log_with_context(
         logging.INFO,
-        f"Found {spaces_found} existing spaces matching migration pattern across {len(all_spaces_by_channel)} channels"
+        f"Found {spaces_found} existing spaces matching migration pattern across {len(all_spaces_by_channel)} channels",
+        channel=None  # Global operation
     )
     
     if hasattr(migrator, "channel_id_to_space_id"):
         log_with_context(
             logging.INFO,
-            f"Created {len(migrator.channel_id_to_space_id)} channel ID to space ID mappings"
+            f"Created {len(migrator.channel_id_to_space_id)} channel ID to space ID mappings",
+            channel=None  # Global operation
         )
     
     return space_mappings, duplicate_spaces
@@ -250,12 +254,7 @@ def get_last_message_timestamp(migrator, channel: str, space: str):
                     f"Found message in {channel} but it has no createTime",
                     channel=channel
                 )
-        else:
-            log_with_context(
-                logging.INFO,
-                f"No existing messages found in space for channel {channel}",
-                channel=channel
-            )
+        # Don't log here - the caller will log with more context
     
     except HttpError as e:
         log_with_context(

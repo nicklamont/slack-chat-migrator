@@ -62,11 +62,6 @@ class SlackToChatMigrator:
         self.update_mode = update_mode
         self.import_mode = not update_mode  # Set import_mode to True when not in update mode
         
-        # Set up logger with verbosity and debug_api flag
-        from slack_migrator.utils.logging import setup_logger
-        global logger
-        logger = setup_logger(verbose, debug_api)
-        
         if self.update_mode:
             logger.info(f"Running in update mode - will update existing spaces")
         
@@ -603,12 +598,10 @@ class SlackToChatMigrator:
         if not hasattr(self, "thread_map"):
             self.thread_map = {}
         
-        # Create output directory structure
-        self.output_dir = create_output_directory(self)
-        
-        # Set up main log file in the output directory
-        from slack_migrator.utils.logging import setup_main_log_file
-        self.main_log_handler = setup_main_log_file(self.output_dir, debug_api=self.debug_api)
+        # Output directory should already be set up by CLI
+        if not hasattr(self, "output_dir"):
+            # Fallback for direct migrator usage (testing, etc.)
+            self.output_dir = create_output_directory(self)
         
         # Initialize dictionary to store channel-specific log handlers
         self.channel_handlers = {}
@@ -1283,10 +1276,6 @@ class SlackToChatMigrator:
                 f"Error during cleanup: {e}",
             )
             
-        # Clean up main log handler if it exists
-        if hasattr(self, 'main_log_handler'):
-            logger.removeHandler(self.main_log_handler)
-
         log_with_context(logging.INFO, "Cleanup completed")
 
     def _load_existing_space_mappings(self):

@@ -68,6 +68,10 @@ class FileHandler:
         self.drive_uploader = DriveFileUploader(drive_service, workspace_domain, dry_run=dry_run)
         self.chat_uploader = ChatFileUploader(chat_service, dry_run=dry_run)
         
+        # Set migrator reference on sub-services for channel context
+        self.drive_uploader.migrator = migrator
+        self.chat_uploader.migrator = migrator
+        
         # Initialize the root folder and shared drive
         self._shared_drive_id = None
         self._root_folder_id = None
@@ -81,12 +85,12 @@ class FileHandler:
         if dry_run:
             self._root_folder_id = folder_id or "DRY_RUN_FOLDER"
             self._drive_initialized = True
-            log_with_context(logging.DEBUG, "FileHandler initialized with verbose logging")
+            log_with_context(logging.DEBUG, "FileHandler initialized with verbose logging", channel=self._get_current_channel())
 
     def ensure_drive_initialized(self):
         """Ensure drive structures are initialized. Call this after permission validation."""
         if not self._drive_initialized and not self.dry_run:
-            log_with_context(logging.INFO, "Initializing drive structures...")
+            log_with_context(logging.INFO, "Initializing drive structures...", channel=self._get_current_channel())
             self._initialize_shared_drive_and_folder()
             self._drive_initialized = True
 
@@ -96,6 +100,16 @@ class FileHandler:
         # Ensure drive is initialized when accessing folder_id
         self.ensure_drive_initialized()
         return self._root_folder_id
+    
+    def _get_current_channel(self):
+        """Helper method to get the current channel from the migrator.
+        
+        Returns:
+            Current channel name or None if not available
+        """
+        if hasattr(self, 'migrator') and hasattr(self.migrator, 'current_channel'):
+            return self.migrator.current_channel
+        return None
         
     @folder_id.setter 
     def folder_id(self, value):
@@ -1004,7 +1018,8 @@ class FileHandler:
                 logging.DEBUG,
                 f"Downloading file from URL: {url_private[:100]}{'...' if len(url_private) > 100 else ''}",
                 file_id=file_id,
-                file_name=name
+                file_name=name,
+                channel=self._get_current_channel()
             )
             
             # For files in the export, the URL might already contain a token
@@ -1021,7 +1036,8 @@ class FileHandler:
                     logging.WARNING,
                     f"Failed to download file {name}: HTTP {response.status_code}",
                     file_id=file_id,
-                    http_status=response.status_code
+                    http_status=response.status_code,
+                    channel=self._get_current_channel()
                 )
                 # Raise an exception to trigger the retry
                 response.raise_for_status()
@@ -1033,7 +1049,8 @@ class FileHandler:
                 log_with_context(
                     logging.DEBUG,
                     f"File size from headers: {content_length} bytes",
-                    file_id=file_id
+                    file_id=file_id,
+                    channel=self._get_current_channel()
                 )
                 
             # Return the actual file content
@@ -1041,7 +1058,8 @@ class FileHandler:
             log_with_context(
                 logging.DEBUG,
                 f"Successfully downloaded file: {name} (Size: {len(content)} bytes)",
-                file_id=file_id
+                file_id=file_id,
+                channel=self._get_current_channel()
             )
             return content
             
@@ -1054,7 +1072,8 @@ class FileHandler:
                     file_id=file_obj.get('id', 'unknown'),
                     file_name=file_obj.get('name', 'unknown'),
                     error=str(e),
-                    status_code=e.response.status_code
+                    status_code=e.response.status_code,
+                    channel=self._get_current_channel()
                 )
                 # Return None instead of re-raising to prevent further retries for auth errors
                 return None
@@ -1065,7 +1084,8 @@ class FileHandler:
                 f"Error downloading file: {str(e)}",
                 file_id=file_obj.get('id', 'unknown'),
                 file_name=file_obj.get('name', 'unknown'),
-                error=str(e)
+                error=str(e),
+                channel=self._get_current_channel()
             )
             raise  # Re-raise to trigger retry
         except Exception as e:
@@ -1074,7 +1094,8 @@ class FileHandler:
                 f"Error downloading file: {str(e)}",
                 file_id=file_obj.get('id', 'unknown'),
                 file_name=file_obj.get('name', 'unknown'),
-                error=str(e)
+                error=str(e),
+                channel=self._get_current_channel()
             )
             return None
             
