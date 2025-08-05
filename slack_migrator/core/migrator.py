@@ -517,21 +517,21 @@ class SlackToChatMigrator:
             email = user_info.get("profile", {}).get("email", "")
 
             if real_name and email:
-                attribution = f"**[From {real_name} ({email})]**"
+                attribution = f"**[From: {real_name}]**"
             elif email:
-                attribution = f"**[From {email}]**"
+                attribution = f"**[From: {email}]**"
             elif real_name:
-                attribution = f"**[From Slack User {user_id}]**"
+                attribution = f"**[From: {real_name}]**"
             else:
-                attribution = f"**[From Slack User {user_id}]**"
+                attribution = f"**[From: {user_id}]**"
         else:
             # User not in users.json (external or deactivated)
             # Check if we have a mapping override that might give us info
             override_email = self.config.get("user_mapping_overrides", {}).get(user_id)
             if override_email:
-                attribution = f"**[From {override_email}]**"
+                attribution = f"**[From: {override_email}]**"
             else:
-                attribution = f"**[From External User {user_id}]**"
+                attribution = f"**[From: {user_id}]**"
 
         # Combine attribution with original message
         modified_text = f"{attribution}\n{original_text}"

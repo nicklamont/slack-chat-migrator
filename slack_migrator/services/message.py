@@ -84,10 +84,12 @@ def process_reactions_batch(
                     # Handle unmapped user reaction with new graceful approach
                     reaction_name = react.get("name", "unknown")
                     message_ts = getattr(migrator, "current_message_ts", "unknown")
-                    migrator._handle_unmapped_user_reaction(
+                    # Call the handler and actually use the return value to decide whether to process
+                    should_process = migrator._handle_unmapped_user_reaction(
                         uid, reaction_name, message_ts
                     )
-                    # Note: This returns False to skip the reaction, which is the intended behavior
+                    # Skip this reaction as _handle_unmapped_user_reaction returns False
+                    continue
         except Exception as e:
             log_with_context(
                 logging.WARNING,
@@ -119,16 +121,31 @@ def process_reactions_batch(
     user_batches: Dict[str, BatchHttpRequest] = {}
 
     for email, emojis in requests_by_user.items():
-        # Skip external users who cannot be impersonated
+        # Always skip external users' reactions to avoid false attribution to admin
         if migrator._is_external_user(email):
             log_with_context(
-                logging.DEBUG,
-                f"Adding {len(emojis)} reactions from external user {email} using admin account",
+                logging.INFO,
+                f"Skipping {len(emojis)} reactions from external user {email} to avoid admin attribution",
                 message_id=message_id,
                 user=email,
                 channel=getattr(migrator, "current_channel", None),
             )
-            # For external users, use the admin account to add reactions
+            continue
+
+        # Process reactions normally for mapped internal users
+        # We already skipped unmapped users earlier in the code
+
+        svc = migrator._get_delegate(email)
+        # If impersonation failed, svc will be the admin service.
+        # We process these synchronously as we can't batch across users.
+        if svc == migrator.chat:
+            log_with_context(
+                logging.DEBUG,
+                f"Using admin account for user {email} (impersonation not available)",
+                message_id=message_id,
+                user=email,
+            )
+
             for emo in emojis:
                 try:
                     reaction_body = {"emoji": {"unicode": emo}}
@@ -503,7 +520,7 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     # Log the final payload for debugging
     log_with_context(
         logging.DEBUG,
-        f"Final formatted text for message {ts}: '{formatted_text}'",
+        f"Final formatted text for message {ts}: '{final_text}'",
         channel=channel,
         ts=ts,
     )
@@ -834,6 +851,9 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
 
         # Process reactions if any
         if "reactions" in message and message_name:
+            # Store the current message timestamp for context in reaction processing
+            migrator.current_message_ts = ts
+
             # The message_id for reactions should be the final segment of the message_name
             final_message_id = message_name.split("/")[-1]
             log_with_context(
