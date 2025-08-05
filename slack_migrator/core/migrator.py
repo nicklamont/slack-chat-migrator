@@ -23,7 +23,6 @@ from slack_migrator.core.config import should_process_channel
 # Import functionality from service modules
 from slack_migrator.services.space import (
     create_space, 
-    send_intro, 
     add_users_to_space, 
     add_regular_members,
 )
@@ -724,7 +723,7 @@ class SlackToChatMigrator:
                 action_desc = "Creating new import mode space" if not self.update_mode else "Creating new space (none found in update mode)"
                 log_with_context(
                     logging.INFO,
-                    f"{'[DRY RUN] ' if self.dry_run else ''}Step 1/5: {action_desc} for {ch.name}",
+                    f"{'[DRY RUN] ' if self.dry_run else ''}Step 1/4: {action_desc} for {ch.name}",
                     channel=ch.name
                 )
                 space = self.space_cache.get(ch.name) or create_space(self, ch.name)
@@ -758,22 +757,14 @@ class SlackToChatMigrator:
                 # Step 2: Add historical memberships
                 log_with_context(
                     logging.INFO,
-                    f"{'[DRY RUN] ' if self.dry_run else ''}Step 2/5: Adding historical memberships for {ch.name}",
+                    f"{'[DRY RUN] ' if self.dry_run else ''}Step 2/4: Adding historical memberships for {ch.name}",
                     channel=ch.name
                 )
                 add_users_to_space(self, space, ch.name)
-
-                # Step 3: Send intro message with channel metadata
-                log_with_context(
-                    logging.INFO,
-                    f"{'[DRY RUN] ' if self.dry_run else ''}Step 3/5: Sending channel metadata as intro message for {ch.name}",
-                    channel=ch.name
-                )
-                send_intro(self, space, ch.name)
             else:
                 log_with_context(
                     logging.INFO,
-                    f"[UPDATE MODE] Skipping user addition and intro message for existing space",
+                    f"[UPDATE MODE] Skipping user addition for existing space",
                     channel=ch.name
                 )
 
@@ -787,7 +778,7 @@ class SlackToChatMigrator:
                 
             log_with_context(
                 logging.INFO,
-                f"{mode_prefix if self.dry_run or self.update_mode else ''} Processing messages for {ch.name}",
+                f"{mode_prefix if self.dry_run or self.update_mode else ''} Step 3/4: Processing messages for {ch.name}",
                 channel=ch.name
             )
             
@@ -900,11 +891,11 @@ class SlackToChatMigrator:
                 channel=ch.name
             )
 
-            # Step 5: Complete import mode (only if not in update mode)
+            # Step 4: Complete import mode (only if not in update mode)
             if not self.update_mode:
                 log_with_context(
                     logging.INFO,
-                    f"{'[DRY RUN] ' if self.dry_run else ''}Step 5/5: Completing import mode for {ch.name}",
+                    f"{'[DRY RUN] ' if self.dry_run else ''}Step 4/4: Completing import mode for {ch.name}",
                     channel=ch.name
                 )
                 

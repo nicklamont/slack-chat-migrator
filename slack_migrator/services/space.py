@@ -171,7 +171,7 @@ def create_space(migrator, channel: str) -> str:
                             "spaceDetails": {"description": description.strip()}
                         }
 
-                        update_mask = "spaceDetails.description"
+                        update_mask = "spaceDetails"
 
                         migrator.chat.spaces().patch(
                             name=space_name, updateMask=update_mask, body=space_details
@@ -202,95 +202,6 @@ def create_space(migrator, channel: str) -> str:
     migrator.spaces_with_external_users[space_name] = has_external_users
 
     return space_name
-
-
-@retry()
-def send_intro(migrator, space: str, channel: str):
-    """Send an introductory message with channel purpose and topic."""
-    # Ensure global retry config is set
-    if hasattr(migrator, 'config'):
-        set_global_retry_config(migrator.config)
-    # Skip if space couldn't be created due to permissions
-    if space.startswith("ERROR_NO_PERMISSION_") or space.startswith("DRY_"):
-        return
-
-    meta = migrator.channels_meta.get(channel, {})
-
-    # Get purpose and topic from channel metadata
-    purpose = meta.get("purpose", {}).get("value", "")
-    topic = meta.get("topic", {}).get("value", "")
-
-    # Skip if no metadata available
-    if not purpose and not topic:
-        logger.info(f"No purpose or topic found for channel {channel}")
-        return
-
-    if migrator.dry_run:
-        migrator.migration_summary["messages_created"] += 1
-        return
-
-    # Format the message with both purpose and topic if available
-    message_parts = []
-    if purpose:
-        message_parts.append(
-            f"*Channel Purpose:* {convert_formatting(purpose, migrator.user_map)}"
-        )
-    if topic:
-        message_parts.append(
-            f"*Channel Topic:* {convert_formatting(topic, migrator.user_map)}"
-        )
-
-    formatted_text = "\n\n".join(message_parts)
-
-    # Get the earliest timestamp from the channel files to use as createTime
-    earliest_ts = None
-    ch_dir = migrator.export_root / channel
-
-    for jf in sorted(ch_dir.glob("*.json")):
-        try:
-            with open(jf) as f:
-                msgs = json.load(f)
-            if msgs:
-                # Find the earliest message timestamp
-                for m in sorted(msgs, key=lambda m: float(m.get("ts", "0"))):
-                    if "ts" in m:
-                        earliest_ts = m["ts"]
-                        break
-                if earliest_ts:
-                    break
-        except Exception as e:
-            logger.warning(
-                f"Failed to get earliest timestamp for channel {channel}: {e}"
-            )
-
-    # Use the earliest timestamp or default to current time
-    if earliest_ts:
-        create_time = slack_ts_to_rfc3339(earliest_ts)
-    else:
-        create_time = slack_ts_to_rfc3339(f"{int(time.time())}.000000")
-
-    # Build request body for message creation
-    body = {
-        "text": formatted_text,
-        "createTime": create_time,
-        "sender": {"type": "HUMAN", "name": f"users/{migrator.workspace_admin}"},
-    }
-
-    try:
-        migrator.chat.spaces().messages().create(parent=space, body=body).execute()
-        logger.info(
-            f"Sent intro message with purpose and topic for channel {channel}"
-        )
-    except HttpError as e:
-        log_with_context(
-            logging.WARNING,
-            "Failed to send intro message",
-            channel=channel,
-            error_code=e.resp.status,
-            error_body=(
-                e.content.decode("utf-8") if hasattr(e, "content") else str(e)
-            ),
-        )
 
 
 def add_users_to_space(migrator, space: str, channel: str):
