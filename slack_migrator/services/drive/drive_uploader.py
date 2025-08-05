@@ -5,8 +5,7 @@ Google Drive file upload functionality.
 import hashlib
 import logging
 import mimetypes
-import os
-from typing import Optional, Tuple, Dict, Any
+from typing import Any, Dict, Optional, Tuple
 
 # Third-party imports
 # pylint: disable=import-error
@@ -14,9 +13,9 @@ from googleapiclient.http import MediaFileUpload
 
 from slack_migrator.utils.api import retry
 from slack_migrator.utils.logging import (
-    log_with_context,
     log_api_request,
     log_api_response,
+    log_with_context,
 )
 
 

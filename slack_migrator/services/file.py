@@ -6,18 +6,19 @@ import hashlib
 import logging
 import mimetypes
 import os
-import requests
 import tempfile
-from typing import Dict, Optional, Any
+from typing import Any, Dict, Optional
 
-from slack_migrator.utils.logging import log_with_context, log_api_request
-from slack_migrator.utils.api import retry
-from slack_migrator.services.drive import (
-    SharedDriveManager,
-    FolderManager,
-    DriveFileUploader,
-)
+import requests
+
 from slack_migrator.services.chat import ChatFileUploader
+from slack_migrator.services.drive import (
+    DriveFileUploader,
+    FolderManager,
+    SharedDriveManager,
+)
+from slack_migrator.utils.api import retry
+from slack_migrator.utils.logging import log_api_request, log_with_context
 
 
 class FileHandler:

@@ -11,7 +11,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from slack_migrator.utils.logging import logger, log_with_context
+from slack_migrator.utils.logging import log_with_context, logger
 
 REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/chat.import",
@@ -28,10 +28,11 @@ _service_cache: Dict[str, Any] = {}
 # Global config for retry settings
 _retry_config = None
 
+
 def set_global_retry_config(config, channel=None):
     """
     Set global retry configuration for all retry decorators.
-    
+
     Args:
         config: The configuration dictionary
         channel: Optional channel name for logging
@@ -39,9 +40,15 @@ def set_global_retry_config(config, channel=None):
     global _retry_config
     _retry_config = config
     if channel:
-        log_with_context(logging.DEBUG, f"Set global retry config: max_retries={config.get('max_retries', 3)}, retry_delay={config.get('retry_delay', 2)}", channel=channel)
+        log_with_context(
+            logging.DEBUG,
+            f"Set global retry config: max_retries={config.get('max_retries', 3)}, retry_delay={config.get('retry_delay', 2)}",
+            channel=channel,
+        )
     else:
-        logger.debug(f"Set global retry config: max_retries={config.get('max_retries', 3)}, retry_delay={config.get('retry_delay', 2)}")
+        logger.debug(
+            f"Set global retry config: max_retries={config.get('max_retries', 3)}, retry_delay={config.get('retry_delay', 2)}"
+        )
 
 
 def retry(
@@ -52,7 +59,7 @@ def retry(
     config: Optional[Dict[str, Any]] = None,
 ):
     """Decorator for retrying API calls with exponential backoff.
-    
+
     Args:
         max_retries: Maximum number of retry attempts
         initial_delay: Initial delay between retries in seconds
@@ -63,17 +70,17 @@ def retry(
     # Use config values if provided, or fall back to global config
     global _retry_config
     effective_config = config or _retry_config
-    
+
     if effective_config:
-        max_retries = effective_config.get('max_retries', max_retries)
-        initial_delay = effective_config.get('retry_delay', initial_delay)
+        max_retries = effective_config.get("max_retries", max_retries)
+        initial_delay = effective_config.get("retry_delay", initial_delay)
 
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             delay = initial_delay
             last_exception = None
-            
+
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
@@ -85,13 +92,13 @@ def retry(
                             f"Client error ({e.resp.status}) not retried: {e}"
                         )
                         raise
-                    
+
                     log_with_context(
                         logging.WARNING,
                         f"Encountered {e.resp.status} {e.resp.reason}",
                         module="http",
                     )
-                    
+
                     if attempt < max_retries:
                         sleep_time = min(delay * (backoff_factor**attempt), max_delay)
                         logger.info(f"Retrying in {sleep_time:.1f} seconds...")
@@ -109,7 +116,9 @@ def retry(
                             module="http",
                         )
                         if attempt < max_retries:
-                            sleep_time = min(delay * (backoff_factor**attempt), max_delay)
+                            sleep_time = min(
+                                delay * (backoff_factor**attempt), max_delay
+                            )
                             logger.info(f"Retrying in {sleep_time:.1f} seconds...")
                             time.sleep(sleep_time)
                         else:
@@ -127,7 +136,7 @@ def retry(
                     else:
                         logger.error(f"Max retries reached. Last error: {e}")
                         raise
-                        
+
             if last_exception:
                 raise last_exception
             raise RuntimeError("Exited retry loop unexpectedly.")

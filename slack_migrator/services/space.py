@@ -2,19 +2,17 @@
 Functions for managing Google Chat spaces during Slack migration
 """
 
+import datetime
 import json
 import logging
-import sys
 import time
-import datetime
-from typing import Dict, Any, Set
+from typing import Any, Dict, Set
 
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
-from slack_migrator.utils.logging import logger, log_with_context
-from slack_migrator.utils.api import retry, slack_ts_to_rfc3339, set_global_retry_config
-from slack_migrator.utils.formatting import convert_formatting
+from slack_migrator.utils.api import retry, set_global_retry_config, slack_ts_to_rfc3339
+from slack_migrator.utils.logging import log_with_context, logger
 
 
 def channel_has_external_users(migrator, channel: str) -> bool:
