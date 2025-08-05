@@ -295,7 +295,10 @@ def add_users_to_space(migrator, space: str, channel: str):
                 f"Failed to process file {jf} when collecting user membership data: {e}"
             )
 
-    # Also check the channel metadata for current members - these are the most reliable source
+    # The channel metadata (channels.json) is the most reliable and definitive source for active members
+    # Reset active_users to ensure only the members from channels.json are considered active
+    active_users = set()  # Clear any users previously marked as active from messages
+    
     meta = migrator.channels_meta.get(channel, {})
     if "members" in meta and isinstance(meta["members"], list):
         for user_id in meta["members"]:
@@ -330,6 +333,28 @@ def add_users_to_space(migrator, space: str, channel: str):
     if migrator.dry_run:
         # In dry run mode, just count and return
         return
+        
+    # Check if the workspace admin is in the active users
+    # Google Chat automatically adds the creator as a member, but we only want them if they were in the channel
+    admin_email = migrator.workspace_admin
+    admin_user_id = None
+    
+    # Look up the admin's Slack user ID if they had one (they'll be in user_map if they were in Slack)
+    for slack_user_id, email in migrator.user_map.items():
+        if email.lower() == admin_email.lower():
+            admin_user_id = slack_user_id
+            break
+    
+    # If we found a user ID for the admin, check if they were in the channel
+    admin_in_channel = False
+    if admin_user_id:
+        admin_in_channel = admin_user_id in active_users
+    
+    log_with_context(
+        logging.DEBUG,
+        f"Workspace admin ({admin_email}) {'was' if admin_in_channel else 'was not'} in original Slack channel {channel}",
+        channel=channel
+    )
 
     # Get channel creation time from metadata to use as fallback
     # (We can't get space info in import mode and don't need to try)
@@ -337,7 +362,11 @@ def add_users_to_space(migrator, space: str, channel: str):
     meta = migrator.channels_meta.get(channel, {})
     if meta.get("created"):
         channel_creation_time = slack_ts_to_rfc3339(f"{meta['created']}.000000")
-        logger.debug(f"Using channel creation time as fallback: {channel_creation_time}")
+        log_with_context(
+            logging.DEBUG,
+            f"Using channel creation time as fallback: {channel_creation_time}",
+            channel=channel
+        )
 
     # Set import time (current time minus 5 seconds) as the deleteTime for all historical memberships
     # According to Google Chat API, in import mode all memberships must have deleteTime in the past
@@ -347,8 +376,10 @@ def add_users_to_space(migrator, space: str, channel: str):
         .isoformat()
         .replace("+00:00", "Z")
     )
-    logger.info(
-        f"Using {historical_delete_time} as historical membership delete time for import mode"
+    log_with_context(
+        logging.INFO,
+        f"Using {historical_delete_time} as historical membership delete time for import mode",
+        channel=channel
     )
     
     # Find the earliest message time across all users as the ultimate fallback
@@ -373,7 +404,11 @@ def add_users_to_space(migrator, space: str, channel: str):
             earliest_dt = datetime.datetime.fromisoformat(earliest_message_time)
             earliest_join_dt = earliest_dt - datetime.timedelta(minutes=2)
             default_join_time = earliest_join_dt.isoformat().replace("+00:00", "Z")
-            logger.debug(f"Using earliest message time minus 2 minutes as default join time: {default_join_time}")
+            log_with_context(
+                logging.DEBUG,
+                f"Using earliest message time minus 2 minutes as default join time: {default_join_time}",
+                channel=channel
+            )
         except ValueError:
             # Keep the default if parsing fails
             pass
@@ -392,7 +427,12 @@ def add_users_to_space(migrator, space: str, channel: str):
                     dt = datetime.datetime.fromisoformat(msg_time)
                     join_dt = dt - datetime.timedelta(minutes=1)
                     membership["join_time"] = join_dt.isoformat().replace("+00:00", "Z")
-                    logger.debug(f"User {user_id}: Setting join time to 1 minute before first message")
+                    log_with_context(
+                        logging.DEBUG,
+                        f"User {user_id}: Setting join time to 1 minute before first message",
+                        user_id=user_id,
+                        channel=channel
+                    )
                 except ValueError:
                     # If parsing fails, use the default join time
                     membership["join_time"] = default_join_time
@@ -430,8 +470,12 @@ def add_users_to_space(migrator, space: str, channel: str):
 
         # Track external users for message attribution
         if migrator._is_external_user(user_email):
-            logger.info(
-                f"Adding external user {user_id} with internal email {internal_email} as historical member"
+            log_with_context(
+                logging.INFO,
+                f"Adding external user {user_id} with internal email {internal_email} as historical member",
+                user_id=user_id,
+                user_email=user_email,
+                channel=channel
             )
             migrator.external_users.add(user_email)
 
@@ -458,14 +502,20 @@ def add_users_to_space(migrator, space: str, channel: str):
             ).execute()
 
             added_count += 1
-            logger.debug(
-                f"Added user {internal_email} to space {space} as historical membership"
+            log_with_context(
+                logging.DEBUG,
+                f"Added user {internal_email} to space {space} as historical membership",
+                user=internal_email,
+                channel=channel
             )
         except HttpError as e:
             # If we get a 409 conflict, the user might already be in the space
             if e.resp.status == 409:
-                logger.warning(
-                    f"User {internal_email} might already be in space {space}: {e}"
+                log_with_context(
+                    logging.WARNING,
+                    f"User {internal_email} might already be in space {space}: {e}",
+                    user=internal_email,
+                    channel=channel
                 )
                 added_count += 1
             else:
@@ -487,11 +537,15 @@ def add_users_to_space(migrator, space: str, channel: str):
 
     # Log summary
     active_count = len(active_users)
-    logger.info(
-        f"Added {added_count} users to space {space} as historical memberships, {failed_count} failed"
+    log_with_context(
+        logging.INFO,
+        f"Added {added_count} users to space {space} as historical memberships, {failed_count} failed",
+        channel=channel
     )
-    logger.info(
-        f"Tracked {active_count} active users to add back after import completes"
+    log_with_context(
+        logging.INFO,
+        f"Tracked {active_count} active users to add back after import completes",
+        channel=channel
     )
 
 
@@ -632,8 +686,12 @@ def add_regular_members(migrator, space: str, channel: str):
 
         # Track external users for message attribution
         if migrator._is_external_user(user_email):
-            logger.info(
-                f"Adding external user {user_id} with internal email {internal_email} as regular member"
+            log_with_context(
+                logging.INFO,
+                f"Adding external user {user_id} with internal email {internal_email} as regular member",
+                user_id=user_id,
+                user_email=user_email,
+                channel=channel
             )
             migrator.external_users.add(user_email)
 
@@ -676,14 +734,20 @@ def add_regular_members(migrator, space: str, channel: str):
             ).execute()
 
             added_count += 1
-            logger.debug(
-                f"Added user {internal_email} to space {space} as regular member"
+            log_with_context(
+                logging.DEBUG,
+                f"Added user {internal_email} to space {space} as regular member",
+                user=internal_email,
+                channel=channel
             )
         except HttpError as e:
             # If we get a 409 conflict, the user might already be in the space
             if e.resp.status == 409:
-                logger.warning(
-                    f"User {internal_email} might already be in space {space}: {e}"
+                log_with_context(
+                    logging.WARNING,
+                    f"User {internal_email} might already be in space {space}: {e}",
+                    user=internal_email,
+                    channel=channel
                 )
                 added_count += 1
             elif e.resp.status == 400:
@@ -731,15 +795,18 @@ def add_regular_members(migrator, space: str, channel: str):
         time.sleep(0.1)
 
     # Log summary
-    logger.info(
-        f"Added {added_count} regular members to space {space}, {failed_count} failed"
+    log_with_context(
+        logging.INFO,
+        f"Added {added_count} regular members to space {space}, {failed_count} failed",
+        channel=channel
     )
     
     # Verify the members were added
     try:
         log_with_context(
             logging.INFO,
-            f"Verifying members added to space {space}"
+            f"Verifying members added to space {space}",
+            channel=channel
         )
         
         # List members to verify they were added
@@ -750,12 +817,112 @@ def add_regular_members(migrator, space: str, channel: str):
         # Just log the count, detailed API response is already logged by the API utilities
         log_with_context(
             logging.INFO,
-            f"Space {space} has {actual_member_count} members after adding {added_count} regular members"
+            f"Space {space} has {actual_member_count} members after adding {added_count} regular members",
+            channel=channel
         )
+        
+        # Check if workspace admin needs to be removed because they weren't in the original channel
+        admin_email = migrator.workspace_admin
+        admin_user_id = None
+        
+        log_with_context(
+            logging.INFO,
+            f"Checking if workspace admin ({admin_email}) should be in space {space} for channel {channel}",
+            channel=channel
+        )
+        
+        # Look up the admin's Slack user ID if they had one
+        for slack_user_id, email in migrator.user_map.items():
+            if email.lower() == admin_email.lower():
+                admin_user_id = slack_user_id
+                log_with_context(
+                    logging.INFO,
+                    f"Found Slack user ID for admin: {slack_user_id}",
+                    channel=channel
+                )
+                break
+                
+        if not admin_user_id:
+            log_with_context(
+                logging.INFO,
+                f"Workspace admin ({admin_email}) was not found in Slack user map",
+                channel=channel
+            )
+        
+        # If admin is not in the active users list for this channel, they should be removed
+        admin_in_channel = False
+        if admin_user_id and admin_user_id in active_users:
+            admin_in_channel = True
+            log_with_context(
+                logging.INFO,
+                f"Workspace admin ({admin_email}) was in the original Slack channel - will keep in space",
+                channel=channel
+            )
+        else:
+            log_with_context(
+                logging.INFO,
+                f"Workspace admin ({admin_email}) was NOT in the original Slack channel - will attempt removal",
+                channel=channel
+            )
+        
+        if not admin_in_channel:
+            # Find the admin in the members list to get their membership ID
+            admin_membership = None
+            for member in members:
+                # Check member name for exact admin email match
+                member_name = member.get("member", {}).get("name", "")
+                # Check both exact match "users/{email}" and case-insensitive match
+                if member_name == f"users/{admin_email}" or member_name.lower() == f"users/{admin_email.lower()}":
+                    admin_membership = member.get("name")
+                    break
+                
+                # Also check for email field which might be present instead of name
+                member_email = member.get("member", {}).get("email", "")
+                if member_email and (member_email == admin_email or member_email.lower() == admin_email.lower()):
+                    admin_membership = member.get("name")
+                    break
+            
+            if admin_membership:
+                log_with_context(
+                    logging.INFO,
+                    f"Removing workspace admin ({admin_email}) from space {space} because they weren't in the original Slack channel {channel}",
+                    channel=channel
+                )
+                
+                # Remove the admin from the space
+                try:
+                    migrator.chat.spaces().members().delete(
+                        name=admin_membership
+                    ).execute()
+                    log_with_context(
+                        logging.INFO,
+                        f"Successfully removed workspace admin from space {space}",
+                        channel=channel
+                    )
+                except Exception as e:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Failed to remove workspace admin from space {space}: {e}",
+                        channel=channel
+                    )
+            else:
+                log_with_context(
+                    logging.INFO,  # Changed from DEBUG to INFO for better visibility
+                    f"Workspace admin ({admin_email}) membership not found in space {space}",
+                    channel=channel
+                )
+                
+                # Log the members we found for debugging
+                log_with_context(
+                    logging.INFO,
+                    f"Members in space {space}: {[member.get('member', {}).get('name', '') for member in members]}",
+                    channel=channel
+                )
     except Exception as e:
         log_with_context(
             logging.WARNING,
-            f"Failed to verify members in space {space}: {e}"
+            f"Failed to verify members in space {space}: {e}",
+            channel=channel
         )
     
     # Update Drive folder permissions for this channel to ensure only active members have access

@@ -971,7 +971,8 @@ class FileHandler:
                 log_with_context(
                     logging.WARNING,
                     f"No URL found for file: {name}",
-                    file_id=file_id
+                    file_id=file_id,
+                    channel=self._get_current_channel()
                 )
                 return None
                 
@@ -1000,7 +1001,8 @@ class FileHandler:
                     logging.INFO,
                     f"Skipping Google Docs link - not a downloadable file: {url_private[:100]}{'...' if len(url_private) > 100 else ''}",
                     file_id=file_id,
-                    file_name=name
+                    file_name=name,
+                    channel=self._get_current_channel()
                 )
                 return None
                 
@@ -1009,7 +1011,8 @@ class FileHandler:
                     logging.INFO,
                     f"Google Drive file detected - will create direct reference instead of downloading: {url_private[:100]}{'...' if len(url_private) > 100 else ''}",
                     file_id=file_id,
-                    file_name=name
+                    file_name=name,
+                    channel=self._get_current_channel()
                 )
                 # Return a special marker to indicate this is a Drive file
                 return b'__GOOGLE_DRIVE_FILE__'
