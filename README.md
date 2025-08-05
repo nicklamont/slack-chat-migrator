@@ -141,6 +141,12 @@ user_mapping_overrides:
   # Map bot accounts that don't have emails
   "U87654321": "slackbot@company.com"
 
+# User handling options
+# Whether to skip importing bot messages and reactions
+# When true, all bot messages and reactions will be excluded from migration
+# When false (default), bot messages will be migrated if user mappings exist
+ignore_bots: false
+
 # Error handling configuration
 # Whether to abort the entire migration if errors are encountered in a channel
 abort_on_error: false

@@ -48,6 +48,13 @@ user_mapping_overrides:
   # U12345678: "user@example.com"
   # U87654321: "another_user@example.com"
 
+# User handling options
+
+# Whether to skip importing bot messages and reactions
+# When true, all bot messages and reactions will be excluded from migration
+# When false (default), bot messages will be migrated if user mappings exist
+ignore_bots: true
+
 # Error handling options
 
 # Whether to abort the entire migration after encountering errors in a channel

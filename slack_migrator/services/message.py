@@ -74,12 +74,28 @@ def process_reactions_batch(
             )
 
             for uid in emoji_users:
+                # Check if this reaction is from a bot and bots should be ignored
+                if migrator.config.get("ignore_bots", False):
+                    user_data = migrator._get_user_data(uid)
+                    if user_data and user_data.get("is_bot", False):
+                        log_with_context(
+                            logging.DEBUG,
+                            f"Skipping reaction :{emoji_name}: from bot user {uid} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
+                            message_id=message_id,
+                            emoji=emoji_name,
+                            user_id=uid,
+                            channel=getattr(migrator, "current_channel", None),
+                        )
+                        continue
+
                 email = migrator.user_map.get(uid)
                 if email:
                     # Get the internal email for this user (handles external users)
                     internal_email = migrator._get_internal_email(uid, email)
-                    requests_by_user[internal_email].append(emo)
-                    reaction_count += 1  # Count every reaction we process
+                    if internal_email:  # Only process if we get a valid internal email
+                        requests_by_user[internal_email].append(emo)
+                        reaction_count += 1  # Count every reaction we process
+                    # If internal_email is None, this user was filtered out (e.g., ignored bot)
                 else:
                     # Handle unmapped user reaction with new graceful approach
                     reaction_name = react.get("name", "unknown")
@@ -352,6 +368,19 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     user_id = message.get("user", "")
     thread_ts = message.get("thread_ts")
     channel = migrator.current_channel
+
+    # Check if this message is from a bot and bots should be ignored
+    if user_id and migrator.config.get("ignore_bots", False):
+        user_data = migrator._get_user_data(user_id)
+        if user_data and user_data.get("is_bot", False):
+            log_with_context(
+                logging.DEBUG,
+                f"Skipping message from bot user {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
+                channel=channel,
+                ts=ts,
+                user_id=user_id,
+            )
+            return "IGNORED_BOT"
 
     # Check for edited messages
     edited = message.get("edited", {})
@@ -912,6 +941,20 @@ def track_message_stats(migrator, m):
     # Get the current channel being processed
     channel = migrator.current_channel
     ts = m.get("ts", "")
+    user_id = m.get("user", "")
+
+    # Check if this message is from a bot and bots should be ignored
+    if user_id and migrator.config.get("ignore_bots", False):
+        user_data = migrator._get_user_data(user_id)
+        if user_data and user_data.get("is_bot", False):
+            log_with_context(
+                logging.DEBUG,
+                f"Skipping stats tracking for bot message from {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
+                channel=channel,
+                ts=ts,
+                user_id=user_id,
+            )
+            return
 
     # Check if we're in update mode
     is_update_mode = getattr(migrator, "update_mode", False)
@@ -956,7 +999,16 @@ def track_message_stats(migrator, m):
     # Track reactions
     reaction_count = 0
     if "reactions" in m:
-        reaction_count = sum(len(r.get("users", [])) for r in m["reactions"])
+        # Count reactions excluding bots if ignore_bots is enabled
+        for reaction in m["reactions"]:
+            for user_id in reaction.get("users", []):
+                # Skip bot reactions if ignore_bots is enabled
+                if migrator.config.get("ignore_bots", False):
+                    user_data = migrator._get_user_data(user_id)
+                    if user_data and user_data.get("is_bot", False):
+                        continue
+                reaction_count += 1
+                
         migrator.channel_stats[channel]["reaction_count"] += reaction_count
 
         # Also increment the global reaction count in dry run mode
