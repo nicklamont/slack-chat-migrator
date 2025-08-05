@@ -705,7 +705,7 @@ def add_regular_members(migrator, space: str, channel: str):
         if migrator._is_external_user(user_email):
             log_with_context(
                 logging.INFO,
-                f"Adding external user {user_id} with internal email {internal_email} as regular member",
+                f"Adding external user {user_id} with email {user_email} as regular member",
                 user_id=user_id,
                 user_email=user_email,
                 channel=channel,
@@ -716,27 +716,22 @@ def add_regular_members(migrator, space: str, channel: str):
             # Log which user we're trying to add
             log_with_context(
                 logging.INFO,  # Changed from DEBUG to INFO for better visibility
-                f"Attempting to add user {internal_email} as regular member",
-                user=internal_email,
+                f"Attempting to add user {user_email if migrator._is_external_user(user_email) else internal_email} as regular member",
+                user=(
+                    user_email
+                    if migrator._is_external_user(user_email)
+                    else internal_email
+                ),
                 channel=channel,
             )
 
             # Create regular membership without time constraints - use the correct format for Google Chat API
             # The key is that we need to format the member properly
 
-            # According to Google Chat API documentation,
-            # use the correct format based on whether the user is external or internal
-            if migrator._is_external_user(user_email):
-                # For external users, we need to use email directly
-                membership_body = {
-                    "member": {"type": "HUMAN"},
-                    "email": user_email,  # Use external email directly
-                }
-            else:
-                # For internal users, use the name format with internal email
-                membership_body = {
-                    "member": {"name": f"users/{internal_email}", "type": "HUMAN"}
-                }
+            # For internal users, use the name format with internal email
+            membership_body = {
+                "member": {"name": f"users/{internal_email}", "type": "HUMAN"}
+            }
 
             # API request details are already logged by API utilities
             # Use the admin user for adding members
