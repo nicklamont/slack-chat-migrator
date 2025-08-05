@@ -13,8 +13,6 @@ from googleapiclient.errors import HttpError
 
 from slack_migrator.utils.logging import logger, log_with_context
 
-# THE FIX: This is the definitive list of scopes the application MUST request.
-# Updated to include all required permissions for complete functionality.
 REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/chat.import",
     "https://www.googleapis.com/auth/chat.spaces",

@@ -126,16 +126,9 @@ check_prerequisites() {
         exit 1
       fi
       echo "Continuing without gcloud. Some steps will be skipped."
-      else
-        echo "Please install the Google Cloud SDK manually:"
-        echo "Visit: https://cloud.google.com/sdk/docs/install"
-        exit 1
-      fi
     else
       echo "Please install the Google Cloud SDK manually:"
-      echo "For macOS: brew install --cask google-cloud-sdk"
-      echo "For Linux/Windows: Visit https://cloud.google.com/sdk/docs/install"
-      echo 
+      echo "Visit: https://cloud.google.com/sdk/docs/install"
       echo "After installation, run 'gcloud init' to set up your environment."
       exit 1
     fi
@@ -250,16 +243,34 @@ create_service_account_key
 assign_iam_roles() {
   echo "4️⃣ Assigning IAM roles to service account..."
   
-  echo "   - Assigning Chat API Admin role"
+  echo "   - Assigning Chat Owner role"
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-    --role="roles/chat.admin" \
+    --role="roles/chat.owner" \
     --quiet || {
-      echo "❌ Failed to assign Chat Admin role"
-      exit 1
+      echo "❌ Failed to assign Chat Owner role"
+      # Don't exit on error, try the next role
     }
-    
-  echo "   ✅ IAM roles assigned successfully"
+  
+  echo "   - Assigning Service Account Token Creator role"
+  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+    --role="roles/iam.serviceAccountTokenCreator" \
+    --quiet || {
+      echo "❌ Failed to assign Service Account Token Creator role"
+      # Don't exit on error, try the next role
+    }
+  
+  echo "   - Assigning Service Account User role"
+  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+    --role="roles/iam.serviceAccountUser" \
+    --quiet || {
+      echo "❌ Failed to assign Service Account User role"
+      # Don't exit on error, try the next role
+    }
+  
+  echo "   ✅ IAM roles assignment completed"
   echo
 }
 
@@ -293,14 +304,9 @@ display_next_steps() {
   echo 
   echo "   ${CLIENT_ID}"
   echo 
-  echo "5️⃣ Enter the following OAuth scopes (copy and paste exactly):"
+  echo "5️⃣ Enter the following OAuth scopes (copy and paste the entire line):"
   echo 
-  echo "   https://www.googleapis.com/auth/chat.import"
-  echo "   https://www.googleapis.com/auth/chat.spaces"
-  echo "   https://www.googleapis.com/auth/chat.messages"
-  echo "   https://www.googleapis.com/auth/chat.spaces.readonly"
-  echo "   https://www.googleapis.com/auth/chat.memberships.readonly"
-  echo "   https://www.googleapis.com/auth/drive"
+  echo "   https://www.googleapis.com/auth/chat.import,https://www.googleapis.com/auth/chat.spaces,https://www.googleapis.com/auth/chat.messages,https://www.googleapis.com/auth/chat.spaces.readonly,https://www.googleapis.com/auth/chat.memberships.readonly,https://www.googleapis.com/auth/drive"
   echo 
   echo "6️⃣ Click 'Authorize'"
   echo "======================================================================"
