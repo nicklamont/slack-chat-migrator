@@ -250,7 +250,8 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
                         "chat.spaces.messages.reactions.create", 
                         result, 
                         message_id=message_id,
-                        user=email
+                        user=email,
+                        channel=getattr(migrator, 'current_channel', None)
                     )
                 except Exception as inner_e:
                     log_with_context(
@@ -267,7 +268,8 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
                 logging.DEBUG,
                 f"Executing batch request for user {email}",
                 message_id=message_id,
-                user=email
+                user=email,
+                channel=getattr(migrator, 'current_channel', None)
             )
             batch.execute()
         except HttpError as e:
@@ -276,6 +278,7 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
                 f"Reaction batch execution failed for user {email}: {e}",
                 message_id=message_id,
                 user=email,
+                channel=getattr(migrator, 'current_channel', None),
                 error=str(e)
             )
 
@@ -286,7 +289,7 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     
     # Ensure global retry config is set
     if hasattr(migrator, 'config'):
-        set_global_retry_config(migrator.config)
+        set_global_retry_config(migrator.config, channel=migrator.current_channel)
 
     This method handles converting a Slack message to a Google Chat message format
     and sending it to the specified space.

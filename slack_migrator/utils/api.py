@@ -28,11 +28,20 @@ _service_cache: Dict[str, Any] = {}
 # Global config for retry settings
 _retry_config = None
 
-def set_global_retry_config(config):
-    """Set global retry configuration for all retry decorators."""
+def set_global_retry_config(config, channel=None):
+    """
+    Set global retry configuration for all retry decorators.
+    
+    Args:
+        config: The configuration dictionary
+        channel: Optional channel name for logging
+    """
     global _retry_config
     _retry_config = config
-    logger.debug(f"Set global retry config: max_retries={config.get('max_retries', 3)}, retry_delay={config.get('retry_delay', 2)}")
+    if channel:
+        log_with_context(logging.DEBUG, f"Set global retry config: max_retries={config.get('max_retries', 3)}, retry_delay={config.get('retry_delay', 2)}", channel=channel)
+    else:
+        logger.debug(f"Set global retry config: max_retries={config.get('max_retries', 3)}, retry_delay={config.get('retry_delay', 2)}")
 
 
 def retry(

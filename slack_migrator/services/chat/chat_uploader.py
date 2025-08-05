@@ -9,7 +9,7 @@ import mimetypes
 from googleapiclient.http import MediaFileUpload
 
 from slack_migrator.utils.logging import log_with_context, log_api_request, log_api_response
-from slack_migrator.utils.api import retry
+from slack_migrator.utils.api import retry, get_gcp_service
 
 
 class ChatFileUploader:

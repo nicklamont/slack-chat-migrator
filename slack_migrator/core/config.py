@@ -7,10 +7,11 @@ which Slack channels should be processed based on the configuration.
 """
 
 import yaml
+import logging
 from pathlib import Path
 from typing import Dict, Any, List, Set, Optional, Union
 
-from slack_migrator.utils.logging import logger
+from slack_migrator.utils.logging import logger, log_with_context
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
@@ -134,24 +135,24 @@ def should_process_channel(channel_name: str, config: Dict[str, Any]) -> bool:
     Returns:
         True if the channel should be processed, False if it should be skipped
     """
-    logger.debug(f"CHANNEL CHECK: Checking if channel '{channel_name}' should be processed")
-    logger.debug(f"CHANNEL CHECK: include_channels={config.get('include_channels', [])}, exclude_channels={config.get('exclude_channels', [])}")
+    log_with_context(logging.DEBUG, f"CHANNEL CHECK: Checking if channel '{channel_name}' should be processed", channel=None)
+    log_with_context(logging.DEBUG, f"CHANNEL CHECK: include_channels={config.get('include_channels', [])}, exclude_channels={config.get('exclude_channels', [])}", channel=channel_name)
     
     # Check include list (if specified, only these channels are processed)
     include_channels = set(config.get('include_channels', []))
     if include_channels:
         if channel_name in include_channels:
-            logger.debug(f"CHANNEL CHECK: Channel '{channel_name}' is in include list, will process")
+            log_with_context(logging.DEBUG, f"CHANNEL CHECK: Channel '{channel_name}' is in include list, will process", channel=None)
             return True
         else:
-            logger.debug(f"CHANNEL CHECK: Channel '{channel_name}' not in include list, skipping")
+            log_with_context(logging.DEBUG, f"CHANNEL CHECK: Channel '{channel_name}' not in include list, skipping", channel=None)
             return False
     
     # Check exclude list
     exclude_channels = set(config.get('exclude_channels', []))
     if channel_name in exclude_channels:
-        logger.debug(f"CHANNEL CHECK: Channel '{channel_name}' is in exclude list, skipping")
+        log_with_context(logging.DEBUG, f"CHANNEL CHECK: Channel '{channel_name}' is in exclude list, skipping", channel=None)
         return False
     
-    logger.debug(f"CHANNEL CHECK: Channel '{channel_name}' not in any list, will process")
+    log_with_context(logging.DEBUG, f"CHANNEL CHECK: Channel '{channel_name}' not in any list, will process", channel=None)
     return True 
