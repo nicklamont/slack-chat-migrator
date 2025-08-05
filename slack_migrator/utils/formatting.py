@@ -6,13 +6,14 @@ convert Slack's markdown syntax to the format expected by Google Chat.
 """
 
 import re
+import logging
 from typing import Dict, List
 
 import emoji
 # This assumes a standard logging setup. If you don't have one,
 # you can replace `from slack_migrator.utils.logging import logger`
 # with `import logging; logger = logging.getLogger(__name__)`
-from slack_migrator.utils.logging import logger
+from slack_migrator.utils.logging import logger, log_with_context
 
 
 def _parse_rich_text_elements(elements: List[Dict]) -> str:
@@ -184,13 +185,14 @@ def parse_slack_blocks(message: Dict) -> str:
     return result
 
 
-def convert_formatting(text: str, user_map: Dict[str, str]) -> str:
+def convert_formatting(text: str, user_map: Dict[str, str], migrator=None) -> str:
     """
     Convert Slack-specific markdown to Google Chat compatible format.
     
     Args:
         text: The Slack message text to convert
         user_map: A dictionary mapping Slack user IDs to Google Chat user IDs/emails
+        migrator: Optional migrator instance for tracking unmapped users
     
     Returns:
         The formatted text with Slack mentions converted to Google Chat format
@@ -206,7 +208,28 @@ def convert_formatting(text: str, user_map: Dict[str, str]) -> str:
             
         if gchat_user_id:
             return f"<users/{gchat_user_id}>"
-        logger.warning(f"Could not map Slack user ID: {slack_user_id}")
+        
+        # Enhanced logging and tracking for unmapped user mentions
+        if migrator and hasattr(migrator, 'unmapped_user_tracker'):
+            current_channel = getattr(migrator, 'current_channel', 'unknown')
+            current_ts = getattr(migrator, 'current_message_ts', 'unknown')
+            
+            # Track this unmapped mention
+            migrator.unmapped_user_tracker.track_unmapped_mention(
+                slack_user_id, current_channel, current_ts, text
+            )
+            
+            log_with_context(
+                logging.ERROR,
+                f"Could not map Slack user ID: {slack_user_id} in message mention (channel: {current_channel})",
+                user_id=slack_user_id,
+                channel=current_channel,
+                message_ts=current_ts
+            )
+        else:
+            # Fallback to original logging if no migrator/tracker
+            logger.warning(f"Could not map Slack user ID: {slack_user_id}")
+            
         return f"@{slack_user_id}"
 
     text = re.sub(r'<@([A-Z0-9]+)>', replace_user_mention, text)

@@ -75,13 +75,11 @@ def process_reactions_batch(migrator, message_name: str, reactions: List[Dict], 
                     requests_by_user[internal_email].append(emo)
                     reaction_count += 1  # Count every reaction we process
                 else:
-                    log_with_context(
-                        logging.WARNING,
-                        f"No email mapping found for user {uid}, skipping reaction",
-                        message_id=message_id,
-                        emoji=emoji_name,
-                        user_id=uid
-                    )
+                    # Handle unmapped user reaction with new graceful approach
+                    reaction_name = react.get('name', 'unknown')
+                    message_ts = getattr(migrator, 'current_message_ts', 'unknown')
+                    migrator._handle_unmapped_user_reaction(uid, reaction_name, message_ts)
+                    # Note: This returns False to skip the reaction, which is the intended behavior
         except Exception as e:
             log_with_context(
                 logging.WARNING,
@@ -418,10 +416,15 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     # Map ALL user IDs with their proper overrides by iterating over .items()
     # This ensures we never miss any mentions and handles all potential edge cases
     for slack_user_id, email in migrator.user_map.items():
-        user_map_with_overrides[slack_user_id] = migrator._get_internal_email(slack_user_id, email)
+        internal_email = migrator._get_internal_email(slack_user_id, email)
+        if internal_email:  # Only add if we got a valid email back
+            user_map_with_overrides[slack_user_id] = internal_email
+
+    # Set current message context for enhanced user tracking
+    migrator.current_message_ts = ts
 
     # Convert Slack formatting to Google Chat formatting using the correct mapping
-    formatted_text = convert_formatting(text, user_map_with_overrides)
+    formatted_text = convert_formatting(text, user_map_with_overrides, migrator)
     
     # For edited messages, add an edit indicator
     if is_edited:
@@ -436,14 +439,31 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
 
     # Set the sender if available
     user_email = migrator.user_map.get(user_id)
+    sender_email = None
+    final_text = formatted_text
+    
     if user_email:
         # Get the internal email for this user (handles external users)
         internal_email = migrator._get_internal_email(user_id, user_email)
-        
-        payload["sender"] = {"type": "HUMAN", "name": f"users/{internal_email}"}
+        if internal_email:
+            sender_email = internal_email
+            payload["sender"] = {"type": "HUMAN", "name": f"users/{internal_email}"}
+        else:
+            # This shouldn't happen if user_email exists, but handle it gracefully
+            admin_email, attributed_text = migrator._handle_unmapped_user_message(user_id, formatted_text)
+            sender_email = admin_email
+            final_text = attributed_text
+            payload["sender"] = {"type": "HUMAN", "name": f"users/{admin_email}"}
+    elif user_id:  # We have a user_id but no mapping
+        # Handle unmapped user with new graceful approach
+        admin_email, attributed_text = migrator._handle_unmapped_user_message(user_id, formatted_text)
+        sender_email = admin_email
+        final_text = attributed_text
+        payload["sender"] = {"type": "HUMAN", "name": f"users/{admin_email}"}
+    # If no user_id at all (system messages, etc.), leave sender empty
 
-    # Add message text
-    payload["text"] = formatted_text
+    # Add message text (potentially modified for unmapped user attribution)
+    payload["text"] = final_text
     
     # Log the final payload for debugging
     log_with_context(

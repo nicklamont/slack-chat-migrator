@@ -294,15 +294,13 @@ def send_intro(migrator, space: str, channel: str):
 
 
 def add_users_to_space(migrator, space: str, channel: str):
-    """Add users to a space in import mode.
-
-    This adds all users who were active in the Slack channel to the Google Chat space.
-    For import mode, we need to create historical memberships for users.
-    The function uses join/leave messages in Slack export to determine membership periods.
-
-    IMPORTANT: Memberships must be created with timestamps before any messages from those users.
-    IMPORTANT: In import mode, ALL memberships require both createTime AND deleteTime in the PAST.
-    """
+    """Add users to a space as historical members."""
+    log_with_context(
+        logging.INFO,
+        f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding historical memberships for channel {channel}",
+        channel=channel
+    )
+    
     # Map to track user join/leave times and store info about who is currently active
     user_membership: Dict[str, Dict[str, Any]] = {}
     active_users: Set[str] = set()  # Track users who are still active for adding after import
@@ -507,7 +505,13 @@ def add_users_to_space(migrator, space: str, channel: str):
         user_email = migrator.user_map.get(user_id)
 
         if not user_email:
-            logger.warning(f"No email mapping found for user {user_id}")
+            log_with_context(
+                logging.ERROR,
+                f"No email mapping found for user {user_id} - cannot add to space",
+                user_id=user_id,
+                channel=channel
+            )
+            # This will be automatically tracked in _get_internal_email when user lookup fails
             continue
 
         # Get the internal email for this user (handles external users)
@@ -702,7 +706,14 @@ def add_regular_members(migrator, space: str, channel: str):
         user_email = migrator.user_map.get(user_id)
 
         if not user_email:
-            logger.warning(f"No email mapping found for user {user_id}")
+            # Track unmapped user for space membership
+            log_with_context(
+                logging.ERROR,  # Escalated from WARNING to ERROR
+                f"🚨 CRITICAL: No email mapping found for user {user_id} - cannot add as regular member",
+                user_id=user_id,
+                channel=channel
+            )
+            # This will be automatically tracked in _get_internal_email when user lookup fails
             continue
 
         # Get the internal email for this user (handles external users)

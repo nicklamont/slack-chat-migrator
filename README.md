@@ -13,7 +13,7 @@ This tool migrates Slack JSON exports into Google Chat spaces via the Chat Impor
 - Filters channels via `config.yaml`
 - Automatically generates user mapping from users.json
 - Maps external emails to internal workspace emails
-- Includes comprehensive reports for both dry runs and actual migrations
+- Includes comprehensive reports for both validation runs and actual migrations
 - Identifies users without email addresses for mapping
 - Automatic permission checking before migration
 
@@ -179,7 +179,7 @@ The `slack-migrator` command provides several options for different migration sc
 | `--export_path` | Yes | Path to the Slack export directory |
 | `--workspace_admin` | Yes | Email of workspace admin to impersonate |
 | `--config` | No | Path to config YAML (default: config.yaml) |
-| `--dry_run` | No | Dry run mode - no changes will be made |
+| `--dry_run` | No | Validation-only mode - performs comprehensive validation without making changes |
 | `--update_mode` | No | Update mode - update existing spaces instead of creating new ones |
 | `--verbose` or `-v` | No | Enable verbose (debug) logging |
 | `--debug_api` | No | Enable detailed API request/response logging (generates large log files) |
@@ -205,7 +205,7 @@ slack-migrator-check-permissions \
   --creds_path /path/to/key.json \
   --workspace_admin admin@company.com
 
-# Perform a dry run to validate before migration
+# Perform comprehensive validation before migration
 slack-migrator \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
@@ -276,18 +276,37 @@ For a successful migration, follow this recommended workflow:
    nano config.yaml  # or your preferred editor
    ```
 
-4. **Run a dry run** (recommended before actual migration):
+4. **Run comprehensive validation** (automatically performed before every migration):
    ```bash
+   # The tool automatically runs a comprehensive validation first:
+   # • Validates all user mappings and detects unmapped users
+   # • Checks file attachments and permissions
+   # • Verifies channel structure and memberships
+   # • Tests message formatting and content
+   # • Estimates migration scope and requirements
+   
+   # For validation-only runs:
    slack-migrator \
      --creds_path /path/to/credentials.json \
      --export_path ./slack_export \
      --workspace_admin admin@domain.com \
      --dry_run
+     
+   # Regular migration (automatically includes validation step):
+   slack-migrator \
+     --creds_path /path/to/credentials.json \
+     --export_path ./slack_export \
+     --workspace_admin admin@domain.com
    ```
-   Review the generated report to identify potential issues.
+   The validation identifies potential issues before any changes are made.
 
-5. **Execute the migration**:
+5. **Execute the migration** (validation runs automatically first):
    ```bash
+   # The migration process includes automatic validation:
+   # Step 1: Comprehensive validation (dry run)
+   # Step 2: User confirmation to proceed
+   # Step 3: Actual migration
+   
    slack-migrator \
      --creds_path /path/to/credentials.json \
      --export_path ./slack_export \
@@ -383,9 +402,15 @@ The cleanup process is important because spaces in import mode have limitations 
 
 ### Migration Reports
 
-The tool generates comprehensive reports in both dry run mode and after actual migrations:
+The tool generates comprehensive reports in both validation mode and after actual migrations:
 
-1. **Dry Run Report**: Generated when running with the `--dry_run` flag, shows what would happen during migration
+1. **Validation Report**: Generated when running with the `--dry_run` flag, shows comprehensive validation results including:
+   - User mapping validation and unmapped user detection
+   - File attachment accessibility checks
+   - Channel structure verification
+   - Message formatting validation
+   - Migration scope estimation
+   
 2. **Migration Summary**: Generated after a real migration, shows what actually happened
 
 The reports include:
@@ -448,14 +473,15 @@ When users sign up for Slack with personal emails (like `personal@gmail.com`) bu
 
 To identify users that need mapping:
 
-1. Run a dry run to generate a report:
+1. Run comprehensive validation to generate a report:
    ```bash
    slack-migrator --creds_path ... --export_path ... --workspace_admin ... --config ... --dry_run
    ```
+   This validates all aspects of the migration including user mappings, file access, and content formatting.
 
-2. Review the report and add the mappings to your `config.yaml` file under `user_mapping_overrides`
+2. Review the validation report and add any required mappings to your `config.yaml` file under `user_mapping_overrides`
 
-3. Run the migration with the updated config
+3. Run the migration with the updated config (validation runs automatically first)
 
 ### Package Structure
 

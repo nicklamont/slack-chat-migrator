@@ -71,18 +71,30 @@ class FileHandler:
         # Initialize the root folder and shared drive
         self._shared_drive_id = None
         self._root_folder_id = None
+        self._drive_initialized = False
         
-        if not dry_run:
-            self._initialize_shared_drive_and_folder()
-        else:
-            self._root_folder_id = folder_id or "DRY_RUN_FOLDER"
+        # Don't initialize drive structures during construction - defer until needed
+        # This avoids expensive operations before permission validation
+        if folder_id:
+            self._root_folder_id = folder_id
             
         if dry_run:
+            self._root_folder_id = folder_id or "DRY_RUN_FOLDER"
+            self._drive_initialized = True
             log_with_context(logging.DEBUG, "FileHandler initialized with verbose logging")
+
+    def ensure_drive_initialized(self):
+        """Ensure drive structures are initialized. Call this after permission validation."""
+        if not self._drive_initialized and not self.dry_run:
+            log_with_context(logging.INFO, "Initializing drive structures...")
+            self._initialize_shared_drive_and_folder()
+            self._drive_initialized = True
 
     @property
     def folder_id(self):
         """Backward compatibility property for the root folder ID."""
+        # Ensure drive is initialized when accessing folder_id
+        self.ensure_drive_initialized()
         return self._root_folder_id
         
     @folder_id.setter 
@@ -271,6 +283,9 @@ class FileHandler:
             }
         """
         try:
+            # Ensure drive structures are initialized before processing files
+            self.ensure_drive_initialized()
+            
             file_id = file_obj.get('id', 'unknown')
             name = file_obj.get('name', f'file_{file_id}')
             mime_type = file_obj.get('mimetype', 'application/octet-stream')

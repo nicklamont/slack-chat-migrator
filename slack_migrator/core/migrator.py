@@ -101,12 +101,18 @@ class SlackToChatMigrator:
         # Generate user mapping from users.json
         self.user_map, self.users_without_email = generate_user_map(self.export_root, self.config)
 
-        # Convert Path to str for API clients
-        creds_path_str = str(self.creds_path)
-        self.chat = get_gcp_service(creds_path_str, self.workspace_admin, "chat", "v1")
-        self.drive = get_gcp_service(
-            creds_path_str, self.workspace_admin, "drive", "v3"
-        )
+        # Initialize simple unmapped user tracking
+        from slack_migrator.utils.user_validation import initialize_unmapped_user_tracking, scan_channel_members_for_unmapped_users
+        self.unmapped_user_tracker = initialize_unmapped_user_tracking(self)
+        
+        # Scan channel members to ensure all channel members have user mappings
+        # This is crucial because Google Chat needs to add all channel members to spaces
+        scan_channel_members_for_unmapped_users(self)
+
+        # API services will be initialized later after permission checks
+        self.chat = None
+        self.drive = None
+        self._api_services_initialized = False
 
         self.chat_delegates: Dict[str, Any] = {}
         self.valid_users: Dict[str, bool] = {}
@@ -121,6 +127,28 @@ class SlackToChatMigrator:
         # Create reverse mapping for convenience
         self.channel_name_to_id = {name: id for id, name in self.channel_id_to_name.items()}
 
+    def _initialize_api_services(self):
+        """Initialize Google API services after permission validation."""
+        if self._api_services_initialized:
+            return
+            
+        log_with_context(logging.INFO, "Initializing Google API services...")
+        
+        # Convert Path to str for API clients
+        creds_path_str = str(self.creds_path)
+        self.chat = get_gcp_service(creds_path_str, self.workspace_admin, "chat", "v1")
+        self.drive = get_gcp_service(
+            creds_path_str, self.workspace_admin, "drive", "v3"
+        )
+        
+        self._api_services_initialized = True
+        log_with_context(logging.INFO, "Google API services initialized successfully")
+        
+        # Initialize dependent services
+        self._initialize_dependent_services()
+
+    def _initialize_dependent_services(self):
+        """Initialize services that depend on API clients."""
         # Initialize file handler
         self.file_handler = FileHandler(
             self.drive, self.chat, folder_id=None, migrator=self, dry_run=self.dry_run
@@ -142,11 +170,14 @@ class SlackToChatMigrator:
         
         # Track message statistics per channel
         self.channel_stats: Dict[str, Dict[str, int]] = {}
+        
+        # Track current message timestamp for enhanced error context
+        self.current_message_ts: Optional[str] = None
 
         # Permission validation is now handled by the CLI layer to avoid duplicates
         # The CLI will call validate_permissions() unless --skip_permission_check is used
             
-        if verbose:
+        if self.verbose:
             logger.debug("Migrator initialized with verbose logging enabled")
             
         # Load existing space mappings for update mode or file attachments
@@ -351,26 +382,45 @@ class SlackToChatMigrator:
 
         log_with_context(logging.INFO, "Cleanup completed")
 
-    def _get_internal_email(self, user_id: str, user_email: Optional[str] = None) -> str:
-        """Get internal email for a user, handling external users.
+    def _get_internal_email(self, user_id: str, user_email: Optional[str] = None) -> Optional[str]:
+        """Get internal email for a user, handling external users and tracking unmapped users.
         
         Args:
             user_id: The Slack user ID
             user_email: Optional email if already known
             
         Returns:
-            The internal email to use for this user
+            The internal email to use for this user, or None if user should be ignored
         """
+        # Check if this user is a bot and bots are being ignored FIRST
+        if self.config.get('ignore_bots', False):
+            # Check if this is a bot user
+            user_data = self._get_user_data(user_id)
+            if user_data and user_data.get('is_bot', False):
+                log_with_context(
+                    logging.DEBUG,
+                    f"Ignoring bot user {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
+                    user_id=user_id,
+                    channel=getattr(self, 'current_channel', 'unknown')
+                )
+                return None  # Explicitly ignore this bot - don't track as unmapped
+        
         # Get the email from our user mapping if not provided
         if user_email is None:
             user_email = self.user_map.get(user_id)
             if not user_email:
+                # Track this unmapped user automatically (only non-ignored users reach here)
+                if hasattr(self, 'unmapped_user_tracker'):
+                    current_channel = getattr(self, 'current_channel', 'unknown')
+                    self.unmapped_user_tracker.add_unmapped_user(user_id, current_channel)
+                
                 log_with_context(
-                    logging.WARNING,
+                    logging.DEBUG,  # Reduced to DEBUG since we now handle this gracefully
                     f"No email mapping found for user {user_id}",
-                    user_id=user_id
+                    user_id=user_id,
+                    channel=getattr(self, 'current_channel', 'unknown')
                 )
-                return f"unknown-user-{user_id}@example.com"
+                return None  # Return None instead of fallback email
         
         # Check if this is an external user
         if self._is_external_user(user_email):
@@ -380,6 +430,139 @@ class SlackToChatMigrator:
             return f"external-{user_id}@{external_user_domain}"
         
         return user_email
+
+    def _get_user_data(self, user_id: str) -> Optional[Dict]:
+        """Get user data from the users.json export file.
+        
+        Args:
+            user_id: The Slack user ID
+            
+        Returns:
+            User data dictionary or None if not found
+        """
+        if not hasattr(self, '_users_data'):
+            # Load and cache users data
+            import json
+            from pathlib import Path
+            
+            users_file = Path(self.export_root) / "users.json"
+            if users_file.exists():
+                try:
+                    with open(users_file, 'r') as f:
+                        users_list = json.load(f)
+                    self._users_data = {user['id']: user for user in users_list}
+                except Exception as e:
+                    log_with_context(logging.WARNING, f"Error loading users.json: {e}")
+                    self._users_data = {}
+            else:
+                self._users_data = {}
+        
+        return self._users_data.get(user_id)
+
+    def _handle_unmapped_user_message(self, user_id: str, original_text: str) -> tuple[str, str]:
+        """Handle messages from unmapped users by using workspace admin with attribution.
+        
+        Args:
+            user_id: The unmapped Slack user ID
+            original_text: The original message text
+            
+        Returns:
+            Tuple of (sender_email, modified_message_text)
+        """
+        # Track this unmapped user
+        if hasattr(self, 'unmapped_user_tracker'):
+            current_channel = getattr(self, 'current_channel', 'unknown')
+            self.unmapped_user_tracker.add_unmapped_user(user_id, f"message_sender:{current_channel}")
+        
+        # Try to get any additional info about this user from users.json
+        user_info = None
+        try:
+            import json
+            from pathlib import Path
+            users_file = Path(self.export_root) / 'users.json'
+            if users_file.exists():
+                with open(users_file, 'r') as f:
+                    users_data = json.load(f)
+                    user_info = next((u for u in users_data if u.get('id') == user_id), None)
+        except Exception:
+            pass  # Continue without user info if we can't load it
+        
+        # Create attribution prefix
+        if user_info:
+            real_name = user_info.get('profile', {}).get('real_name', '')
+            username = user_info.get('name', user_id)
+            email = user_info.get('profile', {}).get('email', '')
+            
+            if real_name and email:
+                attribution = f"**[From {real_name} ({email})]**"
+            elif email:
+                attribution = f"**[From {email}]**"
+            elif real_name:
+                attribution = f"**[From Slack User {user_id}]**"
+            else:
+                attribution = f"**[From Slack User {user_id}]**"
+        else:
+            # User not in users.json (external or deactivated)
+            # Check if we have a mapping override that might give us info
+            override_email = self.config.get('user_mapping_overrides', {}).get(user_id)
+            if override_email:
+                attribution = f"**[From {override_email}]**"
+            else:
+                attribution = f"**[From External User {user_id}]**"
+        
+        # Combine attribution with original message
+        modified_text = f"{attribution}\n{original_text}"
+        
+        # Use workspace admin as sender
+        admin_email = self.workspace_admin
+        
+        log_with_context(
+            logging.WARNING,
+            f"Sending message from unmapped user {user_id} via workspace admin {admin_email}",
+            user_id=user_id,
+            channel=getattr(self, 'current_channel', 'unknown'),
+            attribution=attribution
+        )
+        
+        return admin_email, modified_text
+
+    def _handle_unmapped_user_reaction(self, user_id: str, reaction: str, message_ts: str) -> bool:
+        """Handle reactions from unmapped users by logging and skipping.
+        
+        Args:
+            user_id: The unmapped Slack user ID
+            reaction: The reaction emoji
+            message_ts: The timestamp of the message being reacted to
+            
+        Returns:
+            False to indicate the reaction should be skipped
+        """
+        # Track this unmapped user
+        if hasattr(self, 'unmapped_user_tracker'):
+            current_channel = getattr(self, 'current_channel', 'unknown')
+            self.unmapped_user_tracker.add_unmapped_user(user_id, f"reaction:{current_channel}")
+        
+        log_with_context(
+            logging.WARNING,
+            f"Skipping reaction '{reaction}' from unmapped user {user_id} on message {message_ts}",
+            user_id=user_id,
+            reaction=reaction,
+            message_ts=message_ts,
+            channel=getattr(self, 'current_channel', 'unknown')
+        )
+        
+        # TODO: Add to migration report for surfacing during reporting
+        if not hasattr(self, 'skipped_reactions'):
+            self.skipped_reactions = []
+        
+        self.skipped_reactions.append({
+            'user_id': user_id,
+            'reaction': reaction,
+            'message_ts': message_ts,
+            'channel': getattr(self, 'current_channel', 'unknown')
+        })
+        
+        return False  # Skip this reaction
 
     def _get_space_name(self, channel: str) -> str:
         """Get a consistent display name for a Google Chat space based on channel name."""
@@ -410,27 +593,12 @@ class SlackToChatMigrator:
         except Exception:
             return False
 
-    def export_users_without_email(self, output_path: Optional[str] = None):
-        """Log users without email addresses for reference."""
-        if not hasattr(self, 'users_without_email') or not self.users_without_email:
-            log_with_context(logging.INFO, "No users without email addresses detected")
-            return
-            
-        # Just log the information instead of creating a separate file
-        log_with_context(logging.INFO, f"Found {len(self.users_without_email)} users without email addresses:")
-        log_with_context(logging.INFO, "To map these users, add entries to user_mapping_overrides in config.yaml:")
-        
-        for user in self.users_without_email:
-            user_id = user.get('id', '')
-            name = user.get('name', '')
-            user_type = "Bot" if user.get('is_bot', False) or user.get('is_app_user', False) else "User"
-            log_with_context(logging.INFO, f'  "{user_id}": ""  # {user_type}: {name}')
-        
-        log_with_context(logging.INFO, "This information is also available in the migration report")
-
     def migrate(self):
         """Main migration function that orchestrates the entire process."""
         log_with_context(logging.INFO, "Starting migration process")
+        
+        # Ensure API services are initialized (if not done during permission checks)
+        self._initialize_api_services()
         
         # Initialize the thread map if not already done
         if not hasattr(self, "thread_map"):
@@ -454,6 +622,18 @@ class SlackToChatMigrator:
             "reactions_created": 0,
             "files_created": 0,
         }
+
+        # Report unmapped user issues before starting migration (if any detected during initialization)
+        if hasattr(self, 'unmapped_user_tracker') and self.unmapped_user_tracker.has_unmapped_users():
+            unmapped_users = self.unmapped_user_tracker.get_unmapped_users_list()
+            log_with_context(
+                logging.WARNING,
+                f"Found {len(unmapped_users)} unmapped users during setup: {', '.join(unmapped_users)}"
+            )
+            log_with_context(
+                logging.WARNING,
+                "These will be tracked during migration. Consider adding them to user_mapping_overrides in config.yaml."
+            )
 
         # In update mode, discover existing spaces via API
         if self.update_mode:
@@ -862,6 +1042,31 @@ class SlackToChatMigrator:
         # Log any space mapping conflicts that should be added to config
         from slack_migrator.services.message import log_space_mapping_conflicts
         log_space_mapping_conflicts(self)
+        
+        # Generate final unmapped user report
+        if hasattr(self, 'unmapped_user_tracker') and self.unmapped_user_tracker.has_unmapped_users():
+            unmapped_users = self.unmapped_user_tracker.get_unmapped_users_list()
+            log_with_context(
+                logging.ERROR,
+                f"MIGRATION COMPLETED WITH {len(unmapped_users)} UNMAPPED USERS:"
+            )
+            log_with_context(
+                logging.ERROR, 
+                f"  Users found: {', '.join(unmapped_users)}"
+            )
+            log_with_context(
+                logging.ERROR,
+                "  These users likely represent deleted Slack users or bots without email mappings."
+            )
+            log_with_context(
+                logging.ERROR,
+                "  Add them to user_mapping_overrides in your config.yaml to resolve."
+            )
+        
+        # If this was a dry run, provide specific unmapped user guidance
+        if self.dry_run and hasattr(self, 'unmapped_user_tracker'):
+            from slack_migrator.utils.user_validation import log_unmapped_user_summary_for_dry_run
+            log_unmapped_user_summary_for_dry_run(self)
         
         # Generate report
         report_file = generate_report(self)
