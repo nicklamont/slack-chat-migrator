@@ -157,6 +157,10 @@ def create_space(migrator, channel: str) -> str:
             # Create the space in import mode
             space = migrator.chat.spaces().create(body=body).execute()
             space_name = space["name"]
+
+            # Increment the spaces created counter
+            migrator.migration_summary["spaces_created"] += 1
+
             log_with_context(
                 logging.INFO,
                 f"Created space {space_name} for channel {channel} in import mode with threading enabled",
