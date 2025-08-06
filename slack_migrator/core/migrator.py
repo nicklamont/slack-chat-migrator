@@ -4,6 +4,7 @@ Main migrator class for the Slack to Google Chat migration tool
 
 import json
 import logging
+import signal
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -631,6 +632,21 @@ class SlackToChatMigrator:
         # Import report generation function for use in both success and failure paths
         from slack_migrator.cli.report import generate_report
 
+        # Set up signal handler to ensure we log migration status on interrupt
+        def signal_handler(signum, frame):
+            """Handle SIGINT (Ctrl+C) by logging migration status and exiting gracefully."""
+            migration_duration = time.time() - migration_start_time
+            log_with_context(logging.WARNING, "")
+            log_with_context(logging.WARNING, "🚨 MIGRATION INTERRUPTED BY SIGNAL")
+            self._log_migration_failure(
+                KeyboardInterrupt("Migration interrupted by signal"), migration_duration
+            )
+            # Exit with standard interrupted code
+            exit(130)
+
+        # Install the signal handler
+        old_signal_handler = signal.signal(signal.SIGINT, signal_handler)
+
         try:
             # Ensure API services are initialized (if not done during permission checks)
             self._initialize_api_services()
@@ -1159,7 +1175,7 @@ class SlackToChatMigrator:
 
             return True
 
-        except Exception as e:
+        except BaseException as e:
             # Calculate migration duration
             migration_duration = time.time() - migration_start_time
 
@@ -1195,6 +1211,8 @@ class SlackToChatMigrator:
             # Re-raise the exception to maintain existing error handling behavior
             raise
         finally:
+            # Restore the original signal handler
+            signal.signal(signal.SIGINT, old_signal_handler)
             # Always ensure proper cleanup of channel log handlers
             self._cleanup_channel_handlers()
 
@@ -1239,7 +1257,30 @@ class SlackToChatMigrator:
         # Check for spaces that might still be in import mode
         try:
             # List all spaces created by this app
-            spaces = self.chat.spaces().list().execute().get("spaces", [])
+            log_with_context(
+                logging.DEBUG, "Listing all spaces to check for import mode..."
+            )
+            try:
+                spaces = self.chat.spaces().list().execute().get("spaces", [])
+            except HttpError as http_e:
+                log_with_context(
+                    logging.ERROR,
+                    f"HTTP error listing spaces during cleanup: {http_e} (Status: {http_e.resp.status})",
+                    error_code=http_e.resp.status,
+                )
+                if http_e.resp.status >= 500:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Server error listing spaces - this might be a temporary issue, skipping cleanup",
+                    )
+                return
+            except Exception as list_e:
+                log_with_context(
+                    logging.ERROR,
+                    f"Failed to list spaces during cleanup: {list_e}",
+                )
+                return
+
             import_mode_spaces = []
 
             for space in spaces:
@@ -1253,6 +1294,19 @@ class SlackToChatMigrator:
                     # Use the correct field name: importMode (boolean) instead of importState
                     if space_info.get("importMode") == True:
                         import_mode_spaces.append((space_name, space_info))
+                except HttpError as http_e:
+                    log_with_context(
+                        logging.WARNING,
+                        f"HTTP error checking space status during cleanup: {http_e} (Status: {http_e.resp.status})",
+                        space_name=space_name,
+                        error_code=http_e.resp.status,
+                    )
+                    if http_e.resp.status >= 500:
+                        log_with_context(
+                            logging.WARNING,
+                            f"Server error checking space - this might be a temporary issue",
+                            space_name=space_name,
+                        )
                 except Exception as e:
                     log_with_context(
                         logging.WARNING,
@@ -1322,6 +1376,20 @@ class SlackToChatMigrator:
                                 f"Successfully completed import mode for space: {space_name}",
                                 channel=channel_name if channel_name else None,
                             )
+                        except HttpError as http_e:
+                            log_with_context(
+                                logging.ERROR,
+                                f"HTTP error completing import for space {space_name}: {http_e} (Status: {http_e.resp.status})",
+                                space_name=space_name,
+                                error_code=http_e.resp.status,
+                            )
+                            if http_e.resp.status >= 500:
+                                log_with_context(
+                                    logging.WARNING,
+                                    f"Server error completing import - this might be a temporary issue",
+                                    space_name=space_name,
+                                )
+                            continue
                         except Exception as e:
                             log_with_context(
                                 logging.ERROR,
@@ -1345,6 +1413,19 @@ class SlackToChatMigrator:
                                     logging.INFO,
                                     f"Preserved external user access for space: {space_name}",
                                 )
+                            except HttpError as http_e:
+                                log_with_context(
+                                    logging.WARNING,
+                                    f"HTTP error preserving external user access for space {space_name}: {http_e} (Status: {http_e.resp.status})",
+                                    space_name=space_name,
+                                    error_code=http_e.resp.status,
+                                )
+                                if http_e.resp.status >= 500:
+                                    log_with_context(
+                                        logging.WARNING,
+                                        f"Server error updating space - this might be a temporary issue",
+                                        space_name=space_name,
+                                    )
                             except Exception as e:
                                 log_with_context(
                                     logging.WARNING,
@@ -1414,6 +1495,19 @@ class SlackToChatMigrator:
                                 space_name=space_name,
                             )
 
+                    except HttpError as http_e:
+                        log_with_context(
+                            logging.ERROR,
+                            f"HTTP error during cleanup for space {space_name}: {http_e} (Status: {http_e.resp.status})",
+                            space_name=space_name,
+                            error_code=http_e.resp.status,
+                        )
+                        if http_e.resp.status >= 500:
+                            log_with_context(
+                                logging.WARNING,
+                                f"Server error during cleanup - this might be a temporary issue",
+                                space_name=space_name,
+                            )
                     except Exception as e:
                         log_with_context(
                             logging.ERROR,
@@ -1425,10 +1519,37 @@ class SlackToChatMigrator:
                     logging.INFO, "No spaces found in import mode during cleanup."
                 )
 
+        except HttpError as http_e:
+            log_with_context(
+                logging.ERROR,
+                f"HTTP error during post-migration cleanup: {http_e} (Status: {http_e.resp.status})",
+                error_code=http_e.resp.status,
+            )
+            if http_e.resp.status >= 500:
+                log_with_context(
+                    logging.WARNING,
+                    f"Server error during cleanup - Google's servers may be experiencing issues",
+                )
+            elif http_e.resp.status == 403:
+                log_with_context(
+                    logging.WARNING,
+                    f"Permission error during cleanup - service account may lack required permissions",
+                )
+            elif http_e.resp.status == 429:
+                log_with_context(
+                    logging.WARNING,
+                    f"Rate limit exceeded during cleanup - too many API requests",
+                )
         except Exception as e:
             log_with_context(
                 logging.ERROR,
-                f"Error during cleanup: {e}",
+                f"Unexpected error during cleanup: {e}",
+            )
+            import traceback
+
+            log_with_context(
+                logging.DEBUG,
+                f"Cleanup exception traceback: {traceback.format_exc()}",
             )
 
         log_with_context(logging.INFO, "Cleanup completed")
@@ -1670,10 +1791,26 @@ class SlackToChatMigrator:
                 logging.INFO,
                 "=" * 80,
             )
-            log_with_context(
-                logging.INFO,
-                "🎉 SLACK-TO-GOOGLE-CHAT MIGRATION COMPLETED SUCCESSFULLY!",
-            )
+            # Check if any actual migration work was done
+            no_work_done = spaces_created == 0 and messages_created == 0
+            interrupted_early = channels_processed == 0
+
+            if no_work_done:
+                if interrupted_early:
+                    log_with_context(
+                        logging.WARNING,
+                        "⚠️  MIGRATION WAS INTERRUPTED DURING INITIALIZATION - NO CHANNELS PROCESSED",
+                    )
+                else:
+                    log_with_context(
+                        logging.WARNING,
+                        "⚠️  MIGRATION WAS INTERRUPTED BEFORE ANY SPACES WERE IMPORTED",
+                    )
+            else:
+                log_with_context(
+                    logging.INFO,
+                    "🎉 SLACK-TO-GOOGLE-CHAT MIGRATION COMPLETED SUCCESSFULLY!",
+                )
 
         log_with_context(
             logging.INFO,
@@ -1751,7 +1888,34 @@ class SlackToChatMigrator:
                 "✅ Validation complete! Review the logs and run without --dry_run to migrate.",
             )
         else:
-            if issues_found:
+            # Check if any actual migration work was done
+            no_work_done = spaces_created == 0 and messages_created == 0
+            interrupted_early = channels_processed == 0
+
+            if no_work_done:
+                if interrupted_early:
+                    log_with_context(
+                        logging.WARNING,
+                        "⚠️  Migration was interrupted during setup before any channels were processed.",
+                    )
+                    log_with_context(
+                        logging.INFO,
+                        "💡 The migration may have been interrupted during channel filtering or initialization.",
+                    )
+                else:
+                    log_with_context(
+                        logging.WARNING,
+                        "⚠️  Migration was interrupted before any spaces were successfully imported.",
+                    )
+                log_with_context(
+                    logging.INFO,
+                    "💡 To complete the migration, run the command again.",
+                )
+                log_with_context(
+                    logging.INFO,
+                    "📋 Check the migration report and logs for any issues that need to be addressed.",
+                )
+            elif issues_found:
                 log_with_context(
                     logging.WARNING,
                     "✅ Migration completed with some issues. Check the detailed logs and report.",
@@ -1767,7 +1931,7 @@ class SlackToChatMigrator:
             "=" * 80,
         )
 
-    def _log_migration_failure(self, exception: Exception, duration: float) -> None:
+    def _log_migration_failure(self, exception: BaseException, duration: float) -> None:
         """Log final migration failure status with error details.
 
         Args:

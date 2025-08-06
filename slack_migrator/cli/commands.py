@@ -239,9 +239,7 @@ class MigrationOrchestrator:
                         # Set up output directory and update logger
                         self._setup_output_logging()
                         self.migrator.migrate()
-                        logger.info("")
-                        logger.info("🎉 Migration completed successfully!")
-                        logger.info("")
+
                     except Exception as e:
                         logger.error(f"Migration failed: {e}")
                         raise
@@ -273,16 +271,34 @@ class MigrationOrchestrator:
 
                 # Always clean up channel handlers, regardless of dry run mode
                 if hasattr(self.migrator, "_cleanup_channel_handlers"):
-                    self.migrator._cleanup_channel_handlers()
+                    try:
+                        self.migrator._cleanup_channel_handlers()
+                    except Exception as handler_cleanup_e:
+                        logger.error(
+                            f"Failed to clean up channel handlers: {handler_cleanup_e}",
+                            exc_info=True,
+                        )
 
                 # Only perform space cleanup if not in dry run mode
                 if not self.args.dry_run:
-                    self.migrator.cleanup()
+                    try:
+                        self.migrator.cleanup()
+                    except Exception as space_cleanup_e:
+                        logger.error(
+                            f"Failed to clean up spaces: {space_cleanup_e}",
+                            exc_info=True,
+                        )
+                        logger.warning(
+                            "Some spaces may still be in import mode and require manual cleanup"
+                        )
 
                 logger.info("Cleanup completed successfully.")
             except Exception as cleanup_e:
-                logger.error(f"Cleanup failed: {cleanup_e}", exc_info=True)
+                logger.error(f"Overall cleanup failed: {cleanup_e}", exc_info=True)
                 logger.info("You may need to manually clean up temporary resources.")
+                logger.info(
+                    "Check Google Chat admin console for spaces that may still be in import mode."
+                )
 
 
 def setup_argument_parser() -> argparse.ArgumentParser:
