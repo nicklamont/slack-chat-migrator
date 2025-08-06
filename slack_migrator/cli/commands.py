@@ -267,10 +267,18 @@ class MigrationOrchestrator:
 
     def cleanup(self):
         """Perform cleanup operations."""
-        if self.migrator and not self.args.dry_run:
+        if self.migrator:
             try:
                 logger.info("Performing cleanup operations...")
-                self.migrator.cleanup()
+
+                # Always clean up channel handlers, regardless of dry run mode
+                if hasattr(self.migrator, "_cleanup_channel_handlers"):
+                    self.migrator._cleanup_channel_handlers()
+
+                # Only perform space cleanup if not in dry run mode
+                if not self.args.dry_run:
+                    self.migrator.cleanup()
+
                 logger.info("Cleanup completed successfully.")
             except Exception as cleanup_e:
                 logger.error(f"Cleanup failed: {cleanup_e}", exc_info=True)
@@ -379,7 +387,9 @@ def handle_exception(e):
         logger.info("Please check that all required files exist and paths are correct.")
     elif isinstance(e, KeyboardInterrupt):
         logger.warning("Migration interrupted by user.")
-        logger.info("You can resume the migration with --update_mode.")
+        logger.info("📋 Check the partial migration report in the output directory.")
+        logger.info("🔄 You can resume the migration with --update_mode.")
+        logger.info("📝 All progress and logs have been saved to disk.")
     else:
         logger.error(f"Migration failed: {e}", exc_info=True)
 

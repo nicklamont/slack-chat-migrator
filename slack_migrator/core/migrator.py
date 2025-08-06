@@ -246,7 +246,11 @@ class SlackToChatMigrator:
             try:
                 # Verify user exists by making a simple API call
                 test_service = get_gcp_service(
-                    str(self.creds_path), email, "chat", "v1"
+                    str(self.creds_path),
+                    email,
+                    "chat",
+                    "v1",
+                    getattr(self, "current_channel", None),
                 )
                 test_service.spaces().list(pageSize=1).execute()
                 self.valid_users[email] = True
@@ -619,6 +623,9 @@ class SlackToChatMigrator:
         """Main migration function that orchestrates the entire process."""
         migration_start_time = time.time()
         log_with_context(logging.INFO, "Starting migration process")
+
+        # Import report generation function for use in both success and failure paths
+        from slack_migrator.cli.report import generate_report
 
         try:
             # Ensure API services are initialized (if not done during permission checks)
@@ -1147,6 +1154,9 @@ class SlackToChatMigrator:
             # Log final success status
             self._log_migration_success(migration_duration)
 
+            # Clean up channel handlers in success case (finally block will also run)
+            self._cleanup_channel_handlers()
+
             return True
 
         except Exception as e:
@@ -1156,8 +1166,65 @@ class SlackToChatMigrator:
             # Log final failure status
             self._log_migration_failure(e, migration_duration)
 
+            # Generate report even on failure to show progress made
+            try:
+                report_file = generate_report(self)
+
+                # Log the report location for user reference
+                if isinstance(e, KeyboardInterrupt):
+                    log_with_context(
+                        logging.INFO,
+                        f"📋 Partial migration report available at: {report_file}",
+                    )
+                    log_with_context(
+                        logging.INFO,
+                        "📋 This report shows progress made before interruption.",
+                    )
+                else:
+                    log_with_context(
+                        logging.INFO,
+                        f"📋 Migration report (with partial results) available at: {report_file}",
+                    )
+            except Exception as report_error:
+                # Don't let report generation failure mask the original failure
+                log_with_context(
+                    logging.WARNING,
+                    f"Failed to generate migration report after failure: {report_error}",
+                )
+
             # Re-raise the exception to maintain existing error handling behavior
             raise
+        finally:
+            # Always ensure proper cleanup of channel log handlers
+            self._cleanup_channel_handlers()
+
+    def _cleanup_channel_handlers(self):
+        """Clean up and close all channel-specific log handlers."""
+        if not hasattr(self, "channel_handlers") or not self.channel_handlers:
+            return
+
+        logger = logging.getLogger("slack_migrator")
+
+        for channel_name, handler in list(self.channel_handlers.items()):
+            try:
+                # Flush any pending log entries
+                handler.flush()
+                # Close the file handler
+                handler.close()
+                # Remove the handler from the logger
+                logger.removeHandler(handler)
+                log_with_context(
+                    logging.DEBUG, f"Cleaned up log handler for channel: {channel_name}"
+                )
+            except Exception as e:
+                # Don't let handler cleanup failure prevent the main cleanup
+                # Use print to avoid potential logging issues during cleanup
+                print(
+                    f"Warning: Failed to clean up log handler for channel {channel_name}: {e}"
+                )
+
+        # Clear the handlers dictionary
+        self.channel_handlers.clear()
 
     def cleanup(self):
         """Clean up resources and complete import mode on spaces."""
@@ -1739,16 +1806,29 @@ class SlackToChatMigrator:
             "=" * 80,
         )
 
-        if self.dry_run:
-            log_with_context(
-                logging.ERROR,
-                "❌ DRY RUN VALIDATION FAILED",
-            )
+        # Handle KeyboardInterrupt differently
+        if isinstance(exception, KeyboardInterrupt):
+            if self.dry_run:
+                log_with_context(
+                    logging.WARNING,
+                    "⏹️  DRY RUN VALIDATION INTERRUPTED BY USER",
+                )
+            else:
+                log_with_context(
+                    logging.WARNING,
+                    "⏹️  SLACK-TO-GOOGLE-CHAT MIGRATION INTERRUPTED BY USER",
+                )
         else:
-            log_with_context(
-                logging.ERROR,
-                "❌ SLACK-TO-GOOGLE-CHAT MIGRATION FAILED",
-            )
+            if self.dry_run:
+                log_with_context(
+                    logging.ERROR,
+                    "❌ DRY RUN VALIDATION FAILED",
+                )
+            else:
+                log_with_context(
+                    logging.ERROR,
+                    "❌ SLACK-TO-GOOGLE-CHAT MIGRATION FAILED",
+                )
 
         log_with_context(
             logging.ERROR,
@@ -1756,69 +1836,115 @@ class SlackToChatMigrator:
         )
 
         # Error details
-        log_with_context(
-            logging.ERROR,
-            f"💥 ERROR DETAILS:",
-        )
-        log_with_context(
-            logging.ERROR,
-            f"   • Exception: {type(exception).__name__}",
-        )
-        log_with_context(
-            logging.ERROR,
-            f"   • Message: {str(exception)}",
-        )
-        log_with_context(
-            logging.ERROR,
-            f"   • Duration before failure: {duration_minutes:.1f} minutes ({duration:.1f} seconds)",
-        )
-
-        # Progress before failure
-        log_with_context(
-            logging.ERROR,
-            f"📊 PROGRESS BEFORE FAILURE:",
-        )
-        log_with_context(
-            logging.ERROR,
-            f"   • Channels processed: {channels_processed}",
-        )
-        if not self.dry_run:
+        if isinstance(exception, KeyboardInterrupt):
             log_with_context(
-                logging.ERROR,
-                f"   • Spaces created: {spaces_created}",
+                logging.WARNING,
+                f"⏹️  INTERRUPTION DETAILS:",
             )
             log_with_context(
-                logging.ERROR,
-                f"   • Messages migrated: {messages_created}",
+                logging.WARNING,
+                f"   • Type: User interruption (Ctrl+C)",
             )
-
-        # Log the full traceback for debugging
-        log_with_context(
-            logging.ERROR,
-            f"🔍 FULL TRACEBACK:",
-        )
-        log_with_context(
-            logging.ERROR,
-            traceback.format_exc(),
-        )
-
-        log_with_context(
-            logging.ERROR,
-            "=" * 80,
-        )
-
-        if self.dry_run:
             log_with_context(
-                logging.ERROR,
-                "❌ Fix the validation issues above and try again.",
+                logging.WARNING,
+                f"   • Duration before interruption: {duration_minutes:.1f} minutes ({duration:.1f} seconds)",
             )
         else:
             log_with_context(
                 logging.ERROR,
-                "❌ Migration failed. Check the error details and try --update_mode to resume.",
+                f"💥 ERROR DETAILS:",
+            )
+            log_with_context(
+                logging.ERROR,
+                f"   • Exception: {type(exception).__name__}",
+            )
+            log_with_context(
+                logging.ERROR,
+                f"   • Message: {str(exception)}",
+            )
+            log_with_context(
+                logging.ERROR,
+                f"   • Duration before failure: {duration_minutes:.1f} minutes ({duration:.1f} seconds)",
+            )
+
+        # Progress before failure/interruption
+        progress_level = (
+            logging.WARNING
+            if isinstance(exception, KeyboardInterrupt)
+            else logging.ERROR
+        )
+        progress_label = (
+            "PROGRESS BEFORE INTERRUPTION"
+            if isinstance(exception, KeyboardInterrupt)
+            else "PROGRESS BEFORE FAILURE"
+        )
+
+        log_with_context(
+            progress_level,
+            f"📊 {progress_label}:",
+        )
+        log_with_context(
+            progress_level,
+            f"   • Channels processed: {channels_processed}",
+        )
+        if not self.dry_run:
+            log_with_context(
+                progress_level,
+                f"   • Spaces created: {spaces_created}",
+            )
+            log_with_context(
+                progress_level,
+                f"   • Messages migrated: {messages_created}",
+            )
+
+        # Log the full traceback for debugging (skip for KeyboardInterrupt as it's not useful)
+        if not isinstance(exception, KeyboardInterrupt):
+            log_with_context(
+                logging.ERROR,
+                f"🔍 FULL TRACEBACK:",
+            )
+            log_with_context(
+                logging.ERROR,
+                traceback.format_exc(),
             )
 
         log_with_context(
-            logging.ERROR,
+            (
+                logging.ERROR
+                if not isinstance(exception, KeyboardInterrupt)
+                else logging.WARNING
+            ),
+            "=" * 80,
+        )
+
+        if isinstance(exception, KeyboardInterrupt):
+            if self.dry_run:
+                log_with_context(
+                    logging.WARNING,
+                    "⏹️  Validation interrupted. You can restart the validation anytime.",
+                )
+            else:
+                log_with_context(
+                    logging.WARNING,
+                    "⏹️  Migration interrupted. Use --update_mode to resume from where you left off.",
+                )
+        else:
+            if self.dry_run:
+                log_with_context(
+                    logging.ERROR,
+                    "❌ Fix the validation issues above and try again.",
+                )
+            else:
+                log_with_context(
+                    logging.ERROR,
+                    "❌ Migration failed. Check the error details and try --update_mode to resume.",
+                )
+
+        log_with_context(
+            (
+                logging.ERROR
+                if not isinstance(exception, KeyboardInterrupt)
+                else logging.WARNING
+            ),
             "=" * 80,
         )

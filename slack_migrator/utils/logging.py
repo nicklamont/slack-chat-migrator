@@ -73,6 +73,18 @@ def setup_main_log_file(
     file_handler = logging.FileHandler(log_file, mode="w")
     file_handler.setLevel(logging.DEBUG)  # Always use DEBUG level for file handlers
 
+    # Enable immediate flushing to ensure logs are written to disk promptly
+    # This is important in case the migration fails and we want to preserve logs
+    if hasattr(file_handler, "flush"):
+        # Ensure the file handler flushes immediately on each log write
+        old_emit = file_handler.emit
+
+        def immediate_flush_emit(record):
+            old_emit(record)
+            file_handler.flush()
+
+        file_handler.emit = immediate_flush_emit
+
     # Create formatter - always use EnhancedFormatter but conditionally include API details
     formatter = EnhancedFormatter(
         "%(asctime)s - %(levelname)s - %(message)s", include_api_details=debug_api
@@ -290,6 +302,19 @@ def setup_channel_logger(
     file_handler = logging.FileHandler(log_file, mode="w")
     file_handler.setLevel(logging.DEBUG)  # Always use DEBUG level for file handlers
 
+    # Enable immediate flushing to ensure logs are written to disk promptly
+    # This is important in case the migration fails and we want to preserve logs
+    if hasattr(file_handler, "flush"):
+        # Ensure the file handler flushes immediately on each log write
+        # This sacrifices some performance for data safety
+        old_emit = file_handler.emit
+
+        def immediate_flush_emit(record):
+            old_emit(record)
+            file_handler.flush()
+
+        file_handler.emit = immediate_flush_emit
+
     # Create formatter - use EnhancedFormatter with appropriate settings
     formatter = EnhancedFormatter(verbose=verbose, include_api_details=debug_api)
     file_handler.setFormatter(formatter)
@@ -347,18 +372,26 @@ def ensure_channel_log_created(
 
     # Create an empty log file or write a header if it doesn't exist
     if not os.path.exists(log_file):
-        with open(log_file, "w") as f:
-            if dry_run:
-                f.write(f"# Channel migration log for {channel} (DRY RUN)\n")
-                f.write(
-                    f"# Created at {logging.Formatter().formatTime(logging.LogRecord('', 0, '', 0, '', (), None))}\n"
-                )
-                f.write("# This is a dry run. No actual changes were made.\n\n")
-            else:
-                f.write(f"# Channel migration log for {channel}\n")
-                f.write(
-                    f"# Created at {logging.Formatter().formatTime(logging.LogRecord('', 0, '', 0, '', (), None))}\n\n"
-                )
+        try:
+            with open(log_file, "w") as f:
+                if dry_run:
+                    f.write(f"# Channel migration log for {channel} (DRY RUN)\n")
+                    f.write(
+                        f"# Created at {logging.Formatter().formatTime(logging.LogRecord('', 0, '', 0, '', (), None))}\n"
+                    )
+                    f.write("# This is a dry run. No actual changes were made.\n\n")
+                else:
+                    f.write(f"# Channel migration log for {channel}\n")
+                    f.write(
+                        f"# Created at {logging.Formatter().formatTime(logging.LogRecord('', 0, '', 0, '', (), None))}\n\n"
+                    )
+                # Ensure content is written to disk immediately
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception as e:
+            # Use print instead of logging to avoid potential recursion issues
+            print(f"Warning: Failed to create channel log file for {channel}: {e}")
+            return
 
     logger.debug(
         f"{'[DRY RUN] ' if dry_run else ''}Channel log file ensured at: {log_file}"
