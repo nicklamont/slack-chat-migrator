@@ -860,6 +860,35 @@ class SlackToChatMigrator:
                 # Sort messages by timestamp to maintain chronological order
                 msgs = sorted(msgs, key=lambda m: float(m.get("ts", "0")))
 
+                # Deduplicate messages by timestamp to prevent processing thread replies twice
+                # Thread replies appear both in parent's "replies" array and as standalone message objects
+                seen_timestamps = set()
+                deduped_msgs = []
+                duplicate_count = 0
+
+                for msg in msgs:
+                    ts = msg.get("ts")
+                    if ts and ts not in seen_timestamps:
+                        seen_timestamps.add(ts)
+                        deduped_msgs.append(msg)
+                    elif ts:
+                        duplicate_count += 1
+                        log_with_context(
+                            logging.DEBUG,
+                            f"Skipping duplicate message with timestamp {ts}",
+                            channel=ch.name,
+                            ts=ts,
+                        )
+
+                if duplicate_count > 0:
+                    log_with_context(
+                        logging.INFO,
+                        f"Deduplicated {duplicate_count} messages in channel {ch.name} (likely thread reply duplicates)",
+                        channel=ch.name,
+                    )
+
+                msgs = deduped_msgs
+
                 # Count messages in dry run mode
                 if self.dry_run:
                     # Count only actual messages, not other events
