@@ -11,7 +11,7 @@ from typing import Any, Dict, Set
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
-from slack_migrator.utils.api import retry, set_global_retry_config, slack_ts_to_rfc3339
+from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.logging import log_with_context, logger
 
 
@@ -87,12 +87,8 @@ def channel_has_external_users(migrator, channel: str) -> bool:
     return False
 
 
-@retry()
 def create_space(migrator, channel: str) -> str:
     """Create a Google Chat space for a Slack channel in import mode."""
-    # Ensure global retry config is set
-    if hasattr(migrator, "config"):
-        set_global_retry_config(migrator.config, channel=channel)
     # Get channel metadata
     meta = migrator.channels_meta.get(channel, {})
     display_name = f"Slack #{channel}"

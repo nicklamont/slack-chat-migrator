@@ -11,7 +11,6 @@ from typing import Any, Dict, Optional, Tuple
 # pylint: disable=import-error
 from googleapiclient.http import MediaFileUpload
 
-from slack_migrator.utils.api import retry
 from slack_migrator.utils.logging import (
     log_api_request,
     log_api_response,
@@ -74,7 +73,6 @@ class DriveFileUploader:
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
 
-    @retry()
     def pre_cache_folder_file_hashes(
         self, folder_id: str, shared_drive_id: Optional[str] = None
     ) -> int:
@@ -276,7 +274,6 @@ class DriveFileUploader:
             )
             return None, None
 
-    @retry()
     def upload_file_to_drive(
         self,
         file_path: str,
@@ -490,7 +487,6 @@ class DriveFileUploader:
             )
             return False
 
-    @retry()
     def set_file_permissions_for_users(
         self,
         file_id: str,
@@ -651,7 +647,6 @@ class DriveFileUploader:
 
         return failed_count == 0
 
-    @retry()
     def transfer_ownership(self, file_id: str, new_owner_email: str) -> bool:
         """Transfer ownership of a file to a new owner.
 

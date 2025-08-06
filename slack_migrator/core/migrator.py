@@ -31,7 +31,7 @@ from slack_migrator.services.space import (
     create_space,
 )
 from slack_migrator.services.user import generate_user_map
-from slack_migrator.utils.api import get_gcp_service, set_global_retry_config
+from slack_migrator.utils.api import get_gcp_service
 from slack_migrator.utils.logging import log_with_context, logger
 
 
@@ -92,9 +92,6 @@ class SlackToChatMigrator:
 
         self.config = load_config(self.config_path)
 
-        # Set global retry config for all API calls
-        set_global_retry_config(self.config)
-
         # Generate user mapping from users.json
         self.user_map, self.users_without_email = generate_user_map(
             self.export_root, self.config
@@ -141,9 +138,15 @@ class SlackToChatMigrator:
 
         # Convert Path to str for API clients
         creds_path_str = str(self.creds_path)
-        self.chat = get_gcp_service(creds_path_str, self.workspace_admin, "chat", "v1")
+        self.chat = get_gcp_service(
+            creds_path_str, self.workspace_admin, "chat", "v1", retry_config=self.config
+        )
         self.drive = get_gcp_service(
-            creds_path_str, self.workspace_admin, "drive", "v3"
+            creds_path_str,
+            self.workspace_admin,
+            "drive",
+            "v3",
+            retry_config=self.config,
         )
 
         self._api_services_initialized = True
@@ -251,6 +254,7 @@ class SlackToChatMigrator:
                     "chat",
                     "v1",
                     getattr(self, "current_channel", None),
+                    retry_config=self.config,
                 )
                 test_service.spaces().list(pageSize=1).execute()
                 self.valid_users[email] = True
@@ -1010,80 +1014,47 @@ class SlackToChatMigrator:
                                 channel=ch.name,
                             )
 
-                            # Add retry logic for completeImport
-                            max_retries = 3
-                            retry_delay = 2  # seconds
-                            success = False
+                            result = (
+                                self.chat.spaces().completeImport(name=space).execute()
+                            )
 
-                            for retry_count in range(max_retries):
-                                try:
-                                    result = (
-                                        self.chat.spaces()
-                                        .completeImport(name=space)
-                                        .execute()
-                                    )
+                            log_with_context(
+                                logging.INFO,
+                                f"Successfully completed import for space {space}",
+                                channel=ch.name,
+                            )
 
-                                    log_with_context(
-                                        logging.INFO,
-                                        f"Successfully completed import for space {space}",
-                                        channel=ch.name,
-                                    )
+                            # Add regular members back to the space
+                            log_with_context(
+                                logging.INFO,
+                                f"Adding regular members to space after completing import: {space}",
+                                channel=ch.name,
+                            )
 
-                                    # Add regular members back to the space
-                                    log_with_context(
-                                        logging.INFO,
-                                        f"Adding regular members to space after completing import: {space}",
-                                        channel=ch.name,
-                                    )
+                            try:
+                                from slack_migrator.services.space import (
+                                    add_regular_members,
+                                )
 
-                                    try:
-                                        from slack_migrator.services.space import (
-                                            add_regular_members,
-                                        )
-
-                                        add_regular_members(self, space, ch.name)
-                                        log_with_context(
-                                            logging.INFO,
-                                            f"Successfully added regular members to space {space} for channel {ch.name}",
-                                            channel=ch.name,
-                                        )
-                                    except Exception as e:
-                                        log_with_context(
-                                            logging.ERROR,
-                                            f"Error adding regular members to space {space}: {e}",
-                                            channel=ch.name,
-                                        )
-                                        import traceback
-
-                                        log_with_context(
-                                            logging.DEBUG,
-                                            f"Exception traceback: {traceback.format_exc()}",
-                                            channel=ch.name,
-                                        )
-
-                                    success = True
-                                    break
-                                except HttpError as e:
-                                    log_with_context(
-                                        logging.WARNING,
-                                        f"Retry {retry_count+1}/{max_retries}: Failed to complete import: {e}",
-                                        channel=ch.name,
-                                    )
-                                    if retry_count < max_retries - 1:
-                                        time.sleep(retry_delay)
-
-                            if not success:
+                                add_regular_members(self, space, ch.name)
                                 log_with_context(
-                                    logging.ERROR,
-                                    f"Failed to complete import after {max_retries} retries",
+                                    logging.INFO,
+                                    f"Successfully added regular members to space {space} for channel {ch.name}",
                                     channel=ch.name,
                                 )
-                                channel_had_errors = True
+                            except Exception as e:
+                                log_with_context(
+                                    logging.ERROR,
+                                    f"Error adding regular members to space {space}: {e}",
+                                    channel=ch.name,
+                                )
+                                import traceback
 
-                                # Track spaces that failed to complete import
-                                if not hasattr(self, "incomplete_import_spaces"):
-                                    self.incomplete_import_spaces = []
-                                self.incomplete_import_spaces.append((space, ch.name))
+                                log_with_context(
+                                    logging.DEBUG,
+                                    f"Exception traceback: {traceback.format_exc()}",
+                                    channel=ch.name,
+                                )
 
                         except Exception as e:
                             log_with_context(
@@ -1344,36 +1315,18 @@ class SlackToChatMigrator:
                             f"Attempting to complete import mode for space: {space_name}",
                         )
 
-                        # Add retry logic for completeImport
-                        max_retries = 3
-                        retry_delay = 2  # seconds
-                        success = False
-
-                        for retry_count in range(max_retries):
-                            try:
-                                self.chat.spaces().completeImport(
-                                    name=space_name
-                                ).execute()
-                                log_with_context(
-                                    logging.INFO,
-                                    f"Successfully completed import mode for space: {space_name}",
-                                )
-                                success = True
-                                break
-                            except Exception as e:
-                                log_with_context(
-                                    logging.WARNING,
-                                    f"Retry {retry_count+1}/{max_retries}: Failed to complete import: {e}",
-                                    space_name=space_name,
-                                )
-                                if retry_count < max_retries - 1:
-                                    time.sleep(retry_delay)
-
-                        if not success:
+                        try:
+                            self.chat.spaces().completeImport(name=space_name).execute()
+                            log_with_context(
+                                logging.INFO,
+                                f"Successfully completed import mode for space: {space_name}",
+                                channel=channel_name if channel_name else None,
+                            )
+                        except Exception as e:
                             log_with_context(
                                 logging.ERROR,
-                                f"Failed to complete import after {max_retries} retries",
-                                space_name=space_name,
+                                f"Failed to complete import: {e}",
+                                channel=channel_name if channel_name else None,
                             )
                             continue
 

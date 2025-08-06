@@ -10,7 +10,6 @@ from typing import Any, Dict, Optional, Tuple
 
 from googleapiclient.http import MediaFileUpload
 
-from slack_migrator.utils.api import retry
 from slack_migrator.utils.logging import (
     log_api_request,
     log_api_response,
@@ -46,7 +45,6 @@ class ChatFileUploader:
             return self.migrator.current_channel
         return None
 
-    @retry()
     def upload_file_to_chat(
         self, file_path: str, filename: str, parent_space: Optional[str] = None
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:

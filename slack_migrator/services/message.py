@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from googleapiclient.errors import HttpError
 from googleapiclient.http import BatchHttpRequest
 
-from slack_migrator.utils.api import retry, slack_ts_to_rfc3339
+from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.formatting import convert_formatting, parse_slack_blocks
 from slack_migrator.utils.logging import (
     log_api_request,
@@ -340,13 +340,8 @@ def process_reactions_batch(
             )
 
 
-@retry()
 def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     """Send a message to a Google Chat space.
-
-    # Ensure global retry config is set
-    if hasattr(migrator, 'config'):
-        set_global_retry_config(migrator.config, channel=migrator.current_channel)
 
     This method handles converting a Slack message to a Google Chat message format
     and sending it to the specified space.

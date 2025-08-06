@@ -5,7 +5,6 @@ Folder management for Google Drive integration.
 import logging
 from typing import Optional
 
-from slack_migrator.utils.api import retry
 from slack_migrator.utils.logging import (
     log_api_request,
     log_api_response,
@@ -34,7 +33,6 @@ class FolderManager:
         self.dry_run = dry_run
         self.folder_cache = {}
 
-    @retry()
     def create_root_folder_in_shared_drive(
         self, folder_name: str, shared_drive_id: str
     ) -> Optional[str]:
@@ -118,7 +116,6 @@ class FolderManager:
             )
             return None
 
-    @retry()
     def create_regular_drive_folder(self, folder_name: str) -> Optional[str]:
         """Create a regular Drive folder with domain permissions as fallback.
 
@@ -426,7 +423,6 @@ class FolderManager:
             )
             return None
 
-    @retry()
     def set_channel_folder_permissions(
         self,
         folder_id: str,

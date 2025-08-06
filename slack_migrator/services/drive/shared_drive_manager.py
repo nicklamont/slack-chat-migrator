@@ -6,7 +6,6 @@ import logging
 import uuid
 from typing import Optional
 
-from slack_migrator.utils.api import retry
 from slack_migrator.utils.logging import (
     log_api_request,
     log_api_response,
@@ -100,7 +99,6 @@ class SharedDriveManager:
             )
             return None
 
-    @retry()
     def _find_or_create_shared_drive(self, drive_name: str) -> Optional[str]:
         """Find an existing shared drive by name or create a new one.
 

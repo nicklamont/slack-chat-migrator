@@ -86,7 +86,7 @@ debug: false
 max_retries: 5
 
 # Initial delay between retry attempts (in seconds)
-initial_retry_delay: 1.0
+retry_delay: 1.0
 
 # Batch size for message processing
 batch_size: 100

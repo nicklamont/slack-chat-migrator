@@ -17,7 +17,6 @@ from slack_migrator.services.drive import (
     FolderManager,
     SharedDriveManager,
 )
-from slack_migrator.utils.api import retry
 from slack_migrator.utils.logging import log_api_request, log_with_context
 
 
@@ -555,7 +554,6 @@ class FileHandler:
             )
             return None
 
-    @retry()
     def upload_file(
         self, file_obj: Dict, channel: Optional[str] = None
     ) -> Optional[str]:
@@ -1054,7 +1052,6 @@ class FileHandler:
             * 100,
         }
 
-    @retry()
     def _transfer_file_ownership(self, file_id: str, new_owner_email: str) -> bool:
         """Transfer ownership of a file to a new owner.
 
@@ -1094,7 +1091,6 @@ class FileHandler:
             log_with_context(logging.WARNING, f"Failed to transfer file ownership: {e}")
             return False
 
-    @retry()
     def _download_file(self, file_obj: Dict) -> Optional[bytes]:
         """Download a file from Slack export or URL.
 
@@ -1326,7 +1322,6 @@ class FileHandler:
             )
             return None
 
-    @retry()
     def share_file_with_members(self, drive_file_id: str, channel: str) -> bool:
         """Share a Drive file with all active members of a channel.
 
