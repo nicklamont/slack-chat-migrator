@@ -601,6 +601,8 @@ class FileHandler:
                     user_chat_uploader = ChatFileUploader(
                         user_service, dry_run=self.dry_run
                     )
+                    # Set migrator reference for channel context logging
+                    user_chat_uploader.migrator = self.migrator
                     upload_response, attachment_metadata = (
                         user_chat_uploader.upload_file_to_chat(
                             temp_file_path, name, space

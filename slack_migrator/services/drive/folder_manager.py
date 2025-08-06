@@ -94,7 +94,7 @@ class FolderManager:
                 "parents": [shared_drive_id],
             }
 
-            log_api_request("POST", "drive.files.create", folder_metadata)
+            log_api_request("POST", "drive.files.create", folder_metadata, channel=None)
 
             folder = (
                 self.drive_service.files()
@@ -103,7 +103,7 @@ class FolderManager:
             )
 
             folder_id = folder.get("id")
-            log_api_response(200, "drive.files.create", {"id": folder_id})
+            log_api_response(200, "drive.files.create", {"id": folder_id}, channel=None)
 
             log_with_context(
                 logging.INFO,
@@ -168,7 +168,7 @@ class FolderManager:
                 "mimeType": "application/vnd.google-apps.folder",
             }
 
-            log_api_request("POST", "drive.files.create", folder_metadata)
+            log_api_request("POST", "drive.files.create", folder_metadata, channel=None)
 
             folder = (
                 self.drive_service.files()
@@ -177,7 +177,7 @@ class FolderManager:
             )
 
             folder_id = folder.get("id")
-            log_api_response(200, "drive.files.create", {"id": folder_id})
+            log_api_response(200, "drive.files.create", {"id": folder_id}, channel=None)
 
             # Note: No domain-wide permissions set to avoid org-wide access
             # Individual channel folders will have their own space-specific permissions

@@ -153,16 +153,28 @@ def slack_ts_to_rfc3339(ts: str) -> str:
     return f"{base}.{micros}Z"
 
 
-def get_gcp_service(creds_path: str, user_email: str, api: str, version: str) -> Any:
+def get_gcp_service(
+    creds_path: str,
+    user_email: str,
+    api: str,
+    version: str,
+    channel: Optional[str] = None,
+) -> Any:
     """Get a Google API client service using service account impersonation."""
     cache_key = f"{creds_path}:{user_email}:{api}:{version}"
     if cache_key in _service_cache:
-        logger.debug(f"Using cached service for {api} as {user_email}")
+        log_with_context(
+            logging.DEBUG,
+            f"Using cached service for {api} as {user_email}",
+            channel=channel,
+        )
         return _service_cache[cache_key]
 
     try:
-        logger.debug(
-            f"Creating new service for {api} as {user_email} with required scopes."
+        log_with_context(
+            logging.DEBUG,
+            f"Creating new service for {api} as {user_email} with required scopes.",
+            channel=channel,
         )
 
         # This is the critical step: The code must explicitly request the

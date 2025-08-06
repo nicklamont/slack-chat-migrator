@@ -90,18 +90,8 @@ def setup_main_log_file(
             if record_channel is None or record_channel == "":
                 return True
 
-            # Include API debug logs in the main log when debug_api is enabled
-            if debug_api and (
-                hasattr(record, "api_data") or hasattr(record, "response")
-            ):
-                return True
-
-            # Include HTTP client logs in main log when debug_api is enabled
-            if debug_api and record.name == "http.client":
-                return True
-
             # If record has a non-empty channel attribute, exclude from main log
-            # Channel-specific logs should go to their respective channel log files
+            # Channel-specific logs (including API logs) should go to their respective channel log files
             return False
 
     # Add the filter to the handler
@@ -236,7 +226,7 @@ def setup_logger(
         _patch_http_client_for_debug()
 
         logger.info(
-            "API debug logging enabled - API requests/responses will be logged to migration.log and channel-specific logs"
+            "API debug logging enabled - Channel-specific API requests/responses will be logged to channel logs only"
         )
 
     return logger
@@ -312,16 +302,16 @@ def setup_channel_logger(
             if record_channel == channel:
                 return True
 
-            # Also include API debug logs when they contain api_data or response attributes
-            # These are usually channel-specific API operations
+            # For API debug logs, only include them if they have the matching channel context
             if debug_api and (
                 hasattr(record, "api_data") or hasattr(record, "response")
             ):
-                return True
+                # Only include API logs that have a channel context matching this channel
+                return record_channel == channel
 
-            # Include HTTP client logs only when API debug is enabled
+            # Include HTTP client logs only when API debug is enabled AND they have matching channel context
             if debug_api and record.name == "http.client":
-                return True
+                return record_channel == channel
 
             return False
 

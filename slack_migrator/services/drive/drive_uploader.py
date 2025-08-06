@@ -228,6 +228,7 @@ class DriveFileUploader:
             log_with_context(
                 logging.DEBUG,
                 f"Searching for files with hash {file_hash} using query: {query}",
+                channel=self._get_current_channel(),
             )
 
             # Build request parameters
@@ -261,13 +262,18 @@ class DriveFileUploader:
                 log_with_context(
                     logging.INFO,
                     f"Found existing file with same hash: {filename} (ID: {file_id})",
+                    channel=self._get_current_channel(),
                 )
                 return file_id, web_view_link
 
             return None, None
 
         except Exception as e:
-            log_with_context(logging.WARNING, f"Error searching for file by hash: {e}")
+            log_with_context(
+                logging.WARNING,
+                f"Error searching for file by hash: {e}",
+                channel=self._get_current_channel(),
+            )
             return None, None
 
     @retry()
@@ -348,13 +354,19 @@ class DriveFileUploader:
             log_with_context(
                 logging.DEBUG,
                 f"Uploading file {filename} with MIME type {mime_type} to folder {folder_id}",
+                channel=self._get_current_channel(),
             )
 
             file_metadata = {"name": filename, "parents": [folder_id]}
 
             media = MediaFileUpload(file_path, mimetype=mime_type)
 
-            log_api_request("POST", "drive.files.create", file_metadata)
+            log_api_request(
+                "POST",
+                "drive.files.create",
+                file_metadata,
+                channel=self._get_current_channel(),
+            )
 
             # Upload with appropriate parameters
             if shared_drive_id:
@@ -381,7 +393,10 @@ class DriveFileUploader:
             public_url = file.get("webViewLink")
 
             log_api_response(
-                200, "drive.files.create", {"id": file_id, "webViewLink": public_url}
+                200,
+                "drive.files.create",
+                {"id": file_id, "webViewLink": public_url},
+                channel=self._get_current_channel(),
             )
 
             # We only set editor permissions for the message poster
@@ -394,13 +409,16 @@ class DriveFileUploader:
             log_with_context(
                 logging.INFO,
                 f"Successfully uploaded file {filename} to Drive (ID: {file_id})",
+                channel=self._get_current_channel(),
             )
 
             return (file_id, public_url)
 
         except Exception as e:
             log_with_context(
-                logging.ERROR, f"Failed to upload file {filename} to Drive: {e}"
+                logging.ERROR,
+                f"Failed to upload file {filename} to Drive: {e}",
+                channel=self._get_current_channel(),
             )
             return (None, None)
 
@@ -435,7 +453,11 @@ class DriveFileUploader:
             }
 
             log_api_request(
-                "POST", "drive.permissions.create", permission, file_id=file_id
+                "POST",
+                "drive.permissions.create",
+                permission,
+                file_id=file_id,
+                channel=self._get_current_channel(),
             )
 
             if shared_drive_id:
@@ -513,7 +535,11 @@ class DriveFileUploader:
                 permission = {"type": "user", "role": role, "emailAddress": email}
 
                 log_api_request(
-                    "POST", "drive.permissions.create", permission, file_id=file_id
+                    "POST",
+                    "drive.permissions.create",
+                    permission,
+                    file_id=file_id,
+                    channel=self._get_current_channel(),
                 )
 
                 self.drive_service.permissions().create(
@@ -553,7 +579,11 @@ class DriveFileUploader:
                 )
 
                 log_api_request(
-                    "POST", "drive.permissions.create", permission, file_id=file_id
+                    "POST",
+                    "drive.permissions.create",
+                    permission,
+                    file_id=file_id,
+                    channel=self._get_current_channel(),
                 )
 
                 self.drive_service.permissions().create(
@@ -589,7 +619,11 @@ class DriveFileUploader:
                 )
 
                 log_api_request(
-                    "POST", "drive.permissions.create", permission, file_id=file_id
+                    "POST",
+                    "drive.permissions.create",
+                    permission,
+                    file_id=file_id,
+                    channel=self._get_current_channel(),
                 )
 
                 self.drive_service.permissions().create(
@@ -644,7 +678,11 @@ class DriveFileUploader:
             }
 
             log_api_request(
-                "POST", "drive.permissions.create", permission, file_id=file_id
+                "POST",
+                "drive.permissions.create",
+                permission,
+                file_id=file_id,
+                channel=self._get_current_channel(),
             )
 
             self.drive_service.permissions().create(

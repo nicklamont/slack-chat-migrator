@@ -38,7 +38,11 @@ class ChatFileUploader:
         Returns:
             Current channel name or None if not available
         """
-        if hasattr(self, "migrator") and hasattr(self.migrator, "current_channel"):
+        if (
+            hasattr(self, "migrator")
+            and self.migrator
+            and hasattr(self.migrator, "current_channel")
+        ):
             return self.migrator.current_channel
         return None
 
@@ -92,6 +96,7 @@ class ChatFileUploader:
                 "POST",
                 "chat.media.upload",
                 {"filename": filename, "mimeType": mime_type, "size": file_size},
+                channel=self._get_current_channel(),
             )
 
             # Create media upload object
@@ -132,7 +137,9 @@ class ChatFileUploader:
             response = upload_request.execute()
 
             # Debug: Log the detailed API response
-            log_api_response(200, "chat.media.upload", response)
+            log_api_response(
+                200, "chat.media.upload", response, channel=self._get_current_channel()
+            )
 
             # According to Google Chat API documentation, return the complete response
             # The documentation states: "Set attachment as the response from calling the upload method"
@@ -185,6 +192,7 @@ class ChatFileUploader:
                 status_code,
                 "chat.media.upload",
                 {"error": str(e), "details": error_info},
+                channel=self._get_current_channel(),
             )
 
             return (None, None)

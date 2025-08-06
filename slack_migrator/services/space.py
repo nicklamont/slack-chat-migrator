@@ -43,8 +43,10 @@ def channel_has_external_users(migrator, channel: str) -> bool:
                     if m.get("type") == "message" and "user" in m and m["user"]:
                         user_ids.add(m["user"])
             except Exception as e:
-                logger.warning(
-                    f"Failed to process {jf} when checking for external users: {e}"
+                log_with_context(
+                    logging.WARNING,
+                    f"Failed to process {jf} when checking for external users: {e}",
+                    channel=channel,
                 )
 
         members = list(user_ids)
@@ -75,8 +77,10 @@ def channel_has_external_users(migrator, channel: str) -> bool:
             )
 
         if migrator._is_external_user(email) and not is_bot:
-            logger.info(
-                f"Channel {channel} has external user {user_id} with email {email}"
+            log_with_context(
+                logging.INFO,
+                f"Channel {channel} has external user {user_id} with email {email}",
+                channel=channel,
             )
             return True
 
@@ -133,8 +137,10 @@ def create_space(migrator, channel: str) -> str:
     has_external_users = channel_has_external_users(migrator, channel)
     if has_external_users:
         body["externalUserAllowed"] = True
-        logger.info(
-            f"{'[DRY RUN] ' if migrator.dry_run else ''}Enabling external user access for channel {channel}"
+        log_with_context(
+            logging.INFO,
+            f"{'[DRY RUN] ' if migrator.dry_run else ''}Enabling external user access for channel {channel}",
+            channel=channel,
         )
 
     # Store space name (either real or generated)
@@ -145,22 +151,30 @@ def create_space(migrator, channel: str) -> str:
         migrator.migration_summary["spaces_created"] += 1
         # Use a consistent space name format for tracking
         space_name = f"spaces/{channel}"
-        logger.info(
-            f"[DRY RUN] Would create space {space_name} for channel {channel} in import mode with threading enabled"
+        log_with_context(
+            logging.INFO,
+            f"[DRY RUN] Would create space {space_name} for channel {channel} in import mode with threading enabled",
+            channel=channel,
         )
     else:
         try:
             # Create the space in import mode
             space = migrator.chat.spaces().create(body=body).execute()
             space_name = space["name"]
-            logger.info(
-                f"Created space {space_name} for channel {channel} in import mode with threading enabled"
+            log_with_context(
+                logging.INFO,
+                f"Created space {space_name} for channel {channel} in import mode with threading enabled",
+                channel=channel,
+                space_name=space_name,
             )
 
             # Add warning about 90-day limit for import mode
-            logger.warning(
+            log_with_context(
+                logging.WARNING,
                 f"IMPORTANT: Space {space_name} is in import mode. Per Google Chat API restrictions, "
-                "import mode must be completed within 90 days or the space will be automatically deleted."
+                "import mode must be completed within 90 days or the space will be automatically deleted.",
+                channel=channel,
+                space_name=space_name,
             )
 
             # If channel has a purpose or topic, update the space details
@@ -187,11 +201,17 @@ def create_space(migrator, channel: str) -> str:
                             name=space_name, updateMask=update_mask, body=space_details
                         ).execute()
 
-                        logger.info(
-                            f"Updated space {space_name} with description from channel metadata"
+                        log_with_context(
+                            logging.INFO,
+                            f"Updated space {space_name} with description from channel metadata",
+                            channel=channel,
                         )
                     except HttpError as e:
-                        logger.warning(f"Failed to update space description: {e}")
+                        log_with_context(
+                            logging.WARNING,
+                            f"Failed to update space description: {e}",
+                            channel=channel,
+                        )
         except HttpError as e:
             if e.resp.status == 403 and "PERMISSION_DENIED" in str(e):
                 # Log the error but don't raise an exception
@@ -299,8 +319,10 @@ def add_users_to_space(migrator, space: str, channel: str):
                             if user_id in active_users:
                                 active_users.remove(user_id)  # Remove from active users
         except Exception as e:
-            logger.warning(
-                f"Failed to process file {jf} when collecting user membership data: {e}"
+            log_with_context(
+                logging.WARNING,
+                f"Failed to process file {jf} when collecting user membership data: {e}",
+                channel=channel,
             )
 
     # The channel metadata (channels.json) is the most reliable and definitive source for active members
@@ -334,8 +356,12 @@ def add_users_to_space(migrator, space: str, channel: str):
     migrator.active_users_by_channel[channel] = active_users
 
     # Log what we're doing
-    logger.info(
-        f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding {len(user_membership)} users to space {space} for channel {channel}"
+    log_with_context(
+        logging.INFO,
+        f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding {len(user_membership)} users to space {space} for channel {channel}",
+        channel=channel,
+        space=space,
+        user_count=len(user_membership),
     )
 
     if migrator.dry_run:
@@ -535,11 +561,16 @@ def add_users_to_space(migrator, space: str, channel: str):
                     f"Failed to add user {internal_email} to space {space}",
                     error_code=e.resp.status,
                     error_message=str(e),
+                    channel=channel,
                 )
                 failed_count += 1
         except Exception as e:
-            logger.warning(
-                f"Unexpected error adding user {internal_email} to space {space}: {e}"
+            log_with_context(
+                logging.WARNING,
+                f"Unexpected error adding user {internal_email} to space {space}: {e}",
+                user_email=internal_email,
+                space=space,
+                channel=migrator.current_channel,
             )
             failed_count += 1
 
@@ -647,8 +678,10 @@ def add_regular_members(migrator, space: str, channel: str):
 
     # If we have external users, ensure the space has externalUserAllowed=True
     if has_external_users:
-        logger.info(
-            f"{'[DRY RUN] ' if migrator.dry_run else ''}Enabling external user access for space {space} before adding members"
+        log_with_context(
+            logging.INFO,
+            f"{'[DRY RUN] ' if migrator.dry_run else ''}Enabling external user access for space {space} before adding members",
+            channel=channel,
         )
 
         if not migrator.dry_run:
@@ -664,12 +697,16 @@ def add_regular_members(migrator, space: str, channel: str):
                     migrator.chat.spaces().patch(
                         name=space, updateMask=update_mask, body=update_body
                     ).execute()
-                    logger.info(
-                        f"Successfully enabled external user access for space {space}"
+                    log_with_context(
+                        logging.INFO,
+                        f"Successfully enabled external user access for space {space}",
+                        channel=channel,
                     )
             except Exception as e:
-                logger.warning(
-                    f"Failed to enable external user access for space {space}: {e}"
+                log_with_context(
+                    logging.WARNING,
+                    f"Failed to enable external user access for space {space}: {e}",
+                    channel=channel,
                 )
 
     # In dry run mode, just log and return
@@ -760,6 +797,7 @@ def add_regular_members(migrator, space: str, channel: str):
                     logging.ERROR,
                     f"Bad request (400) when adding user {internal_email} - check API documentation for correct format",
                     error_message=str(e),
+                    channel=channel,
                 )
                 failed_count += 1
             else:
@@ -769,6 +807,7 @@ def add_regular_members(migrator, space: str, channel: str):
                     error_code=e.resp.status,
                     error_message=str(e),
                     request_body=json.dumps(membership_body),
+                    channel=channel,
                 )
                 failed_count += 1
 
@@ -780,10 +819,13 @@ def add_regular_members(migrator, space: str, channel: str):
                         f"Check that the user exists and the service account has permission to modify the space.",
                         space=space,
                         user=internal_email,
+                        channel=channel,
                     )
         except Exception as e:
-            logger.warning(
-                f"Unexpected error adding user {internal_email} to space {space} as regular member: {e}"
+            log_with_context(
+                logging.WARNING,
+                f"Unexpected error adding user {internal_email} to space {space} as regular member: {e}",
+                channel=channel,
             )
             failed_count += 1
 
@@ -794,6 +836,7 @@ def add_regular_members(migrator, space: str, channel: str):
                 logging.DEBUG,
                 f"Exception traceback: {traceback.format_exc()}",
                 user=internal_email,
+                channel=channel,
             )
 
         # Add a small delay to avoid rate limiting

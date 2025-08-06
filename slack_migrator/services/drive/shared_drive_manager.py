@@ -136,7 +136,7 @@ class SharedDriveManager:
 
             drive_metadata = {"name": drive_name}
 
-            log_api_request("POST", "drive.drives.create", drive_metadata)
+            log_api_request("POST", "drive.drives.create", drive_metadata, channel=None)
 
             created_drive = (
                 self.drive_service.drives()
@@ -145,7 +145,7 @@ class SharedDriveManager:
             )
 
             drive_id = created_drive.get("id")
-            log_api_response(200, "drive.drives.create", created_drive)
+            log_api_response(200, "drive.drives.create", created_drive, channel=None)
 
             log_with_context(
                 logging.INFO,

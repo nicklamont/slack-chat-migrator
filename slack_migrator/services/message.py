@@ -160,6 +160,7 @@ def process_reactions_batch(
                 f"Using admin account for user {email} (impersonation not available)",
                 message_id=message_id,
                 user=email,
+                channel=getattr(migrator, "current_channel", None),
             )
 
             for emo in emojis:
@@ -171,6 +172,7 @@ def process_reactions_batch(
                         reaction_body,
                         message_id=message_id,
                         user=email,
+                        channel=getattr(migrator, "current_channel", None),
                     )
 
                     result = (
@@ -187,6 +189,7 @@ def process_reactions_batch(
                         result,
                         message_id=message_id,
                         user=email,
+                        channel=getattr(migrator, "current_channel", None),
                     )
                 except HttpError as e:
                     log_with_context(
@@ -195,6 +198,7 @@ def process_reactions_batch(
                         error_code=e.resp.status,
                         user=email,
                         message_id=message_id,
+                        channel=getattr(migrator, "current_channel", None),
                     )
             continue
 
@@ -207,6 +211,7 @@ def process_reactions_batch(
                 f"Using admin account for user {email} (impersonation not available)",
                 message_id=message_id,
                 user=email,
+                channel=getattr(migrator, "current_channel", None),
             )
 
             for emo in emojis:
@@ -220,6 +225,7 @@ def process_reactions_batch(
                         reaction_body,
                         message_id=message_id,
                         user=email,
+                        channel=getattr(migrator, "current_channel", None),
                     )
 
                     result = (
@@ -236,6 +242,7 @@ def process_reactions_batch(
                         result,
                         message_id=message_id,
                         user=email,
+                        channel=getattr(migrator, "current_channel", None),
                     )
                 except HttpError as e:
                     log_with_context(
@@ -244,6 +251,7 @@ def process_reactions_batch(
                         error_code=e.resp.status,
                         user=email,
                         message_id=message_id,
+                        channel=getattr(migrator, "current_channel", None),
                     )
             continue
 
