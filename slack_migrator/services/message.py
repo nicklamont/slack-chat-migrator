@@ -522,11 +522,22 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     final_text = formatted_text
 
     if user_email:
-        # Get the internal email for this user (handles external users)
+        # Get the internal email for this user (now just returns the mapped email)
         internal_email = migrator._get_internal_email(user_id, user_email)
         if internal_email:
-            sender_email = internal_email
-            payload["sender"] = {"type": "HUMAN", "name": f"users/{internal_email}"}
+            # Check if this is an external user - if so, use admin with attribution
+            if migrator._is_external_user(internal_email):
+                # External user - send via admin with attribution
+                admin_email, attributed_text = migrator._handle_unmapped_user_message(
+                    user_id, formatted_text
+                )
+                sender_email = admin_email
+                final_text = attributed_text
+                payload["sender"] = {"type": "HUMAN", "name": f"users/{admin_email}"}
+            else:
+                # Regular internal user - send directly
+                sender_email = internal_email
+                payload["sender"] = {"type": "HUMAN", "name": f"users/{internal_email}"}
         else:
             # This shouldn't happen if user_email exists, but handle it gracefully
             admin_email, attributed_text = migrator._handle_unmapped_user_message(

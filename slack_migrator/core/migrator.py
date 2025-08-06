@@ -436,15 +436,9 @@ class SlackToChatMigrator:
                 )
                 return None  # Return None instead of fallback email
 
-        # Check if this is an external user
-        if self._is_external_user(user_email):
-            # For external users, we need to use a special format
-            # This ensures messages are properly attributed to external users
-            external_user_domain = self.config.get(
-                "external_user_domain", "external.example.com"
-            )
-            return f"external-{user_id}@{external_user_domain}"
-
+        # Always return the mapped email - don't create fake external emails
+        # If the user has a mapping override, that takes precedence
+        # If they're external but have a real email mapping, use that
         return user_email
 
     def _get_user_data(self, user_id: str) -> Optional[Dict]:
@@ -511,27 +505,26 @@ class SlackToChatMigrator:
             pass  # Continue without user info if we can't load it
 
         # Create attribution prefix
-        if user_info:
+        # First check if we have a mapping override (this takes precedence)
+        override_email = self.config.get("user_mapping_overrides", {}).get(user_id)
+        if override_email:
+            attribution = f"*[From: {override_email}]*"
+        elif user_info:
             real_name = user_info.get("profile", {}).get("real_name", "")
             username = user_info.get("name", user_id)
             email = user_info.get("profile", {}).get("email", "")
 
             if real_name and email:
-                attribution = f"**[From: {real_name}]**"
+                attribution = f"*[From: {real_name} ({email})]*"
             elif email:
-                attribution = f"**[From: {email}]**"
+                attribution = f"*[From: {email}]*"
             elif real_name:
-                attribution = f"**[From: {real_name}]**"
+                attribution = f"*[From: {real_name}]*"
             else:
-                attribution = f"**[From: {user_id}]**"
+                attribution = f"*[From: {user_id}]*"
         else:
-            # User not in users.json (external or deactivated)
-            # Check if we have a mapping override that might give us info
-            override_email = self.config.get("user_mapping_overrides", {}).get(user_id)
-            if override_email:
-                attribution = f"**[From: {override_email}]**"
-            else:
-                attribution = f"**[From: {user_id}]**"
+            # User not in users.json (external or deactivated) and no override
+            attribution = f"*[From: {user_id}]*"
 
         # Combine attribution with original message
         modified_text = f"{attribution}\n{original_text}"
