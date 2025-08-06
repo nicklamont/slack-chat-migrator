@@ -4,11 +4,12 @@ Report generation functionality for Slack to Google Chat migration
 
 import datetime
 import json
+import logging
 import os
 
 import yaml
 
-from slack_migrator.utils.logging import logger
+from slack_migrator.utils.logging import log_with_context
 
 
 def print_dry_run_summary(migrator, report_file=None):
@@ -76,26 +77,6 @@ def print_dry_run_summary(migrator, report_file=None):
     print("=" * 80)
 
 
-def create_output_directory(migrator):
-    """Create the output directory structure for this migration run."""
-    # Create a timestamped directory for this run
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_output_dir = os.path.join("slack_export_output", f"run_{timestamp}")
-
-    # Create subdirectories
-    os.makedirs(run_output_dir, exist_ok=True)
-    os.makedirs(os.path.join(run_output_dir, "channel_logs"), exist_ok=True)
-
-    # Store the directory paths in the migrator
-    migrator.output_dir = run_output_dir
-    migrator.output_dirs = {
-        "channel_logs": os.path.join(run_output_dir, "channel_logs"),
-    }
-
-    logger.info(f"Created output directory structure at {run_output_dir}")
-    return run_output_dir
-
-
 def generate_report(migrator):
     """Generate a detailed migration report."""
     # Get the output directory
@@ -114,13 +95,17 @@ def generate_report(migrator):
             failed_by_channel[channel].append(failed_msg)
 
         # Log summary of failed messages
-        logger.warning(
-            f"Migration completed with {len(migrator.failed_messages)} failed messages across {len(failed_by_channel)} channels"
+        log_with_context(
+            logging.WARNING,
+            f"Migration completed with {len(migrator.failed_messages)} failed messages across {len(failed_by_channel)} channels",
         )
 
         # For each channel with failures, write detailed logs
         for channel, failures in failed_by_channel.items():
-            logger.warning(f"Channel {channel} had {len(failures)} failed messages")
+            log_with_context(
+                logging.WARNING,
+                f"Channel {channel} had {len(failures)} failed messages",
+            )
 
             # Write detailed failure info to channel log
             if hasattr(migrator, "output_dir"):
@@ -149,12 +134,14 @@ def generate_report(migrator):
 
                             f.write("\n" + "-" * 40 + "\n\n")
 
-                    logger.info(
-                        f"Detailed failure information for channel {channel} written to {log_file}"
+                    log_with_context(
+                        logging.INFO,
+                        f"Detailed failure information for channel {channel} written to {log_file}",
                     )
                 except Exception as e:
-                    logger.error(
-                        f"Failed to write detailed failure log for channel {channel}: {e}"
+                    log_with_context(
+                        logging.ERROR,
+                        f"Failed to write detailed failure log for channel {channel}: {e}",
                     )
 
     # Create a report dictionary
@@ -347,7 +334,7 @@ def generate_report(migrator):
         yaml.dump(report, f, default_flow_style=False)
 
     # Log that the report was generated
-    logger.info(f"Migration report generated: {report_path}")
+    log_with_context(logging.INFO, f"Migration report generated: {report_path}")
 
     # Return the report file path instead of the report content
     return report_path

@@ -91,19 +91,45 @@ def setup_main_log_file(
     )
     file_handler.setFormatter(formatter)
 
-    # Create a filter to include logs that don't have a channel attribute,
-    # channel attribute is empty, or are API-related logs when debug_api is enabled
+    # Create a filter to include logs that should go to the main migration log:
+    # 1. All ERROR level and above (critical errors always go to main log)
+    # 2. All logs without a channel attribute (migration-level events)
+    # 3. API logs when debug_api is enabled AND they have no channel context
     class MainLogFilter(logging.Filter):
         def filter(self, record):
             # Check if the record has a channel attribute
             record_channel = getattr(record, "channel", None)
 
-            # If no channel attribute or empty channel, include in main log
+            # Always include critical errors (ERROR level and above) in main log
+            if record.levelno >= logging.ERROR:
+                return True
+
+            # Include ALL logs without a channel attribute or with empty/None channel
+            # This covers all migration-level operations by default
             if record_channel is None or record_channel == "":
                 return True
 
-            # If record has a non-empty channel attribute, exclude from main log
-            # Channel-specific logs (including API logs) should go to their respective channel log files
+            # For logs that DO have a channel attribute, exclude them from main log
+            # (they should go to channel-specific logs instead)
+            # Exception: if debug_api is disabled, API logs go nowhere
+            message = record.getMessage()
+            has_api_indicators = any(
+                indicator in message
+                for indicator in [
+                    "API Request:",
+                    "API Response:",
+                    "🔄",
+                    "✅",
+                    "--- API Request Data ---",
+                    "--- API Response Data ---",
+                ]
+            )
+
+            # If this is an API log but debug_api is disabled, exclude it entirely
+            if has_api_indicators and not debug_api:
+                return False
+
+            # All other logs with channel context should go to channel logs only
             return False
 
     # Add the filter to the handler

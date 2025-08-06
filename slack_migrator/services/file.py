@@ -114,7 +114,7 @@ class FileHandler:
         if not self._drive_initialized and not self.dry_run:
             log_with_context(
                 logging.INFO,
-                "Initializing drive structures...",
+                "Initializing Google Drive structures (shared drive and folder hierarchy)...",
                 channel=self._get_current_channel(),
             )
             self._initialize_shared_drive_and_folder()
@@ -199,7 +199,7 @@ class FileHandler:
                 # Use the shared drive root directly - no need for an extra folder layer
                 self._root_folder_id = self._shared_drive_id
                 log_with_context(
-                    logging.INFO,
+                    logging.DEBUG,
                     f"Using shared drive root as attachment folder: {self._shared_drive_id}",
                 )
 
@@ -240,7 +240,7 @@ class FileHandler:
 
         try:
             log_with_context(
-                logging.INFO,
+                logging.DEBUG,
                 "Pre-caching file hashes from root folder to improve deduplication",
             )
 
@@ -292,12 +292,12 @@ class FileHandler:
 
                         if folders_processed % 10 == 0:
                             log_with_context(
-                                logging.INFO,
+                                logging.DEBUG,
                                 f"Pre-cached {folders_processed}/{total_subfolders} subfolders ({total_files_cached} total files)",
                             )
 
                 log_with_context(
-                    logging.INFO,
+                    logging.DEBUG,
                     f"Completed pre-caching {total_files_cached} files from {folders_processed} channel folders",
                 )
 
@@ -370,7 +370,7 @@ class FileHandler:
                     self.file_stats["external_user_files"] += 1
 
             log_with_context(
-                logging.INFO,
+                logging.DEBUG,
                 f"Processing file: {name} (MIME: {mime_type}, Size: {size})",
                 channel=channel,
                 file_id=file_id,
@@ -403,7 +403,7 @@ class FileHandler:
             # Check if this is a Google Docs file that should be skipped
             if file_content == b"__GOOGLE_DOCS_SKIP__":
                 log_with_context(
-                    logging.INFO,
+                    logging.DEBUG,
                     f"Google Docs/Sheets file cannot be attached - will appear as link in message text: {name}",
                     channel=channel,
                     file_id=file_id,
@@ -483,7 +483,7 @@ class FileHandler:
                     return direct_result
                 else:
                     log_with_context(
-                        logging.INFO,
+                        logging.DEBUG,
                         f"Direct upload failed for {name}, falling back to Drive upload",
                         channel=channel,
                         file_id=file_id,
@@ -525,7 +525,7 @@ class FileHandler:
                 self.file_stats["drive_uploads"] += 1
 
                 log_with_context(
-                    logging.INFO,
+                    logging.DEBUG,
                     f"Successfully uploaded file {name} to Drive: {drive_result.get('link')}",
                     channel=channel,
                     file_id=file_id,
@@ -662,7 +662,7 @@ class FileHandler:
                     }
 
                     log_with_context(
-                        logging.INFO,
+                        logging.DEBUG,
                         f"Successfully uploaded file {name} directly to Chat API",
                         channel=channel,
                         file_id=file_id,
@@ -793,91 +793,38 @@ class FileHandler:
             if user_id and hasattr(self.migrator, "user_map"):
                 user_email = self.migrator.user_map.get(user_id)
 
-            # Get or create a folder for this channel and collect user emails for permissions
+            # Get or create a folder for this channel
             folder_id = None
-            user_emails_for_sharing = []
 
             if channel:
                 folder_id = self.folder_manager.get_or_create_channel_folder(
                     channel, self._root_folder_id, self._shared_drive_id
                 )
 
-                # Only set permissions if this channel folder hasn't been shared yet
+                # Mark this channel folder as processed to avoid redundant setup
+                # Note: Channel folder permissions will be set later in add_regular_members()
+                # after migration is complete and we have definitive member data
                 channel_folder_key = f"{channel}_{folder_id}"
                 if folder_id and channel_folder_key not in self.shared_channel_folders:
-                    # Collect user emails for permissions (used for both folder and file permissions)
-                    # Try multiple sources to get as complete a list as possible
-
-                    # First check active users explicitly tracked during import
-                    if (
-                        hasattr(self.migrator, "active_users_by_channel")
-                        and channel in self.migrator.active_users_by_channel
-                    ):
-                        active_users = self.migrator.active_users_by_channel[channel]
-
-                        # Get emails for ALL active users (including external users)
-                        for user_id in active_users:
-                            email = self.migrator.user_map.get(user_id)
-                            if email:
-                                # Get internal email (for proper permission handling)
-                                internal_email = self.migrator._get_internal_email(
-                                    user_id, email
-                                )
-                                if (
-                                    internal_email
-                                    and internal_email not in user_emails_for_sharing
-                                ):
-                                    user_emails_for_sharing.append(internal_email)
-
-                    # Also check the channel metadata for completeness
-                    meta = self.migrator.channels_meta.get(channel, {})
-                    if "members" in meta and isinstance(meta["members"], list):
-                        for user_id in meta["members"]:
-                            email = self.migrator.user_map.get(user_id)
-                            if email:
-                                # Get internal email (for proper permission handling)
-                                internal_email = self.migrator._get_internal_email(
-                                    user_id, email
-                                )
-                                if (
-                                    internal_email
-                                    and internal_email not in user_emails_for_sharing
-                                ):
-                                    user_emails_for_sharing.append(internal_email)
-
-                    # If we have the sender's email, ensure they're included (they need editor permission)
-                    if sender_email and sender_email not in user_emails_for_sharing:
-                        user_emails_for_sharing.append(sender_email)
-
-                    # Log who we're sharing with
                     log_with_context(
                         logging.DEBUG,
-                        f"Sharing channel folder for {channel} with {len(user_emails_for_sharing)} users",
+                        f"Channel folder created for {channel}, permissions will be set after migration completes",
                         channel=channel,
                     )
-
-                    # Set permissions on the channel folder for all channel members
-                    if user_emails_for_sharing:
-                        self.folder_manager.set_channel_folder_permissions(
-                            folder_id,
-                            channel,
-                            user_emails_for_sharing,
-                            self._shared_drive_id,
-                        )
-
-                        # Mark this channel folder as shared to avoid redundant sharing
-                        self.shared_channel_folders.add(channel_folder_key)
+                    # Mark this channel folder as processed to avoid redundant processing
+                    self.shared_channel_folders.add(channel_folder_key)
                 else:
                     log_with_context(
                         logging.DEBUG,
-                        f"Channel folder for {channel} already shared, skipping permissions setup",
+                        f"Channel folder for {channel} already processed",
                         channel=channel,
                     )
 
                 # Pre-cache file hashes from this folder to avoid duplicate uploads
-                self.drive_uploader.pre_cache_folder_file_hashes(
-                    folder_id, self._shared_drive_id
-                )
+                if folder_id:
+                    self.drive_uploader.pre_cache_folder_file_hashes(
+                        folder_id, self._shared_drive_id
+                    )
 
             # If we couldn't get or create a channel folder, use the root folder
             if not folder_id:
@@ -1131,7 +1078,7 @@ class FileHandler:
 
             if is_google_docs:
                 log_with_context(
-                    logging.INFO,
+                    logging.DEBUG,
                     f"Skipping Google Docs link - not a downloadable file: {url_private[:100]}{'...' if len(url_private) > 100 else ''}",
                     file_id=file_id,
                     file_name=name,
@@ -1141,7 +1088,7 @@ class FileHandler:
 
             if is_google_drive_file:
                 log_with_context(
-                    logging.INFO,
+                    logging.DEBUG,
                     f"Google Drive file detected - will create direct reference instead of downloading: {url_private[:100]}{'...' if len(url_private) > 100 else ''}",
                     file_id=file_id,
                     file_name=name,
@@ -1282,7 +1229,7 @@ class FileHandler:
                 return None
 
             log_with_context(
-                logging.INFO,
+                logging.DEBUG,
                 f"Created direct Drive reference for existing file: {name} (Drive ID: {drive_file_id})",
                 channel=channel,
                 file_id=file_id,

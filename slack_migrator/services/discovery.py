@@ -219,7 +219,7 @@ def get_last_message_timestamp(migrator, channel: str, space: str):
         float: Unix timestamp of the last message, or 0 if no messages
     """
     log_with_context(
-        logging.INFO,
+        logging.DEBUG,
         f"Finding last message timestamp in space for channel {channel}",
         channel=channel,
     )

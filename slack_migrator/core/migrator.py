@@ -14,7 +14,6 @@ from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
 from slack_migrator.cli.report import (
-    create_output_directory,
     generate_report,
     print_dry_run_summary,
 )
@@ -64,7 +63,9 @@ class SlackToChatMigrator:
         )  # Set import_mode to True when not in update mode
 
         if self.update_mode:
-            logger.info(f"Running in update mode - will update existing spaces")
+            log_with_context(
+                logging.INFO, f"Running in update mode - will update existing spaces"
+            )
 
         # Initialize caches and state tracking
         self.space_cache = {}  # channel -> space_name
@@ -135,7 +136,9 @@ class SlackToChatMigrator:
         if self._api_services_initialized:
             return
 
-        log_with_context(logging.INFO, "Initializing Google API services...")
+        log_with_context(
+            logging.INFO, "Initializing Google Chat and Drive API services..."
+        )
 
         # Convert Path to str for API clients
         creds_path_str = str(self.creds_path)
@@ -151,7 +154,9 @@ class SlackToChatMigrator:
         )
 
         self._api_services_initialized = True
-        log_with_context(logging.INFO, "Google API services initialized successfully")
+        log_with_context(
+            logging.INFO, "Google Chat and Drive API services initialized successfully"
+        )
 
         # Initialize dependent services
         self._initialize_dependent_services()
@@ -192,7 +197,9 @@ class SlackToChatMigrator:
         # The CLI will call validate_permissions() unless --skip_permission_check is used
 
         if self.verbose:
-            logger.debug("Migrator initialized with verbose logging enabled")
+            log_with_context(
+                logging.DEBUG, "Migrator initialized with verbose logging enabled"
+            )
 
         # Load existing space mappings for update mode or file attachments
         self._load_existing_space_mappings()
@@ -200,10 +207,14 @@ class SlackToChatMigrator:
     def _validate_export_format(self):
         """Validate that the export directory has the expected structure."""
         if not (self.export_root / "channels.json").exists():
-            logger.warning("channels.json not found in export directory")
+            log_with_context(
+                logging.WARNING, "channels.json not found in export directory"
+            )
 
         if not (self.export_root / "users.json").exists():
-            logger.warning("users.json not found in export directory")
+            log_with_context(
+                logging.WARNING, "users.json not found in export directory"
+            )
             raise ValueError(
                 f"users.json not found in {self.export_root}. This file is required for user mapping."
             )
@@ -216,8 +227,9 @@ class SlackToChatMigrator:
         # Check that each channel directory has at least one JSON file
         for ch_dir in channel_dirs:
             if not list(ch_dir.glob("*.json")):
-                logger.warning(
-                    f"No JSON files found in channel directory {ch_dir.name}"
+                log_with_context(
+                    logging.WARNING,
+                    f"No JSON files found in channel directory {ch_dir.name}",
                 )
 
     def _load_channels_meta(self):
@@ -368,7 +380,7 @@ class SlackToChatMigrator:
         if not self.config.get("cleanup_on_error", False):
             log_with_context(
                 logging.INFO,
-                f"Not deleting space {space_name} despite errors (cleanup_on_error is disabled)",
+                f"Not deleting space {space_name} despite errors (cleanup_on_error is disabled in config)",
                 space_name=space_name,
             )
             return
@@ -655,10 +667,20 @@ class SlackToChatMigrator:
             if not hasattr(self, "thread_map"):
                 self.thread_map = {}
 
-            # Output directory should already be set up by CLI
-            if not hasattr(self, "output_dir"):
-                # Fallback for direct migrator usage (testing, etc.)
-                self.output_dir = create_output_directory(self)
+            # Output directory should already be set up by CLI, but provide a sensible default
+            if not hasattr(self, "output_dir") or not self.output_dir:
+                # Create default output directory with timestamp
+                import datetime
+
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                self.output_dir = f"migration_logs/run_{timestamp}"
+                log_with_context(
+                    logging.INFO, f"Using default output directory: {self.output_dir}"
+                )
+                # Create the directory
+                import os
+
+                os.makedirs(self.output_dir, exist_ok=True)
 
             # Initialize dictionary to store channel-specific log handlers
             self.channel_handlers = {}
@@ -722,17 +744,17 @@ class SlackToChatMigrator:
                 # Track the current channel being processed
                 self.current_channel = ch.name
 
-                mode_prefix = "[DRY RUN]"
+                mode_prefix = "[DRY RUN] "
                 if self.update_mode:
                     mode_prefix = (
-                        "[UPDATE MODE]"
+                        "[UPDATE MODE] "
                         if not self.dry_run
-                        else "[DRY RUN] [UPDATE MODE]"
+                        else "[DRY RUN] [UPDATE MODE] "
                     )
 
                 log_with_context(
                     logging.INFO,
-                    f"{mode_prefix if self.dry_run or self.update_mode else ''} Processing channel: {ch.name}",
+                    f"{mode_prefix if self.dry_run or self.update_mode else ''}Processing channel: {ch.name}",
                     channel=ch.name,
                 )
                 self.migration_summary["channels_processed"].append(ch.name)
@@ -740,7 +762,7 @@ class SlackToChatMigrator:
                 # Check if channel should be processed
                 if not should_process_channel(ch.name, self.config):
                     log_with_context(
-                        logging.INFO,
+                        logging.WARNING,
                         f"Skipping channel {ch.name} based on configuration",
                         channel=ch.name,
                     )
@@ -800,7 +822,7 @@ class SlackToChatMigrator:
                     )
                     log_with_context(
                         logging.INFO,
-                        f"{'[DRY RUN] ' if self.dry_run else ''}Step 1/4: {action_desc} for {ch.name}",
+                        f"{'[DRY RUN] ' if self.dry_run else ''}Step 1/6: {action_desc} for {ch.name}",
                         channel=ch.name,
                     )
                     space = self.space_cache.get(ch.name) or create_space(self, ch.name)
@@ -824,7 +846,7 @@ class SlackToChatMigrator:
 
                 # Log that we're setting the current space
                 log_with_context(
-                    logging.INFO,  # Changed from DEBUG to INFO for better visibility
+                    logging.DEBUG,  # Changed to DEBUG for less verbose output
                     f"Setting current space to {space} for channel {ch.name} and storing in channel_to_space mapping",
                     channel=ch.name,
                 )
@@ -834,7 +856,7 @@ class SlackToChatMigrator:
                     # Step 2: Add historical memberships
                     log_with_context(
                         logging.INFO,
-                        f"{'[DRY RUN] ' if self.dry_run else ''}Step 2/4: Adding historical memberships for {ch.name}",
+                        f"{'[DRY RUN] ' if self.dry_run else ''}Step 2/6: Adding historical memberships for {ch.name}",
                         channel=ch.name,
                     )
                     add_users_to_space(self, space, ch.name)
@@ -859,7 +881,7 @@ class SlackToChatMigrator:
 
                 log_with_context(
                     logging.INFO,
-                    f"{mode_prefix if self.dry_run or self.update_mode else ''} Step 3/4: Processing messages for {ch.name}",
+                    f"{mode_prefix if self.dry_run or self.update_mode else ''} Step 3/6: Processing messages for {ch.name}",
                     channel=ch.name,
                 )
 
@@ -937,7 +959,15 @@ class SlackToChatMigrator:
                 # Track failures for this channel
                 channel_failures = []
 
-                pbar = tqdm(msgs, desc=f"{ch.name} - Messages")
+                # Create more informative progress bar description
+                mode_prefix = ""
+                if self.dry_run:
+                    mode_prefix = "[DRY RUN] "
+                elif self.update_mode:
+                    mode_prefix = "[UPDATE] "
+
+                progress_desc = f"{mode_prefix}Adding messages to {ch.name}"
+                pbar = tqdm(msgs, desc=progress_desc)
                 for m in pbar:
                     if m.get("type") != "message":
                         continue
@@ -1009,7 +1039,7 @@ class SlackToChatMigrator:
                 if not self.update_mode:
                     log_with_context(
                         logging.INFO,
-                        f"{'[DRY RUN] ' if self.dry_run else ''}Step 4/4: Completing import mode for {ch.name}",
+                        f"{'[DRY RUN] ' if self.dry_run else ''}Step 4/6: Completing import mode for {ch.name}",
                         channel=ch.name,
                     )
 
@@ -1025,7 +1055,7 @@ class SlackToChatMigrator:
                     ) and not self.dry_run:
                         try:
                             log_with_context(
-                                logging.INFO,
+                                logging.DEBUG,
                                 f"Attempting to complete import mode for space {space}",
                                 channel=ch.name,
                             )
@@ -1036,14 +1066,14 @@ class SlackToChatMigrator:
 
                             log_with_context(
                                 logging.INFO,
-                                f"Successfully completed import for space {space}",
+                                f"Successfully completed import mode for space: {space}",
                                 channel=ch.name,
                             )
 
-                            # Add regular members back to the space
+                            # Step 5: Add regular members back to the space
                             log_with_context(
                                 logging.INFO,
-                                f"Adding regular members to space after completing import: {space}",
+                                f"{'[DRY RUN] ' if self.dry_run else ''}Step 5/6: Adding regular members to space for {ch.name}",
                                 channel=ch.name,
                             )
 
@@ -1054,7 +1084,7 @@ class SlackToChatMigrator:
 
                                 add_regular_members(self, space, ch.name)
                                 log_with_context(
-                                    logging.INFO,
+                                    logging.DEBUG,
                                     f"Successfully added regular members to space {space} for channel {ch.name}",
                                     channel=ch.name,
                                 )
@@ -1104,8 +1134,8 @@ class SlackToChatMigrator:
 
                 # Log completion for this channel
                 log_with_context(
-                    logging.INFO,
-                    f"Channel log file completed for: {ch.name}",
+                    logging.DEBUG,
+                    f"Channel log file completed for channel: {ch.name}",
                     channel=ch.name,
                 )
 
@@ -1246,6 +1276,9 @@ class SlackToChatMigrator:
 
     def cleanup(self):
         """Clean up resources and complete import mode on spaces."""
+        # Clear current_channel so cleanup operations don't get tagged with channel context
+        self.current_channel = None
+
         if self.dry_run:
             log_with_context(
                 logging.INFO, "[DRY RUN] Would perform post-migration cleanup"
@@ -1365,14 +1398,14 @@ class SlackToChatMigrator:
                                 )
 
                         log_with_context(
-                            logging.INFO,
+                            logging.DEBUG,
                             f"Attempting to complete import mode for space: {space_name}",
                         )
 
                         try:
                             self.chat.spaces().completeImport(name=space_name).execute()
                             log_with_context(
-                                logging.INFO,
+                                logging.DEBUG,
                                 f"Successfully completed import mode for space: {space_name}",
                                 channel=channel_name if channel_name else None,
                             )
@@ -1464,16 +1497,16 @@ class SlackToChatMigrator:
                                     break
 
                         if channel_name:
-                            # Add regular members back to the space
+                            # Step 5: Add regular members back to the space
                             log_with_context(
                                 logging.INFO,
-                                f"Adding regular members to space after completing import: {space_name}",
+                                f"Step 5/6: Adding regular members to space for channel: {channel_name}",
                             )
                             try:
                                 add_regular_members(self, space_name, channel_name)
                                 log_with_context(
-                                    logging.INFO,
-                                    f"Successfully added regular members to space {space_name} for channel {channel_name}",
+                                    logging.DEBUG,
+                                    f"Successfully added regular members to space {space_name} for channel: {channel_name}",
                                 )
                             except Exception as e:
                                 log_with_context(

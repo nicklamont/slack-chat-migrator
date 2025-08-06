@@ -38,11 +38,11 @@ def load_config(config_path: Path) -> Dict[str, Any]:
                 # Handle None result from empty file
                 if loaded_config is not None:
                     config = loaded_config
-            logger.info(f"Loaded configuration from {config_path}")
+            log_with_context(logging.INFO, f"Loaded configuration from {config_path}")
         except Exception as e:
-            logger.warning(f"Failed to load config file {config_path}: {e}")
+            log_with_context(logging.WARNING, f"Failed to load config file {config_path}: {e}")
     else:
-        logger.warning(f"Config file {config_path} not found, using default settings")
+        log_with_context(logging.WARNING, f"Config file {config_path} not found, using default settings")
 
     # Ensure expected dictionaries exist
     config.setdefault("exclude_channels", [])
@@ -81,7 +81,7 @@ def create_default_config(output_path: Path) -> bool:
         True if the config file was created successfully, False otherwise
     """
     if output_path.exists():
-        logger.warning(f"Config file {output_path} already exists, not overwriting")
+        log_with_context(logging.WARNING, f"Config file {output_path} already exists, not overwriting")
         return False
 
     default_config = {
@@ -108,10 +108,10 @@ def create_default_config(output_path: Path) -> bool:
     try:
         with open(output_path, "w") as f:
             yaml.safe_dump(default_config, f, default_flow_style=False)
-        logger.info(f"Created default config file at {output_path}")
+        log_with_context(logging.INFO, f"Created default config file at {output_path}")
         return True
     except Exception as e:
-        logger.error(f"Failed to create default config file: {e}")
+        log_with_context(logging.ERROR, f"Failed to create default config file: {e}")
         return False
 
 

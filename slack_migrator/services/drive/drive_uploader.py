@@ -106,7 +106,7 @@ class DriveFileUploader:
 
         try:
             log_with_context(
-                logging.INFO,
+                logging.DEBUG,
                 f"Pre-caching file hashes from folder {folder_id}",
                 channel=self._get_current_channel(),
             )
@@ -158,7 +158,7 @@ class DriveFileUploader:
             self.folders_pre_cached.add(folder_id)
 
             log_with_context(
-                logging.INFO,
+                logging.DEBUG,
                 f"Successfully pre-cached {files_cached} files from folder {folder_id}",
             )
             return files_cached
@@ -256,7 +256,7 @@ class DriveFileUploader:
                 self.file_hash_cache[file_hash] = (file_id, web_view_link)
 
                 log_with_context(
-                    logging.INFO,
+                    logging.DEBUG,
                     f"Found existing file with same hash: {filename} (ID: {file_id})",
                     channel=self._get_current_channel(),
                 )
@@ -332,7 +332,7 @@ class DriveFileUploader:
             # If the file already exists, reuse it instead of uploading again
             if existing_file_id and existing_url:
                 log_with_context(
-                    logging.INFO,
+                    logging.DEBUG,
                     f"Reusing existing file with same hash: {filename} (ID: {existing_file_id})",
                     channel=self._get_current_channel(),
                 )
@@ -388,7 +388,7 @@ class DriveFileUploader:
                 )
 
             log_with_context(
-                logging.INFO,
+                logging.DEBUG,
                 f"Successfully uploaded file {filename} to Drive (ID: {file_id})",
                 channel=self._get_current_channel(),
             )

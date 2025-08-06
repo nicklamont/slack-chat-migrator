@@ -283,7 +283,7 @@ def convert_formatting(text: str, user_map: Dict[str, str], migrator=None) -> st
             )
         else:
             # Fallback to original logging if no migrator/tracker
-            logger.warning(f"Could not map Slack user ID: {slack_user_id}")
+            log_with_context(logging.WARNING, f"Could not map Slack user ID: {slack_user_id}")
 
         return f"@{slack_user_id}"
 

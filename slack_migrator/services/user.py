@@ -7,7 +7,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from slack_migrator.utils.logging import logger
+import logging
+
+from slack_migrator.utils.logging import log_with_context
+
+# Create logger instance
+logger = logging.getLogger("slack_migrator")
 
 
 def generate_user_map(
@@ -29,14 +34,14 @@ def generate_user_map(
     users_file = export_root / "users.json"
 
     if not users_file.exists():
-        logger.error("users.json not found in export directory")
+        log_with_context(logging.ERROR, "users.json not found in export directory")
         sys.exit(1)
 
     try:
         with users_file.open() as f:
             users = json.load(f)
     except json.JSONDecodeError:
-        logger.error("Failed to parse users.json")
+        log_with_context(logging.ERROR, "Failed to parse users.json")
         sys.exit(1)
 
     # Get email domain override from config
@@ -58,8 +63,9 @@ def generate_user_map(
         # Skip bots if ignore_bots is enabled
         if ignore_bots and user.get("is_bot", False):
             ignored_bots_count += 1
-            logger.info(
-                f"Ignoring bot user {user_id} ({user.get('real_name', user.get('name', 'Unknown'))}) - ignore_bots enabled"
+            log_with_context(
+                logging.INFO,
+                f"Ignoring bot user {user_id} ({user.get('real_name', user.get('name', 'Unknown'))}) - ignore_bots enabled",
             )
             continue
 
@@ -83,8 +89,9 @@ def generate_user_map(
                 "deleted": user.get("deleted", False),
             }
             users_without_email.append(user_info)
-            logger.warning(
-                f"No email found for user {user_id} ({username}). Add to user_mapping_overrides in config.yaml."
+            log_with_context(
+                logging.WARNING,
+                f"No email found for user {user_id} ({username}). Add to user_mapping_overrides in config.yaml.",
             )
             continue
 
@@ -96,18 +103,21 @@ def generate_user_map(
         user_map[user_id] = email
 
     if users_without_email:
-        logger.warning(
-            f"Found {len(users_without_email)} users without email addresses:"
+        log_with_context(
+            logging.WARNING,
+            f"Found {len(users_without_email)} users without email addresses:",
         )
         for user in users_without_email:
             user_type = "Bot" if user["is_bot"] or user["is_app_user"] else "User"
             deleted_status = " (DELETED)" if user.get("deleted", False) else ""
-            logger.warning(
-                f"  - {user_type}: {user['name']} (ID: {user['id']}){deleted_status}"
+            log_with_context(
+                logging.WARNING,
+                f"  - {user_type}: {user['name']} (ID: {user['id']}){deleted_status}",
             )
 
-        logger.warning(
-            "\nTo map these users, add entries to user_mapping_overrides in config.yaml:"
+        log_with_context(
+            logging.WARNING,
+            "\nTo map these users, add entries to user_mapping_overrides in config.yaml:",
         )
         for user in users_without_email:
             deleted_comment = (
@@ -115,23 +125,27 @@ def generate_user_map(
                 if user.get("deleted", False)
                 else f" # {user['name']}"
             )
-            logger.warning(f'  "{user["id"]}": ""{deleted_comment}')
+            log_with_context(logging.WARNING, f'  "{user["id"]}": ""{deleted_comment}')
 
     # Add any user_mapping_overrides that weren't already processed
     # This handles cases where users are mentioned in messages but not in users.json
     for override_user_id, override_email in user_mapping_overrides.items():
         if override_user_id not in user_map:
             user_map[override_user_id] = override_email
-            logger.info(
-                f"Added user mapping override for {override_user_id} -> {override_email} (not in users.json)"
+            log_with_context(
+                logging.INFO,
+                f"Added user mapping override for {override_user_id} -> {override_email} (not in users.json)",
             )
 
     if not user_map:
-        logger.error("No valid users found in users.json")
+        log_with_context(logging.ERROR, "No valid users found in users.json")
         sys.exit(1)
 
-    logger.info(f"Generated user mapping for {len(user_map)} users")
+    log_with_context(logging.INFO, f"Generated user mapping for {len(user_map)} users")
     if ignored_bots_count > 0:
-        logger.info(f"Ignored {ignored_bots_count} bot users (ignore_bots enabled)")
+        log_with_context(
+            logging.INFO,
+            f"Ignored {ignored_bots_count} bot users (ignore_bots enabled)",
+        )
 
     return user_map, users_without_email

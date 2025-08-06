@@ -133,7 +133,7 @@ class ChatFileUploader:
             }
 
             log_with_context(
-                logging.INFO,
+                logging.DEBUG,
                 f"Successfully uploaded file {filename} to Chat API",
                 channel=self._get_current_channel(),
             )

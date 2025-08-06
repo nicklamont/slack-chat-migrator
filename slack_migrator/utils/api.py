@@ -126,7 +126,10 @@ class RetryWrapper:
                     # Channel-specific errors are already logged via log_with_context
                     if e.resp.status >= 500:  # Server errors (5xx) only
                         main_logger = logging.getLogger("slack_migrator")
-                        main_log_with_context(logging.ERROR, f"🚨 Critical API Server Error {e.resp.status} ({e.resp.reason}): {str(e)}")
+                        main_log_with_context(
+                            logging.ERROR,
+                            f"🚨 Critical API Server Error {e.resp.status} ({e.resp.reason}): {str(e)}",
+                        )
 
                     # Don't retry client errors (4xx) except rate limits (429)
                     if e.resp.status // 100 == 4 and e.resp.status != 429:

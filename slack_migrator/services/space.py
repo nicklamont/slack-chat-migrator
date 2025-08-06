@@ -120,7 +120,7 @@ def create_space(migrator, channel: str) -> str:
     }
 
     log_with_context(
-        logging.INFO,
+        logging.DEBUG,
         f"{'[DRY RUN] ' if migrator.dry_run else ''}Creating import mode space for {display_name}",
         channel=channel,
     )
@@ -170,7 +170,7 @@ def create_space(migrator, channel: str) -> str:
 
             # Add warning about 90-day limit for import mode
             log_with_context(
-                logging.WARNING,
+                logging.DEBUG,
                 f"IMPORTANT: Space {space_name} is in import mode. Per Google Chat API restrictions, "
                 "import mode must be completed within 90 days or the space will be automatically deleted.",
                 channel=channel,
@@ -237,7 +237,7 @@ def create_space(migrator, channel: str) -> str:
 def add_users_to_space(migrator, space: str, channel: str):
     """Add users to a space as historical members."""
     log_with_context(
-        logging.INFO,
+        logging.DEBUG,
         f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding historical memberships for channel {channel}",
         channel=channel,
     )
@@ -357,7 +357,7 @@ def add_users_to_space(migrator, space: str, channel: str):
 
     # Log what we're doing
     log_with_context(
-        logging.INFO,
+        logging.DEBUG,
         f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding {len(user_membership)} users to space {space} for channel {channel}",
         channel=channel,
         space=space,
@@ -411,7 +411,7 @@ def add_users_to_space(migrator, space: str, channel: str):
         .replace("+00:00", "Z")
     )
     log_with_context(
-        logging.INFO,
+        logging.DEBUG,
         f"Using {historical_delete_time} as historical membership delete time for import mode",
         channel=channel,
     )
@@ -585,7 +585,7 @@ def add_users_to_space(migrator, space: str, channel: str):
         channel=channel,
     )
     log_with_context(
-        logging.INFO,
+        logging.DEBUG,
         f"Tracked {active_count} active users to add back after import completes",
         channel=channel,
     )
@@ -654,7 +654,7 @@ def add_regular_members(migrator, space: str, channel: str):
 
     active_users = migrator.active_users_by_channel[channel]
     log_with_context(
-        logging.INFO,
+        logging.DEBUG,
         f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding {len(active_users)} regular members to space {space} for channel {channel}",
         channel=channel,
     )
@@ -750,7 +750,7 @@ def add_regular_members(migrator, space: str, channel: str):
         try:
             # Log which user we're trying to add
             log_with_context(
-                logging.INFO,  # Changed from DEBUG to INFO for better visibility
+                logging.DEBUG,  # Changed from INFO for less verbose output
                 f"Attempting to add user {user_email if migrator._is_external_user(user_email) else internal_email} as regular member",
                 user=(
                     user_email
@@ -852,7 +852,7 @@ def add_regular_members(migrator, space: str, channel: str):
     # Verify the members were added
     try:
         log_with_context(
-            logging.INFO, f"Verifying members added to space {space}", channel=channel
+            logging.DEBUG, f"Verifying members added to space {space}", channel=channel
         )
 
         # List members to verify they were added
@@ -862,7 +862,7 @@ def add_regular_members(migrator, space: str, channel: str):
 
         # Just log the count, detailed API response is already logged by the API utilities
         log_with_context(
-            logging.INFO,
+            logging.DEBUG,
             f"Space {space} has {actual_member_count} members after adding {added_count} regular members",
             channel=channel,
         )
@@ -872,7 +872,7 @@ def add_regular_members(migrator, space: str, channel: str):
         admin_user_id = None
 
         log_with_context(
-            logging.INFO,
+            logging.DEBUG,
             f"Checking if workspace admin ({admin_email}) should be in space {space} for channel {channel}",
             channel=channel,
         )
@@ -882,7 +882,7 @@ def add_regular_members(migrator, space: str, channel: str):
             if email.lower() == admin_email.lower():
                 admin_user_id = slack_user_id
                 log_with_context(
-                    logging.INFO,
+                    logging.DEBUG,
                     f"Found Slack user ID for admin: {slack_user_id}",
                     channel=channel,
                 )
@@ -890,7 +890,7 @@ def add_regular_members(migrator, space: str, channel: str):
 
         if not admin_user_id:
             log_with_context(
-                logging.INFO,
+                logging.DEBUG,
                 f"Workspace admin ({admin_email}) was not found in Slack user map",
                 channel=channel,
             )
@@ -900,13 +900,13 @@ def add_regular_members(migrator, space: str, channel: str):
         if admin_user_id and admin_user_id in active_users:
             admin_in_channel = True
             log_with_context(
-                logging.INFO,
+                logging.DEBUG,
                 f"Workspace admin ({admin_email}) was in the original Slack channel - will keep in space",
                 channel=channel,
             )
         else:
             log_with_context(
-                logging.INFO,
+                logging.DEBUG,
                 f"Workspace admin ({admin_email}) was NOT in the original Slack channel - will attempt removal",
                 channel=channel,
             )
@@ -993,9 +993,10 @@ def add_regular_members(migrator, space: str, channel: str):
             )
 
             if folder_id:
+                # Step 6: Update file permissions
                 log_with_context(
                     logging.INFO,
-                    f"{'[DRY RUN] ' if migrator.dry_run else ''}Updating file permissions for channel folder {folder_id} to match {len(active_user_emails)} active members",
+                    f"{'[DRY RUN] ' if migrator.dry_run else ''}Step 6/6: Updating file permissions for {channel} folder to match {len(active_user_emails)} active members",
                     channel=channel,
                     folder_id=folder_id,
                 )

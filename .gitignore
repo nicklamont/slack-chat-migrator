@@ -36,7 +36,8 @@ secrets/
 config.yaml
 
 # Output files
-slack_export_output/
+# Migration logs and output
+migration_logs/
 test_output/
 
 # System files

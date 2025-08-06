@@ -424,6 +424,30 @@ After all channels are processed, a **cleanup process** runs to ensure all space
 
 The cleanup process is important because spaces in import mode have limitations and will be automatically deleted after 90 days if not properly completed.
 
+### Output Directory and Log Files
+
+The migration tool automatically creates a timestamped output directory for each migration run to store logs, reports, and other output files:
+
+```
+migration_logs/
+├── run_20250806_153200/          # Timestamped run directory
+│   ├── migration.log             # Main migration log
+│   ├── migration_report.yaml     # Summary report
+│   ├── channel_logs/            # Per-channel detailed logs
+│   │   ├── general_migration.log
+│   │   └── random_migration.log
+│   └── failed_messages.txt       # Failed messages (if any)
+```
+
+**Log File Types:**
+
+- **migration.log**: Main log file containing overall migration progress, errors, and system messages
+- **channel_logs/*.log**: Per-channel detailed logs with message-level details (when `--debug_api` is enabled)
+- **migration_report.yaml**: Structured summary report with statistics and recommendations
+- **failed_messages.txt**: Details of any messages that failed to migrate (created only if there are failures)
+
+> **Note:** When using `--debug_api`, channel logs can become quite large as they include complete API request/response data.
+
 ### Migration Reports
 
 The tool generates comprehensive reports in both validation mode and after actual migrations:

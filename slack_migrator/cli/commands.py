@@ -10,11 +10,16 @@ migration process with appropriate error handling.
 import argparse
 import sys
 from pathlib import Path
-from typing import NoReturn
+from typing import Optional
+
+import logging
 
 from slack_migrator.core.migrator import SlackToChatMigrator
-from slack_migrator.utils.logging import logger, setup_logger
+from slack_migrator.utils.logging import setup_logger, log_with_context
 from slack_migrator.utils.permissions import validate_permissions
+
+# Create logger instance
+logger = logging.getLogger("slack_migrator")
 
 
 class MigrationOrchestrator:
@@ -24,10 +29,11 @@ class MigrationOrchestrator:
         self.args = args
         self.migrator = None
         self.dry_run_migrator = None
+        self.output_dir: Optional[str] = None
 
     def create_migrator(self, force_dry_run: bool = False) -> SlackToChatMigrator:
         """Create a migrator instance with the given parameters."""
-        return SlackToChatMigrator(
+        migrator = SlackToChatMigrator(
             self.args.creds_path,
             self.args.export_path,
             self.args.workspace_admin,
@@ -38,51 +44,64 @@ class MigrationOrchestrator:
             debug_api=self.args.debug_api,
         )
 
+        # Set output directory if we have one
+        if self.output_dir:
+            migrator.output_dir = self.output_dir
+
+        return migrator
+
     def validate_prerequisites(self):
         """Validate all prerequisites before migration."""
         # Check credentials file
         creds_path = Path(self.args.creds_path)
         if not creds_path.exists():
-            logger.error(f"Credentials file not found: {self.args.creds_path}")
-            logger.info(
-                "Make sure your service account JSON key file exists and has the correct path."
+            log_with_context(
+                logging.ERROR, f"Credentials file not found: {self.args.creds_path}"
+            )
+            log_with_context(
+                logging.INFO,
+                "Make sure your service account JSON key file exists and has the correct path.",
             )
             sys.exit(1)
 
-        # Initialize main migrator (without expensive drive operations)
+        # Initialize main migrator
         self.migrator = self.create_migrator()
 
         # Run permission checks BEFORE any expensive operations
         if not self.args.skip_permission_check:
-            logger.info("Checking permissions before proceeding...")
+            log_with_context(logging.INFO, "Checking permissions before proceeding...")
             try:
                 validate_permissions(self.migrator)
-                logger.info("Permission checks passed!")
+                log_with_context(logging.INFO, "Permission checks passed!")
 
                 # Now that permissions are validated, initialize drive structures
                 if (
                     hasattr(self.migrator, "file_handler")
                     and self.migrator.file_handler
                 ):
-                    logger.info("Initializing drive structures...")
                     self.migrator.file_handler.ensure_drive_initialized()
-                    logger.info("Drive structures initialized!")
+                    log_with_context(
+                        logging.INFO, "Drive structures initialized successfully"
+                    )
 
             except Exception as e:
-                logger.error(f"Permission checks failed: {e}")
-                logger.error(
-                    "Fix the issues or run with --skip_permission_check if you're sure."
+                log_with_context(logging.ERROR, f"Permission checks failed: {e}")
+                log_with_context(
+                    logging.ERROR,
+                    "Fix the issues or run with --skip_permission_check if you're sure.",
                 )
                 sys.exit(1)
         else:
-            logger.warning(
-                "Permission checks skipped. This may cause issues during migration."
+            log_with_context(
+                logging.WARNING,
+                "Permission checks skipped. This may cause issues during migration.",
             )
             # Still initialize drive structures even if permission checks are skipped
             if hasattr(self.migrator, "file_handler") and self.migrator.file_handler:
-                logger.info("Initializing drive structures...")
                 self.migrator.file_handler.ensure_drive_initialized()
-                logger.info("Drive structures initialized!")
+                log_with_context(
+                    logging.INFO, "Drive structures initialized successfully"
+                )
 
     def check_unmapped_users(self, migrator_instance: SlackToChatMigrator) -> bool:
         """Check for unmapped users and return True if any found."""
@@ -95,30 +114,43 @@ class MigrationOrchestrator:
         self, migrator_instance: SlackToChatMigrator, is_explicit_dry_run: bool = False
     ) -> bool:
         """Report validation issues and ask user if they want to proceed anyway."""
-        logger.info("")
-        logger.info("🚨 VALIDATION ISSUES DETECTED!")
-        logger.info(
-            f"Found {migrator_instance.unmapped_user_tracker.get_unmapped_count()} unmapped user(s)."
+        log_with_context(logging.INFO, "")
+        log_with_context(logging.INFO, "🚨 VALIDATION ISSUES DETECTED!")
+        log_with_context(
+            logging.INFO,
+            f"Found {migrator_instance.unmapped_user_tracker.get_unmapped_count()} unmapped user(s).",
         )
-        logger.info("")
-        logger.info("⚠️  WARNING: If you proceed without fixing these mappings:")
-        logger.info(
-            "   • Messages from unmapped users will be sent by the workspace admin"
+        log_with_context(logging.INFO, "")
+        log_with_context(
+            logging.INFO, "⚠️  WARNING: If you proceed without fixing these mappings:"
         )
-        logger.info("   • Attribution prefixes will indicate the original sender")
-        logger.info("   • Reactions from unmapped users will be skipped and logged")
-        logger.info("")
-        logger.info("📋 Recommended steps to fix:")
-        logger.info("1. Review the unmapped users listed above")
-        logger.info("2. Add them to user_mapping_overrides in your config.yaml")
+        log_with_context(
+            logging.INFO,
+            "   • Messages from unmapped users will be sent by the workspace admin",
+        )
+        log_with_context(
+            logging.INFO, "   • Attribution prefixes will indicate the original sender"
+        )
+        log_with_context(
+            logging.INFO,
+            "   • Reactions from unmapped users will be skipped and logged",
+        )
+        log_with_context(logging.INFO, "")
+        log_with_context(logging.INFO, "📋 Recommended steps to fix:")
+        log_with_context(logging.INFO, "1. Review the unmapped users listed above")
+        log_with_context(
+            logging.INFO, "2. Add them to user_mapping_overrides in your config.yaml"
+        )
 
         if is_explicit_dry_run:
-            logger.info("3. Run the migration again (without --dry_run)")
-            logger.info("")
+            log_with_context(
+                logging.INFO, "3. Run the migration again (without --dry_run)"
+            )
+            log_with_context(logging.INFO, "")
             return False  # In explicit dry run, just report and exit
         else:
-            logger.info("3. Run the migration again")
-            logger.info("")
+            log_with_context(logging.INFO, "3. Run the migration again")
+            log_with_context(logging.INFO, "")
 
             # Ask user if they want to proceed anyway
             try:
@@ -130,46 +162,57 @@ class MigrationOrchestrator:
                     .lower()
                 )
                 if response in ["y", "yes"]:
-                    logger.warning(
-                        "Proceeding with unmapped users - messages will be attributed to workspace admin"
+                    log_with_context(
+                        logging.WARNING,
+                        "Proceeding with unmapped users - messages will be attributed to workspace admin",
                     )
                     return True
                 else:
-                    logger.info(
-                        "Migration cancelled. Please fix the user mappings and try again."
+                    log_with_context(
+                        logging.INFO,
+                        "Migration cancelled. Please fix the user mappings and try again.",
                     )
                     return False
             except KeyboardInterrupt:
-                logger.info("\nMigration cancelled by user.")
+                log_with_context(logging.INFO, "\nMigration cancelled by user.")
                 return False
 
     def report_validation_success(self, is_explicit_dry_run: bool = False):
         """Report successful validation."""
-        logger.info("")
-        logger.info("✅ Validation completed successfully!")
-        logger.info("   • All users mapped correctly")
-        logger.info("   • File attachments accessible")
-        logger.info("   • Channel structure validated")
-        logger.info("   • Migration scope confirmed")
-        logger.info("")
+        log_with_context(logging.INFO, "")
+        log_with_context(logging.INFO, "✅ Validation completed successfully!")
+        log_with_context(logging.INFO, "   • All users mapped correctly")
+        log_with_context(logging.INFO, "   • File attachments accessible")
+        log_with_context(logging.INFO, "   • Channel structure validated")
+        log_with_context(logging.INFO, "   • Migration scope confirmed")
+        log_with_context(logging.INFO, "")
 
         if is_explicit_dry_run:
-            logger.info(
-                "You can now run the migration without --dry_run to perform the actual migration."
+            log_with_context(
+                logging.INFO,
+                "You can now run the migration without --dry_run to perform the actual migration.",
             )
 
-        logger.info("")
+        log_with_context(logging.INFO, "")
 
     def run_validation(self) -> bool:
         """Run comprehensive validation. Returns True if validation passes."""
-        logger.info("")
-        logger.info("🔍 STEP 1: Running comprehensive validation (dry run)...")
-        logger.info("   • Validating user mappings and detecting unmapped users")
-        logger.info("   • Checking file attachments and permissions")
-        logger.info("   • Verifying channel structure and memberships")
-        logger.info("   • Testing message formatting and content")
-        logger.info("   • Estimating migration scope and requirements")
-        logger.info("")
+        log_with_context(logging.INFO, "")
+        log_with_context(
+            logging.INFO, "🔍 STEP 1: Running comprehensive validation (dry run)..."
+        )
+        log_with_context(
+            logging.INFO, "   • Validating user mappings and detecting unmapped users"
+        )
+        log_with_context(logging.INFO, "   • Checking file attachments and permissions")
+        log_with_context(
+            logging.INFO, "   • Verifying channel structure and memberships"
+        )
+        log_with_context(logging.INFO, "   • Testing message formatting and content")
+        log_with_context(
+            logging.INFO, "   • Estimating migration scope and requirements"
+        )
+        log_with_context(logging.INFO, "")
 
         # Create and run dry run migrator
         self.dry_run_migrator = self.create_migrator(force_dry_run=True)
@@ -177,9 +220,10 @@ class MigrationOrchestrator:
         try:
             self.dry_run_migrator.migrate()
         except Exception as e:
-            logger.error(f"Validation (dry run) failed: {e}")
-            logger.error(
-                "Please fix the issues identified during validation before proceeding."
+            log_with_context(logging.ERROR, f"Validation (dry run) failed: {e}")
+            log_with_context(
+                logging.ERROR,
+                "Please fix the issues identified during validation before proceeding.",
             )
             sys.exit(1)
 
@@ -191,8 +235,10 @@ class MigrationOrchestrator:
 
     def get_user_confirmation(self) -> bool:
         """Get user confirmation to proceed with migration."""
-        logger.info("🚀 STEP 2: Ready to proceed with actual migration")
-        logger.info("")
+        log_with_context(
+            logging.INFO, "🚀 STEP 2: Ready to proceed with actual migration"
+        )
+        log_with_context(logging.INFO, "")
 
         try:
             response = (
@@ -200,7 +246,7 @@ class MigrationOrchestrator:
             )
             return response in ["y", "yes"]
         except KeyboardInterrupt:
-            logger.info("\nMigration cancelled by user.")
+            log_with_context(logging.INFO, "\nMigration cancelled by user.")
             return False
 
     def run_migration(self):
@@ -208,8 +254,6 @@ class MigrationOrchestrator:
         if self.args.dry_run:
             # Explicit dry run mode
             try:
-                # Set up output directory and update logger
-                self._setup_output_logging()
                 self.migrator.migrate()
 
                 if self.check_unmapped_users(self.migrator):
@@ -217,8 +261,9 @@ class MigrationOrchestrator:
                         self.migrator, is_explicit_dry_run=True
                     ):
                         # User should not be able to proceed in explicit dry run mode
-                        logger.info(
-                            "Use normal migration mode to proceed with unmapped users."
+                        log_with_context(
+                            logging.INFO,
+                            "Use normal migration mode to proceed with unmapped users.",
                         )
                         sys.exit(1)
                     else:
@@ -227,7 +272,7 @@ class MigrationOrchestrator:
                     self.report_validation_success(is_explicit_dry_run=True)
 
             except Exception as e:
-                logger.error(f"Validation failed: {e}")
+                log_with_context(logging.ERROR, f"Validation failed: {e}")
                 sys.exit(1)
         else:
             # Full migration with automatic validation
@@ -236,45 +281,28 @@ class MigrationOrchestrator:
 
                 if self.get_user_confirmation():
                     try:
-                        # Set up output directory and update logger
-                        self._setup_output_logging()
                         self.migrator.migrate()
 
                     except Exception as e:
-                        logger.error(f"Migration failed: {e}")
+                        log_with_context(logging.ERROR, f"Migration failed: {e}")
                         raise
                 else:
-                    logger.info("Migration cancelled by user.")
+                    log_with_context(logging.INFO, "Migration cancelled by user.")
                     sys.exit(0)
-
-    def _setup_output_logging(self):
-        """Set up output directory and update logger with file logging."""
-        from slack_migrator.cli.report import create_output_directory
-
-        # Create output directory (this will be used by the migrator)
-        output_dir = create_output_directory(self.migrator)
-
-        # Set the output directory on the migrator so it doesn't create its own
-        self.migrator.output_dir = output_dir
-
-        # Update the logger to include file logging
-        global logger
-        logger = setup_logger(self.args.verbose, self.args.debug_api, output_dir)
-
-        logger.info(f"Output directory created: {output_dir}")
 
     def cleanup(self):
         """Perform cleanup operations."""
         if self.migrator:
             try:
-                logger.info("Performing cleanup operations...")
+                log_with_context(logging.INFO, "Performing cleanup operations...")
 
                 # Always clean up channel handlers, regardless of dry run mode
                 if hasattr(self.migrator, "_cleanup_channel_handlers"):
                     try:
                         self.migrator._cleanup_channel_handlers()
                     except Exception as handler_cleanup_e:
-                        logger.error(
+                        log_with_context(
+                            logging.ERROR,
                             f"Failed to clean up channel handlers: {handler_cleanup_e}",
                             exc_info=True,
                         )
@@ -284,20 +312,28 @@ class MigrationOrchestrator:
                     try:
                         self.migrator.cleanup()
                     except Exception as space_cleanup_e:
-                        logger.error(
+                        log_with_context(
+                            logging.ERROR,
                             f"Failed to clean up spaces: {space_cleanup_e}",
                             exc_info=True,
                         )
-                        logger.warning(
-                            "Some spaces may still be in import mode and require manual cleanup"
+                        log_with_context(
+                            logging.WARNING,
+                            "Some spaces may still be in import mode and require manual cleanup",
                         )
 
-                logger.info("Cleanup completed successfully.")
+                log_with_context(logging.INFO, "Cleanup completed successfully.")
             except Exception as cleanup_e:
-                logger.error(f"Overall cleanup failed: {cleanup_e}", exc_info=True)
-                logger.info("You may need to manually clean up temporary resources.")
-                logger.info(
-                    "Check Google Chat admin console for spaces that may still be in import mode."
+                log_with_context(
+                    logging.ERROR, f"Overall cleanup failed: {cleanup_e}", exc_info=True
+                )
+                log_with_context(
+                    logging.INFO,
+                    "You may need to manually clean up temporary resources.",
+                )
+                log_with_context(
+                    logging.INFO,
+                    "Check Google Chat admin console for spaces that may still be in import mode.",
                 )
 
 
@@ -355,44 +391,56 @@ def log_startup_info(args):
     if not config_path.is_absolute():
         config_path = Path.cwd() / args.config
 
-    logger.info("Starting migration with the following parameters:")
-    logger.info(f"- Export path: {args.export_path}")
-    logger.info(f"- Workspace admin: {args.workspace_admin}")
-    logger.info(f"- Config: {config_path}")
-    logger.info(f"- Dry run: {args.dry_run}")
-    logger.info(f"- Update mode: {args.update_mode}")
-    logger.info(f"- Verbose logging: {args.verbose}")
-    logger.info(f"- Debug API calls: {args.debug_api}")
+    log_with_context(logging.INFO, "Starting migration with the following parameters:")
+    log_with_context(logging.INFO, f"- Export path: {args.export_path}")
+    log_with_context(logging.INFO, f"- Workspace admin: {args.workspace_admin}")
+    log_with_context(logging.INFO, f"- Config: {config_path}")
+    log_with_context(logging.INFO, f"- Dry run: {args.dry_run}")
+    log_with_context(logging.INFO, f"- Update mode: {args.update_mode}")
+    log_with_context(logging.INFO, f"- Verbose logging: {args.verbose}")
+    log_with_context(logging.INFO, f"- Debug API calls: {args.debug_api}")
 
 
 def handle_http_error(e):
     """Handle HTTP errors with specific messages."""
 
     if e.resp.status == 403 and "PERMISSION_DENIED" in str(e):
-        logger.error(f"Permission denied error: {e}")
-        logger.info(
-            "\nThe service account doesn't have sufficient permissions. Please ensure:"
+        log_with_context(logging.ERROR, f"Permission denied error: {e}")
+        log_with_context(
+            logging.INFO,
+            "\nThe service account doesn't have sufficient permissions. Please ensure:",
         )
-        logger.info(
-            "1. The service account has the 'Chat API Admin' role in your GCP project"
+        log_with_context(
+            logging.INFO,
+            "1. The service account has the 'Chat API Admin' role in your GCP project",
         )
-        logger.info(
-            "2. Domain-wide delegation is configured properly in your Google Workspace admin console"
+        log_with_context(
+            logging.INFO,
+            "2. Domain-wide delegation is configured properly in your Google Workspace admin console",
         )
-        logger.info("3. The following scopes are granted to the service account:")
-        logger.info("   - https://www.googleapis.com/auth/chat.import")
-        logger.info("   - https://www.googleapis.com/auth/chat.spaces")
-        logger.info("   - https://www.googleapis.com/auth/drive")
+        log_with_context(
+            logging.INFO, "3. The following scopes are granted to the service account:"
+        )
+        log_with_context(
+            logging.INFO, "   - https://www.googleapis.com/auth/chat.import"
+        )
+        log_with_context(
+            logging.INFO, "   - https://www.googleapis.com/auth/chat.spaces"
+        )
+        log_with_context(logging.INFO, "   - https://www.googleapis.com/auth/drive")
     elif e.resp.status == 429:
-        logger.error(f"Rate limit exceeded: {e}")
-        logger.info(
-            "The migration hit API rate limits. Consider using --update_mode to resume."
+        log_with_context(logging.ERROR, f"Rate limit exceeded: {e}")
+        log_with_context(
+            logging.INFO,
+            "The migration hit API rate limits. Consider using --update_mode to resume.",
         )
     elif e.resp.status >= 500:
-        logger.error(f"Server error from Google API: {e}")
-        logger.info("This is likely a temporary issue. Please try again later.")
+        log_with_context(logging.ERROR, f"Server error from Google API: {e}")
+        log_with_context(
+            logging.INFO, "This is likely a temporary issue. Please try again later."
+        )
     else:
-        logger.error(f"API error during migration: {e}")
+        log_with_context(logging.ERROR, f"API error during migration: {e}")
 
 
 def handle_exception(e):
@@ -402,29 +450,59 @@ def handle_exception(e):
     if isinstance(e, HttpError):
         handle_http_error(e)
     elif isinstance(e, FileNotFoundError):
-        logger.error(f"File not found: {e}")
-        logger.info("Please check that all required files exist and paths are correct.")
+        log_with_context(logging.ERROR, f"File not found: {e}")
+        log_with_context(
+            logging.INFO,
+            "Please check that all required files exist and paths are correct.",
+        )
     elif isinstance(e, KeyboardInterrupt):
-        logger.warning("Migration interrupted by user.")
-        logger.info("📋 Check the partial migration report in the output directory.")
-        logger.info("🔄 You can resume the migration with --update_mode.")
-        logger.info("📝 All progress and logs have been saved to disk.")
+        log_with_context(logging.WARNING, "Migration interrupted by user.")
+        log_with_context(
+            logging.INFO,
+            "📋 Check the partial migration report in the output directory.",
+        )
+        log_with_context(
+            logging.INFO, "🔄 You can resume the migration with --update_mode."
+        )
+        log_with_context(
+            logging.INFO, "📝 All progress and logs have been saved to disk."
+        )
     else:
-        logger.error(f"Migration failed: {e}", exc_info=True)
+        log_with_context(logging.ERROR, f"Migration failed: {e}", exc_info=True)
 
 
 def show_security_warning():
     """Show security warning about tokens in export files."""
-    logger.warning(
-        "\nSECURITY WARNING: Your Slack export files contain authentication tokens in the URLs."
+    log_with_context(
+        logging.WARNING,
+        "\nSECURITY WARNING: Your Slack export files contain authentication tokens in the URLs.",
     )
-    logger.warning(
-        "Consider securing or deleting these files after the migration is complete."
+    log_with_context(
+        logging.WARNING,
+        "Consider securing or deleting these files after the migration is complete.",
     )
-    logger.warning("See README.md for more information on security best practices.")
+    log_with_context(
+        logging.WARNING,
+        "See README.md for more information on security best practices.",
+    )
 
 
-def main() -> NoReturn:
+def create_migration_output_directory():
+    """Create output directory for migration with timestamp."""
+    import datetime
+    import os
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = f"migration_logs/run_{timestamp}"
+
+    # Create subdirectories
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "channel_logs"), exist_ok=True)
+
+    return output_dir
+
+
+def main():
     """
     Main entry point for the Slack to Google Chat migration tool.
 
@@ -433,22 +511,24 @@ def main() -> NoReturn:
 
     The function handles errors during migration and provides appropriate
     error messages and cleanup operations.
-
-    Returns:
-        NoReturn: The function exits with sys.exit()
     """
     # Parse arguments and setup
     parser = setup_argument_parser()
     args = parser.parse_args()
 
-    # Set up logger with verbosity level from command line
-    global logger
-    logger = setup_logger(args.verbose, args.debug_api)
+    # Create output directory early so all operations are logged to file
+    output_dir = create_migration_output_directory()
+
+    # Set up logger with output directory for file logging
+    logger = setup_logger(args.verbose, args.debug_api, output_dir)
 
     log_startup_info(args)
+    log_with_context(logging.INFO, f"Output directory: {output_dir}")
 
     # Create orchestrator and run migration
     orchestrator = MigrationOrchestrator(args)
+    # Set the output directory so migrator doesn't create its own
+    orchestrator.output_dir = output_dir
 
     try:
         orchestrator.validate_prerequisites()
