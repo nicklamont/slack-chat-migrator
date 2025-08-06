@@ -370,17 +370,32 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     channel = migrator.current_channel
 
     # Check if this message is from a bot and bots should be ignored
-    if user_id and migrator.config.get("ignore_bots", False):
-        user_data = migrator._get_user_data(user_id)
-        if user_data and user_data.get("is_bot", False):
+    if migrator.config.get("ignore_bots", False):
+        # Check for bot messages by subtype (covers system bots like USLACKBOT that aren't in users.json)
+        if message.get("subtype") in ["bot_message", "app_message"]:
+            bot_name = message.get("username", user_id or "Unknown Bot")
             log_with_context(
                 logging.DEBUG,
-                f"Skipping message from bot user {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
+                f"Skipping bot message from {bot_name} (subtype: {message.get('subtype')}) - ignore_bots enabled",
                 channel=channel,
                 ts=ts,
                 user_id=user_id,
+                bot_name=bot_name,
             )
             return "IGNORED_BOT"
+
+        # Also check for user-based bots (bots that are in users.json)
+        if user_id:
+            user_data = migrator._get_user_data(user_id)
+            if user_data and user_data.get("is_bot", False):
+                log_with_context(
+                    logging.DEBUG,
+                    f"Skipping message from bot user {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
+                    channel=channel,
+                    ts=ts,
+                    user_id=user_id,
+                )
+                return "IGNORED_BOT"
 
     # Check for edited messages
     edited = message.get("edited", {})
@@ -457,19 +472,6 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
             user_id=user_id,
         )
         return "SKIPPED"
-
-    # Skip messages from bots or apps we don't want to migrate
-    if message.get("subtype") in ["bot_message", "app_message"]:
-        bot_name = message.get("username", "Unknown Bot")
-        if bot_name in migrator.config.get("skip_bots", []):
-            log_with_context(
-                logging.INFO,
-                f"Skipping message from bot: {bot_name}",
-                channel=channel,
-                ts=ts,
-                bot=bot_name,
-            )
-            return "SKIPPED"
 
     # Extract text from Slack blocks (rich formatting) or fallback to plain text
     text = parse_slack_blocks(message)
@@ -944,17 +946,32 @@ def track_message_stats(migrator, m):
     user_id = m.get("user", "")
 
     # Check if this message is from a bot and bots should be ignored
-    if user_id and migrator.config.get("ignore_bots", False):
-        user_data = migrator._get_user_data(user_id)
-        if user_data and user_data.get("is_bot", False):
+    if migrator.config.get("ignore_bots", False):
+        # Check for bot messages by subtype (covers system bots like USLACKBOT that aren't in users.json)
+        if m.get("subtype") in ["bot_message", "app_message"]:
+            bot_name = m.get("username", user_id or "Unknown Bot")
             log_with_context(
                 logging.DEBUG,
-                f"Skipping stats tracking for bot message from {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
+                f"Skipping stats tracking for bot message from {bot_name} (subtype: {m.get('subtype')}) - ignore_bots enabled",
                 channel=channel,
                 ts=ts,
                 user_id=user_id,
+                bot_name=bot_name,
             )
             return
+
+        # Also check for user-based bots (bots that are in users.json)
+        if user_id:
+            user_data = migrator._get_user_data(user_id)
+            if user_data and user_data.get("is_bot", False):
+                log_with_context(
+                    logging.DEBUG,
+                    f"Skipping stats tracking for bot message from {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
+                    channel=channel,
+                    ts=ts,
+                    user_id=user_id,
+                )
+                return
 
     # Check if we're in update mode
     is_update_mode = getattr(migrator, "update_mode", False)
@@ -1008,7 +1025,7 @@ def track_message_stats(migrator, m):
                     if user_data and user_data.get("is_bot", False):
                         continue
                 reaction_count += 1
-                
+
         migrator.channel_stats[channel]["reaction_count"] += reaction_count
 
         # Also increment the global reaction count in dry run mode
