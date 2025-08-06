@@ -535,6 +535,17 @@ The codebase is organized into the following modules:
 
 5. Create & execute Cloud Run job (mount export & map via Cloud Storage or volume).
 
+### Known Issues
+
+- **Thread Continuity in Update Mode**: When using update mode to resume an interrupted migration, messages that are part of threads started in the previous migration may not be correctly threaded with their parent thread. This occurs because the tool only imports messages newer than the last message in each space, and thread replies to older messages are posted as new standalone messages instead of being properly attached to their original thread context.
+
+- **Limited External User Support**: The migration tool has several limitations when dealing with external users (users outside your Google Workspace domain):
+  - External users cannot be impersonated due to Google Chat API restrictions, so their messages are posted by the workspace admin with attribution text indicating the original sender
+  - Emoji reactions from external users are dropped and not migrated
+  - External users are not automatically added to migrated spaces - only internal workspace users receive space memberships during migration
+
+- **Attachment Handling**: When Slack attachment files are uploaded to Google Drive during migration, a link to the Google Drive file is appended to the end of the message content rather than being attached as a native Google Chat attachment. This preserves access to the files but changes how they appear in the migrated conversations.
+
 ### Troubleshooting
 
 #### Google Cloud SDK Issues
