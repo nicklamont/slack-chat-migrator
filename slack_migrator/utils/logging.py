@@ -79,8 +79,8 @@ def setup_main_log_file(
     )
     file_handler.setFormatter(formatter)
 
-    # Create a filter to include logs that don't have a channel attribute
-    # or the channel attribute is empty
+    # Create a filter to include logs that don't have a channel attribute,
+    # channel attribute is empty, or are API-related logs when debug_api is enabled
     class MainLogFilter(logging.Filter):
         def filter(self, record):
             # Check if the record has a channel attribute
@@ -88,6 +88,16 @@ def setup_main_log_file(
 
             # If no channel attribute or empty channel, include in main log
             if record_channel is None or record_channel == "":
+                return True
+
+            # Include API debug logs in the main log when debug_api is enabled
+            if debug_api and (
+                hasattr(record, "api_data") or hasattr(record, "response")
+            ):
+                return True
+
+            # Include HTTP client logs in main log when debug_api is enabled
+            if debug_api and record.name == "http.client":
                 return True
 
             # If record has a non-empty channel attribute, exclude from main log
@@ -127,7 +137,7 @@ class EnhancedFormatter(logging.Formatter):
         elif not fmt:
             fmt = "%(asctime)s - %(levelname)s - %(message)s"
 
-        super().__init__(fmt, datefmt, style)
+        super().__init__(fmt, datefmt)
         self.include_api_details = include_api_details
 
     def format(self, record):
@@ -136,13 +146,39 @@ class EnhancedFormatter(logging.Formatter):
 
         # Only include API details if explicitly enabled
         if self.include_api_details:
-            # Add API data if present
-            if hasattr(record, "api_data") and record.api_data:
-                result += f"\nAPI Data: {record.api_data}"
+            # Add API data if present (for structured API requests)
+            if hasattr(record, "api_data") and getattr(record, "api_data"):
+                api_data = getattr(record, "api_data")
+                result += f"\n--- API Request Data ---\n{api_data}\n--- End API Request Data ---"
 
-            # Add response data if present
-            if hasattr(record, "response") and record.response:
-                result += f"\nResponse: {record.response}"
+            # Add response data if present (for structured API responses)
+            if hasattr(record, "response") and getattr(record, "response"):
+                response_data = getattr(record, "response")
+                result += f"\n--- API Response Data ---\n{response_data}\n--- End API Response Data ---"
+
+        # For HTTP client debug messages, improve formatting
+        if record.name == "http.client" and record.levelname == "DEBUG":
+            if "Header:" in record.getMessage():
+                # Format HTTP headers more cleanly
+                msg = record.getMessage()
+                if "authorization:" in msg.lower():
+                    msg = msg.replace(
+                        msg.split("authorization:")[1].split("'")[1], "[REDACTED]"
+                    )
+                result = f"{record.asctime if hasattr(record, 'asctime') else ''} - HTTP - {msg}"
+            elif "Sending request:" in record.getMessage():
+                # Format HTTP requests more cleanly
+                msg = record.getMessage()
+                # Redact authorization tokens in request logs
+                if "authorization: Bearer" in msg:
+                    import re
+
+                    msg = re.sub(
+                        r"authorization: Bearer [^\r\n]+",
+                        "authorization: Bearer [REDACTED]",
+                        msg,
+                    )
+                result = f"{record.asctime if hasattr(record, 'asctime') else ''} - HTTP - {msg}"
 
         return result
 
@@ -196,45 +232,12 @@ def setup_logger(
         http_logger.setLevel(logging.DEBUG)
         http_logger.propagate = True
 
-        # Add a handler to log HTTP traffic to a separate file if output_dir is provided
-        if output_dir:
-            # Create formatter for API logs with API details always enabled
-            api_formatter = EnhancedFormatter(include_api_details=True)
+        # Patch http.client to log complete request/response data
+        _patch_http_client_for_debug()
 
-            # Set up API debug log file for HTTP client logs
-            api_log_file = os.path.join(output_dir, "api_debug.log")
-            api_handler = logging.FileHandler(api_log_file, mode="w")
-            api_handler.setLevel(logging.DEBUG)
-            api_handler.setFormatter(api_formatter)
-            http_logger.addHandler(api_handler)
-
-            # Create a separate file specifically for our structured API logs
-            structured_api_log_file = os.path.join(
-                output_dir, "structured_api_debug.log"
-            )
-            structured_api_handler = logging.FileHandler(
-                structured_api_log_file, mode="w"
-            )
-            structured_api_handler.setLevel(logging.DEBUG)
-            structured_api_handler.setFormatter(api_formatter)
-
-            # Only include records that have api_data or response attributes
-            def api_filter(record):
-                return hasattr(record, "api_data") or hasattr(record, "response")
-
-            structured_api_handler.addFilter(api_filter)
-            logger.addHandler(structured_api_handler)
-
-            logger.info(
-                f"API debug logging enabled, writing to {api_log_file} and {structured_api_log_file}"
-            )
-
-            # Patch http.client to log complete request/response data
-            _patch_http_client_for_debug()
-
-            logger.info(f"API debug logging enabled, writing to {api_log_file}")
-        else:
-            logger.info("API debug logging enabled, writing to console")
+        logger.info(
+            "API debug logging enabled - API requests/responses will be logged to migration.log and channel-specific logs"
+        )
 
     return logger
 
@@ -301,12 +304,26 @@ def setup_channel_logger(
     formatter = EnhancedFormatter(verbose=verbose, include_api_details=debug_api)
     file_handler.setFormatter(formatter)
 
-    # Create a filter to only include logs for this specific channel
+    # Create a filter to only include logs for this specific channel and related API calls
     class ChannelFilter(logging.Filter):
         def filter(self, record):
-            # Only include log messages that have a channel attribute matching this channel
+            # Always include logs that have a channel attribute matching this channel
             record_channel = getattr(record, "channel", None)
-            return record_channel == channel
+            if record_channel == channel:
+                return True
+
+            # Also include API debug logs when they contain api_data or response attributes
+            # These are usually channel-specific API operations
+            if debug_api and (
+                hasattr(record, "api_data") or hasattr(record, "response")
+            ):
+                return True
+
+            # Include HTTP client logs only when API debug is enabled
+            if debug_api and record.name == "http.client":
+                return True
+
+            return False
 
     # Add the filter to the handler
     channel_filter = ChannelFilter()
@@ -384,6 +401,46 @@ def log_with_context(level: int, message: str, **kwargs: Any) -> None:
     logger.log(level, message, extra=extras)
 
 
+def _extract_api_operation(method: str, url: str) -> str:
+    """
+    Extract a meaningful API operation description from method and URL.
+
+    Args:
+        method: HTTP method (GET, POST, etc.)
+        url: The API endpoint URL
+
+    Returns:
+        A formatted string describing the API operation
+    """
+    try:
+        # Extract the path and operation from common Google Chat API URLs
+        if "chat.googleapis.com" in url:
+            if "/spaces?" in url and method == "POST":
+                return f"{method} chat.spaces.create"
+            elif "/spaces/" in url and "/members?" in url and method == "POST":
+                return f"{method} chat.spaces.members.create"
+            elif "/spaces/" in url and "/messages?" in url and method == "POST":
+                return f"{method} chat.spaces.messages.create"
+            elif "/spaces/" in url and "/messages/" in url and method == "GET":
+                return f"{method} chat.spaces.messages.get"
+            elif "/media/" in url:
+                if method == "POST":
+                    return f"{method} chat.media.upload"
+                elif method == "GET":
+                    return f"{method} chat.media.download"
+
+        # Fallback to basic method + simplified URL
+        simplified_url = url.split("?")[0]  # Remove query parameters
+        if len(simplified_url) > 50:
+            simplified_url = "..." + simplified_url[-47:]
+
+        return f"{method} {simplified_url}"
+
+    except Exception:
+        # If anything goes wrong, just return the basic info
+        return f"{method} {url}"
+
+
 def log_api_request(
     method: str, url: str, data: Optional[Dict] = None, **kwargs: Any
 ) -> None:
@@ -403,6 +460,9 @@ def log_api_request(
     # Always log the basic request info
     log_context = kwargs.copy()
 
+    # Extract API operation from URL for better context
+    api_operation = _extract_api_operation(method, url)
+
     # Add detailed data if available
     if data and isinstance(data, dict):
         data_copy = data.copy()
@@ -418,7 +478,7 @@ def log_api_request(
         log_context["api_data"] = json.dumps(data_copy, indent=2)
 
     # Log with all available context
-    log_with_context(logging.DEBUG, f"API Request: {method} {url}", **log_context)
+    log_with_context(logging.DEBUG, f"🔄 API Request: {api_operation}", **log_context)
 
 
 def log_api_response(
@@ -439,6 +499,14 @@ def log_api_response(
 
     # Always log the basic response info
     log_context = kwargs.copy()
+
+    # Extract API operation from URL for better context
+    api_operation = _extract_api_operation("", url).replace(" ", " ").strip()
+
+    # Add status emoji for better readability
+    status_emoji = (
+        "✅" if 200 <= status_code < 300 else "❌" if status_code >= 400 else "⚠️"
+    )
 
     # Process and add response data if available
     if response_data:
@@ -463,7 +531,9 @@ def log_api_response(
 
     # Log with all available context
     log_with_context(
-        logging.DEBUG, f"API Response: {status_code} from {url}", **log_context
+        logging.DEBUG,
+        f"{status_emoji} API Response: {status_code} from {api_operation}",
+        **log_context,
     )
 
 
