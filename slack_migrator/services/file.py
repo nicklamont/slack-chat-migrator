@@ -57,6 +57,9 @@ class FileHandler:
         # Initialize the dictionary to track processed files
         self.processed_files = {}
 
+        # Initialize cache to track which channel folders have already been shared
+        self.shared_channel_folders = set()
+
         # Initialize file upload statistics
         self.file_stats = {
             "total_files": 0,
@@ -144,6 +147,17 @@ class FileHandler:
     def shared_drive_id(self):
         """Property to access the shared drive ID."""
         return self._shared_drive_id
+
+    def reset_shared_folder_cache(self):
+        """Reset the cache of shared channel folders.
+
+        This can be useful when starting a fresh migration or for testing.
+        """
+        self.shared_channel_folders.clear()
+        log_with_context(
+            logging.DEBUG,
+            "Cleared shared channel folder cache",
+        )
 
     def _initialize_shared_drive_and_folder(self) -> None:
         """Initialize the shared drive and root folder for attachments."""
@@ -790,64 +804,76 @@ class FileHandler:
                     channel, self._root_folder_id, self._shared_drive_id
                 )
 
-                # Collect user emails for permissions (used for both folder and file permissions)
-                # Try multiple sources to get as complete a list as possible
+                # Only set permissions if this channel folder hasn't been shared yet
+                channel_folder_key = f"{channel}_{folder_id}"
+                if folder_id and channel_folder_key not in self.shared_channel_folders:
+                    # Collect user emails for permissions (used for both folder and file permissions)
+                    # Try multiple sources to get as complete a list as possible
 
-                # First check active users explicitly tracked during import
-                if (
-                    hasattr(self.migrator, "active_users_by_channel")
-                    and channel in self.migrator.active_users_by_channel
-                ):
-                    active_users = self.migrator.active_users_by_channel[channel]
+                    # First check active users explicitly tracked during import
+                    if (
+                        hasattr(self.migrator, "active_users_by_channel")
+                        and channel in self.migrator.active_users_by_channel
+                    ):
+                        active_users = self.migrator.active_users_by_channel[channel]
 
-                    # Get emails for ALL active users (including external users)
-                    for user_id in active_users:
-                        email = self.migrator.user_map.get(user_id)
-                        if email:
-                            # Get internal email (for proper permission handling)
-                            internal_email = self.migrator._get_internal_email(
-                                user_id, email
-                            )
-                            if (
-                                internal_email
-                                and internal_email not in user_emails_for_sharing
-                            ):
-                                user_emails_for_sharing.append(internal_email)
+                        # Get emails for ALL active users (including external users)
+                        for user_id in active_users:
+                            email = self.migrator.user_map.get(user_id)
+                            if email:
+                                # Get internal email (for proper permission handling)
+                                internal_email = self.migrator._get_internal_email(
+                                    user_id, email
+                                )
+                                if (
+                                    internal_email
+                                    and internal_email not in user_emails_for_sharing
+                                ):
+                                    user_emails_for_sharing.append(internal_email)
 
-                # Also check the channel metadata for completeness
-                meta = self.migrator.channels_meta.get(channel, {})
-                if "members" in meta and isinstance(meta["members"], list):
-                    for user_id in meta["members"]:
-                        email = self.migrator.user_map.get(user_id)
-                        if email:
-                            # Get internal email (for proper permission handling)
-                            internal_email = self.migrator._get_internal_email(
-                                user_id, email
-                            )
-                            if (
-                                internal_email
-                                and internal_email not in user_emails_for_sharing
-                            ):
-                                user_emails_for_sharing.append(internal_email)
+                    # Also check the channel metadata for completeness
+                    meta = self.migrator.channels_meta.get(channel, {})
+                    if "members" in meta and isinstance(meta["members"], list):
+                        for user_id in meta["members"]:
+                            email = self.migrator.user_map.get(user_id)
+                            if email:
+                                # Get internal email (for proper permission handling)
+                                internal_email = self.migrator._get_internal_email(
+                                    user_id, email
+                                )
+                                if (
+                                    internal_email
+                                    and internal_email not in user_emails_for_sharing
+                                ):
+                                    user_emails_for_sharing.append(internal_email)
 
-                # If we have the sender's email, ensure they're included (they need editor permission)
-                if sender_email and sender_email not in user_emails_for_sharing:
-                    user_emails_for_sharing.append(sender_email)
+                    # If we have the sender's email, ensure they're included (they need editor permission)
+                    if sender_email and sender_email not in user_emails_for_sharing:
+                        user_emails_for_sharing.append(sender_email)
 
-                # Log who we're sharing with
-                log_with_context(
-                    logging.DEBUG,
-                    f"Sharing channel folder for {channel} with {len(user_emails_for_sharing)} users",
-                    channel=channel,
-                )
+                    # Log who we're sharing with
+                    log_with_context(
+                        logging.DEBUG,
+                        f"Sharing channel folder for {channel} with {len(user_emails_for_sharing)} users",
+                        channel=channel,
+                    )
 
-                # Set permissions on the channel folder for all channel members
-                if folder_id and user_emails_for_sharing:
-                    self.folder_manager.set_channel_folder_permissions(
-                        folder_id,
-                        channel,
-                        user_emails_for_sharing,
-                        self._shared_drive_id,
+                    # Set permissions on the channel folder for all channel members
+                    if user_emails_for_sharing:
+                        self.folder_manager.set_channel_folder_permissions(
+                            folder_id,
+                            channel,
+                            user_emails_for_sharing,
+                            self._shared_drive_id,
+                        )
+
+                        # Mark this channel folder as shared to avoid redundant sharing
+                        self.shared_channel_folders.add(channel_folder_key)
+                else:
+                    log_with_context(
+                        logging.DEBUG,
+                        f"Channel folder for {channel} already shared, skipping permissions setup",
+                        channel=channel,
                     )
 
                 # Pre-cache file hashes from this folder to avoid duplicate uploads
