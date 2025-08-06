@@ -1073,7 +1073,7 @@ class SlackToChatMigrator:
                             # Step 5: Add regular members back to the space
                             log_with_context(
                                 logging.INFO,
-                                f"{'[DRY RUN] ' if self.dry_run else ''}Step 5/6: Adding regular members to space for {ch.name}",
+                                f"{'[DRY RUN] ' if self.dry_run else ''}Step 5/6: Adding current members to space for {ch.name}",
                                 channel=ch.name,
                             )
 
@@ -1085,13 +1085,13 @@ class SlackToChatMigrator:
                                 add_regular_members(self, space, ch.name)
                                 log_with_context(
                                     logging.DEBUG,
-                                    f"Successfully added regular members to space {space} for channel {ch.name}",
+                                    f"Successfully added current members to space {space} for channel {ch.name}",
                                     channel=ch.name,
                                 )
                             except Exception as e:
                                 log_with_context(
                                     logging.ERROR,
-                                    f"Error adding regular members to space {space}: {e}",
+                                    f"Error adding current members to space {space}: {e}",
                                     channel=ch.name,
                                 )
                                 import traceback

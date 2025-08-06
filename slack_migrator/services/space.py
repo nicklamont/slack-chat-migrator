@@ -488,7 +488,7 @@ def add_users_to_space(migrator, space: str, channel: str):
     added_count = 0
     failed_count = 0
 
-    pbar = tqdm(user_membership.items(), desc=f"Adding members to {channel}")
+    pbar = tqdm(user_membership.items(), desc=f"Adding historical members to {channel}")
     for user_id, membership in pbar:
         user_email = migrator.user_map.get(user_id)
 
@@ -717,7 +717,7 @@ def add_regular_members(migrator, space: str, channel: str):
     added_count = 0
     failed_count = 0
 
-    pbar = tqdm(active_users, desc=f"Adding regular members to {channel}")
+    pbar = tqdm(active_users, desc=f"Adding current members to {channel}")
     for user_id in pbar:
         user_email = migrator.user_map.get(user_id)
         membership_body = {}  # Ensure membership_body is always defined
@@ -959,14 +959,14 @@ def add_regular_members(migrator, space: str, channel: str):
                     )
             else:
                 log_with_context(
-                    logging.INFO,  # Changed from DEBUG to INFO for better visibility
+                    logging.DEBUG,  # Changed from DEBUG to INFO for better visibility
                     f"Workspace admin ({admin_email}) membership not found in space {space}",
                     channel=channel,
                 )
 
                 # Log the members we found for debugging
                 log_with_context(
-                    logging.INFO,
+                    logging.DEBUG,
                     f"Members in space {space}: {[member.get('member', {}).get('name', '') for member in members]}",
                     channel=channel,
                 )
