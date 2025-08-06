@@ -96,7 +96,7 @@ def retry(
                     log_with_context(
                         logging.WARNING,
                         f"Encountered {e.resp.status} {e.resp.reason}",
-                        module="http",
+                        component="http",
                     )
 
                     if attempt < max_retries:
@@ -113,7 +113,7 @@ def retry(
                         log_with_context(
                             logging.WARNING,
                             f"API client error: {e}",
-                            module="http",
+                            component="http",
                         )
                         if attempt < max_retries:
                             sleep_time = min(

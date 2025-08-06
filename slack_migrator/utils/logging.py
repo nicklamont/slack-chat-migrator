@@ -410,6 +410,38 @@ def log_with_context(level: int, message: str, **kwargs: Any) -> None:
     # Filter out None values from kwargs
     filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
+    # Filter out reserved logging attributes to avoid conflicts
+    reserved_attributes = {
+        "name",
+        "msg",
+        "args",
+        "levelname",
+        "levelno",
+        "pathname",
+        "filename",
+        "module",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "lineno",
+        "funcName",
+        "created",
+        "msecs",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "processName",
+        "process",
+        "getMessage",
+        "message",
+        "asctime",
+    }
+
+    # Remove any reserved attributes from kwargs
+    filtered_kwargs = {
+        k: v for k, v in filtered_kwargs.items() if k not in reserved_attributes
+    }
+
     # Make sure extra attributes don't cause issues with standard formatters
     # by ensuring all potentially missing attributes have default values
     default_extras = {"api_data": "", "response": ""}
