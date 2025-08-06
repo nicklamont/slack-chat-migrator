@@ -173,6 +173,8 @@ max_retries: 3
 retry_delay: 2
 ```
 
+> **Note:** Debug and logging options are controlled via command-line flags (`--verbose` and `--debug_api`) rather than configuration file settings. This ensures consistent logging behavior across all migration runs.
+
 ### Command-Line Reference
 
 The `slack-migrator` command provides several options for different migration scenarios:
@@ -187,9 +189,18 @@ The `slack-migrator` command provides several options for different migration sc
 | `--config` | No | Path to config YAML (default: config.yaml) |
 | `--dry_run` | No | Validation-only mode - performs comprehensive validation without making changes |
 | `--update_mode` | No | Update mode - update existing spaces instead of creating new ones |
-| `--verbose` or `-v` | No | Enable verbose (debug) logging |
-| `--debug_api` | No | Enable detailed API request/response logging (generates large log files) |
+| `--verbose` or `-v` | No | Enable verbose console logging (shows DEBUG level messages) |
+| `--debug_api` | No | Enable detailed API request/response logging (creates very large log files) |
 | `--skip_permission_check` | No | Skip permission checks (not recommended) |
+
+#### Logging and Debug Options
+
+The migration tool provides two levels of debug logging:
+
+- **`--verbose` / `-v`**: Enables verbose console output showing DEBUG level messages. Useful for understanding the migration flow and troubleshooting issues.
+- **`--debug_api`**: Enables detailed HTTP API request/response logging to files. This creates very large log files but is invaluable for diagnosing API-related issues or developing the tool. Only enable this when specifically needed.
+
+Both options are independent and can be used together for maximum debugging information.
 
 > **Note:** The `--skip_permission_check` option bypasses validation of service account permissions. Only use this if you're certain your service account is properly configured and you're encountering false positives in the permission check.
 
@@ -231,12 +242,19 @@ slack-migrator \
   --workspace_admin admin@company.com \
   --update_mode
 
-# Debug a problematic migration
+# Debug a problematic migration with detailed logging
 slack-migrator \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
   --workspace_admin admin@company.com \
   --verbose
+
+# Enable API debugging for development or complex troubleshooting
+slack-migrator \
+  --creds_path /path/to/key.json \
+  --export_path ./slack_export \
+  --workspace_admin admin@company.com \
+  --verbose --debug_api
 ```
 
 > **Note:** For backward compatibility, you can also use `python slack_to_chat_migration.py` with the same arguments.

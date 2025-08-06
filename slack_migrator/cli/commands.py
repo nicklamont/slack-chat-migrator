@@ -315,12 +315,15 @@ def setup_argument_parser() -> argparse.ArgumentParser:
         help="Update mode - update existing spaces instead of creating new ones",
     )
     parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable verbose (debug) logging"
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose console logging (shows DEBUG level messages)",
     )
     parser.add_argument(
         "--debug_api",
         action="store_true",
-        help="Enable detailed API request/response logging (generates large log files)",
+        help="Enable detailed API request/response logging (creates very large log files)",
     )
     parser.add_argument(
         "--skip_permission_check",

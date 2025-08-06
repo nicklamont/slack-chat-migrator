@@ -79,9 +79,6 @@ cleanup_on_error: true
 
 # Advanced options
 
-# Debug mode - will log more detailed information
-debug: false
-
 # Maximum number of retry attempts for API calls
 max_retries: 5
 
