@@ -11,8 +11,6 @@ from typing import Any, Dict, Optional, Tuple
 from googleapiclient.http import MediaFileUpload
 
 from slack_migrator.utils.logging import (
-    log_api_request,
-    log_api_response,
     log_with_context,
 )
 
@@ -89,14 +87,6 @@ class ChatFileUploader:
 
             # Use Chat API media upload endpoint
             # Upload the file using Google Chat API media upload
-
-            log_api_request(
-                "POST",
-                "chat.media.upload",
-                {"filename": filename, "mimeType": mime_type, "size": file_size},
-                channel=self._get_current_channel(),
-            )
-
             # Create media upload object
             media = MediaFileUpload(
                 file_path,
@@ -133,11 +123,6 @@ class ChatFileUploader:
 
             # Execute the upload
             response = upload_request.execute()
-
-            # Debug: Log the detailed API response
-            log_api_response(
-                200, "chat.media.upload", response, channel=self._get_current_channel()
-            )
 
             # According to Google Chat API documentation, return the complete response
             # The documentation states: "Set attachment as the response from calling the upload method"
@@ -185,14 +170,6 @@ class ChatFileUploader:
                 and hasattr(e.resp, "status")
             ):
                 status_code = e.resp.status
-
-            log_api_response(
-                status_code,
-                "chat.media.upload",
-                {"error": str(e), "details": error_info},
-                channel=self._get_current_channel(),
-            )
-
             return (None, None)
 
     def create_attachment_for_message(

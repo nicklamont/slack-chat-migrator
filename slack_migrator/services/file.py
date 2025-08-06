@@ -17,7 +17,7 @@ from slack_migrator.services.drive import (
     FolderManager,
     SharedDriveManager,
 )
-from slack_migrator.utils.logging import log_api_request, log_with_context
+from slack_migrator.utils.logging import log_with_context
 
 
 class FileHandler:
@@ -1068,11 +1068,6 @@ class FileHandler:
                 "role": "owner",
                 "emailAddress": new_owner_email,
             }
-
-            log_api_request(
-                "POST", "drive.permissions.create", permission, file_id=file_id
-            )
-
             self.drive_service.permissions().create(
                 fileId=file_id,
                 body=permission,
@@ -1432,15 +1427,6 @@ class FileHandler:
                         "role": "reader",
                         "emailAddress": email,
                     }
-
-                    log_api_request(
-                        "POST",
-                        "drive.permissions.create",
-                        permission,
-                        channel=channel,
-                        file_id=drive_file_id,
-                    )
-
                     if self._shared_drive_id:
                         self.drive_service.permissions().create(
                             fileId=drive_file_id,

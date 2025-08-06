@@ -12,8 +12,6 @@ from typing import Any, Dict, Optional, Tuple
 from googleapiclient.http import MediaFileUpload
 
 from slack_migrator.utils.logging import (
-    log_api_request,
-    log_api_response,
     log_with_context,
 )
 
@@ -358,13 +356,6 @@ class DriveFileUploader:
 
             media = MediaFileUpload(file_path, mimetype=mime_type)
 
-            log_api_request(
-                "POST",
-                "drive.files.create",
-                file_metadata,
-                channel=self._get_current_channel(),
-            )
-
             # Upload with appropriate parameters
             if shared_drive_id:
                 file = (
@@ -388,13 +379,6 @@ class DriveFileUploader:
 
             file_id = file.get("id")
             public_url = file.get("webViewLink")
-
-            log_api_response(
-                200,
-                "drive.files.create",
-                {"id": file_id, "webViewLink": public_url},
-                channel=self._get_current_channel(),
-            )
 
             # We only set editor permissions for the message poster
             # All other permissions are inherited from the folder
@@ -448,15 +432,6 @@ class DriveFileUploader:
                 or "editor",  # 'writer' is used for shared drives
                 "emailAddress": message_poster_email,
             }
-
-            log_api_request(
-                "POST",
-                "drive.permissions.create",
-                permission,
-                file_id=file_id,
-                channel=self._get_current_channel(),
-            )
-
             if shared_drive_id:
                 self.drive_service.permissions().create(
                     fileId=file_id,
@@ -529,15 +504,6 @@ class DriveFileUploader:
                     )
 
                 permission = {"type": "user", "role": role, "emailAddress": email}
-
-                log_api_request(
-                    "POST",
-                    "drive.permissions.create",
-                    permission,
-                    file_id=file_id,
-                    channel=self._get_current_channel(),
-                )
-
                 self.drive_service.permissions().create(
                     fileId=file_id,
                     body=permission,
@@ -573,15 +539,6 @@ class DriveFileUploader:
                     f"Adding separate editor permission for message poster {message_poster_email} for file {file_id}",
                     channel=self._get_current_channel(),
                 )
-
-                log_api_request(
-                    "POST",
-                    "drive.permissions.create",
-                    permission,
-                    file_id=file_id,
-                    channel=self._get_current_channel(),
-                )
-
                 self.drive_service.permissions().create(
                     fileId=file_id,
                     body=permission,
@@ -613,15 +570,6 @@ class DriveFileUploader:
                     f"Adding editor permission for service account {self.service_account_email} for file {file_id}",
                     channel=self._get_current_channel(),
                 )
-
-                log_api_request(
-                    "POST",
-                    "drive.permissions.create",
-                    permission,
-                    file_id=file_id,
-                    channel=self._get_current_channel(),
-                )
-
                 self.drive_service.permissions().create(
                     fileId=file_id,
                     body=permission,
@@ -671,15 +619,6 @@ class DriveFileUploader:
                 "role": "owner",
                 "emailAddress": new_owner_email,
             }
-
-            log_api_request(
-                "POST",
-                "drive.permissions.create",
-                permission,
-                file_id=file_id,
-                channel=self._get_current_channel(),
-            )
-
             self.drive_service.permissions().create(
                 fileId=file_id,
                 body=permission,

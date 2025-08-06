@@ -6,8 +6,6 @@ import logging
 from typing import Optional
 
 from slack_migrator.utils.logging import (
-    log_api_request,
-    log_api_response,
     log_with_context,
 )
 
@@ -91,9 +89,6 @@ class FolderManager:
                 "mimeType": "application/vnd.google-apps.folder",
                 "parents": [shared_drive_id],
             }
-
-            log_api_request("POST", "drive.files.create", folder_metadata, channel=None)
-
             folder = (
                 self.drive_service.files()
                 .create(body=folder_metadata, fields="id", supportsAllDrives=True)
@@ -101,8 +96,6 @@ class FolderManager:
             )
 
             folder_id = folder.get("id")
-            log_api_response(200, "drive.files.create", {"id": folder_id}, channel=None)
-
             log_with_context(
                 logging.INFO,
                 f"Successfully created root folder in shared drive: {folder_name} (ID: {folder_id})",
@@ -164,9 +157,6 @@ class FolderManager:
                 "name": folder_name,
                 "mimeType": "application/vnd.google-apps.folder",
             }
-
-            log_api_request("POST", "drive.files.create", folder_metadata, channel=None)
-
             folder = (
                 self.drive_service.files()
                 .create(body=folder_metadata, fields="id")
@@ -174,8 +164,6 @@ class FolderManager:
             )
 
             folder_id = folder.get("id")
-            log_api_response(200, "drive.files.create", {"id": folder_id}, channel=None)
-
             # Note: No domain-wide permissions set to avoid org-wide access
             # Individual channel folders will have their own space-specific permissions
 
@@ -286,11 +274,6 @@ class FolderManager:
                 "mimeType": "application/vnd.google-apps.folder",
                 "parents": [parent_folder_id],
             }
-
-            log_api_request(
-                "POST", "drive.files.create", folder_metadata, channel=channel
-            )
-
             # Create folder with appropriate parameters
             if shared_drive_id:
                 folder = (
@@ -369,9 +352,6 @@ class FolderManager:
 
             # First, search for folder in the parent folder
             q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and '{parent_folder_id}' in parents"
-
-            log_api_request("GET", "drive.files.list", {"q": q}, channel=channel)
-
             if shared_drive_id:
                 response = (
                     self.drive_service.files()
@@ -462,15 +442,6 @@ class FolderManager:
         for email in user_emails:
             try:
                 permission = {"type": "user", "role": "reader", "emailAddress": email}
-
-                log_api_request(
-                    "POST",
-                    "drive.permissions.create",
-                    permission,
-                    folder_id=folder_id,
-                    channel=channel,
-                )
-
                 if shared_drive_id:
                     self.drive_service.permissions().create(
                         fileId=folder_id,

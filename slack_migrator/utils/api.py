@@ -12,7 +12,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from slack_migrator.utils.logging import log_with_context, logger
+from slack_migrator.utils.logging import log_with_context
 
 REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/chat.import",
@@ -63,7 +63,7 @@ class RetryWrapper:
         return attr
 
     def _wrap_execute(self, execute_method):
-        """Wrap an execute method with retry logic."""
+        """Wrap an execute method with retry logic and automatic API logging."""
 
         @functools.wraps(execute_method)
         def wrapper(*args, **kwargs):
@@ -85,14 +85,49 @@ class RetryWrapper:
             if channel_context and isinstance(channel_context, str):
                 log_kwargs["channel"] = channel_context
 
+            # Extract request details for automatic API logging
+            request_details = self._extract_request_details(execute_method)
+
+            # Log API request automatically if debug mode is enabled
+            if request_details:
+                self._log_api_request(request_details, channel_context)
+
             delay = initial_delay
             last_exception = None
+            request_logged = False
 
             for attempt in range(max_retries + 1):
                 try:
-                    return execute_method(*args, **kwargs)
+                    result = execute_method(*args, **kwargs)
+
+                    # Log successful API response automatically if debug mode is enabled (only on final success)
+                    if request_details and not request_logged:
+                        # Extract actual status code from the response
+                        status_code = self._extract_status_code(execute_method, result)
+                        self._log_api_response(
+                            status_code, request_details, result, channel_context
+                        )
+
+                    return result
                 except HttpError as e:
                     last_exception = e
+
+                    # Log failed API response automatically if debug mode is enabled (only on final failure)
+                    if (
+                        request_details
+                        and not request_logged
+                        and attempt == max_retries
+                    ):
+                        self._log_api_response(
+                            e.resp.status, request_details, None, channel_context
+                        )
+
+                    # Only log critical server errors (5xx) to main migration log
+                    # Channel-specific errors are already logged via log_with_context
+                    if e.resp.status >= 500:  # Server errors (5xx) only
+                        main_logger = logging.getLogger("slack_migrator")
+                        main_log_with_context(logging.ERROR, f"🚨 Critical API Server Error {e.resp.status} ({e.resp.reason}): {str(e)}")
+
                     # Don't retry client errors (4xx) except rate limits (429)
                     if e.resp.status // 100 == 4 and e.resp.status != 429:
                         log_with_context(
@@ -175,6 +210,191 @@ class RetryWrapper:
             raise RuntimeError("Exited retry loop unexpectedly.")
 
         return wrapper
+
+    def _extract_request_details(self, execute_method):
+        """Extract request details from the API method for logging purposes."""
+        try:
+            # Try to get the underlying HttpRequest object
+            method_self = (
+                execute_method.__self__ if hasattr(execute_method, "__self__") else None
+            )
+
+            if not method_self:
+                return None
+
+            # Common attributes we can extract from GoogleAPI HttpRequest objects
+            http_method = getattr(
+                method_self, "method", getattr(method_self, "_method", None)
+            )
+            uri = getattr(method_self, "uri", getattr(method_self, "_uri", None))
+            body = getattr(method_self, "body", getattr(method_self, "_body", None))
+
+            # If we don't have basic info, try to infer from method chain
+            if not uri and hasattr(method_self, "methodId"):
+                # This is a GoogleAPI service method - we can get some info
+                method_id = method_self.methodId
+                uri = f"googleapis.com/{method_id.replace('.', '/')}"
+
+            # If we still don't have an HTTP method, try to infer it
+            if not http_method:
+                # Look for clues in the URI or method name
+                if uri and any(
+                    keyword in uri.lower() for keyword in ["create", "insert"]
+                ):
+                    http_method = "POST"
+                elif uri and any(
+                    keyword in uri.lower() for keyword in ["update", "patch"]
+                ):
+                    http_method = (
+                        "PUT"  # or PATCH, but PUT is more common in Google APIs
+                    )
+                elif uri and any(
+                    keyword in uri.lower() for keyword in ["delete", "remove"]
+                ):
+                    http_method = "DELETE"
+                elif uri and any(
+                    keyword in uri.lower() for keyword in ["list", "get", "search"]
+                ):
+                    http_method = "GET"
+                else:
+                    # Default to POST for Google APIs when we can't determine the method
+                    http_method = "POST"
+
+            return {
+                "method": http_method,
+                "uri": uri or "unknown_endpoint",
+                "body": body,
+            }
+        except Exception:
+            # If extraction fails, return minimal info
+            return {
+                "method": "UNKNOWN",  # Don't assume POST
+                "uri": "google_api_call",
+                "body": None,
+            }
+
+    def _extract_status_code(self, execute_method, result):
+        """Extract the actual HTTP status code from the response."""
+        try:
+            # Try to get the status code from the underlying HTTP response
+            method_self = (
+                execute_method.__self__ if hasattr(execute_method, "__self__") else None
+            )
+
+            if method_self:
+                # Look for common attributes that contain status information
+                # Google API client libraries sometimes store this in different places
+                if hasattr(method_self, "_response") and method_self._response:
+                    if hasattr(method_self._response, "status"):
+                        return int(method_self._response.status)
+                    elif hasattr(method_self._response, "status_code"):
+                        return int(method_self._response.status_code)
+
+                # Some clients store it in the httplib2 response object
+                if hasattr(method_self, "response") and method_self.response:
+                    if hasattr(method_self.response, "status"):
+                        return int(method_self.response.status)
+                    elif (
+                        isinstance(method_self.response, tuple)
+                        and len(method_self.response) > 0
+                    ):
+                        # httplib2 returns (response, content) tuple
+                        resp = method_self.response[0]
+                        if hasattr(resp, "status"):
+                            return int(resp.status)
+
+                # Check if the result itself contains status information
+                if isinstance(result, dict) and "status" in result:
+                    status = result["status"]
+                    if isinstance(status, (int, str)) and str(status).isdigit():
+                        return int(status)
+
+            # If we can't extract the actual status code, infer from the HTTP method
+            # This is a reasonable fallback based on REST conventions
+            if hasattr(method_self, "method") or hasattr(method_self, "_method"):
+                method = getattr(
+                    method_self, "method", getattr(method_self, "_method", "POST")
+                )
+                method = method.upper() if method else "POST"
+
+                # Standard HTTP status codes for successful operations
+                if method == "POST":
+                    return 201  # Created
+                elif method == "PUT":
+                    return 200  # OK
+                elif method == "DELETE":
+                    return 204  # No Content
+                elif method == "PATCH":
+                    return 200  # OK
+                else:  # GET and others
+                    return 200  # OK
+
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+        # Final fallback - assume 200 OK for successful responses
+        return 200
+
+    def _log_api_request(self, request_details, channel_context):
+        """Log API request automatically if debug mode is enabled."""
+        try:
+            # Import here to avoid circular imports
+            from slack_migrator.utils.logging import is_debug_api_enabled
+
+            if not is_debug_api_enabled():
+                return
+
+            # Import the actual logging function only when needed
+            from slack_migrator.utils.logging import log_api_request
+
+            # Prepare request data for logging
+            request_data = None
+            if request_details.get("body"):
+                try:
+                    # Try to parse body as JSON if it's a string
+                    import json
+
+                    if isinstance(request_details["body"], str):
+                        request_data = json.loads(request_details["body"])
+                    elif isinstance(request_details["body"], dict):
+                        request_data = request_details["body"]
+                except (json.JSONDecodeError, TypeError):
+                    # If parsing fails, just use string representation
+                    request_data = {"body": str(request_details["body"])[:500]}
+
+            log_api_request(
+                method=request_details["method"],
+                url=request_details["uri"],
+                data=request_data,
+                channel=channel_context,
+            )
+        except (ImportError, AttributeError, Exception):
+            # Silently ignore logging errors to not break API calls
+            pass
+
+    def _log_api_response(
+        self, status_code, request_details, response_data, channel_context
+    ):
+        """Log API response automatically if debug mode is enabled."""
+        try:
+            # Import here to avoid circular imports
+            from slack_migrator.utils.logging import is_debug_api_enabled
+
+            if not is_debug_api_enabled():
+                return
+
+            # Import the actual logging function only when needed
+            from slack_migrator.utils.logging import log_api_response
+
+            log_api_response(
+                status_code=status_code,
+                url=request_details["uri"],
+                response_data=response_data,
+                channel=channel_context,
+            )
+        except (ImportError, AttributeError, Exception):
+            # Silently ignore logging errors to not break API calls
+            pass
 
 
 def slack_ts_to_rfc3339(ts: str) -> str:

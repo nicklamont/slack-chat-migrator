@@ -7,8 +7,6 @@ import uuid
 from typing import Optional
 
 from slack_migrator.utils.logging import (
-    log_api_request,
-    log_api_response,
     log_with_context,
 )
 
@@ -134,8 +132,6 @@ class SharedDriveManager:
 
             drive_metadata = {"name": drive_name}
 
-            log_api_request("POST", "drive.drives.create", drive_metadata, channel=None)
-
             created_drive = (
                 self.drive_service.drives()
                 .create(body=drive_metadata, requestId=request_id)
@@ -143,7 +139,6 @@ class SharedDriveManager:
             )
 
             drive_id = created_drive.get("id")
-            log_api_response(200, "drive.drives.create", created_drive, channel=None)
 
             log_with_context(
                 logging.INFO,

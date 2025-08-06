@@ -15,8 +15,6 @@ from googleapiclient.http import BatchHttpRequest
 from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.formatting import convert_formatting, parse_slack_blocks
 from slack_migrator.utils.logging import (
-    log_api_request,
-    log_api_response,
     log_with_context,
 )
 
@@ -166,30 +164,12 @@ def process_reactions_batch(
             for emo in emojis:
                 try:
                     reaction_body = {"emoji": {"unicode": emo}}
-                    log_api_request(
-                        "POST",
-                        "chat.spaces.messages.reactions.create",
-                        reaction_body,
-                        message_id=message_id,
-                        user=email,
-                        channel=getattr(migrator, "current_channel", None),
-                    )
-
                     result = (
                         migrator.chat.spaces()
                         .messages()
                         .reactions()
                         .create(parent=message_name, body=reaction_body)
                         .execute()
-                    )
-
-                    log_api_response(
-                        200,
-                        "chat.spaces.messages.reactions.create",
-                        result,
-                        message_id=message_id,
-                        user=email,
-                        channel=getattr(migrator, "current_channel", None),
                     )
                 except HttpError as e:
                     log_with_context(
@@ -219,30 +199,12 @@ def process_reactions_batch(
                     # Format reaction body according to the import documentation
                     # https://developers.google.com/workspace/chat/import-data
                     reaction_body = {"emoji": {"unicode": emo}}
-                    log_api_request(
-                        "POST",
-                        "chat.spaces.messages.reactions.create",
-                        reaction_body,
-                        message_id=message_id,
-                        user=email,
-                        channel=getattr(migrator, "current_channel", None),
-                    )
-
                     result = (
                         svc.spaces()
                         .messages()
                         .reactions()
                         .create(parent=message_name, body=reaction_body)
                         .execute()
-                    )
-
-                    log_api_response(
-                        200,
-                        "chat.spaces.messages.reactions.create",
-                        result,
-                        message_id=message_id,
-                        user=email,
-                        channel=getattr(migrator, "current_channel", None),
                     )
                 except HttpError as e:
                     log_with_context(
@@ -300,15 +262,6 @@ def process_reactions_batch(
                         .reactions()
                         .create(parent=message_name, body=reaction_body)
                         .execute()
-                    )
-
-                    log_api_response(
-                        200,
-                        "chat.spaces.messages.reactions.create",
-                        result,
-                        message_id=message_id,
-                        user=email,
-                        channel=getattr(migrator, "current_channel", None),
                     )
                 except Exception as inner_e:
                     log_with_context(
@@ -806,14 +759,7 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
             channel=channel,
             ts=ts,
         )
-        log_api_request(
-            "POST", "chat.spaces.messages.create", payload, channel=channel, ts=ts
-        )
         result = chat_service.spaces().messages().create(**request_params).execute()
-        log_api_response(
-            200, "chat.spaces.messages.create", result, channel=channel, ts=ts
-        )
-
         message_name = result.get("name")
 
         # Store the message ID mapping for potential future edits
@@ -1141,17 +1087,12 @@ def send_intro(migrator, space: str, channel: str):
         }
 
         # Send the message
-        log_api_request(
-            "POST", "chat.spaces.messages.create", message_body, channel=channel
-        )
         result = (
             migrator.chat.spaces()
             .messages()
             .create(parent=space, body=message_body)
             .execute()
         )
-        log_api_response(200, "chat.spaces.messages.create", result, channel=channel)
-
         # Increment the counter
         migrator.migration_summary["messages_created"] += 1
 
