@@ -101,6 +101,16 @@ class MessageAttachmentProcessor:
                 )
 
                 if upload_result:
+                    # Check if this is a skip result (e.g., Google Docs files)
+                    if upload_result.get("type") == "skip":
+                        log_with_context(
+                            logging.INFO,
+                            f"Skipping attachment (reason: {upload_result.get('reason', 'unknown')}): {upload_result.get('name', 'unknown')}",
+                            channel=channel,
+                            file_id=file_obj.get("id", "unknown"),
+                        )
+                        continue  # Skip this attachment but don't log it as an error
+
                     attachment = self._create_attachment_from_result(upload_result)
                     if attachment:
                         attachments.append(attachment)

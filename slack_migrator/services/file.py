@@ -387,6 +387,22 @@ class FileHandler:
                 self.file_stats["failed_uploads"] += 1
                 return None
 
+            # Check if this is a Google Docs file that should be skipped
+            if file_content == b"__GOOGLE_DOCS_SKIP__":
+                log_with_context(
+                    logging.INFO,
+                    f"Google Docs/Sheets file cannot be attached - will appear as link in message text: {name}",
+                    channel=channel,
+                    file_id=file_id,
+                )
+                # Return a special result indicating this was a Google Docs skip, not a failure
+                return {
+                    "type": "skip",
+                    "reason": "google_docs_link",
+                    "name": name,
+                    "url": file_obj.get("url_private", ""),
+                }
+
             # Check if this is a Google Drive file that should be referenced directly
             if file_content == b"__GOOGLE_DRIVE_FILE__":
                 log_with_context(
@@ -1104,7 +1120,7 @@ class FileHandler:
                     file_name=name,
                     channel=self._get_current_channel(),
                 )
-                return None
+                return b"__GOOGLE_DOCS_SKIP__"
 
             if is_google_drive_file:
                 log_with_context(
