@@ -49,16 +49,19 @@ def _parse_rich_text_elements(elements: List[Dict]) -> str:
         """
         if not style:
             return text
-        markers = ""
-        if style.get("strike"):
-            markers += "~"
-        if style.get("italic"):
-            markers += "_"
+
+        # Apply styles in the correct order: bold -> italic -> strikethrough
+        # This ensures proper nesting of markdown markers
+        result = text
+
         if style.get("bold"):
-            markers += "*"
-        if markers:
-            return f"{markers}{text}{markers[::-1]}"
-        return text
+            result = f"*{result}*"
+        if style.get("italic"):
+            result = f"_{result}_"
+        if style.get("strike"):
+            result = f"~{result}~"
+
+        return result
 
     output_parts = []
     for el in elements:
@@ -93,7 +96,10 @@ def _parse_rich_text_elements(elements: List[Dict]) -> str:
             output_parts.append(f":{el.get('name', '')}:")
 
         elif el_type == "user":
-            output_parts.append(f"<@{el.get('user_id', '')}>")
+            user_mention = f"<@{el.get('user_id', '')}>"
+            # Apply styles to the user mention if any are specified
+            # Note that Google Chat does not support bold or italic for user mentions
+            output_parts.append(_apply_styles(user_mention, style))
 
     return "".join(output_parts)
 
@@ -138,39 +144,75 @@ def parse_slack_blocks(message: Dict) -> str:
                     texts.append(field.get("text", ""))
 
         elif block_type == "rich_text":
+            # Process rich text elements, handling lists specially to maintain proper indentation
+            rich_text_parts = []
+            list_items = []  # Track consecutive list items
+
             for element in block.get("elements", []):
                 element_type = element.get("type")
 
                 if element_type == "rich_text_section":
+                    # If we have accumulated list items, add them first
+                    if list_items:
+                        rich_text_parts.append("\n".join(list_items))
+                        list_items = []
+
                     rich_text_content = _parse_rich_text_elements(
                         element.get("elements", [])
                     )
                     if rich_text_content.strip():  # Only add non-empty content
-                        texts.append(rich_text_content)
+                        # Remove excessive trailing newlines but preserve intentional line breaks
+                        cleaned_content = rich_text_content.rstrip("\n")
+                        if (
+                            cleaned_content
+                        ):  # Make sure we still have content after cleaning
+                            rich_text_parts.append(cleaned_content)
 
                 elif element_type == "rich_text_list":
-                    list_items = []
+                    # Process list item with proper indentation
                     list_style = element.get("style", "bullet")
+                    indent_level = element.get("indent", 0)
+                    indent_str = "    " * indent_level  # 4 spaces per indent level
+
                     for i, item in enumerate(element.get("elements", [])):
                         item_text = _parse_rich_text_elements(item.get("elements", []))
                         prefix = "•" if list_style == "bullet" else f"{i + 1}."
-                        list_items.append(f"{prefix} {item_text}")
-                    texts.append("\n".join(list_items))
+                        list_items.append(f"{indent_str}{prefix} {item_text}")
 
                 elif element_type == "rich_text_quote":
+                    # If we have accumulated list items, add them first
+                    if list_items:
+                        rich_text_parts.append("\n".join(list_items))
+                        list_items = []
+
                     quote_content = _parse_rich_text_elements(
                         element.get("elements", [])
                     )
-                    # FIX 1: Split by paragraph, wrap each in italics, and rejoin.
+                    # Split by paragraph, wrap each in italics, and rejoin.
                     paragraphs = quote_content.strip().split("\n\n")
                     italicized_paragraphs = [
                         f"_{p.strip()}_" for p in paragraphs if p.strip()
                     ]
-                    texts.append("\n\n".join(italicized_paragraphs))
+                    rich_text_parts.append("\n\n".join(italicized_paragraphs))
 
                 elif element_type == "rich_text_preformatted":
+                    # If we have accumulated list items, add them first
+                    if list_items:
+                        rich_text_parts.append("\n".join(list_items))
+                        list_items = []
+
                     code_text = _parse_rich_text_elements(element.get("elements", []))
-                    texts.append(f"```\n{code_text}\n```")
+                    rich_text_parts.append(f"```\n{code_text}\n```")
+
+            # Add any remaining list items
+            if list_items:
+                rich_text_parts.append("\n".join(list_items))
+
+            # Join rich text parts
+            if rich_text_parts:
+                texts.append(
+                    "\n\n".join(part for part in rich_text_parts if part.strip())
+                )
 
         elif block_type == "header":
             if text_obj := block.get("text"):
