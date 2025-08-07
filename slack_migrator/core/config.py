@@ -12,7 +12,7 @@ from typing import Any, Dict
 
 import yaml
 
-from slack_migrator.utils.logging import log_with_context, logger
+from slack_migrator.utils.logging import log_with_context
 
 
 def load_config(config_path: Path) -> Dict[str, Any]:
@@ -40,9 +40,14 @@ def load_config(config_path: Path) -> Dict[str, Any]:
                     config = loaded_config
             log_with_context(logging.INFO, f"Loaded configuration from {config_path}")
         except Exception as e:
-            log_with_context(logging.WARNING, f"Failed to load config file {config_path}: {e}")
+            log_with_context(
+                logging.WARNING, f"Failed to load config file {config_path}: {e}"
+            )
     else:
-        log_with_context(logging.WARNING, f"Config file {config_path} not found, using default settings")
+        log_with_context(
+            logging.WARNING,
+            f"Config file {config_path} not found, using default settings",
+        )
 
     # Ensure expected dictionaries exist
     config.setdefault("exclude_channels", [])
@@ -81,7 +86,10 @@ def create_default_config(output_path: Path) -> bool:
         True if the config file was created successfully, False otherwise
     """
     if output_path.exists():
-        log_with_context(logging.WARNING, f"Config file {output_path} already exists, not overwriting")
+        log_with_context(
+            logging.WARNING,
+            f"Config file {output_path} already exists, not overwriting",
+        )
         return False
 
     default_config = {
