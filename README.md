@@ -589,7 +589,7 @@ The codebase is organized into the following modules:
 - **Attachment Handling**: When Slack attachment files are uploaded to Google Drive during migration, a link to the Google Drive file is appended to the end of the message content rather than being attached as a native Google Chat attachment. This preserves access to the files but changes how they appear in the migrated conversations.
 
  - **Formatting Limitations**: Caveats related to migrating Markdown formatting from Slack to Google Chat, including:
-   - Nested bullet lists may not indent correctly in Google Chat, causing subbullets to appear as top-level bullets.
+   - Nested bullet lists may not indent correctly in Google Chat, causing subbullets to appear as manually indented bullets that do not wrap correctly.
    - Bold styling around user mentions (e.g., `*<@USER>*`) is not supported by Google Chat and will display literal asterisks.
 ### Troubleshooting
 

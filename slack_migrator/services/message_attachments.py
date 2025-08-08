@@ -58,6 +58,22 @@ class MessageAttachmentProcessor:
             List of attachment objects for Google Chat message payload
         """
         files = message.get("files", [])
+
+        # Also check for files in forwarded message attachments
+        attachments = message.get("attachments", [])
+        for attachment in attachments:
+            # Check if this is a forwarded/shared message with files
+            if (
+                attachment.get("is_share") or attachment.get("is_msg_unfurl")
+            ) and "files" in attachment:
+                forwarded_files = attachment.get("files", [])
+                files.extend(forwarded_files)
+                log_with_context(
+                    logging.DEBUG,
+                    f"Found {len(forwarded_files)} files in forwarded message attachment",
+                    channel=channel,
+                )
+
         if not files:
             return []
 

@@ -432,8 +432,20 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     # Extract text from Slack blocks (rich formatting) or fallback to plain text
     text = parse_slack_blocks(message)
 
-    # Skip empty messages
-    if not text.strip() and "files" not in message:
+    # Check for files in main message and forwarded messages
+    has_files = "files" in message
+    if not has_files:
+        # Also check for files in forwarded message attachments
+        attachments = message.get("attachments", [])
+        for attachment in attachments:
+            if (
+                attachment.get("is_share") or attachment.get("is_msg_unfurl")
+            ) and "files" in attachment:
+                has_files = True
+                break
+
+    # Skip empty messages (no text and no files)
+    if not text.strip() and not has_files:
         log_with_context(
             logging.DEBUG,
             f"Skipping empty message from {user_id}",

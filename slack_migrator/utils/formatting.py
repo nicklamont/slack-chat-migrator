@@ -8,6 +8,7 @@ convert Slack's markdown syntax to the format expected by Google Chat.
 import logging
 import re
 from typing import Dict, List
+from datetime import datetime
 
 import emoji
 
@@ -70,19 +71,35 @@ def _parse_rich_text_elements(elements: List[Dict]) -> str:
 
         if el_type == "text":
             text_content = el.get("text", "")
-            # Separate content from surrounding whitespace
-            leading_space = text_content[
-                : len(text_content) - len(text_content.lstrip())
-            ]
-            trailing_space = text_content[len(text_content.rstrip()) :]
-            content = text_content.strip()
 
-            if content:
-                # Apply styles only to the text content
-                content = _apply_styles(content, style)
+            # Handle the simple cases first
+            if not text_content:
+                output_parts.append(text_content)
+            elif not style:
+                # No styling to apply - preserve text exactly
+                output_parts.append(text_content)
+            elif not text_content.strip():
+                # Text is all whitespace - preserve exactly (no styling possible)
+                output_parts.append(text_content)
+            else:
+                # We have both content and styling - apply styles while preserving whitespace
+                # Find the span of actual content (first to last non-whitespace character)
+                first_char = next(
+                    i for i, c in enumerate(text_content) if not c.isspace()
+                )
+                last_char = next(
+                    i for i, c in enumerate(reversed(text_content)) if not c.isspace()
+                )
+                last_char = len(text_content) - 1 - last_char
 
-            # Re-attach whitespace outside the markdown
-            output_parts.append(f"{leading_space}{content}{trailing_space}")
+                leading_whitespace = text_content[:first_char]
+                content = text_content[first_char : last_char + 1]
+                trailing_whitespace = text_content[last_char + 1 :]
+
+                styled_content = _apply_styles(content, style)
+                output_parts.append(
+                    f"{leading_whitespace}{styled_content}{trailing_whitespace}"
+                )
 
         elif el_type == "link":
             url = el.get("url", "")
@@ -113,6 +130,8 @@ def parse_slack_blocks(message: Dict) -> str:
     and applies appropriate formatting. Rich text blocks are processed recursively to handle
     nested formatting.
 
+    Also checks for forwarded/shared message content in the attachments array.
+
     Supported block types:
     - section: Basic text blocks and fields
     - rich_text: Complex formatted text including sections, lists, quotes, and code blocks
@@ -127,8 +146,105 @@ def parse_slack_blocks(message: Dict) -> str:
         A string with all the formatted text content from the message blocks,
         or the raw text field if no blocks are present or no content could be extracted
     """
+    # First check for forwarded message content
+    forwarded_texts = []
+    attachments = message.get("attachments", [])
+    for attachment in attachments:
+        # Check if this is a forwarded/shared message
+        if attachment.get("is_share") or attachment.get("is_msg_unfurl"):
+            # Try to get text from various fields in the attachment
+            forwarded_text = ""
+            author_info = ""
+            timestamp_info = ""
+
+            # Extract author information if available
+            if attachment.get("author_name"):
+                author_info = f" from {attachment['author_name']}"
+            elif attachment.get("author_subname"):
+                author_info = f" from {attachment['author_subname']}"
+
+            # Extract timestamp information if available
+            if attachment.get("ts"):
+                # Convert timestamp to readable format
+                try:
+                    timestamp = float(attachment["ts"])
+                    readable_time = datetime.fromtimestamp(timestamp).strftime(
+                        "%B %d, %Y at %I:%M %p"
+                    )
+                    timestamp_info = f" (originally sent {readable_time})"
+                except (ValueError, OSError):
+                    # Fallback if timestamp conversion fails
+                    timestamp_info = f" (originally sent at {attachment['ts']})"
+
+            # Prefer rich message_blocks over plain text for better formatting
+            if "message_blocks" in attachment:
+                for msg_block in attachment.get("message_blocks", []):
+                    if "message" in msg_block and "blocks" in msg_block["message"]:
+                        # Recursively parse blocks from the forwarded message to preserve rich formatting
+                        forwarded_text = parse_slack_blocks(msg_block["message"])
+                        break
+
+            # Fall back to plain text fields if no message_blocks available
+            if not forwarded_text:
+                if attachment.get("text"):
+                    forwarded_text = attachment.get("text", "")
+                elif attachment.get("fallback"):
+                    forwarded_text = attachment.get("fallback", "")
+
+            if forwarded_text.strip():
+                # Handle bullet formatting directly for Google Chat compatibility
+                lines = forwarded_text.strip().split("\n")
+                improved_lines = []
+
+                for line in lines:
+                    stripped = line.strip()
+                    # Handle indented bullets by converting to different bullet types
+                    if re.match(r"^\s+•", line):
+                        # Convert indented bullets to different bullet characters
+                        indent_level = len(line) - len(line.lstrip())
+                        content = (
+                            stripped[1:].strip()
+                            if stripped.startswith("•")
+                            else stripped
+                        )
+                        if indent_level <= 4:
+                            # Use official Google Chat bullet format for first level
+                            improved_lines.append(f"* {content}")
+                        elif indent_level <= 8:
+                            # Calculate indentation: 4 spaces base + 5 spaces for level 1
+                            indent_spaces = " " * (4 + 5)  # 9 spaces total
+                            improved_lines.append(f"{indent_spaces}◦ {content}")
+                        else:
+                            # Calculate indentation: 4 spaces base + 5 spaces per level (assuming level 2+)
+                            level = 2 if indent_level <= 12 else 3
+                            indent_spaces = " " * (4 + (5 * level))
+                            improved_lines.append(f"{indent_spaces}▪ {content}")
+                    elif stripped.startswith("•"):
+                        # Convert top-level bullets to official Google Chat format
+                        content = stripped[1:].strip() if len(stripped) > 1 else ""
+                        improved_lines.append(f"* {content}")
+                    else:
+                        improved_lines.append(line)
+
+                forwarded_text = "\n".join(improved_lines)
+
+                # Add indicator with author and timestamp info when available
+                # Use Google Chat bold formatting (*text* instead of **text**)
+                header = f"*Forwarded message{author_info}{timestamp_info}:*"
+                forwarded_texts.append(f"{header}\n{forwarded_text}")
+
+    # Now process the main message blocks
     if "blocks" not in message or not message["blocks"]:
-        return message.get("text", "")
+        main_text = message.get("text", "")
+        # If we have forwarded content but no main text, use forwarded content
+        if not main_text.strip() and forwarded_texts:
+            return "\n\n".join(forwarded_texts)
+        # If we have both, combine them
+        elif main_text.strip() and forwarded_texts:
+            return main_text + "\n\n" + "\n\n".join(forwarded_texts)
+        # Otherwise just return main text
+        else:
+            return main_text
 
     texts = []
     blocks_data = message.get("blocks", [])
@@ -169,15 +285,46 @@ def parse_slack_blocks(message: Dict) -> str:
                             rich_text_parts.append(cleaned_content)
 
                 elif element_type == "rich_text_list":
-                    # Process list item with proper indentation
+                    # Process list item with Google Chat compatible formatting
                     list_style = element.get("style", "bullet")
                     indent_level = element.get("indent", 0)
-                    indent_str = "    " * indent_level  # 4 spaces per indent level
+
+                    # Use proper Google Chat list formatting for first level
+                    # and fallback characters for deeper levels
+                    if list_style == "bullet":
+                        if indent_level == 0:
+                            # Use official Google Chat bullet format for proper line wrapping
+                            prefix = "*"  # Official Google Chat bullet format
+                        elif indent_level == 1:
+                            prefix = "◦"  # Hollow bullet for level 1
+                        else:
+                            prefix = "▪"  # Small bullet for level 2+
+                    else:
+                        # For numbered lists
+                        pass  # Will use i+1 in the loop
 
                     for i, item in enumerate(element.get("elements", [])):
                         item_text = _parse_rich_text_elements(item.get("elements", []))
-                        prefix = "•" if list_style == "bullet" else f"{i + 1}."
-                        list_items.append(f"{indent_str}{prefix} {item_text}")
+                        if list_style == "bullet":
+                            if indent_level == 0:
+                                # Format first-level bullets with official Google Chat format
+                                list_items.append(f"* {item_text}")
+                            else:
+                                # Calculate indentation: 4 spaces base + 5 spaces per level
+                                indent_spaces = " " * (4 + (5 * indent_level))
+                                list_items.append(
+                                    f"{indent_spaces}{prefix} {item_text}"
+                                )
+                        else:
+                            # For numbered lists
+                            if indent_level == 0:
+                                list_items.append(f"{i + 1}. {item_text}")
+                            else:
+                                # Same indentation formula for numbered lists
+                                indent_spaces = " " * (4 + (5 * indent_level))
+                                list_items.append(
+                                    f"{indent_spaces}{i + 1}. {item_text}"
+                                )
 
                 elif element_type == "rich_text_quote":
                     # If we have accumulated list items, add them first
@@ -235,7 +382,20 @@ def parse_slack_blocks(message: Dict) -> str:
 
     # If we didn't get any meaningful content from blocks, fall back to text field
     if not result:
-        return message.get("text", "")
+        main_text = message.get("text", "")
+        # If we have forwarded content but no main text, use forwarded content
+        if not main_text.strip() and forwarded_texts:
+            return "\n\n".join(forwarded_texts)
+        # If we have both, combine them
+        elif main_text.strip() and forwarded_texts:
+            return main_text + "\n\n" + "\n\n".join(forwarded_texts)
+        # Otherwise just return main text
+        else:
+            return main_text
+
+    # If we have both main content and forwarded content, combine them
+    if forwarded_texts:
+        result = result + "\n\n" + "\n\n".join(forwarded_texts)
 
     return result
 
@@ -283,7 +443,9 @@ def convert_formatting(text: str, user_map: Dict[str, str], migrator=None) -> st
             )
         else:
             # Fallback to original logging if no migrator/tracker
-            log_with_context(logging.WARNING, f"Could not map Slack user ID: {slack_user_id}")
+            log_with_context(
+                logging.WARNING, f"Could not map Slack user ID: {slack_user_id}"
+            )
 
         return f"@{slack_user_id}"
 
