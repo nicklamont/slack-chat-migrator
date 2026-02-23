@@ -90,7 +90,7 @@ class TestGenerateUserMap:
         ]
         _write_users_json(tmp_path, users)
 
-        user_map, without_email = generate_user_map(
+        user_map, _without_email = generate_user_map(
             tmp_path, {"user_mapping_overrides": {"U001": "fallback@co.com"}}
         )
 

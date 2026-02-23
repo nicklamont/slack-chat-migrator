@@ -8,7 +8,6 @@ convert Slack's markdown syntax to the format expected by Google Chat.
 import logging
 import re
 from datetime import datetime
-from typing import Dict, List
 
 import emoji
 
@@ -18,7 +17,7 @@ import emoji
 from slack_migrator.utils.logging import log_with_context
 
 
-def _parse_rich_text_elements(elements: List[Dict]) -> str:
+def _parse_rich_text_elements(elements: list[dict]) -> str:
     """
     Helper function to parse a list of rich text elements from Slack's block kit format.
 
@@ -121,7 +120,7 @@ def _parse_rich_text_elements(elements: List[Dict]) -> str:
     return "".join(output_parts)
 
 
-def parse_slack_blocks(message: Dict) -> str:
+def parse_slack_blocks(message: dict) -> str:  # noqa: C901
     """
     Parse Slack block kit format from a message to extract rich text content.
 
@@ -262,7 +261,7 @@ def parse_slack_blocks(message: Dict) -> str:
         elif block_type == "rich_text":
             # Process rich text elements, handling lists specially to maintain proper indentation
             rich_text_parts = []
-            list_items: List[str] = []  # Track consecutive list items
+            list_items: list[str] = []  # Track consecutive list items
 
             for element in block.get("elements", []):
                 element_type = element.get("type")
@@ -400,7 +399,7 @@ def parse_slack_blocks(message: Dict) -> str:
     return result
 
 
-def convert_formatting(text: str, user_map: Dict[str, str], migrator=None) -> str:
+def convert_formatting(text: str, user_map: dict[str, str], migrator=None) -> str:
     """
     Convert Slack-specific markdown to Google Chat compatible format.
 

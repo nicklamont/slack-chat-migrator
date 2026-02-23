@@ -7,7 +7,7 @@ import logging
 import mimetypes
 import os
 import tempfile
-from typing import Any, Dict, Optional, Set
+from typing import Any, ClassVar, Optional
 
 import requests
 
@@ -25,7 +25,12 @@ class FileHandler:
 
     # MIME types suitable for direct upload to Google Chat (small images only)
     # For import mode, Google recommends Drive for most files, but small images can be direct
-    DIRECT_UPLOAD_MIME_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+    DIRECT_UPLOAD_MIME_TYPES: ClassVar[set[str]] = {
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+    }
 
     # Maximum file size for direct upload (in bytes) - 25MB for direct Chat uploads
     # Note: 200MB is Drive API limit, but Chat direct uploads are much smaller
@@ -54,13 +59,13 @@ class FileHandler:
         self.dry_run = dry_run
 
         # Initialize the dictionary to track processed files
-        self.processed_files: Dict[str, Any] = {}
+        self.processed_files: dict[str, Any] = {}
 
         # Initialize cache to track which channel folders have already been shared
-        self.shared_channel_folders: Set[str] = set()
+        self.shared_channel_folders: set[str] = set()
 
         # Initialize file upload statistics
-        self.file_stats: Dict[str, Any] = {
+        self.file_stats: dict[str, Any] = {
             "total_files": 0,
             "drive_uploads": 0,
             "direct_uploads": 0,
@@ -313,14 +318,14 @@ class FileHandler:
                 f"Failed to pre-cache file hashes from root folder: {e}. Continuing without pre-cache.",
             )
 
-    def upload_attachment(
+    def upload_attachment(  # noqa: C901
         self,
-        file_obj: Dict,
+        file_obj: dict,
         channel: Optional[str] = None,
         space: Optional[str] = None,
         user_service=None,
         sender_email: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[dict[str, Any]]:
         """Upload a file using the most appropriate method based on file type.
 
         This method determines whether to use direct upload to Chat or Google Drive
@@ -377,7 +382,7 @@ class FileHandler:
 
             # Check if we've already processed this file
             if file_id in self.processed_files:
-                cached_result: Optional[Dict[str, Any]] = self.processed_files[file_id]
+                cached_result: Optional[dict[str, Any]] = self.processed_files[file_id]
                 log_with_context(
                     logging.DEBUG,
                     f"File {name} already processed, using cached result",
@@ -540,7 +545,7 @@ class FileHandler:
             self.file_stats["failed_uploads"] += 1
             log_with_context(
                 logging.ERROR,
-                f"Error uploading file: {str(e)}",
+                f"Error uploading file: {e!s}",
                 channel=channel,
                 file_id=file_obj.get("id", "unknown"),
                 error=str(e),
@@ -548,7 +553,7 @@ class FileHandler:
             return None
 
     def upload_file(
-        self, file_obj: Dict, channel: Optional[str] = None
+        self, file_obj: dict, channel: Optional[str] = None
     ) -> Optional[str]:
         """Upload a file from Slack to Google Drive.
 
@@ -571,7 +576,7 @@ class FileHandler:
         except Exception as e:
             log_with_context(
                 logging.ERROR,
-                f"Error uploading file: {str(e)}",
+                f"Error uploading file: {e!s}",
                 channel=channel,
                 file_id=file_obj.get("id", "unknown"),
                 error=str(e),
@@ -580,13 +585,13 @@ class FileHandler:
 
     def _upload_direct_to_chat(
         self,
-        file_obj: Dict,
+        file_obj: dict,
         file_content: bytes,
         channel: Optional[str] = None,
         space: Optional[str] = None,
         user_service=None,
         sender_email: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[dict[str, Any]]:
         """Upload a file directly to Google Chat API.
 
         Args:
@@ -692,13 +697,13 @@ class FileHandler:
             )
             return None
 
-    def _upload_to_drive(
+    def _upload_to_drive(  # noqa: C901
         self,
-        file_obj: Dict,
+        file_obj: dict,
         file_content: bytes,
         channel: Optional[str] = None,
         sender_email: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[dict[str, Any]]:
         """Upload a file to Google Drive.
 
         Args:
@@ -846,7 +851,7 @@ class FileHandler:
                 message_poster_email = sender_email or user_email
 
                 # Calculate hash of file content for logging and debugging
-                content_hash = hashlib.md5(file_content).hexdigest()
+                content_hash = hashlib.md5(file_content).hexdigest()  # noqa: S324 — not used for security
                 log_with_context(
                     logging.DEBUG,
                     f"File content hash: {content_hash}",
@@ -967,7 +972,7 @@ class FileHandler:
             )
             return None
 
-    def get_file_statistics(self) -> Dict[str, Any]:
+    def get_file_statistics(self) -> dict[str, Any]:
         """Get detailed file upload statistics.
 
         Returns:
@@ -1027,7 +1032,7 @@ class FileHandler:
             log_with_context(logging.WARNING, f"Failed to transfer file ownership: {e}")
             return False
 
-    def _download_file(self, file_obj: Dict) -> Optional[bytes]:
+    def _download_file(self, file_obj: dict) -> Optional[bytes]:
         """Download a file from Slack export or URL.
 
         Args:
@@ -1098,12 +1103,14 @@ class FileHandler:
 
             # For files in the export, the URL might already contain a token
             # We'll try to download using requests with default headers
-            headers: Dict[str, str] = {}
+            headers: dict[str, str] = {}
 
             # Note: Slack token authentication removed as not needed
             # Export URLs already contain authentication tokens
 
-            response = requests.get(url_private, headers=headers, stream=True)
+            response = requests.get(
+                url_private, headers=headers, stream=True, timeout=60
+            )
 
             if response.status_code != 200:
                 log_with_context(
@@ -1146,7 +1153,7 @@ class FileHandler:
             ):
                 log_with_context(
                     logging.WARNING,
-                    f"Authentication error downloading file, not retrying: {str(e)}",
+                    f"Authentication error downloading file, not retrying: {e!s}",
                     file_id=file_obj.get("id", "unknown"),
                     file_name=file_obj.get("name", "unknown"),
                     error=str(e),
@@ -1159,7 +1166,7 @@ class FileHandler:
             # For other network errors, log and re-raise to trigger retry
             log_with_context(
                 logging.WARNING,
-                f"Error downloading file: {str(e)}",
+                f"Error downloading file: {e!s}",
                 file_id=file_obj.get("id", "unknown"),
                 file_name=file_obj.get("name", "unknown"),
                 error=str(e),
@@ -1169,7 +1176,7 @@ class FileHandler:
         except Exception as e:
             log_with_context(
                 logging.ERROR,
-                f"Error downloading file: {str(e)}",
+                f"Error downloading file: {e!s}",
                 file_id=file_obj.get("id", "unknown"),
                 file_name=file_obj.get("name", "unknown"),
                 error=str(e),
@@ -1178,8 +1185,8 @@ class FileHandler:
             return None
 
     def _create_drive_reference(
-        self, file_obj: Dict, channel: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
+        self, file_obj: dict, channel: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
         """Create a direct reference to an existing Google Drive file.
 
         Args:

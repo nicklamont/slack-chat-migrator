@@ -11,7 +11,7 @@ import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Optional
+from typing import ClassVar, Optional
 
 import click
 
@@ -41,12 +41,12 @@ class DefaultGroup(click.Group):
 
     # Flags that belong to the group itself and should NOT trigger the
     # ``migrate`` default.
-    _GROUP_FLAGS = {"--help", "--version", "-h"}
+    _GROUP_FLAGS: ClassVar[set[str]] = {"--help", "--version", "-h"}
 
     def parse_args(self, ctx, args):
         # If no args at all, let click show help as usual.
         if args and args[0].startswith("-") and args[0] not in self._GROUP_FLAGS:
-            args = ["migrate"] + list(args)
+            args = ["migrate", *list(args)]
         return super().parse_args(ctx, args)
 
 

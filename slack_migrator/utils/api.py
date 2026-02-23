@@ -6,7 +6,7 @@ import functools
 import json
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -24,7 +24,7 @@ REQUIRED_SCOPES = [
 ]
 
 # Cache for service instances
-_service_cache: Dict[str, Any] = {}
+_service_cache: dict[str, Any] = {}
 
 
 class RetryWrapper:
@@ -62,11 +62,11 @@ class RetryWrapper:
 
         return attr
 
-    def _wrap_execute(self, execute_method):
+    def _wrap_execute(self, execute_method):  # noqa: C901
         """Wrap an execute method with retry logic and automatic API logging."""
 
         @functools.wraps(execute_method)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args, **kwargs):  # noqa: C901
             # Get retry config from configuration or use defaults
             max_retries = self._retry_config.get("max_retries", 3)
             initial_delay = self._retry_config.get("retry_delay", 1)
@@ -267,7 +267,7 @@ class RetryWrapper:
                 "body": None,
             }
 
-    def _extract_status_code(self, execute_method, result):
+    def _extract_status_code(self, execute_method, result):  # noqa: C901
         """Extract the actual HTTP status code from the response."""
         try:
             # Try to get the status code from the underlying HTTP response
@@ -404,7 +404,7 @@ def get_gcp_service(
     api: str,
     version: str,
     channel: Optional[str] = None,
-    retry_config: Optional[Dict[str, Any]] = None,
+    retry_config: Optional[dict[str, Any]] = None,
 ) -> Any:
     """Get a Google API client service using service account impersonation."""
     cache_key = f"{creds_path}:{user_email}:{api}:{version}"

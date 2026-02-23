@@ -3,7 +3,7 @@ Integrated file attachment service for message processing.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from slack_migrator.utils.logging import log_with_context
 
@@ -37,13 +37,13 @@ class MessageAttachmentProcessor:
 
     def process_message_attachments(
         self,
-        message: Dict[str, Any],
+        message: dict[str, Any],
         channel: str,
         space: Optional[str] = None,
         user_id: Optional[str] = None,
         user_service: Optional[Any] = None,
         sender_email: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Process all file attachments for a message and return attachment payload list.
 
         Args:
@@ -155,7 +155,7 @@ class MessageAttachmentProcessor:
             except Exception as e:
                 log_with_context(
                     logging.ERROR,
-                    f"Error processing file attachment: {file_obj.get('name', 'unknown')} - {str(e)}",
+                    f"Error processing file attachment: {file_obj.get('name', 'unknown')} - {e!s}",
                     channel=channel,
                     file_id=file_obj.get("id", "unknown"),
                     error=str(e),
@@ -166,8 +166,8 @@ class MessageAttachmentProcessor:
         return attachments
 
     def _create_attachment_from_result(
-        self, upload_result: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
+        self, upload_result: dict[str, Any]
+    ) -> Optional[dict[str, Any]]:
         """Create Google Chat attachment object from upload result.
 
         Args:
@@ -248,7 +248,7 @@ class MessageAttachmentProcessor:
 
         elif upload_type == "direct":
             # For direct uploads, the ref contains the complete attachment object
-            attachment_ref: Optional[Dict[str, Any]] = upload_result.get("ref")
+            attachment_ref: Optional[dict[str, Any]] = upload_result.get("ref")
             if attachment_ref and isinstance(attachment_ref, dict):
                 # The attachment_ref is already a complete attachment object from ChatFileUploader
                 log_with_context(
@@ -273,7 +273,7 @@ class MessageAttachmentProcessor:
 
         return None
 
-    def count_message_files(self, message: Dict) -> int:
+    def count_message_files(self, message: dict) -> int:
         """Count the number of files in a message.
 
         Args:
@@ -286,7 +286,7 @@ class MessageAttachmentProcessor:
             return 0
         return len(message.get("files", []))
 
-    def has_files(self, message: Dict) -> bool:
+    def has_files(self, message: dict) -> bool:
         """Check if a message has file attachments.
 
         Args:

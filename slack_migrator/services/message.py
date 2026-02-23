@@ -7,7 +7,7 @@ import hashlib
 import logging
 import time
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import BatchHttpRequest
@@ -19,8 +19,8 @@ from slack_migrator.utils.logging import (
 )
 
 
-def process_reactions_batch(
-    migrator, message_name: str, reactions: List[Dict], message_id: str
+def process_reactions_batch(  # noqa: C901
+    migrator, message_name: str, reactions: list[dict], message_id: str
 ):
     """Process reactions for a message in import mode."""
 
@@ -44,7 +44,7 @@ def process_reactions_batch(
             )
 
     # Group reactions by user for batch processing
-    requests_by_user: Dict[str, List[str]] = defaultdict(list)
+    requests_by_user: dict[str, list[str]] = defaultdict(list)
     reaction_count = 0
 
     log_with_context(
@@ -105,7 +105,7 @@ def process_reactions_batch(
         except Exception as e:
             log_with_context(
                 logging.WARNING,
-                f"Failed to process reaction {react.get('name')}: {str(e)}",
+                f"Failed to process reaction {react.get('name')}: {e!s}",
                 message_id=message_id,
                 error=str(e),
                 channel=getattr(migrator, "current_channel", None),
@@ -130,7 +130,7 @@ def process_reactions_batch(
         channel=getattr(migrator, "current_channel", None),
     )
 
-    user_batches: Dict[str, BatchHttpRequest] = {}
+    user_batches: dict[str, BatchHttpRequest] = {}
 
     for email, emojis in requests_by_user.items():
         # Always skip external users' reactions to avoid false attribution to admin
@@ -291,7 +291,7 @@ def process_reactions_batch(
             )
 
 
-def send_message(migrator, space: str, message: Dict) -> Optional[str]:
+def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa: C901
     """Send a message to a Google Chat space.
 
     This method handles converting a Slack message to a Google Chat message format
@@ -480,7 +480,7 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
     create_time = slack_ts_to_rfc3339(ts)
 
     # Prepare the message payload
-    payload: Dict[str, Any] = {"createTime": create_time}
+    payload: dict[str, Any] = {"createTime": create_time}
 
     # Set the sender if available
     user_email = migrator.user_map.get(user_id)
@@ -658,7 +658,7 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
             if is_edited:
                 hash_input = f"{ts}:{edited_ts}"
 
-            hash_obj = hashlib.md5(hash_input.encode())
+            hash_obj = hashlib.md5(hash_input.encode())  # noqa: S324 — not used for security
             hash_digest = hash_obj.hexdigest()[:8]
 
             # Create a shorter ID that still maintains uniqueness
@@ -907,7 +907,7 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
         return None
 
 
-def track_message_stats(migrator, m: Dict[str, Any]) -> None:
+def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
     """Handle tracking message stats in both dry run and normal mode."""
     # Get the current channel being processed
     channel = migrator.current_channel
@@ -1142,7 +1142,7 @@ def log_space_mapping_conflicts(migrator) -> None:
             )
 
 
-def load_space_mappings(migrator) -> Dict[str, str]:
+def load_space_mappings(migrator) -> dict[str, str]:
     """Load space mappings for update mode.
 
     This uses the Google Chat API for discovery and the config file for overrides.
@@ -1159,7 +1159,7 @@ def load_space_mappings(migrator) -> Dict[str, str]:
         # Use API discovery to find spaces
         from slack_migrator.services.discovery import discover_existing_spaces
 
-        discovered_spaces, duplicate_spaces = discover_existing_spaces(migrator)
+        discovered_spaces, _duplicate_spaces = discover_existing_spaces(migrator)
 
         # Log the discovery results
         if discovered_spaces:

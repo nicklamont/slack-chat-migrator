@@ -5,7 +5,7 @@ Logging module for the Slack to Google Chat migration tool
 import json
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 # Module-level flag to track if API debug logging is enabled
 _DEBUG_API_ENABLED = False
@@ -175,13 +175,13 @@ class EnhancedFormatter(logging.Formatter):
         # Only include API details if explicitly enabled
         if self.include_api_details:
             # Add API data if present (for structured API requests)
-            if hasattr(record, "api_data") and getattr(record, "api_data"):
-                api_data = getattr(record, "api_data")
+            if hasattr(record, "api_data") and record.api_data:
+                api_data = record.api_data
                 result += f"\n--- API Request Data ---\n{api_data}\n--- End API Request Data ---"
 
             # Add response data if present (for structured API responses)
-            if hasattr(record, "response") and getattr(record, "response"):
-                response_data = getattr(record, "response")
+            if hasattr(record, "response") and record.response:
+                response_data = record.response
                 result += f"\n--- API Response Data ---\n{response_data}\n--- End API Response Data ---"
 
         # For HTTP client debug messages, improve formatting
@@ -516,7 +516,7 @@ def _extract_api_operation(method: str, url: str) -> str:
 
 
 def log_api_request(
-    method: str, url: str, data: Optional[Dict] = None, **kwargs: Any
+    method: str, url: str, data: Optional[dict] = None, **kwargs: Any
 ) -> None:
     """
     Log an API request with appropriate detail level based on debug mode.
@@ -611,7 +611,7 @@ def log_api_response(
     )
 
 
-def log_failed_message(channel: str, failed_msg: Dict[str, Any]) -> None:
+def log_failed_message(channel: str, failed_msg: dict[str, Any]) -> None:
     """
     Log details of a failed message to the channel log.
 
@@ -632,7 +632,7 @@ def log_failed_message(channel: str, failed_msg: Dict[str, Any]) -> None:
         )
     except Exception:
         logger.debug(
-            f"Failed message payload (not JSON serializable): {repr(failed_msg.get('payload', {}))}",
+            f"Failed message payload (not JSON serializable): {failed_msg.get('payload', {})!r}",
             extra={"channel": channel},
         )
 

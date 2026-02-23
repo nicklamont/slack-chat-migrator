@@ -6,7 +6,7 @@ import datetime
 import json
 import logging
 import time
-from typing import Any, Dict, Set
+from typing import Any
 
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
@@ -241,7 +241,7 @@ def create_space(migrator, channel: str) -> str:
     return space_name
 
 
-def add_users_to_space(migrator, space: str, channel: str) -> None:
+def add_users_to_space(migrator, space: str, channel: str) -> None:  # noqa: C901
     """Add users to a space as historical members."""
     log_with_context(
         logging.DEBUG,
@@ -250,8 +250,8 @@ def add_users_to_space(migrator, space: str, channel: str) -> None:
     )
 
     # Map to track user join/leave times and store info about who is currently active
-    user_membership: Dict[str, Dict[str, Any]] = {}
-    active_users: Set[str] = (
+    user_membership: dict[str, dict[str, Any]] = {}
+    active_users: set[str] = (
         set()
     )  # Track users who are still active for adding after import
     ch_dir = migrator.export_root / channel
@@ -605,7 +605,7 @@ def add_users_to_space(migrator, space: str, channel: str) -> None:
     )
 
 
-def add_regular_members(migrator, space: str, channel: str) -> None:
+def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C901
     """Add regular members to a space after import mode is complete.
 
     After completing import mode, this method adds back all active members
@@ -636,7 +636,7 @@ def add_regular_members(migrator, space: str, channel: str) -> None:
             channels_file = export_root / "channels.json"
 
             if channels_file.exists():
-                with open(channels_file, "r") as f:
+                with open(channels_file) as f:
                     channels_data = json.load(f)
 
                 for ch in channels_data:
