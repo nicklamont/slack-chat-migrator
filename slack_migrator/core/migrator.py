@@ -607,7 +607,6 @@ class SlackToChatMigrator:
             channel=getattr(self, "current_channel", "unknown"),
         )
 
-        # TODO: Add to migration report for surfacing during reporting
         if not hasattr(self, "skipped_reactions"):
             self.skipped_reactions = []
 

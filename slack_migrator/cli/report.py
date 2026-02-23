@@ -185,6 +185,7 @@ def generate_report(migrator):
             "users_without_email": {},
         },
         "file_upload_details": file_stats,
+        "skipped_reactions": [],
         "recommendations": [],
     }
 
@@ -211,6 +212,19 @@ def generate_report(migrator):
                 "message": f"Found {len(migrator.channel_conflicts)} channels with duplicate space conflicts. "
                 f"These channels were skipped. Add entries to space_mapping in config.yaml to resolve: {', '.join(migrator.channel_conflicts)}",
                 "severity": "error",
+            }
+        )
+
+    # Add skipped reactions from unmapped users
+    skipped_reactions = getattr(migrator, "skipped_reactions", [])
+    if skipped_reactions:
+        report["skipped_reactions"] = skipped_reactions
+        report["recommendations"].append(
+            {
+                "type": "skipped_reactions",
+                "message": f"Skipped {len(skipped_reactions)} reactions from unmapped users. "
+                "Add these users to user_mapping_overrides in config.yaml to include their reactions.",
+                "severity": "warning",
             }
         )
 

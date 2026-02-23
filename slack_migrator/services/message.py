@@ -907,7 +907,7 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
         return None
 
 
-def track_message_stats(migrator, m):
+def track_message_stats(migrator, m: Dict[str, Any]) -> None:
     """Handle tracking message stats in both dry run and normal mode."""
     # Get the current channel being processed
     channel = migrator.current_channel
@@ -1034,7 +1034,7 @@ def track_message_stats(migrator, m):
     # We don't need to process files here - they are handled in send_message
 
 
-def send_intro(migrator, space: str, channel: str):
+def send_intro(migrator, space: str, channel: str) -> None:
     """Send an intro message with channel metadata."""
     # Check if we're in update mode - if so, don't send intro message again
     is_update_mode = getattr(migrator, "update_mode", False)
@@ -1117,7 +1117,7 @@ def send_intro(migrator, space: str, channel: str):
         )
 
 
-def log_space_mapping_conflicts(migrator):
+def log_space_mapping_conflicts(migrator) -> None:
     """
     Log information about space mapping conflicts that need to be resolved.
     """
@@ -1142,7 +1142,7 @@ def log_space_mapping_conflicts(migrator):
             )
 
 
-def load_space_mappings(migrator):
+def load_space_mappings(migrator) -> Dict[str, str]:
     """Load space mappings for update mode.
 
     This uses the Google Chat API for discovery and the config file for overrides.

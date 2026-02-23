@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 
 # Third-party imports
 # pylint: disable=import-error
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from slack_migrator.utils.logging import (
@@ -163,7 +164,7 @@ class DriveFileUploader:
             )
             return files_cached
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.WARNING,
                 f"Failed to pre-cache file hashes from folder {folder_id}: {e}",
@@ -264,7 +265,7 @@ class DriveFileUploader:
 
             return None, None
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.WARNING,
                 f"Error searching for file by hash: {e}",
@@ -395,7 +396,7 @@ class DriveFileUploader:
 
             return (file_id, public_url)
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.ERROR,
                 f"Failed to upload file {filename} to Drive: {e}",
@@ -454,7 +455,7 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
             return True
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.WARNING,
                 f"Failed to set editor permission for message poster on file {file_id}: {e}",
@@ -513,7 +514,7 @@ class DriveFileUploader:
 
                 success_count += 1
 
-            except Exception as e:
+            except HttpError as e:
                 log_with_context(
                     logging.WARNING,
                     f"Failed to set permission for {email} on file {file_id}: {e}",
@@ -548,7 +549,7 @@ class DriveFileUploader:
 
                 success_count += 1
 
-            except Exception as e:
+            except HttpError as e:
                 log_with_context(
                     logging.WARNING,
                     f"Failed to set editor permission for message poster {message_poster_email} on file {file_id}: {e}",
@@ -579,7 +580,7 @@ class DriveFileUploader:
 
                 success_count += 1
 
-            except Exception as e:
+            except HttpError as e:
                 log_with_context(
                     logging.WARNING,
                     f"Failed to set editor permission for service account {self.service_account_email} on file {file_id}: {e}",
@@ -634,7 +635,7 @@ class DriveFileUploader:
 
             return True
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.WARNING,
                 f"Failed to transfer file ownership: {e}",
