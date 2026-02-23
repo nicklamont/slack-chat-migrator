@@ -65,7 +65,7 @@ pip install -e .
 pip install git+https://github.com/nicklamont/slack-chat-migrator.git
 ```
 
-> Note: The `setup.py` file is used by pip during installation and shouldn't be run directly.
+> Note: Build configuration is defined in `pyproject.toml`. Install the package with `pip install -e .` rather than running any build files directly.
 
 ### Setting Up Permissions
 
@@ -112,10 +112,10 @@ Create a `config.yaml` file:
 shared_drive:
   # Option 1: Specify an existing shared drive by ID
   # id: "0AInA6b6Ej1Q2Uk9PVA"  # Replace with your shared drive ID
-  
+
   # Option 2: Specify a shared drive by name (will be created if it doesn't exist)
   name: "Imported Slack Attachments"
-  
+
   # If neither id nor name is specified, a new shared drive will be created
   # with the name "Imported Slack Attachments"
 
@@ -269,7 +269,7 @@ For a successful migration, follow this recommended workflow:
    ```bash
    # macOS
    brew install --cask google-cloud-sdk
-   
+
    # Linux/Windows: Follow the instructions at https://cloud.google.com/sdk/docs/install
    # After installation, run:
    gcloud init
@@ -279,11 +279,11 @@ For a successful migration, follow this recommended workflow:
    ```bash
    # Run with default settings
    ./setup_permissions.sh
-   
+
    # Or customize the setup
    ./setup_permissions.sh --project your-project-id --sa-name custom-sa-name --key-file custom-key.json
    ```
-   
+
    After running the script, complete the domain-wide delegation setup in Google Workspace Admin Console as instructed.
 
 2. **Verify permissions** (recommended before each migration):
@@ -308,14 +308,14 @@ For a successful migration, follow this recommended workflow:
    # • Verifies channel structure and memberships
    # • Tests message formatting and content
    # • Estimates migration scope and requirements
-   
+
    # For validation-only runs:
    slack-migrator \
      --creds_path /path/to/credentials.json \
      --export_path ./slack_export \
      --workspace_admin admin@domain.com \
      --dry_run
-     
+
    # Regular migration (automatically includes validation step):
    slack-migrator \
      --creds_path /path/to/credentials.json \
@@ -330,7 +330,7 @@ For a successful migration, follow this recommended workflow:
    # Step 1: Comprehensive validation (dry run)
    # Step 2: User confirmation to proceed
    # Step 3: Actual migration
-   
+
    slack-migrator \
      --creds_path /path/to/credentials.json \
      --export_path ./slack_export \
@@ -346,15 +346,15 @@ For a successful migration, follow this recommended workflow:
      --workspace_admin admin@domain.com \
      --update_mode
    ```
-   
-   Update mode will find existing spaces and only import messages that are newer than the last message 
+
+   Update mode will find existing spaces and only import messages that are newer than the last message
    in each space. This approach is simple and reliable but has a known limitation: thread replies to
    older messages may be posted as new standalone messages instead of being properly threaded.
-   
-   If multiple Google Chat spaces exist with the same name (e.g., multiple "Slack #general" spaces), 
-   the tool will detect this conflict and show you the details of each space. You'll need to add a 
+
+   If multiple Google Chat spaces exist with the same name (e.g., multiple "Slack #general" spaces),
+   the tool will detect this conflict and show you the details of each space. You'll need to add a
    `space_mapping` section to your config.yaml file to specify which space to use for each channel:
-   
+
    ```yaml
    space_mapping:
      "general": "AAAAAgcE123"  # Use this space ID for the general channel
@@ -458,7 +458,7 @@ The tool generates comprehensive reports in both validation mode and after actua
    - Channel structure verification
    - Message formatting validation
    - Migration scope estimation
-   
+
 2. **Migration Summary**: Generated after a real migration, shows what actually happened
 
 The reports include:
@@ -601,11 +601,11 @@ The codebase is organized into the following modules:
     - macOS: `brew install --cask google-cloud-sdk`
     - Linux/Windows: Use the [Official Installation Guide](https://cloud.google.com/sdk/docs/install)
   - After installation, run `gcloud init` to configure your environment
-  
+
 - **Permission denied when running setup_permissions.sh**:
   - Make the script executable: `chmod +x setup_permissions.sh`
   - Run as: `./setup_permissions.sh`
-  
+
 #### Manual Google Cloud Setup (Without Using the Script)
 
 If you prefer not to use the setup script, follow these steps manually:
