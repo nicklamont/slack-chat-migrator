@@ -17,6 +17,7 @@ import click
 
 import slack_migrator
 from slack_migrator.core.migrator import SlackToChatMigrator, cleanup_import_mode_spaces
+from slack_migrator.exceptions import MigratorError
 from slack_migrator.utils.logging import log_with_context, setup_logger
 from slack_migrator.utils.permissions import (
     check_permissions_standalone,
@@ -179,6 +180,7 @@ def migrate(
         orchestrator.run_migration()
     except Exception as e:
         handle_exception(e)
+        sys.exit(1)
     finally:
         orchestrator.cleanup()
         show_security_warning()
@@ -268,6 +270,7 @@ def validate(
         orchestrator.run_migration()
     except Exception as e:
         handle_exception(e)
+        sys.exit(1)
     finally:
         orchestrator.cleanup()
         show_security_warning()
@@ -692,7 +695,9 @@ def handle_exception(e):
     """Handle different types of exceptions."""
     from googleapiclient.errors import HttpError
 
-    if isinstance(e, HttpError):
+    if isinstance(e, MigratorError):
+        log_with_context(logging.ERROR, str(e))
+    elif isinstance(e, HttpError):
         handle_http_error(e)
     elif isinstance(e, FileNotFoundError):
         log_with_context(logging.ERROR, f"File not found: {e}")
