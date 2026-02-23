@@ -82,7 +82,7 @@ no_implicit_optional = true
 strict_optional = true
 
 [[tool.mypy.overrides]]
-module = ["emoji.*", "slackblocks.*", "tqdm.*"]
+module = ["emoji.*", "slackblocks.*", "tqdm.*", "googleapiclient.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

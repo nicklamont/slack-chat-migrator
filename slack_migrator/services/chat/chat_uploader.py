@@ -45,7 +45,7 @@ class ChatFileUploader:
 
     def upload_file_to_chat(
         self, file_path: str, filename: str, parent_space: Optional[str] = None
-    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """Upload a file directly to Google Chat API.
 
         Args:
@@ -58,7 +58,7 @@ class ChatFileUploader:
         """
         if self.dry_run:
             return (
-                f"DRY_CHAT_TOKEN_{filename}",
+                {"token": f"DRY_CHAT_TOKEN_{filename}"},
                 {"name": filename, "driveFile": {"name": f"DRY_CHAT_FILE_{filename}"}},
             )
 

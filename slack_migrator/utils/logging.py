@@ -83,7 +83,7 @@ def setup_main_log_file(
             old_emit(record)
             file_handler.flush()
 
-        file_handler.emit = immediate_flush_emit
+        file_handler.emit = immediate_flush_emit  # type: ignore[method-assign]
 
     # Create formatter - always use EnhancedFormatter but conditionally include API details
     formatter = EnhancedFormatter(
@@ -293,7 +293,7 @@ def _enable_http_client_debug():
             http_logger.debug("Header: %s: %s", header, header_value)
         return _orig_putheader(self, header, *values)
 
-    http.client.HTTPConnection.putheader = _debug_putheader
+    http.client.HTTPConnection.putheader = _debug_putheader  # type: ignore[method-assign]
 
 
 def setup_channel_logger(
@@ -332,7 +332,7 @@ def setup_channel_logger(
             old_emit(record)
             file_handler.flush()
 
-        file_handler.emit = immediate_flush_emit
+        file_handler.emit = immediate_flush_emit  # type: ignore[method-assign]
 
     # Create formatter - use EnhancedFormatter with appropriate settings
     formatter = EnhancedFormatter(verbose=verbose, include_api_details=debug_api)

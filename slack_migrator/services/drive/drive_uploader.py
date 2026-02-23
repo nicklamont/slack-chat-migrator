@@ -5,7 +5,7 @@ Google Drive file upload functionality.
 import hashlib
 import logging
 import mimetypes
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 # Third-party imports
 # pylint: disable=import-error
@@ -39,8 +39,8 @@ class DriveFileUploader:
         self.workspace_domain = workspace_domain
         self.dry_run = dry_run
         self.service_account_email = service_account_email
-        self.file_hash_cache = {}
-        self.folders_pre_cached = set()
+        self.file_hash_cache: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+        self.folders_pre_cached: Set[str] = set()
         self.migrator = None  # Will be set by the FileHandler when it's created
 
     def _get_current_channel(self):
@@ -229,14 +229,14 @@ class DriveFileUploader:
             )
 
             # Build request parameters
-            params: Dict[str, Any] = {
+            search_params: Dict[str, Any] = {
                 "q": query,
                 "fields": "files(id,name,webViewLink)",
             }
 
             # Add shared drive parameters if applicable
             if shared_drive_id:
-                params.update(
+                search_params.update(
                     {
                         "spaces": "drive",
                         "corpora": "drive",
@@ -246,7 +246,7 @@ class DriveFileUploader:
                     }
                 )
 
-            response = self.drive_service.files().list(**params).execute()
+            response = self.drive_service.files().list(**search_params).execute()
 
             files = response.get("files", [])
             if files:

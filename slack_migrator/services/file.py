@@ -7,7 +7,7 @@ import logging
 import mimetypes
 import os
 import tempfile
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 import requests
 
@@ -35,7 +35,7 @@ class FileHandler:
         self,
         drive_service,
         chat_service,
-        folder_id: str,
+        folder_id: Optional[str],
         migrator,
         dry_run: bool = False,
     ):
@@ -54,13 +54,13 @@ class FileHandler:
         self.dry_run = dry_run
 
         # Initialize the dictionary to track processed files
-        self.processed_files = {}
+        self.processed_files: Dict[str, Any] = {}
 
         # Initialize cache to track which channel folders have already been shared
-        self.shared_channel_folders = set()
+        self.shared_channel_folders: Set[str] = set()
 
         # Initialize file upload statistics
-        self.file_stats = {
+        self.file_stats: Dict[str, Any] = {
             "total_files": 0,
             "drive_uploads": 0,
             "direct_uploads": 0,
@@ -91,8 +91,8 @@ class FileHandler:
         self.chat_uploader.migrator = migrator
 
         # Initialize the root folder and shared drive
-        self._shared_drive_id = None
-        self._root_folder_id = None
+        self._shared_drive_id: Optional[str] = None
+        self._root_folder_id: Optional[str] = None
         self._drive_initialized = False
 
         # Don't initialize drive structures during construction - defer until needed
@@ -121,11 +121,16 @@ class FileHandler:
             self._drive_initialized = True
 
     @property
-    def folder_id(self):
+    def folder_id(self) -> Optional[str]:
         """Backward compatibility property for the root folder ID."""
         # Ensure drive is initialized when accessing folder_id
         self.ensure_drive_initialized()
         return self._root_folder_id
+
+    @folder_id.setter
+    def folder_id(self, value: Optional[str]) -> None:
+        """Backward compatibility setter for the root folder ID."""
+        self._root_folder_id = value
 
     def _get_current_channel(self):
         """Helper method to get the current channel from the migrator.
@@ -136,11 +141,6 @@ class FileHandler:
         if hasattr(self, "migrator") and hasattr(self.migrator, "current_channel"):
             return self.migrator.current_channel
         return None
-
-    @folder_id.setter
-    def folder_id(self, value):
-        """Backward compatibility setter for the root folder ID."""
-        self._root_folder_id = value
 
     @property
     def shared_drive_id(self):
@@ -164,7 +164,7 @@ class FileHandler:
             # Get shared drive configuration
             shared_drive_config = self.migrator.config.get("shared_drive", {})
             shared_drive_name = shared_drive_config.get("name")
-            shared_drive_id = shared_drive_config.get("id")
+            shared_drive_id: Optional[str] = shared_drive_config.get("id")
 
             # If no shared drive specified, use default name
             if not shared_drive_name and not shared_drive_id:
@@ -377,7 +377,7 @@ class FileHandler:
 
             # Check if we've already processed this file
             if file_id in self.processed_files:
-                cached_result = self.processed_files[file_id]
+                cached_result: Optional[Dict[str, Any]] = self.processed_files[file_id]
                 log_with_context(
                     logging.DEBUG,
                     f"File {name} already processed, using cached result",
@@ -789,7 +789,7 @@ class FileHandler:
             # Get or create a folder for this channel
             folder_id = None
 
-            if channel:
+            if channel and self._root_folder_id:
                 folder_id = self.folder_manager.get_or_create_channel_folder(
                     channel, self._root_folder_id, self._shared_drive_id
                 )
@@ -986,9 +986,10 @@ class FileHandler:
             "ownership_transfer_failed": self.file_stats["ownership_transfer_failed"],
             "files_by_channel": dict(self.file_stats["files_by_channel"]),
             "success_rate": (
-                (self.file_stats["drive_uploads"] + self.file_stats["direct_uploads"])
-                / max(1, self.file_stats["total_files"])
+                int(self.file_stats["drive_uploads"])
+                + int(self.file_stats["direct_uploads"])
             )
+            / max(1, int(self.file_stats["total_files"]))
             * 100,
         }
 
@@ -1097,7 +1098,7 @@ class FileHandler:
 
             # For files in the export, the URL might already contain a token
             # We'll try to download using requests with default headers
-            headers = {}
+            headers: Dict[str, str] = {}
 
             # Note: Slack token authentication removed as not needed
             # Export URLs already contain authentication tokens

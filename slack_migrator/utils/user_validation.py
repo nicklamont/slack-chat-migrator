@@ -228,7 +228,7 @@ def analyze_unmapped_users(
     import json
     from pathlib import Path
 
-    analysis = {}
+    analysis: Dict[str, Dict[str, Any]] = {}
 
     try:
         # Load users.json to get detailed user information
