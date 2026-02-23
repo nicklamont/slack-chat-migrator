@@ -548,7 +548,6 @@ class SlackToChatMigrator:
             attribution = f"*[From: {override_email}]*"
         elif user_info:
             real_name = user_info.get("profile", {}).get("real_name", "")
-            username = user_info.get("name", user_id)
             email = user_info.get("profile", {}).get("email", "")
 
             if real_name and email:
@@ -1355,7 +1354,7 @@ class SlackToChatMigrator:
                 try:
                     space_info = self.chat.spaces().get(name=space_name).execute()
                     # Use the correct field name: importMode (boolean) instead of importState
-                    if space_info.get("importMode") == True:
+                    if space_info.get("importMode"):
                         import_mode_spaces.append((space_name, space_info))
                 except HttpError as http_e:
                     log_with_context(
@@ -1437,7 +1436,7 @@ class SlackToChatMigrator:
                             log_with_context(
                                 logging.DEBUG,
                                 f"Successfully completed import mode for space: {space_name}",
-                                channel=channel_name if channel_name else None,
+                                space_name=space_name,
                             )
                         except HttpError as http_e:
                             log_with_context(
@@ -1457,7 +1456,7 @@ class SlackToChatMigrator:
                             log_with_context(
                                 logging.ERROR,
                                 f"Failed to complete import: {e}",
-                                channel=channel_name if channel_name else None,
+                                space_name=space_name,
                             )
                             continue
 

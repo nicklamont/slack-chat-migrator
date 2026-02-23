@@ -281,7 +281,6 @@ class FileHandler:
 
                 for folder in folders:
                     folder_id = folder.get("id")
-                    folder_name = folder.get("name")
 
                     if folder_id:
                         file_count = self.drive_uploader.pre_cache_folder_file_hashes(
@@ -1049,9 +1048,6 @@ class FileHandler:
                     channel=self._get_current_channel(),
                 )
                 return None
-
-            # Create a hash of the URL to use as cache key
-            file_hash = hashlib.md5(url_private.encode()).hexdigest()
 
             # Skip Google Docs links - these should not be processed as file attachments
             # Google Docs URLs in Slack messages are text links, not downloadable files

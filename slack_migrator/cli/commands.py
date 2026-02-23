@@ -519,7 +519,7 @@ def main():
     output_dir = create_migration_output_directory()
 
     # Set up logger with output directory for file logging
-    logger = setup_logger(args.verbose, args.debug_api, output_dir)
+    setup_logger(args.verbose, args.debug_api, output_dir)
 
     log_startup_info(args)
     log_with_context(logging.INFO, f"Output directory: {output_dir}")
