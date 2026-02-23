@@ -6,6 +6,8 @@ import logging
 import uuid
 from typing import Optional
 
+from googleapiclient.errors import HttpError
+
 from slack_migrator.utils.logging import (
     log_with_context,
 )
@@ -41,7 +43,7 @@ class SharedDriveManager:
         try:
             self.drive_service.drives().get(driveId=shared_drive_id).execute()
             return True
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.WARNING, f"Shared drive {shared_drive_id} not accessible: {e}"
             )
@@ -79,7 +81,7 @@ class SharedDriveManager:
                         f"Using configured shared drive: {drive_info.get('name', 'Unknown')} (ID: {shared_drive_id})",
                     )
                     return shared_drive_id
-                except Exception as e:
+                except HttpError as e:
                     log_with_context(
                         logging.ERROR,
                         f"Configured shared drive ID {shared_drive_id} not accessible: {e}. Will create new one.",
@@ -91,7 +93,7 @@ class SharedDriveManager:
 
             return None
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.ERROR, f"Failed to get or create shared drive: {e}"
             )
@@ -147,7 +149,7 @@ class SharedDriveManager:
 
             return drive_id
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.ERROR,
                 f"Failed to find or create shared drive {drive_name}: {e}",

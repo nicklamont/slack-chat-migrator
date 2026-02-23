@@ -5,6 +5,8 @@ Folder management for Google Drive integration.
 import logging
 from typing import Optional
 
+from googleapiclient.errors import HttpError
+
 from slack_migrator.utils.logging import (
     log_with_context,
 )
@@ -103,7 +105,7 @@ class FolderManager:
 
             return folder_id
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.ERROR, f"Failed to create root folder in shared drive: {e}"
             )
@@ -174,7 +176,7 @@ class FolderManager:
 
             return folder_id
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.ERROR, f"Failed to create regular Drive folder: {e}"
             )
@@ -210,7 +212,7 @@ class FolderManager:
                 else:
                     self.drive_service.files().get(fileId=folder_id).execute()
                 return folder_id
-            except Exception as e:
+            except HttpError as e:
                 log_with_context(
                     logging.WARNING,
                     f"Cached folder ID {folder_id} for channel {channel} not found: {e}. Will create new folder.",
@@ -311,7 +313,7 @@ class FolderManager:
                 )
                 return None
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.WARNING,
                 f"Failed to get or create channel folder {channel}: {e}",
@@ -394,7 +396,7 @@ class FolderManager:
             )
             return None
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.WARNING,
                 f"Failed to get channel folder ID for {channel}: {e}",

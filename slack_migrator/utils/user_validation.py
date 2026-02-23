@@ -400,7 +400,7 @@ def scan_channel_members_for_unmapped_users(migrator) -> None:
                     with open(users_file, "r") as f:
                         users_data = json.load(f)
                     user_lookup = {user["id"]: user for user in users_data}
-            except Exception as e:
+            except (OSError, json.JSONDecodeError) as e:
                 log_with_context(
                     logging.WARNING, f"Error loading users.json for bot checking: {e}"
                 )
