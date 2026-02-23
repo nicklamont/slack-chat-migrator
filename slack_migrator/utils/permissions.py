@@ -8,13 +8,24 @@ required scopes and operations before starting migration.
 import datetime
 import io
 import logging
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
-from slack_migrator.utils.api import REQUIRED_SCOPES
+from slack_migrator.utils.api import REQUIRED_SCOPES, get_gcp_service
 from slack_migrator.utils.logging import log_with_context
+
+
+@dataclass
+class PermissionCheckContext:
+    """Lightweight context carrying only what PermissionValidator needs."""
+
+    chat: Any
+    drive: Any
+    workspace_admin: str
 
 
 class PermissionValidator:
@@ -31,7 +42,9 @@ class PermissionValidator:
         Initialize the permission validator.
 
         Args:
-            migrator: The SlackToChatMigrator instance with configured API clients
+            migrator: Any object exposing ``.chat``, ``.drive``, and
+                ``.workspace_admin`` attributes — typically a
+                ``SlackToChatMigrator`` or ``PermissionCheckContext``.
         """
         self.migrator = migrator
         self.permission_errors: List[str] = []
@@ -397,4 +410,51 @@ def validate_permissions(migrator) -> bool:
     migrator._initialize_api_services()
 
     validator = PermissionValidator(migrator)
+    return validator.validate_all_permissions()
+
+
+def check_permissions_standalone(
+    creds_path: str,
+    workspace_admin: str,
+    config_path: str = "config.yaml",
+) -> bool:
+    """
+    Run permission checks without creating a full SlackToChatMigrator.
+
+    This avoids the heavy init (export parsing, user mapping, channel loading)
+    that SlackToChatMigrator performs, since permission checking only needs
+    API service clients.
+
+    The caller is responsible for configuring logging (e.g. via
+    ``setup_logger``) before calling this function.
+
+    Args:
+        creds_path: Path to service account credentials JSON.
+        workspace_admin: Email of workspace admin to impersonate.
+        config_path: Path to config YAML (used for retry settings).
+
+    Returns:
+        True if all permissions are valid.
+
+    Raises:
+        Exception: If critical permissions are missing.
+    """
+    from slack_migrator.core.config import load_config
+
+    log_with_context(logging.INFO, "Running standalone permission check...")
+
+    config = load_config(Path(config_path))
+
+    chat = get_gcp_service(
+        creds_path, workspace_admin, "chat", "v1", retry_config=config
+    )
+    drive = get_gcp_service(
+        creds_path, workspace_admin, "drive", "v3", retry_config=config
+    )
+
+    ctx = PermissionCheckContext(
+        chat=chat, drive=drive, workspace_admin=workspace_admin
+    )
+
+    validator = PermissionValidator(ctx)
     return validator.validate_all_permissions()

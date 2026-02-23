@@ -218,7 +218,7 @@ slack-migrator migrate \
 
 ```bash
 # Check permissions before migration (highly recommended)
-slack-migrator-check-permissions \
+slack-migrator check-permissions \
   --creds_path /path/to/key.json \
   --workspace_admin admin@company.com
 
@@ -288,7 +288,7 @@ For a successful migration, follow this recommended workflow:
 
 2. **Verify permissions** (recommended before each migration):
    ```bash
-   slack-migrator-check-permissions \
+   slack-migrator check-permissions \
      --creds_path /path/to/credentials.json \
      --workspace_admin admin@domain.com
    ```
