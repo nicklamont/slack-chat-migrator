@@ -15,6 +15,7 @@ from typing import Any
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
+from slack_migrator.exceptions import PermissionCheckError
 from slack_migrator.utils.api import REQUIRED_SCOPES, get_gcp_service
 from slack_migrator.utils.logging import log_with_context
 
@@ -58,7 +59,7 @@ class PermissionValidator:
             True if all permissions are valid, False otherwise
 
         Raises:
-            Exception: If critical permissions are missing
+            PermissionCheckError: If critical permissions are missing
         """
         log_with_context(
             logging.INFO, "🔍 Starting comprehensive permission validation..."
@@ -383,7 +384,7 @@ class PermissionValidator:
                 logging.ERROR, "See the setup documentation for detailed instructions."
             )
 
-            raise Exception(
+            raise PermissionCheckError(
                 f"Permission validation failed with {len(self.permission_errors)} errors. Migration cannot proceed."
             )
 

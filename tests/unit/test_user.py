@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from slack_migrator.exceptions import ExportError, UserMappingError
 from slack_migrator.services.user import generate_user_map
 
 
@@ -151,8 +152,18 @@ class TestGenerateUserMap:
 
         assert "B001" in user_map
 
-    def test_missing_users_json_exits(self, tmp_path):
-        with pytest.raises(SystemExit):
+    def test_missing_users_json_raises(self, tmp_path):
+        with pytest.raises(ExportError, match=r"users\.json not found"):
+            generate_user_map(tmp_path, {})
+
+    def test_invalid_json_raises(self, tmp_path):
+        (tmp_path / "users.json").write_text("{invalid json")
+        with pytest.raises(ExportError, match=r"Failed to parse users\.json"):
+            generate_user_map(tmp_path, {})
+
+    def test_no_valid_users_raises(self, tmp_path):
+        _write_users_json(tmp_path, [{"id": "U001", "name": "noemail", "profile": {}}])
+        with pytest.raises(UserMappingError, match="No valid users found"):
             generate_user_map(tmp_path, {})
 
     def test_user_without_id_skipped(self, tmp_path):
