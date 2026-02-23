@@ -509,12 +509,6 @@ class FileHandler:
                     channel=channel,
                     file_id=file_id,
                 )
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found user email {user_email} for user ID {username}, will grant editor permission",
-                    channel=channel,
-                    file_id=file_id,
-                )
 
             drive_result = self._upload_to_drive(
                 file_obj, file_content, channel, sender_email

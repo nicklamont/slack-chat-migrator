@@ -43,6 +43,9 @@ def generate_user_map(
     except json.JSONDecodeError:
         log_with_context(logging.ERROR, "Failed to parse users.json")
         sys.exit(1)
+    except OSError as e:
+        log_with_context(logging.ERROR, f"Failed to read users.json: {e}")
+        sys.exit(1)
 
     # Get email domain override from config
     email_domain_override = config.get("email_domain_override", "")
