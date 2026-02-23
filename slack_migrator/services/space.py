@@ -234,7 +234,7 @@ def create_space(migrator, channel: str) -> str:
     return space_name
 
 
-def add_users_to_space(migrator, space: str, channel: str):
+def add_users_to_space(migrator, space: str, channel: str) -> None:
     """Add users to a space as historical members."""
     log_with_context(
         logging.DEBUG,
@@ -591,7 +591,7 @@ def add_users_to_space(migrator, space: str, channel: str):
     )
 
 
-def add_regular_members(migrator, space: str, channel: str):
+def add_regular_members(migrator, space: str, channel: str) -> None:
     """Add regular members to a space after import mode is complete.
 
     After completing import mode, this method adds back all active members
