@@ -1,1 +1,1 @@
-"""Test package for slack-chat-migrator.""" 
+"""Test package for slack-chat-migrator."""

@@ -8,14 +8,13 @@ migration process with appropriate error handling.
 """
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import Optional
 
-import logging
-
 from slack_migrator.core.migrator import SlackToChatMigrator
-from slack_migrator.utils.logging import setup_logger, log_with_context
+from slack_migrator.utils.logging import log_with_context, setup_logger
 from slack_migrator.utils.permissions import validate_permissions
 
 # Create logger instance

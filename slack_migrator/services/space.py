@@ -12,7 +12,7 @@ from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
 from slack_migrator.utils.api import slack_ts_to_rfc3339
-from slack_migrator.utils.logging import log_with_context, logger
+from slack_migrator.utils.logging import log_with_context
 
 
 def channel_has_external_users(migrator, channel: str) -> bool:

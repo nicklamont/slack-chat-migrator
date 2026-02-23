@@ -289,9 +289,7 @@ def _enable_http_client_debug():
         if header and values:
             header_value = ", ".join(str(v) for v in values)
             if header.lower() == "authorization":
-                header_value = re.sub(
-                    r"(Bearer\s+)\S+", r"\1[REDACTED]", header_value
-                )
+                header_value = re.sub(r"(Bearer\s+)\S+", r"\1[REDACTED]", header_value)
             http_logger.debug("Header: %s: %s", header, header_value)
         return _orig_putheader(self, header, *values)
 

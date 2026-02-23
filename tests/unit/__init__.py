@@ -1,1 +1,1 @@
-"""Unit tests for slack-chat-migrator.""" 
+"""Unit tests for slack-chat-migrator."""

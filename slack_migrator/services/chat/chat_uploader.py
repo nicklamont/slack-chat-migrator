@@ -190,7 +190,7 @@ class ChatFileUploader:
         # Log the attachment creation details
         log_with_context(
             logging.DEBUG,
-            f"Creating attachment from upload response",
+            "Creating attachment from upload response",
             api_data=json.dumps(
                 {
                     "upload_response_type": type(upload_response).__name__,

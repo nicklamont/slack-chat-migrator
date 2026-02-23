@@ -2,10 +2,8 @@
 Main migrator class for the Slack to Google Chat migration tool
 """
 
-import datetime
 import json
 import logging
-import os
 import signal
 import time
 import traceback
@@ -35,7 +33,7 @@ from slack_migrator.services.space import (
 )
 from slack_migrator.services.user import generate_user_map
 from slack_migrator.utils.api import get_gcp_service
-from slack_migrator.utils.logging import log_with_context, logger
+from slack_migrator.utils.logging import log_with_context
 
 
 class SlackToChatMigrator:
@@ -67,7 +65,7 @@ class SlackToChatMigrator:
 
         if self.update_mode:
             log_with_context(
-                logging.INFO, f"Running in update mode - will update existing spaces"
+                logging.INFO, "Running in update mode - will update existing spaces"
             )
 
         # Initialize caches and state tracking
@@ -380,14 +378,14 @@ class SlackToChatMigrator:
             if should_abort:
                 log_with_context(
                     logging.WARNING,
-                    f"Aborting import due to errors (abort_on_error is enabled in config)",
+                    "Aborting import due to errors (abort_on_error is enabled in config)",
                     channel=channel,
                 )
                 return True
             else:
                 log_with_context(
                     logging.WARNING,
-                    f"Continuing with migration despite errors (abort_on_error is disabled in config)",
+                    "Continuing with migration despite errors (abort_on_error is disabled in config)",
                     channel=channel,
                 )
 
@@ -660,7 +658,6 @@ class SlackToChatMigrator:
         log_with_context(logging.INFO, "Starting migration process")
 
         # Import report generation function for use in both success and failure paths
-        from slack_migrator.cli.report import generate_report
 
         # Set up signal handler to ensure we log migration status on interrupt
         def signal_handler(signum, frame):
@@ -743,7 +740,7 @@ class SlackToChatMigrator:
                 else:
                     log_with_context(
                         logging.WARNING,
-                        f"[UPDATE MODE] No existing spaces found via API. Will create new spaces.",
+                        "[UPDATE MODE] No existing spaces found via API. Will create new spaces.",
                     )
 
             # Get all channel directories
@@ -887,7 +884,7 @@ class SlackToChatMigrator:
                 else:
                     log_with_context(
                         logging.INFO,
-                        f"[UPDATE MODE] Skipping historical memberships for existing space (already has history)",
+                        "[UPDATE MODE] Skipping historical memberships for existing space (already has history)",
                         channel=ch.name,
                     )
 
@@ -1176,7 +1173,7 @@ class SlackToChatMigrator:
                 if self._should_abort_import(ch.name, processed_count, failed_count):
                     log_with_context(
                         logging.WARNING,
-                        f"Aborting import after first channel due to errors",
+                        "Aborting import after first channel due to errors",
                         channel=ch.name,
                     )
                     break
@@ -1337,7 +1334,7 @@ class SlackToChatMigrator:
                 if http_e.resp.status >= 500:
                     log_with_context(
                         logging.WARNING,
-                        f"Server error listing spaces - this might be a temporary issue, skipping cleanup",
+                        "Server error listing spaces - this might be a temporary issue, skipping cleanup",
                     )
                 return
             except Exception as list_e:
@@ -1370,7 +1367,7 @@ class SlackToChatMigrator:
                     if http_e.resp.status >= 500:
                         log_with_context(
                             logging.WARNING,
-                            f"Server error checking space - this might be a temporary issue",
+                            "Server error checking space - this might be a temporary issue",
                             space_name=space_name,
                         )
                 except Exception as e:
@@ -1452,7 +1449,7 @@ class SlackToChatMigrator:
                             if http_e.resp.status >= 500:
                                 log_with_context(
                                     logging.WARNING,
-                                    f"Server error completing import - this might be a temporary issue",
+                                    "Server error completing import - this might be a temporary issue",
                                     space_name=space_name,
                                 )
                             continue
@@ -1489,7 +1486,7 @@ class SlackToChatMigrator:
                                 if http_e.resp.status >= 500:
                                     log_with_context(
                                         logging.WARNING,
-                                        f"Server error updating space - this might be a temporary issue",
+                                        "Server error updating space - this might be a temporary issue",
                                         space_name=space_name,
                                     )
                             except Exception as e:
@@ -1571,7 +1568,7 @@ class SlackToChatMigrator:
                         if http_e.resp.status >= 500:
                             log_with_context(
                                 logging.WARNING,
-                                f"Server error during cleanup - this might be a temporary issue",
+                                "Server error during cleanup - this might be a temporary issue",
                                 space_name=space_name,
                             )
                     except Exception as e:
@@ -1594,17 +1591,17 @@ class SlackToChatMigrator:
             if http_e.resp.status >= 500:
                 log_with_context(
                     logging.WARNING,
-                    f"Server error during cleanup - Google's servers may be experiencing issues",
+                    "Server error during cleanup - Google's servers may be experiencing issues",
                 )
             elif http_e.resp.status == 403:
                 log_with_context(
                     logging.WARNING,
-                    f"Permission error during cleanup - service account may lack required permissions",
+                    "Permission error during cleanup - service account may lack required permissions",
                 )
             elif http_e.resp.status == 429:
                 log_with_context(
                     logging.WARNING,
-                    f"Rate limit exceeded during cleanup - too many API requests",
+                    "Rate limit exceeded during cleanup - too many API requests",
                 )
         except Exception as e:
             log_with_context(
@@ -1886,7 +1883,7 @@ class SlackToChatMigrator:
         # Migration statistics
         log_with_context(
             logging.INFO,
-            f"📊 MIGRATION STATISTICS:",
+            "📊 MIGRATION STATISTICS:",
         )
         log_with_context(
             logging.INFO,
@@ -1940,7 +1937,7 @@ class SlackToChatMigrator:
         if not issues_found:
             log_with_context(
                 logging.INFO,
-                f"   • Issues detected: None! 🎉",
+                "   • Issues detected: None! 🎉",
             )
 
         log_with_context(
@@ -2051,11 +2048,11 @@ class SlackToChatMigrator:
         if isinstance(exception, KeyboardInterrupt):
             log_with_context(
                 logging.WARNING,
-                f"⏹️  INTERRUPTION DETAILS:",
+                "⏹️  INTERRUPTION DETAILS:",
             )
             log_with_context(
                 logging.WARNING,
-                f"   • Type: User interruption (Ctrl+C)",
+                "   • Type: User interruption (Ctrl+C)",
             )
             log_with_context(
                 logging.WARNING,
@@ -2064,7 +2061,7 @@ class SlackToChatMigrator:
         else:
             log_with_context(
                 logging.ERROR,
-                f"💥 ERROR DETAILS:",
+                "💥 ERROR DETAILS:",
             )
             log_with_context(
                 logging.ERROR,
@@ -2113,7 +2110,7 @@ class SlackToChatMigrator:
         if not isinstance(exception, KeyboardInterrupt):
             log_with_context(
                 logging.ERROR,
-                f"🔍 FULL TRACEBACK:",
+                "🔍 FULL TRACEBACK:",
             )
             log_with_context(
                 logging.ERROR,

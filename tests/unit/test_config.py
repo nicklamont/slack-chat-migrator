@@ -1,10 +1,8 @@
 """Unit tests for the config module."""
 
-import os
 import tempfile
 from pathlib import Path
 
-import pytest
 import yaml
 
 from slack_migrator.core.config import load_config, should_process_channel
@@ -74,7 +72,7 @@ def test_should_process_channel():
     # Test with both include and exclude (include takes precedence)
     config = {
         "include_channels": ["channel1", "channel2"],
-        "exclude_channels": ["channel1", "channel3"]
+        "exclude_channels": ["channel1", "channel3"],
     }
     assert should_process_channel("channel1", config) is True  # In include list
     assert should_process_channel("channel2", config) is True  # In include list

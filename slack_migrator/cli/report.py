@@ -40,7 +40,7 @@ def print_dry_run_summary(migrator, report_file=None):
         try:
             file_stats = migrator.file_handler.get_file_statistics()
             if file_stats["total_files_processed"] > 0:
-                print(f"\nFile Upload Details:")
+                print("\nFile Upload Details:")
                 print(f"  Total files processed: {file_stats['total_files_processed']}")
                 print(f"  Successful uploads: {file_stats['successful_uploads']}")
                 print(f"  Failed uploads: {file_stats['failed_uploads']}")
@@ -117,7 +117,9 @@ def generate_report(migrator):
                     # Check if file exists, append if it does
                     mode = "a" if os.path.exists(log_file) else "w"
                     with open(log_file, mode) as f:
-                        f.write(f"\n\n{'='*50}\nFAILED MESSAGES DETAILS\n{'='*50}\n\n")
+                        f.write(
+                            f"\n\n{'=' * 50}\nFAILED MESSAGES DETAILS\n{'=' * 50}\n\n"
+                        )
                         for failed_msg in failures:
                             f.write(f"Timestamp: {failed_msg.get('ts')}\n")
                             f.write(f"Error: {failed_msg.get('error')}\n")
