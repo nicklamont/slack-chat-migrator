@@ -5,7 +5,11 @@ from pathlib import Path
 
 import yaml
 
-from slack_migrator.core.config import load_config, should_process_channel
+from slack_migrator.core.config import (
+    create_default_config,
+    load_config,
+    should_process_channel,
+)
 
 
 def test_load_config_with_empty_file():
@@ -78,3 +82,66 @@ def test_should_process_channel():
     assert should_process_channel("channel2", config) is True  # In include list
     assert should_process_channel("channel3", config) is False  # Not in include list
     assert should_process_channel("channel4", config) is False  # Not in include list
+
+
+def test_create_default_config(tmp_path):
+    """Test creating a default config file."""
+    config_path = tmp_path / "config.yaml"
+    result = create_default_config(config_path)
+
+    assert result is True
+    assert config_path.exists()
+
+    # Verify the file is valid YAML with expected keys
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    assert "exclude_channels" in config
+    assert "user_mapping_overrides" in config
+    assert "max_retries" in config
+
+
+def test_create_default_config_no_overwrite(tmp_path):
+    """Test that create_default_config won't overwrite an existing file."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("existing: true\n")
+
+    result = create_default_config(config_path)
+
+    assert result is False
+    # Verify original content is preserved
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    assert config == {"existing": True}
+
+
+def test_should_process_channel_empty_lists():
+    """Test should_process_channel with empty include/exclude lists."""
+    config = {"include_channels": [], "exclude_channels": []}
+    assert should_process_channel("anything", config) is True
+
+
+def test_should_process_channel_no_lists():
+    """Test should_process_channel with no include/exclude keys."""
+    config = {}
+    assert should_process_channel("anything", config) is True
+
+
+def test_load_config_nonexistent_path():
+    """Test loading config from a nonexistent path returns defaults."""
+    config = load_config(Path("/nonexistent/path/config.yaml"))
+
+    assert config["max_retries"] == 3
+    assert config["exclude_channels"] == []
+    assert config["email_domain_override"] == ""
+
+
+def test_load_config_invalid_yaml(tmp_path):
+    """Test loading config from a file with invalid YAML."""
+    bad_file = tmp_path / "bad.yaml"
+    bad_file.write_text("{{invalid yaml: [")
+
+    config = load_config(bad_file)
+
+    # Should fall back to defaults
+    assert config["max_retries"] == 3
+    assert config["exclude_channels"] == []
