@@ -46,7 +46,7 @@ class DefaultGroup(click.Group):
     def parse_args(self, ctx, args):
         # If no args at all, let click show help as usual.
         if args and args[0].startswith("-") and args[0] not in self._GROUP_FLAGS:
-            args = ["migrate", *list(args)]
+            args = ["migrate", *args]
         return super().parse_args(ctx, args)
 
 
