@@ -1,6 +1,63 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "slack-chat-migrator"
+description = "Tool for migrating Slack exports to Google Chat"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{ name = "Nick Lamont", email = "nick@nicklamont.com" }]
+keywords = ["slack", "google-chat", "migration", "workspace", "chat", "data-migration"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Utilities",
+]
+dynamic = ["version", "dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/nicklamont/slack-chat-migrator"
+"Bug Tracker" = "https://github.com/nicklamont/slack-chat-migrator/issues"
+"Source Code" = "https://github.com/nicklamont/slack-chat-migrator"
+
+[project.scripts]
+slack-migrator = "slack_migrator.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+    "mypy>=1.10",
+    "types-requests>=2.32",
+    "types-PyYAML>=6.0",
+    "pytest-cov>=5.0",
+    "coverage>=7.0",
+    "pre-commit>=3.0",
+    "commitizen>=3.0",
+]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "slack_migrator.__version__" }
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["slack_migrator*"]
+
+[tool.setuptools.package-data]
+slack_migrator = ["py.typed"]
 
 [tool.ruff]
 line-length = 88
@@ -39,3 +96,11 @@ tag_format = "v$version"
 version = "0.3.1"
 version_files = ["slack_migrator/__init__.py:__version__"]
 update_changelog_on_bump = true
+
+[tool.coverage.run]
+branch = true
+source = ["."]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
