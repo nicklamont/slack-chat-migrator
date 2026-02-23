@@ -89,6 +89,10 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
@@ -99,8 +103,9 @@ update_changelog_on_bump = true
 
 [tool.coverage.run]
 branch = true
-source = ["."]
+source = ["slack_migrator"]
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+fail_under = 17
