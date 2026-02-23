@@ -64,8 +64,14 @@ line-length = 88
 target-version = "py39"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I"]
-ignore = ["E203", "E501"]
+select = ["E", "F", "W", "I", "B", "UP", "RUF", "C90", "S"]
+ignore = ["E203", "E501", "S101", "S110", "S112"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S108"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["slack_migrator"]
