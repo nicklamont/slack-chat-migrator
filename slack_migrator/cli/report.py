@@ -129,7 +129,7 @@ def generate_report(migrator):
                                     f.write(
                                         f"Payload: {json.dumps(payload, indent=2)}\n"
                                     )
-                                except:
+                                except Exception:
                                     f.write(f"Payload: {repr(payload)}\n")
 
                             f.write("\n" + "-" * 40 + "\n\n")
