@@ -2,15 +2,16 @@
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.black]
+[tool.ruff]
 line-length = 88
-target-version = ['py39', 'py310', 'py311']
-include = '\.pyi?$'
+target-version = "py39"
 
-[tool.isort]
-profile = "black"
-line_length = 88
-multi_line_output = 3
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E203", "E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["slack_migrator"]
 
 [tool.mypy]
 python_version = "3.9"
@@ -30,4 +31,11 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
-python_functions = "test_*" 
+python_functions = "test_*"
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "v$version"
+version = "0.3.1"
+version_files = ["slack_migrator/__init__.py:__version__"]
+update_changelog_on_bump = true

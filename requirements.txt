@@ -7,18 +7,3 @@ google-api-python-client==2.177.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.2.0
 tqdm==4.67.1
-
-# Development dependencies
-pytest==8.4.1
-black==25.1.0
-mypy==1.17.1
-isort==6.0.1
-flake8==7.3.0
-
-# Type checking support (only needed for mypy)
-types-requests>=2.32.4
-types-PyYAML>=6.0.12
-
-# Documentation
-mkdocs==1.6.1
-mkdocs-material==9.6.16
