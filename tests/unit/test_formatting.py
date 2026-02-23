@@ -308,7 +308,7 @@ class TestConvertFormatting:
 
     def test_emoji_conversion(self):
         result = convert_formatting("great :thumbsup:", {})
-        assert ":thumbsup:" not in result or "👍" in result
+        assert "👍" in result
 
     def test_plain_text_passthrough(self):
         text = "Hello, world!"

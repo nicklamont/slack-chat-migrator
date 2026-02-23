@@ -44,9 +44,7 @@ class TestChannelHasExternalUsers:
             user_map={"U001": "alice@example.com", "U002": "ext@other.com"},
             channels_meta={"general": {"members": ["U001", "U002"]}},
         )
-        migrator._is_external_user.side_effect = lambda email: (
-            email == "ext@other.com"
-        )
+        migrator._is_external_user.side_effect = lambda email: email == "ext@other.com"
 
         result = channel_has_external_users(migrator, "general")
         assert result is True
