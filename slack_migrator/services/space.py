@@ -14,6 +14,13 @@ from tqdm import tqdm
 from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.logging import log_with_context
 
+# Named constants for magic numbers used in membership time calculations
+IMPORT_MODE_DAYS_LIMIT = 90
+DEFAULT_FALLBACK_JOIN_TIME = "2020-01-01T00:00:00Z"
+HISTORICAL_DELETE_TIME_OFFSET_SECONDS = 5
+EARLIEST_MESSAGE_OFFSET_MINUTES = 2
+FIRST_MESSAGE_OFFSET_MINUTES = 1
+
 
 def channel_has_external_users(migrator, channel: str) -> bool:
     """Check if a channel has external users that need access.
@@ -172,7 +179,7 @@ def create_space(migrator, channel: str) -> str:
             log_with_context(
                 logging.DEBUG,
                 f"IMPORTANT: Space {space_name} is in import mode. Per Google Chat API restrictions, "
-                "import mode must be completed within 90 days or the space will be automatically deleted.",
+                f"import mode must be completed within {IMPORT_MODE_DAYS_LIMIT} days or the space will be automatically deleted.",
                 channel=channel,
                 space_name=space_name,
             )
@@ -336,7 +343,7 @@ def add_users_to_space(migrator, space: str, channel: str) -> None:
             if user_id not in user_membership:
                 # If user is in metadata but not seen in messages, add them with default times
                 user_membership[user_id] = {
-                    "join_time": "2020-01-01T00:00:00Z",  # Default time
+                    "join_time": DEFAULT_FALLBACK_JOIN_TIME,
                     "leave_time": None,
                     "active": True,
                     "first_message_time": None,
@@ -406,7 +413,10 @@ def add_users_to_space(migrator, space: str, channel: str) -> None:
     # According to Google Chat API, in import mode all memberships must have deleteTime in the past
     current_time = datetime.datetime.now(datetime.timezone.utc)
     historical_delete_time = (
-        (current_time - datetime.timedelta(seconds=5))
+        (
+            current_time
+            - datetime.timedelta(seconds=HISTORICAL_DELETE_TIME_OFFSET_SECONDS)
+        )
         .isoformat()
         .replace("+00:00", "Z")
     )
@@ -432,14 +442,16 @@ def add_users_to_space(migrator, space: str, channel: str) -> None:
     # 3. Channel creation time from metadata
     # 4. Earliest message time in the channel minus 2 minutes
     # 5. Last resort default time
-    default_join_time = "2020-01-01T00:00:00Z"
+    default_join_time = DEFAULT_FALLBACK_JOIN_TIME
     if earliest_message_time:
         try:
             # Convert to datetime, subtract 2 minutes for safety, and convert back
             if earliest_message_time.endswith("Z"):
                 earliest_message_time = earliest_message_time[:-1] + "+00:00"
             earliest_dt = datetime.datetime.fromisoformat(earliest_message_time)
-            earliest_join_dt = earliest_dt - datetime.timedelta(minutes=2)
+            earliest_join_dt = earliest_dt - datetime.timedelta(
+                minutes=EARLIEST_MESSAGE_OFFSET_MINUTES
+            )
             default_join_time = earliest_join_dt.isoformat().replace("+00:00", "Z")
             log_with_context(
                 logging.DEBUG,
@@ -462,7 +474,9 @@ def add_users_to_space(migrator, space: str, channel: str) -> None:
                     if msg_time.endswith("Z"):
                         msg_time = msg_time[:-1] + "+00:00"
                     dt = datetime.datetime.fromisoformat(msg_time)
-                    join_dt = dt - datetime.timedelta(minutes=1)
+                    join_dt = dt - datetime.timedelta(
+                        minutes=FIRST_MESSAGE_OFFSET_MINUTES
+                    )
                     membership["join_time"] = join_dt.isoformat().replace("+00:00", "Z")
                     log_with_context(
                         logging.DEBUG,
