@@ -159,17 +159,6 @@ class ChatFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            # Log as API response error with appropriate status code
-            from googleapiclient.errors import HttpError
-
-            # Get the actual HTTP status code if available
-            status_code = 500  # Default to 500 for general errors
-            if (
-                isinstance(e, HttpError)
-                and hasattr(e, "resp")
-                and hasattr(e.resp, "status")
-            ):
-                status_code = e.resp.status
             return (None, None)
 
     def create_attachment_for_message(
@@ -190,7 +179,7 @@ class ChatFileUploader:
         # Log the attachment creation details
         log_with_context(
             logging.DEBUG,
-            f"Creating attachment from upload response",
+            "Creating attachment from upload response",
             api_data=json.dumps(
                 {
                     "upload_response_type": type(upload_response).__name__,

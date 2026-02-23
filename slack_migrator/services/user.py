@@ -3,11 +3,10 @@ User mapping functionality for Slack to Google Chat migration
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-
-import logging
 
 from slack_migrator.utils.logging import log_with_context
 

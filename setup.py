@@ -48,6 +48,22 @@ setup(
     # Package configuration
     packages=find_packages(),
     install_requires=requirements,
+    extras_require={
+        "dev": [
+            "pytest>=8.0",
+            "ruff>=0.8",
+            "mypy>=1.10",
+            "types-requests>=2.32",
+            "types-PyYAML>=6.0",
+            "coverage>=7.0",
+            "pre-commit>=3.0",
+            "commitizen>=3.0",
+        ],
+        "docs": [
+            "mkdocs>=1.6",
+            "mkdocs-material>=9.5",
+        ],
+    },
     python_requires=">=3.9",
     include_package_data=True,
     package_data={

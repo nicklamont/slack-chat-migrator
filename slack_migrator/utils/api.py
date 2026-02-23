@@ -430,9 +430,7 @@ def get_gcp_service(
                 creds_path, scopes=REQUIRED_SCOPES
             )
         except FileNotFoundError as e:
-            raise FileNotFoundError(
-                f"Credential file not found: {creds_path}"
-            ) from e
+            raise FileNotFoundError(f"Credential file not found: {creds_path}") from e
         except (ValueError, json.JSONDecodeError) as e:
             raise ValueError(
                 f"Invalid credential file format in {creds_path}: {e}"

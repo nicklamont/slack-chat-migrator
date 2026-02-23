@@ -98,11 +98,9 @@ def process_reactions_batch(
                     # Handle unmapped user reaction with new graceful approach
                     reaction_name = react.get("name", "unknown")
                     message_ts = getattr(migrator, "current_message_ts", "unknown")
-                    # Call the handler and actually use the return value to decide whether to process
-                    should_process = migrator._handle_unmapped_user_reaction(
+                    migrator._handle_unmapped_user_reaction(
                         uid, reaction_name, message_ts
                     )
-                    # Skip this reaction as _handle_unmapped_user_reaction returns False
                     continue
         except Exception as e:
             log_with_context(
@@ -164,7 +162,7 @@ def process_reactions_batch(
             for emo in emojis:
                 try:
                     reaction_body = {"emoji": {"unicode": emo}}
-                    result = (
+                    (
                         migrator.chat.spaces()
                         .messages()
                         .reactions()
@@ -199,7 +197,7 @@ def process_reactions_batch(
                     # Format reaction body according to the import documentation
                     # https://developers.google.com/workspace/chat/import-data
                     reaction_body = {"emoji": {"unicode": emo}}
-                    result = (
+                    (
                         svc.spaces()
                         .messages()
                         .reactions()
@@ -256,7 +254,7 @@ def process_reactions_batch(
                 )
                 # Fall back to direct API call
                 try:
-                    result = (
+                    (
                         svc.spaces()
                         .messages()
                         .reactions()
@@ -648,7 +646,6 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
         # For edited messages, include the edited timestamp in the message ID
         if is_edited:
             # Use a different format for edited messages to avoid conflicts
-            clean_edited_ts = edited_ts.replace(".", "-")
             # Include both timestamps to ensure uniqueness
             message_id = f"client-slack-edit-{clean_ts}-{current_ms}-{unique_id}"
         else:
@@ -1099,7 +1096,7 @@ def send_intro(migrator, space: str, channel: str):
         }
 
         # Send the message
-        result = (
+        (
             migrator.chat.spaces()
             .messages()
             .create(parent=space, body=message_body)

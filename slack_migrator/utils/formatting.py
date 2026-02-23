@@ -7,15 +7,15 @@ convert Slack's markdown syntax to the format expected by Google Chat.
 
 import logging
 import re
-from typing import Dict, List
 from datetime import datetime
+from typing import Dict, List
 
 import emoji
 
 # This assumes a standard logging setup. If you don't have one,
 # you can replace `from slack_migrator.utils.logging import logger`
 # with `import logging; logger = logging.getLogger(__name__)`
-from slack_migrator.utils.logging import log_with_context, logger
+from slack_migrator.utils.logging import log_with_context
 
 
 def _parse_rich_text_elements(elements: List[Dict]) -> str:

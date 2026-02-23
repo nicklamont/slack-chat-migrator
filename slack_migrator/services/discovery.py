@@ -174,7 +174,7 @@ def discover_existing_spaces(migrator):
                 for i, space_info in enumerate(spaces):
                     log_with_context(
                         logging.WARNING,
-                        f"  Space {i+1}: {space_info['display_name']} (ID: {space_info['space_id']}, "
+                        f"  Space {i + 1}: {space_info['display_name']} (ID: {space_info['space_id']}, "
                         f"Type: {space_info['space_type']}, Members: {space_info['member_count']}, "
                         f"Created: {space_info['create_time']})",
                     )

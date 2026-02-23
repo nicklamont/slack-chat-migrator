@@ -281,7 +281,6 @@ class FileHandler:
 
                 for folder in folders:
                     folder_id = folder.get("id")
-                    folder_name = folder.get("name")
 
                     if folder_id:
                         file_count = self.drive_uploader.pre_cache_folder_file_hashes(
@@ -827,7 +826,7 @@ class FileHandler:
             if not folder_id:
                 log_with_context(
                     logging.ERROR,
-                    f"No valid folder ID available for file upload",
+                    "No valid folder ID available for file upload",
                     channel=channel,
                     file_id=file_id,
                 )
@@ -882,7 +881,7 @@ class FileHandler:
                 else:
                     log_with_context(
                         logging.WARNING,
-                        f"No user email available for message poster, could not assign editor permissions",
+                        "No user email available for message poster, could not assign editor permissions",
                         channel=channel,
                         file_id=file_id,
                     )
@@ -925,7 +924,7 @@ class FileHandler:
                 elif self._shared_drive_id:
                     log_with_context(
                         logging.DEBUG,
-                        f"Files in shared drives use inherited permissions, not individual ownership",
+                        "Files in shared drives use inherited permissions, not individual ownership",
                         channel=channel,
                         file_id=file_id,
                         drive_file_id=drive_file_id,
@@ -1049,9 +1048,6 @@ class FileHandler:
                     channel=self._get_current_channel(),
                 )
                 return None
-
-            # Create a hash of the URL to use as cache key
-            file_hash = hashlib.md5(url_private.encode()).hexdigest()
 
             # Skip Google Docs links - these should not be processed as file attachments
             # Google Docs URLs in Slack messages are text links, not downloadable files
@@ -1392,7 +1388,7 @@ class FileHandler:
 
             log_with_context(
                 logging.DEBUG,
-                f"Successfully shared Drive file with channel members",
+                "Successfully shared Drive file with channel members",
                 channel=channel,
                 file_id=drive_file_id,
             )
