@@ -8,7 +8,7 @@ import signal
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
@@ -69,18 +69,30 @@ class SlackToChatMigrator:
             )
 
         # Initialize caches and state tracking
-        self.space_cache = {}  # channel -> space_name
-        self.created_spaces = {}  # channel -> space_name
-        self.user_map = {}  # slack_user_id -> google_email
-        self.drive_files_cache = {}  # file_id -> drive_file
+        self.space_cache: Dict[str, str] = {}  # channel -> space_name
+        self.created_spaces: Dict[str, str] = {}  # channel -> space_name
+        self.user_map: Dict[str, str] = {}  # slack_user_id -> google_email
+        self.drive_files_cache: Dict[str, Any] = {}  # file_id -> drive_file
         self.progress_file = self.export_root / ".migration_progress.json"
-        self.thread_map = {}  # slack_thread_ts -> google_chat_thread_name
-        self.external_users = set()  # Set of external user emails
-        self.users_without_email = []  # List of users without email mappings
-        self.failed_messages = []  # List of failed message details
-        self.channel_handlers = {}  # Store channel-specific log handlers
-        self.channel_to_space = {}  # channel -> space_name for file attachments
-        self.current_space = None  # Current space being processed
+        self.thread_map: Dict[
+            str, str
+        ] = {}  # slack_thread_ts -> google_chat_thread_name
+        self.external_users: Set[str] = set()  # Set of external user emails
+        self.users_without_email: List[
+            Dict[str, Any]
+        ] = []  # List of users without email mappings
+        self.failed_messages: List[
+            Dict[str, Any]
+        ] = []  # List of failed message details
+        self.channel_handlers: Dict[
+            str, Any
+        ] = {}  # Store channel-specific log handlers
+        self.channel_to_space: Dict[
+            str, str
+        ] = {}  # channel -> space_name for file attachments
+        self.current_space: Optional[str] = None  # Current space being processed
+        self.migration_summary: Dict[str, Any] = {}
+        self.output_dir: Optional[str] = None
 
         # Validate workspace admin email format
         if (
@@ -122,13 +134,13 @@ class SlackToChatMigrator:
         scan_channel_members_for_unmapped_users(self)
 
         # API services will be initialized later after permission checks
-        self.chat = None
-        self.drive = None
+        self.chat: Optional[Any] = None
+        self.drive: Optional[Any] = None
         self._api_services_initialized = False
 
         self.chat_delegates: Dict[str, Any] = {}
         self.valid_users: Dict[str, bool] = {}
-        self.channel_to_space: Dict[str, str] = {}
+        self.channel_to_space.clear()
 
         # Initialize channel ID mapping
         self.channel_id_to_space_id: Dict[str, str] = {}
@@ -188,8 +200,8 @@ class SlackToChatMigrator:
             self.file_handler, dry_run=self.dry_run
         )
 
-        # Initialize caches and state tracking
-        self.created_spaces: Dict[str, str] = {}  # channel -> space_name
+        # Reset caches and state tracking
+        self.created_spaces.clear()
         self.current_channel: Optional[str] = (
             None  # Track current channel being processed
         )
@@ -407,6 +419,7 @@ class SlackToChatMigrator:
                 f"Deleting space {space_name} due to errors",
                 space_name=space_name,
             )
+            assert self.chat is not None
             self.chat.spaces().delete(name=space_name).execute()
             log_with_context(
                 logging.INFO,
@@ -1081,6 +1094,7 @@ class SlackToChatMigrator:
                                 channel=ch.name,
                             )
 
+                            assert self.chat is not None
                             result = (
                                 self.chat.spaces().completeImport(name=space).execute()
                             )
@@ -1322,6 +1336,7 @@ class SlackToChatMigrator:
                 logging.DEBUG, "Listing all spaces to check for import mode..."
             )
             try:
+                assert self.chat is not None
                 spaces = self.chat.spaces().list().execute().get("spaces", [])
             except HttpError as http_e:
                 log_with_context(
@@ -1351,6 +1366,7 @@ class SlackToChatMigrator:
 
                 # Check if space is in import mode
                 try:
+                    assert self.chat is not None
                     space_info = self.chat.spaces().get(name=space_name).execute()
                     # Use the correct field name: importMode (boolean) instead of importState
                     if space_info.get("importMode"):
@@ -1431,6 +1447,7 @@ class SlackToChatMigrator:
                         )
 
                         try:
+                            assert self.chat is not None
                             self.chat.spaces().completeImport(name=space_name).execute()
                             log_with_context(
                                 logging.DEBUG,
@@ -1465,6 +1482,7 @@ class SlackToChatMigrator:
                                 # Update space to ensure externalUserAllowed is set
                                 update_body = {"externalUserAllowed": True}
                                 update_mask = "externalUserAllowed"
+                                assert self.chat is not None
                                 self.chat.spaces().patch(
                                     name=space_name,
                                     updateMask=update_mask,
