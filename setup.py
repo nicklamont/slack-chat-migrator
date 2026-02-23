@@ -5,10 +5,11 @@ This file manages the package installation process, including dependencies,
 entry points, metadata, and other package configuration.
 """
 
-from setuptools import setup, find_packages
-import os
 import re
-from typing import List, Optional
+from typing import List
+
+from setuptools import find_packages, setup
+
 
 # Read version from __init__.py without importing the package
 def get_version() -> str:
@@ -17,17 +18,20 @@ def get_version() -> str:
         version_match = re.search(r'__version__\s*=\s*[\'"]([^\'"]*)[\'"]', f.read())
         return version_match.group(1) if version_match else "0.1.0"
 
+
 # Read long description from README.md
 def get_long_description() -> str:
     """Read and return the content of README.md file."""
     with open("README.md", "r", encoding="utf-8") as fh:
         return fh.read()
 
+
 # Read requirements from requirements.txt
 def get_requirements() -> List[str]:
     """Parse requirements.txt file and return a list of required packages."""
     with open("requirements.txt", "r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip() and not line.startswith("#")]
+
 
 version = get_version()
 long_description = get_long_description()
@@ -44,7 +48,6 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/nicklamont/slack-chat-migrator",
     keywords="slack, google-chat, migration, workspace, chat, data-migration",
-    
     # Package configuration
     packages=find_packages(),
     install_requires=requirements,
@@ -55,6 +58,7 @@ setup(
             "mypy>=1.10",
             "types-requests>=2.32",
             "types-PyYAML>=6.0",
+            "pytest-cov>=5.0",
             "coverage>=7.0",
             "pre-commit>=3.0",
             "commitizen>=3.0",
@@ -69,14 +73,12 @@ setup(
     package_data={
         "slack_migrator": ["py.typed"],  # Include type information
     },
-    
     # Command line tools
     entry_points={
-        'console_scripts': [
-            'slack-migrator=slack_migrator.__main__:main',
+        "console_scripts": [
+            "slack-migrator=slack_migrator.__main__:main",
         ],
     },
-    
     # Classifiers for package indexing
     classifiers=[
         "Development Status :: 4 - Beta",
@@ -91,11 +93,10 @@ setup(
         "Topic :: Communications :: Chat",
         "Topic :: Utilities",
     ],
-    
     # Additional URLs
     project_urls={
         "Bug Tracker": "https://github.com/nicklamont/slack-chat-migrator/issues",
         "Documentation": "https://github.com/nicklamont/slack-chat-migrator",
         "Source Code": "https://github.com/nicklamont/slack-chat-migrator",
     },
-) 
+)
