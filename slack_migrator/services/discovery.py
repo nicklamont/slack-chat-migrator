@@ -4,6 +4,7 @@ Functions for discovering existing Google Chat resources for migration resumptio
 
 import logging
 import time
+from typing import Any, Dict, List
 
 from googleapiclient.errors import HttpError
 
@@ -35,7 +36,7 @@ def discover_existing_spaces(migrator):
     )
 
     # Track all spaces by channel name to detect duplicates
-    all_spaces_by_channel = {}
+    all_spaces_by_channel: Dict[str, List[Dict[str, Any]]] = {}
     space_mappings = {}
     duplicate_spaces = {}
 
@@ -224,7 +225,7 @@ def get_last_message_timestamp(migrator, channel: str, space: str):
         channel=channel,
     )
 
-    last_message_time = 0
+    last_message_time: float = 0.0
 
     try:
         # We only need the most recent message, so limit to 1 result sorted by createTime desc

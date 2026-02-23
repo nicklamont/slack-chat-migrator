@@ -769,7 +769,7 @@ def send_message(migrator, space: str, message: Dict) -> Optional[str]:
             ts=ts,
         )
         result = chat_service.spaces().messages().create(**request_params).execute()
-        message_name = result.get("name")
+        message_name: Optional[str] = result.get("name")
 
         # Store the message ID mapping for potential future edits
         if message_name:

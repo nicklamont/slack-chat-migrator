@@ -80,7 +80,8 @@ class SharedDriveManager:
                         logging.INFO,
                         f"Using configured shared drive: {drive_info.get('name', 'Unknown')} (ID: {shared_drive_id})",
                     )
-                    return shared_drive_id
+                    drive_id_result: Optional[str] = shared_drive_id
+                    return drive_id_result
                 except HttpError as e:
                     log_with_context(
                         logging.ERROR,
@@ -119,12 +120,12 @@ class SharedDriveManager:
 
             for drive in drives:
                 if drive.get("name") == drive_name:
-                    drive_id = drive.get("id")
+                    found_drive_id: Optional[str] = drive.get("id")
                     log_with_context(
                         logging.INFO,
-                        f"Found existing shared drive: {drive_name} (ID: {drive_id})",
+                        f"Found existing shared drive: {drive_name} (ID: {found_drive_id})",
                     )
-                    return drive_id
+                    return found_drive_id
 
             # Create new shared drive if not found
             log_with_context(logging.INFO, f"Creating new shared drive: {drive_name}")
@@ -140,14 +141,14 @@ class SharedDriveManager:
                 .execute()
             )
 
-            drive_id = created_drive.get("id")
+            created_drive_id: Optional[str] = created_drive.get("id")
 
             log_with_context(
                 logging.INFO,
-                f"Successfully created shared drive: {drive_name} (ID: {drive_id})",
+                f"Successfully created shared drive: {drive_name} (ID: {created_drive_id})",
             )
 
-            return drive_id
+            return created_drive_id
 
         except HttpError as e:
             log_with_context(

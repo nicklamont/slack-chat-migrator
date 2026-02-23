@@ -3,7 +3,7 @@ Integrated file attachment service for message processing.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from slack_migrator.utils.logging import log_with_context
 
@@ -167,7 +167,7 @@ class MessageAttachmentProcessor:
 
     def _create_attachment_from_result(
         self, upload_result: Dict[str, Any]
-    ) -> Optional[Dict[str, Union[str, Dict[str, str]]]]:
+    ) -> Optional[Dict[str, Any]]:
         """Create Google Chat attachment object from upload result.
 
         Args:
@@ -248,7 +248,7 @@ class MessageAttachmentProcessor:
 
         elif upload_type == "direct":
             # For direct uploads, the ref contains the complete attachment object
-            attachment_ref = upload_result.get("ref")
+            attachment_ref: Optional[Dict[str, Any]] = upload_result.get("ref")
             if attachment_ref and isinstance(attachment_ref, dict):
                 # The attachment_ref is already a complete attachment object from ChatFileUploader
                 log_with_context(

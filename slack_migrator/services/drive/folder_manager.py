@@ -3,7 +3,7 @@ Folder management for Google Drive integration.
 """
 
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 from googleapiclient.errors import HttpError
 
@@ -31,7 +31,7 @@ class FolderManager:
         self.drive_service = drive_service
         self.workspace_domain = workspace_domain
         self.dry_run = dry_run
-        self.folder_cache = {}
+        self.folder_cache: Dict[str, str] = {}
 
     def create_root_folder_in_shared_drive(
         self, folder_name: str, shared_drive_id: str
@@ -73,7 +73,7 @@ class FolderManager:
 
             files = results.get("files", [])
             if files:
-                folder_id = files[0]["id"]
+                folder_id: Optional[str] = files[0]["id"]
                 log_with_context(
                     logging.INFO,
                     f"Found existing root folder in shared drive: {folder_name} (ID: {folder_id})",
@@ -97,13 +97,13 @@ class FolderManager:
                 .execute()
             )
 
-            folder_id = folder.get("id")
+            new_folder_id: Optional[str] = folder.get("id")
             log_with_context(
                 logging.INFO,
-                f"Successfully created root folder in shared drive: {folder_name} (ID: {folder_id})",
+                f"Successfully created root folder in shared drive: {folder_name} (ID: {new_folder_id})",
             )
 
-            return folder_id
+            return new_folder_id
 
         except HttpError as e:
             log_with_context(
@@ -140,15 +140,15 @@ class FolderManager:
 
             files = results.get("files", [])
             if files:
-                folder_id = files[0]["id"]
+                existing_folder_id: Optional[str] = files[0]["id"]
                 log_with_context(
                     logging.INFO,
-                    f"Found existing regular Drive folder: {folder_name} (ID: {folder_id})",
+                    f"Found existing regular Drive folder: {folder_name} (ID: {existing_folder_id})",
                 )
 
                 # Note: No domain-wide permissions set to avoid org-wide access
                 # Individual channel folders will have their own space-specific permissions
-                return folder_id
+                return existing_folder_id
 
             # Create new folder
             log_with_context(
@@ -165,16 +165,16 @@ class FolderManager:
                 .execute()
             )
 
-            folder_id = folder.get("id")
+            new_folder_id: Optional[str] = folder.get("id")
             # Note: No domain-wide permissions set to avoid org-wide access
             # Individual channel folders will have their own space-specific permissions
 
             log_with_context(
                 logging.INFO,
-                f"Successfully created regular Drive folder: {folder_name} (ID: {folder_id})",
+                f"Successfully created regular Drive folder: {folder_name} (ID: {new_folder_id})",
             )
 
-            return folder_id
+            return new_folder_id
 
         except HttpError as e:
             log_with_context(
@@ -201,7 +201,7 @@ class FolderManager:
         # Check cache
         cache_key = f"folder_{channel}"
         if cache_key in self.folder_cache:
-            folder_id = self.folder_cache[cache_key]
+            folder_id: str = self.folder_cache[cache_key]
 
             # Verify folder still exists
             try:
@@ -256,15 +256,15 @@ class FolderManager:
 
             # Use existing folder if found
             if items:
-                folder_id = items[0]["id"]
+                existing_id: str = items[0]["id"]
                 log_with_context(
                     logging.DEBUG,
-                    f"Found existing channel folder: {channel} (ID: {folder_id})",
+                    f"Found existing channel folder: {channel} (ID: {existing_id})",
                     channel=channel,
                 )
 
-                self.folder_cache[cache_key] = folder_id
-                return folder_id
+                self.folder_cache[cache_key] = existing_id
+                return existing_id
 
             # Create new channel folder
             log_with_context(
@@ -290,21 +290,21 @@ class FolderManager:
                     .execute()
                 )
 
-            folder_id = folder.get("id")
+            created_folder_id: Optional[str] = folder.get("id")
 
-            if folder_id:
+            if created_folder_id:
                 log_with_context(
                     logging.INFO,
-                    f"Successfully created channel folder: {channel} (ID: {folder_id})",
+                    f"Successfully created channel folder: {channel} (ID: {created_folder_id})",
                     channel=channel,
                 )
 
-                self.folder_cache[cache_key] = folder_id
+                self.folder_cache[cache_key] = created_folder_id
 
                 # Note: Channel folder permissions should be set by the caller using set_channel_folder_permissions
                 # to ensure only space members have access, not the entire domain
 
-                return folder_id
+                return created_folder_id
             else:
                 log_with_context(
                     logging.WARNING,
@@ -340,7 +340,7 @@ class FolderManager:
         # First check cache
         cache_key = f"{channel}:{parent_folder_id}"
         if cache_key in self.folder_cache:
-            folder_id = self.folder_cache[cache_key]
+            folder_id: str = self.folder_cache[cache_key]
             log_with_context(
                 logging.DEBUG,
                 f"Found cached channel folder ID for {channel}: {folder_id}",
@@ -378,15 +378,15 @@ class FolderManager:
             files = response.get("files", [])
 
             if files:
-                folder_id = files[0].get("id")
-                if folder_id:
-                    self.folder_cache[cache_key] = folder_id
+                found_folder_id: Optional[str] = files[0].get("id")
+                if found_folder_id:
+                    self.folder_cache[cache_key] = found_folder_id
                     log_with_context(
                         logging.DEBUG,
-                        f"Found existing channel folder: {channel} (ID: {folder_id})",
+                        f"Found existing channel folder: {channel} (ID: {found_folder_id})",
                         channel=channel,
                     )
-                    return folder_id
+                    return found_folder_id
 
             # Not found
             log_with_context(
