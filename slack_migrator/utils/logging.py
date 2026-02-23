@@ -260,8 +260,8 @@ def setup_logger(
         http_logger.setLevel(logging.DEBUG)
         http_logger.propagate = True
 
-        # Patch http.client to log complete request/response data
-        _patch_http_client_for_debug()
+        # Enable http.client debug logging via stdlib debuglevel
+        _enable_http_client_debug()
 
         logger.info(
             "API debug logging enabled - Channel-specific API requests/responses will be logged to channel logs only"
@@ -270,36 +270,31 @@ def setup_logger(
     return logger
 
 
-def _patch_http_client_for_debug():
+def _enable_http_client_debug():
     """
-    Patch http.client to log complete request/response data.
+    Enable http.client debug logging by routing debug output through the
+    logging module with auth token redaction.
+
+    Only patches the `putheader` method to intercept headers (for redaction).
     This is only used when debug_api=True.
     """
     import http.client
+    import re
 
-    # Save the original methods
-    _orig_send = http.client.HTTPConnection.send
     _orig_putheader = http.client.HTTPConnection.putheader
 
     http_logger = logging.getLogger("http.client")
 
-    def _debug_send(self, data):
-        if hasattr(self, "_http_vsn_str") and self._http_vsn_str:
-            http_logger.debug(f"Sending request: {data[:1024]}")
-        return _orig_send(self, data)
-
     def _debug_putheader(self, header, *values):
         if header and values:
             header_value = ", ".join(str(v) for v in values)
-            # Don't log Authorization headers with tokens
             if header.lower() == "authorization":
-                http_logger.debug(f"Header: {header}: [REDACTED]")
-            else:
-                http_logger.debug(f"Header: {header}: {header_value}")
+                header_value = re.sub(
+                    r"(Bearer\s+)\S+", r"\1[REDACTED]", header_value
+                )
+            http_logger.debug("Header: %s: %s", header, header_value)
         return _orig_putheader(self, header, *values)
 
-    # Replace the methods with debug versions
-    http.client.HTTPConnection.send = _debug_send
     http.client.HTTPConnection.putheader = _debug_putheader
 
 
@@ -637,7 +632,7 @@ def log_failed_message(channel: str, failed_msg: Dict[str, Any]) -> None:
         logger.debug(
             f"Failed message payload: {payload_str}", extra={"channel": channel}
         )
-    except:
+    except Exception:
         logger.debug(
             f"Failed message payload (not JSON serializable): {repr(failed_msg.get('payload', {}))}",
             extra={"channel": channel},

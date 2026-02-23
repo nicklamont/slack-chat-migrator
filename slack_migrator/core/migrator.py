@@ -2,12 +2,15 @@
 Main migrator class for the Slack to Google Chat migration tool
 """
 
+import datetime
 import json
 import logging
+import os
 import signal
 import time
+import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
@@ -52,7 +55,7 @@ class SlackToChatMigrator:
         """Initialize the migrator with the required parameters."""
         self.creds_path = creds_path
         self.export_root = Path(export_path)
-        self.workspace_admin = workspace_admin
+        self.workspace_admin = workspace_admin.strip()
         self.config_path = Path(config_path)
         self.dry_run = dry_run
         self.verbose = verbose
@@ -81,10 +84,19 @@ class SlackToChatMigrator:
         self.channel_to_space = {}  # channel -> space_name for file attachments
         self.current_space = None  # Current space being processed
 
+        # Validate workspace admin email format
+        if (
+            "@" not in self.workspace_admin
+            or self.workspace_admin.count("@") != 1
+            or not self.workspace_admin.split("@")[0]
+            or not self.workspace_admin.split("@")[1]
+        ):
+            raise ValueError(
+                f"Invalid workspace_admin email: '{self.workspace_admin}'. Must be a valid email address."
+            )
+
         # Extract workspace domain from admin email for external user detection
-        self.workspace_domain = (
-            self.workspace_admin.split("@")[1] if "@" in self.workspace_admin else None
-        )
+        self.workspace_domain = self.workspace_admin.split("@")[1]
 
         # Initialize API clients
         self._validate_export_format()
@@ -206,6 +218,12 @@ class SlackToChatMigrator:
 
     def _validate_export_format(self):
         """Validate that the export directory has the expected structure."""
+        # Check that the export root is a valid directory before inspecting contents
+        if not self.export_root.is_dir():
+            raise ValueError(
+                f"Export path is not a valid directory: {self.export_root}"
+            )
+
         if not (self.export_root / "channels.json").exists():
             log_with_context(
                 logging.WARNING, "channels.json not found in export directory"
@@ -492,7 +510,7 @@ class SlackToChatMigrator:
 
     def _handle_unmapped_user_message(
         self, user_id: str, original_text: str
-    ) -> tuple[str, str]:
+    ) -> Tuple[str, str]:
         """Handle messages from unmapped users by using workspace admin with attribution.
 
         Args:
@@ -800,6 +818,9 @@ class SlackToChatMigrator:
                 # Initialize error tracking variables
                 channel_had_errors = False
                 space_name = None
+                is_newly_created_space = (
+                    False  # Track if this space was created in this session
+                )
 
                 # Check if we're in update mode and already have a space for this channel
                 if self.update_mode and ch.name in self.created_spaces:
@@ -813,6 +834,7 @@ class SlackToChatMigrator:
                         channel=ch.name,
                     )
                     self.space_cache[ch.name] = space
+                    is_newly_created_space = False  # This space already existed
                 else:
                     # Create new space (either in import mode, or update mode with no existing space)
                     action_desc = (
@@ -827,6 +849,7 @@ class SlackToChatMigrator:
                     )
                     space = self.space_cache.get(ch.name) or create_space(self, ch.name)
                     self.space_cache[ch.name] = space
+                    is_newly_created_space = True  # This space was just created
 
                 # Skip processing if we couldn't create a space due to permissions
                 if space and space.startswith("ERROR_NO_PERMISSION_"):
@@ -851,8 +874,9 @@ class SlackToChatMigrator:
                     channel=ch.name,
                 )
 
-                # In update mode, skip adding users and sending intro message
-                if not self.update_mode:
+                # Add historical memberships: only for newly created spaces (which are in import mode)
+                # Historical memberships are only needed when creating a space from scratch
+                if is_newly_created_space:
                     # Step 2: Add historical memberships
                     log_with_context(
                         logging.INFO,
@@ -863,7 +887,7 @@ class SlackToChatMigrator:
                 else:
                     log_with_context(
                         logging.INFO,
-                        f"[UPDATE MODE] Skipping user addition for existing space",
+                        f"[UPDATE MODE] Skipping historical memberships for existing space (already has history)",
                         channel=ch.name,
                     )
 
@@ -1035,8 +1059,10 @@ class SlackToChatMigrator:
                     channel=ch.name,
                 )
 
-                # Step 4: Complete import mode (only if not in update mode)
-                if not self.update_mode:
+                # Step 4: Complete import mode and add current members
+                # For newly created spaces: complete import mode first, then add current members
+                # For existing spaces: just add/update current members
+                if is_newly_created_space:
                     log_with_context(
                         logging.INFO,
                         f"{'[DRY RUN] ' if self.dry_run else ''}Step 4/6: Completing import mode for {ch.name}",
@@ -1070,38 +1096,6 @@ class SlackToChatMigrator:
                                 channel=ch.name,
                             )
 
-                            # Step 5: Add regular members back to the space
-                            log_with_context(
-                                logging.INFO,
-                                f"{'[DRY RUN] ' if self.dry_run else ''}Step 5/6: Adding current members to space for {ch.name}",
-                                channel=ch.name,
-                            )
-
-                            try:
-                                from slack_migrator.services.space import (
-                                    add_regular_members,
-                                )
-
-                                add_regular_members(self, space, ch.name)
-                                log_with_context(
-                                    logging.DEBUG,
-                                    f"Successfully added current members to space {space} for channel {ch.name}",
-                                    channel=ch.name,
-                                )
-                            except Exception as e:
-                                log_with_context(
-                                    logging.ERROR,
-                                    f"Error adding current members to space {space}: {e}",
-                                    channel=ch.name,
-                                )
-                                import traceback
-
-                                log_with_context(
-                                    logging.DEBUG,
-                                    f"Exception traceback: {traceback.format_exc()}",
-                                    channel=ch.name,
-                                )
-
                         except Exception as e:
                             log_with_context(
                                 logging.ERROR,
@@ -1125,10 +1119,49 @@ class SlackToChatMigrator:
                         if not hasattr(self, "incomplete_import_spaces"):
                             self.incomplete_import_spaces = []
                         self.incomplete_import_spaces.append((space, ch.name))
+
+                # Step 5: Add/update current members (for both new and existing spaces)
+                step_desc = (
+                    "Adding current members to space"
+                    if is_newly_created_space
+                    else "Updating current members in existing space"
+                )
+                log_with_context(
+                    logging.INFO,
+                    f"{'[DRY RUN] ' if self.dry_run else ''}Step 5/6: {step_desc} for {ch.name}",
+                    channel=ch.name,
+                )
+
+                if not channel_had_errors or not is_newly_created_space:
+                    # For existing spaces, we always try to update members even if there were message errors
+                    # For new spaces, only add members if import completed successfully
+                    try:
+                        from slack_migrator.services.space import (
+                            add_regular_members,
+                        )
+
+                        add_regular_members(self, space, ch.name)
+                        log_with_context(
+                            logging.DEBUG,
+                            f"Successfully updated current members for space {space} and channel {ch.name}",
+                            channel=ch.name,
+                        )
+                    except Exception as e:
+                        log_with_context(
+                            logging.ERROR,
+                            f"Error updating current members for space {space}: {e}",
+                            channel=ch.name,
+                        )
+
+                        log_with_context(
+                            logging.DEBUG,
+                            f"Exception traceback: {traceback.format_exc()}",
+                            channel=ch.name,
+                        )
                 else:
                     log_with_context(
-                        logging.INFO,
-                        f"[UPDATE MODE] Skipping import completion for existing space",
+                        logging.WARNING,
+                        f"Skipping member addition for newly created space {space} due to import completion errors",
                         channel=ch.name,
                     )
 

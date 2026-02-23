@@ -39,7 +39,7 @@ def load_config(config_path: Path) -> Dict[str, Any]:
                 if loaded_config is not None:
                     config = loaded_config
             log_with_context(logging.INFO, f"Loaded configuration from {config_path}")
-        except Exception as e:
+        except (yaml.YAMLError, OSError) as e:
             log_with_context(
                 logging.WARNING, f"Failed to load config file {config_path}: {e}"
             )

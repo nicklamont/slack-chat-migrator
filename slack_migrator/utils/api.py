@@ -3,7 +3,7 @@ API utilities for the Slack to Google Chat migration tool
 """
 
 import functools
-import inspect
+import json
 import logging
 import time
 from typing import Any, Dict, Optional
@@ -425,9 +425,18 @@ def get_gcp_service(
 
         # This is the critical step: The code must explicitly request the
         # scopes that you authorized in the Admin Console.
-        creds = service_account.Credentials.from_service_account_file(
-            creds_path, scopes=REQUIRED_SCOPES
-        )
+        try:
+            creds = service_account.Credentials.from_service_account_file(
+                creds_path, scopes=REQUIRED_SCOPES
+            )
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"Credential file not found: {creds_path}"
+            ) from e
+        except (ValueError, json.JSONDecodeError) as e:
+            raise ValueError(
+                f"Invalid credential file format in {creds_path}: {e}"
+            ) from e
 
         # Impersonate the target user
         delegated = creds.with_subject(user_email)
@@ -436,49 +445,9 @@ def get_gcp_service(
         service = build(api, version, credentials=delegated, cache_discovery=False)
 
         # Wrap the service with retry logic
-        # Create a channel context getter that tries multiple sources
+        # Use the explicitly passed channel parameter for context
         def get_channel_context():
-            # First try the explicitly passed channel
-            if channel:
-                return channel
-
-            # Try to get from current call stack or global state
-            # This is a fallback for when channel isn't explicitly passed
-            try:
-                frame = inspect.currentframe()
-                while frame:
-                    local_vars = frame.f_locals
-                    # Look for common channel variable names
-                    for var_name in ["channel", "current_channel"]:
-                        if var_name in local_vars and isinstance(
-                            local_vars[var_name], str
-                        ):
-                            return local_vars[var_name]
-
-                    # Look for migrator object with current_channel
-                    if "migrator" in local_vars:
-                        migrator = local_vars["migrator"]
-                        if (
-                            hasattr(migrator, "current_channel")
-                            and migrator.current_channel
-                        ):
-                            return migrator.current_channel
-
-                    # Look for self with migrator or current channel
-                    if "self" in local_vars:
-                        self_obj = local_vars["self"]
-                        if hasattr(self_obj, "migrator") and hasattr(
-                            self_obj.migrator, "current_channel"
-                        ):
-                            return self_obj.migrator.current_channel
-                        elif hasattr(self_obj, "_get_current_channel"):
-                            return self_obj._get_current_channel()
-
-                    frame = frame.f_back
-            except Exception:
-                pass
-
-            return None
+            return channel
 
         wrapped_service = RetryWrapper(service, get_channel_context, retry_config)
 
