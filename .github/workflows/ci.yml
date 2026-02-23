@@ -20,7 +20,6 @@ jobs:
 
   type-check:
     runs-on: ubuntu-latest
-    continue-on-error: true  # TODO: remove after fixing pre-existing mypy errors
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

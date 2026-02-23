@@ -253,6 +253,7 @@ class MigrationOrchestrator:
         if self.args.dry_run:
             # Explicit dry run mode
             try:
+                assert self.migrator is not None
                 self.migrator.migrate()
 
                 if self.check_unmapped_users(self.migrator):
@@ -280,6 +281,7 @@ class MigrationOrchestrator:
 
                 if self.get_user_confirmation():
                     try:
+                        assert self.migrator is not None
                         self.migrator.migrate()
 
                     except Exception as e:

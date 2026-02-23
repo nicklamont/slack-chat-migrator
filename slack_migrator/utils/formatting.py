@@ -235,7 +235,7 @@ def parse_slack_blocks(message: Dict) -> str:
 
     # Now process the main message blocks
     if "blocks" not in message or not message["blocks"]:
-        main_text = message.get("text", "")
+        main_text: str = message.get("text", "")
         # If we have forwarded content but no main text, use forwarded content
         if not main_text.strip() and forwarded_texts:
             return "\n\n".join(forwarded_texts)
@@ -262,7 +262,7 @@ def parse_slack_blocks(message: Dict) -> str:
         elif block_type == "rich_text":
             # Process rich text elements, handling lists specially to maintain proper indentation
             rich_text_parts = []
-            list_items = []  # Track consecutive list items
+            list_items: List[str] = []  # Track consecutive list items
 
             for element in block.get("elements", []):
                 element_type = element.get("type")
@@ -382,7 +382,7 @@ def parse_slack_blocks(message: Dict) -> str:
 
     # If we didn't get any meaningful content from blocks, fall back to text field
     if not result:
-        main_text = message.get("text", "")
+        main_text = str(message.get("text", ""))
         # If we have forwarded content but no main text, use forwarded content
         if not main_text.strip() and forwarded_texts:
             return "\n\n".join(forwarded_texts)
