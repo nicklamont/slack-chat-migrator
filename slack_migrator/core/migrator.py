@@ -1152,7 +1152,6 @@ class SlackToChatMigrator:
                             f"Error updating current members for space {space}: {e}",
                             channel=ch.name,
                         )
-                        import traceback
 
                         log_with_context(
                             logging.DEBUG,

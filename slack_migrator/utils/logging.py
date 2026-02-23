@@ -275,8 +275,8 @@ def _enable_http_client_debug():
     Enable http.client debug logging by routing debug output through the
     logging module with auth token redaction.
 
-    Only patches the `putheader` method to intercept headers (for redaction)
-    and `send` for request data logging. This is only used when debug_api=True.
+    Only patches the `putheader` method to intercept headers (for redaction).
+    This is only used when debug_api=True.
     """
     import http.client
     import re
