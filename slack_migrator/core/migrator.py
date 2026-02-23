@@ -36,6 +36,118 @@ from slack_migrator.utils.api import get_gcp_service
 from slack_migrator.utils.logging import log_with_context
 
 
+def _list_all_spaces(chat_service) -> List[Dict[str, Any]]:
+    """Paginate through ``spaces().list()`` and return every space."""
+    spaces = []
+    page_token = None
+    while True:
+        try:
+            response = (
+                chat_service.spaces().list(pageSize=100, pageToken=page_token).execute()
+            )
+            spaces.extend(response.get("spaces", []))
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+        except HttpError as http_e:
+            log_with_context(
+                logging.ERROR,
+                f"HTTP error listing spaces during cleanup: {http_e} "
+                f"(Status: {http_e.resp.status})",
+            )
+            break
+        except Exception as e:
+            log_with_context(logging.ERROR, f"Failed to list spaces: {e}")
+            break
+    return spaces
+
+
+def cleanup_import_mode_spaces(chat_service) -> None:
+    """
+    Complete import mode on any spaces still stuck in import mode.
+
+    This is a standalone version of the cleanup logic that only requires a
+    Chat API service client — no export data or user mappings needed.
+    It finds all spaces in import mode and calls completeImport() on each.
+
+    Member-adding is skipped because that requires export data. Users can
+    run ``slack-migrator migrate --update_mode`` afterwards to add members.
+
+    Args:
+        chat_service: An authenticated Google Chat API service resource.
+    """
+    log_with_context(logging.INFO, "Running standalone cleanup...")
+
+    spaces = _list_all_spaces(chat_service)
+    if not spaces:
+        log_with_context(logging.INFO, "No spaces found.")
+        return
+
+    import_mode_spaces = []
+    for space in spaces:
+        space_name = space.get("name", "")
+        if not space_name:
+            continue
+        try:
+            space_info = chat_service.spaces().get(name=space_name).execute()
+            if space_info.get("importMode"):
+                import_mode_spaces.append((space_name, space_info))
+        except Exception as e:
+            log_with_context(
+                logging.WARNING,
+                f"Failed to check space {space_name}: {e}",
+            )
+
+    if not import_mode_spaces:
+        log_with_context(logging.INFO, "No spaces found in import mode during cleanup.")
+        return
+
+    log_with_context(
+        logging.INFO,
+        f"Found {len(import_mode_spaces)} space(s) still in import mode.",
+    )
+
+    for space_name, space_info in import_mode_spaces:
+        try:
+            chat_service.spaces().completeImport(name=space_name).execute()
+            log_with_context(
+                logging.INFO,
+                f"Completed import mode for space: {space_name}",
+            )
+
+            # Preserve external user access if it was set
+            if space_info.get("externalUserAllowed"):
+                try:
+                    chat_service.spaces().patch(
+                        name=space_name,
+                        updateMask="externalUserAllowed",
+                        body={"externalUserAllowed": True},
+                    ).execute()
+                    log_with_context(
+                        logging.INFO,
+                        f"Preserved external user access for: {space_name}",
+                    )
+                except Exception as e:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Failed to preserve external user access for "
+                        f"{space_name}: {e}",
+                    )
+        except HttpError as http_e:
+            log_with_context(
+                logging.ERROR,
+                f"HTTP error completing import for {space_name}: {http_e} "
+                f"(Status: {http_e.resp.status})",
+            )
+        except Exception as e:
+            log_with_context(
+                logging.ERROR,
+                f"Failed to complete import for {space_name}: {e}",
+            )
+
+    log_with_context(logging.INFO, "Standalone cleanup completed.")
+
+
 class SlackToChatMigrator:
     """Main class for migrating Slack exports to Google Chat."""
 

@@ -7,18 +7,312 @@ handling argument parsing, configuration loading, and executing the
 migration process with appropriate error handling.
 """
 
-import argparse
 import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
-from slack_migrator.core.migrator import SlackToChatMigrator
+import click
+
+import slack_migrator
+from slack_migrator.core.migrator import SlackToChatMigrator, cleanup_import_mode_spaces
 from slack_migrator.utils.logging import log_with_context, setup_logger
-from slack_migrator.utils.permissions import validate_permissions
+from slack_migrator.utils.permissions import (
+    check_permissions_standalone,
+    validate_permissions,
+)
 
 # Create logger instance
 logger = logging.getLogger("slack_migrator")
+
+
+# ---------------------------------------------------------------------------
+# Custom click.Group that defaults to ``migrate`` for backwards compatibility.
+# When the first CLI token starts with ``-`` (i.e. a flag, not a subcommand)
+# the group silently prepends ``migrate`` so that the old invocation style
+#   ``slack-migrator --creds_path ... --export_path ...``
+# continues to work.
+# ---------------------------------------------------------------------------
+
+
+class DefaultGroup(click.Group):
+    """Click group that defaults to the ``migrate`` subcommand."""
+
+    # Flags that belong to the group itself and should NOT trigger the
+    # ``migrate`` default.
+    _GROUP_FLAGS = {"--help", "--version", "-h"}
+
+    def parse_args(self, ctx, args):
+        # If no args at all, let click show help as usual.
+        if args and args[0].startswith("-") and args[0] not in self._GROUP_FLAGS:
+            args = ["migrate"] + list(args)
+        return super().parse_args(ctx, args)
+
+
+# ---------------------------------------------------------------------------
+# Shared option decorator
+# ---------------------------------------------------------------------------
+
+
+def common_options(f):
+    """Decorator that adds options shared across multiple subcommands."""
+    f = click.option(
+        "--creds_path",
+        required=True,
+        help="Path to service account credentials JSON",
+    )(f)
+    f = click.option(
+        "--workspace_admin",
+        required=True,
+        help="Email of workspace admin to impersonate",
+    )(f)
+    f = click.option(
+        "--config",
+        default="config.yaml",
+        show_default=True,
+        help="Path to config YAML",
+    )(f)
+    f = click.option(
+        "--verbose",
+        "-v",
+        is_flag=True,
+        default=False,
+        help="Enable verbose console logging (shows DEBUG level messages)",
+    )(f)
+    f = click.option(
+        "--debug_api",
+        is_flag=True,
+        default=False,
+        help="Enable detailed API request/response logging (creates very large log files)",
+    )(f)
+    return f
+
+
+# ---------------------------------------------------------------------------
+# CLI group
+# ---------------------------------------------------------------------------
+
+
+@click.group(
+    cls=DefaultGroup,
+    invoke_without_command=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.version_option(version=slack_migrator.__version__, prog_name="slack-migrator")
+@click.pass_context
+def cli(ctx):
+    """Slack to Google Chat migration tool."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+# ---------------------------------------------------------------------------
+# migrate subcommand
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@common_options
+@click.option(
+    "--export_path",
+    required=True,
+    help="Path to Slack export directory",
+)
+@click.option(
+    "--dry_run",
+    is_flag=True,
+    default=False,
+    help="Validation-only mode - performs comprehensive validation without making changes",
+)
+@click.option(
+    "--update_mode",
+    is_flag=True,
+    default=False,
+    help="Update mode - update existing spaces instead of creating new ones",
+)
+@click.option(
+    "--skip_permission_check",
+    is_flag=True,
+    default=False,
+    help="Skip permission checks (not recommended)",
+)
+def migrate(
+    creds_path,
+    export_path,
+    workspace_admin,
+    config,
+    verbose,
+    debug_api,
+    dry_run,
+    update_mode,
+    skip_permission_check,
+):
+    """Run the full Slack-to-Google-Chat migration."""
+    args = SimpleNamespace(
+        creds_path=creds_path,
+        export_path=export_path,
+        workspace_admin=workspace_admin,
+        config=config,
+        verbose=verbose,
+        debug_api=debug_api,
+        dry_run=dry_run,
+        update_mode=update_mode,
+        skip_permission_check=skip_permission_check,
+    )
+
+    # Create output directory early so all operations are logged to file
+    output_dir = create_migration_output_directory()
+
+    # Set up logger with output directory for file logging
+    setup_logger(args.verbose, args.debug_api, output_dir)
+
+    log_startup_info(args)
+    log_with_context(logging.INFO, f"Output directory: {output_dir}")
+
+    # Create orchestrator and run migration
+    orchestrator = MigrationOrchestrator(args)
+    orchestrator.output_dir = output_dir
+
+    try:
+        orchestrator.validate_prerequisites()
+        orchestrator.run_migration()
+    except Exception as e:
+        handle_exception(e)
+    finally:
+        orchestrator.cleanup()
+        show_security_warning()
+
+
+# ---------------------------------------------------------------------------
+# check-permissions subcommand
+# ---------------------------------------------------------------------------
+
+
+@cli.command("check-permissions")
+@common_options
+def check_permissions(creds_path, workspace_admin, config, verbose, debug_api):
+    """Validate API permissions without running a migration.
+
+    Tests that the service account has all required scopes for the Chat and
+    Drive APIs.  Does not require a Slack export directory.
+    """
+    setup_logger(verbose, debug_api)
+
+    try:
+        check_permissions_standalone(
+            creds_path=creds_path,
+            workspace_admin=workspace_admin,
+            config_path=config,
+        )
+    except Exception as e:
+        handle_exception(e)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# validate subcommand
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@common_options
+@click.option(
+    "--export_path",
+    required=True,
+    help="Path to Slack export directory",
+)
+@click.option(
+    "--dry_run",
+    is_flag=True,
+    default=False,
+    hidden=True,
+    help="(ignored — validate always runs in dry-run mode)",
+)
+def validate(
+    creds_path, export_path, workspace_admin, config, verbose, debug_api, dry_run
+):
+    """Dry-run validation of export data, user mappings, and channels.
+
+    Equivalent to ``migrate --dry_run`` but expressed as an explicit command.
+    """
+    if dry_run:
+        log_with_context(
+            logging.INFO,
+            "Note: --dry_run is redundant with 'validate' (always dry-run).",
+        )
+
+    args = SimpleNamespace(
+        creds_path=creds_path,
+        export_path=export_path,
+        workspace_admin=workspace_admin,
+        config=config,
+        verbose=verbose,
+        debug_api=debug_api,
+        dry_run=True,  # always dry run
+        update_mode=False,
+        skip_permission_check=False,
+    )
+
+    output_dir = create_migration_output_directory()
+    setup_logger(args.verbose, args.debug_api, output_dir)
+
+    log_startup_info(args)
+    log_with_context(logging.INFO, f"Output directory: {output_dir}")
+
+    orchestrator = MigrationOrchestrator(args)
+    orchestrator.output_dir = output_dir
+
+    try:
+        orchestrator.validate_prerequisites()
+        orchestrator.run_migration()
+    except Exception as e:
+        handle_exception(e)
+    finally:
+        orchestrator.cleanup()
+        show_security_warning()
+
+
+# ---------------------------------------------------------------------------
+# cleanup subcommand
+# ---------------------------------------------------------------------------
+
+
+@cli.command()
+@common_options
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def cleanup(creds_path, workspace_admin, config, verbose, debug_api, yes):
+    """Complete import mode on spaces that are stuck.
+
+    Lists all spaces visible to the service account and calls completeImport()
+    on any that are still in import mode.  Does not add members — use
+    ``migrate --update_mode`` for that.
+    """
+    from slack_migrator.core.config import load_config
+    from slack_migrator.utils.api import get_gcp_service
+
+    setup_logger(verbose, debug_api)
+
+    if not yes:
+        if not click.confirm(
+            "This will complete import mode on all stuck spaces. Continue?"
+        ):
+            click.echo("Cleanup cancelled.")
+            sys.exit(0)
+
+    cfg = load_config(Path(config))
+    chat = get_gcp_service(creds_path, workspace_admin, "chat", "v1", retry_config=cfg)
+
+    try:
+        cleanup_import_mode_spaces(chat)
+    except Exception as e:
+        handle_exception(e)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# MigrationOrchestrator (unchanged from the argparse version)
+# ---------------------------------------------------------------------------
 
 
 class MigrationOrchestrator:
@@ -153,14 +447,10 @@ class MigrationOrchestrator:
 
             # Ask user if they want to proceed anyway
             try:
-                response = (
-                    input(
-                        "⚠️  Proceed anyway despite unmapped users? (NOT RECOMMENDED) (y/N): "
-                    )
-                    .strip()
-                    .lower()
-                )
-                if response in ["y", "yes"]:
+                if click.confirm(
+                    "Proceed anyway despite unmapped users? (NOT RECOMMENDED)",
+                    default=False,
+                ):
                     log_with_context(
                         logging.WARNING,
                         "Proceeding with unmapped users - messages will be attributed to workspace admin",
@@ -172,7 +462,7 @@ class MigrationOrchestrator:
                         "Migration cancelled. Please fix the user mappings and try again.",
                     )
                     return False
-            except KeyboardInterrupt:
+            except click.Abort:
                 log_with_context(logging.INFO, "\nMigration cancelled by user.")
                 return False
 
@@ -240,11 +530,8 @@ class MigrationOrchestrator:
         log_with_context(logging.INFO, "")
 
         try:
-            response = (
-                input("Proceed with the actual migration? (y/N): ").strip().lower()
-            )
-            return response in ["y", "yes"]
-        except KeyboardInterrupt:
+            return click.confirm("Proceed with the actual migration?", default=False)
+        except click.Abort:
             log_with_context(logging.INFO, "\nMigration cancelled by user.")
             return False
 
@@ -338,52 +625,9 @@ class MigrationOrchestrator:
                 )
 
 
-def setup_argument_parser() -> argparse.ArgumentParser:
-    """Set up and return the argument parser."""
-    parser = argparse.ArgumentParser(description="Migrate Slack export to Google Chat")
-    parser.add_argument(
-        "--creds_path", required=True, help="Path to service account credentials JSON"
-    )
-    parser.add_argument(
-        "--export_path", required=True, help="Path to Slack export directory"
-    )
-    parser.add_argument(
-        "--workspace_admin",
-        required=True,
-        help="Email of workspace admin to impersonate",
-    )
-    parser.add_argument(
-        "--config",
-        default="config.yaml",
-        help="Path to config YAML (default: config.yaml)",
-    )
-    parser.add_argument(
-        "--dry_run",
-        action="store_true",
-        help="Validation-only mode - performs comprehensive validation without making changes",
-    )
-    parser.add_argument(
-        "--update_mode",
-        action="store_true",
-        help="Update mode - update existing spaces instead of creating new ones",
-    )
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Enable verbose console logging (shows DEBUG level messages)",
-    )
-    parser.add_argument(
-        "--debug_api",
-        action="store_true",
-        help="Enable detailed API request/response logging (creates very large log files)",
-    )
-    parser.add_argument(
-        "--skip_permission_check",
-        action="store_true",
-        help="Skip permission checks (not recommended)",
-    )
-    return parser
+# ---------------------------------------------------------------------------
+# Helper functions (unchanged)
+# ---------------------------------------------------------------------------
 
 
 def log_startup_info(args):
@@ -503,42 +747,14 @@ def create_migration_output_directory():
     return output_dir
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
 def main():
-    """
-    Main entry point for the Slack to Google Chat migration tool.
-
-    Parses command line arguments, sets up logging, performs permission checks,
-    initializes the migrator, and executes the migration process.
-
-    The function handles errors during migration and provides appropriate
-    error messages and cleanup operations.
-    """
-    # Parse arguments and setup
-    parser = setup_argument_parser()
-    args = parser.parse_args()
-
-    # Create output directory early so all operations are logged to file
-    output_dir = create_migration_output_directory()
-
-    # Set up logger with output directory for file logging
-    setup_logger(args.verbose, args.debug_api, output_dir)
-
-    log_startup_info(args)
-    log_with_context(logging.INFO, f"Output directory: {output_dir}")
-
-    # Create orchestrator and run migration
-    orchestrator = MigrationOrchestrator(args)
-    # Set the output directory so migrator doesn't create its own
-    orchestrator.output_dir = output_dir
-
-    try:
-        orchestrator.validate_prerequisites()
-        orchestrator.run_migration()
-    except Exception as e:
-        handle_exception(e)
-    finally:
-        orchestrator.cleanup()
-        show_security_warning()
+    """Entry point for the slack-migrator command."""
+    cli()
 
 
 if __name__ == "__main__":

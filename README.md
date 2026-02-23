@@ -177,9 +177,22 @@ retry_delay: 2
 
 ### Command-Line Reference
 
-The `slack-migrator` command provides several options for different migration scenarios:
+The `slack-migrator` command provides four subcommands:
 
-#### Available Command-Line Options
+```
+slack-migrator migrate            # Run the full migration
+slack-migrator check-permissions  # Validate API permissions only
+slack-migrator validate           # Dry-run validation of export data
+slack-migrator cleanup            # Complete import mode on stuck spaces
+```
+
+> **Backwards compatibility:** Running `slack-migrator --creds_path ...` (flags without a subcommand) automatically routes to `migrate`.
+
+#### Subcommands
+
+##### `migrate`
+
+Run the full Slack-to-Google-Chat migration.
 
 | Option | Required | Description |
 |--------|----------|-------------|
@@ -193,6 +206,43 @@ The `slack-migrator` command provides several options for different migration sc
 | `--debug_api` | No | Enable detailed API request/response logging (creates very large log files) |
 | `--skip_permission_check` | No | Skip permission checks (not recommended) |
 
+##### `check-permissions`
+
+Validate that the service account has all required API scopes. Does **not** require a Slack export directory.
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--creds_path` | Yes | Path to the service account credentials JSON file |
+| `--workspace_admin` | Yes | Email of workspace admin to impersonate |
+| `--config` | No | Path to config YAML (default: config.yaml) |
+| `--verbose` or `-v` | No | Enable verbose console logging |
+| `--debug_api` | No | Enable detailed API request/response logging |
+
+##### `validate`
+
+Dry-run validation of export data, user mappings, and channels. Equivalent to `migrate --dry_run` but expressed as an explicit command.
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--creds_path` | Yes | Path to the service account credentials JSON file |
+| `--export_path` | Yes | Path to the Slack export directory |
+| `--workspace_admin` | Yes | Email of workspace admin to impersonate |
+| `--config` | No | Path to config YAML (default: config.yaml) |
+| `--verbose` or `-v` | No | Enable verbose console logging |
+| `--debug_api` | No | Enable detailed API request/response logging |
+
+##### `cleanup`
+
+Complete import mode on spaces that are stuck. Does **not** require a Slack export directory or add members — use `migrate --update_mode` for that.
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--creds_path` | Yes | Path to the service account credentials JSON file |
+| `--workspace_admin` | Yes | Email of workspace admin to impersonate |
+| `--config` | No | Path to config YAML (default: config.yaml) |
+| `--verbose` or `-v` | No | Enable verbose console logging |
+| `--debug_api` | No | Enable detailed API request/response logging |
+
 #### Logging and Debug Options
 
 The migration tool provides two levels of debug logging:
@@ -202,62 +252,47 @@ The migration tool provides two levels of debug logging:
 
 Both options are independent and can be used together for maximum debugging information.
 
-> **Note:** The `--skip_permission_check` option bypasses validation of service account permissions. Only use this if you're certain your service account is properly configured and you're encountering false positives in the permission check.
+> **Note:** The `--skip_permission_check` option (on `migrate`) bypasses validation of service account permissions. Only use this if you're certain your service account is properly configured and you're encountering false positives in the permission check.
 
-#### Basic Command Example
-
-```bash
-slack-migrator migrate \
-  --creds_path ./slack-chat-migrator-sa-key.json \
-  --export_path ./slack_export \
-  --workspace_admin admin@company.com \
-  --verbose
-```
-
-**Example commands for different scenarios:**
+#### Examples
 
 ```bash
 # Check permissions before migration (highly recommended)
-slack-migrator-check-permissions \
+slack-migrator check-permissions \
   --creds_path /path/to/key.json \
   --workspace_admin admin@company.com
 
-# Perform comprehensive validation before migration
-slack-migrator \
+# Validate export data without making changes
+slack-migrator validate \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
-  --workspace_admin admin@company.com \
-  --dry_run
+  --workspace_admin admin@company.com
 
 # Execute the full migration
-slack-migrator \
+slack-migrator migrate \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
   --workspace_admin admin@company.com
 
 # Resume an interrupted migration
-slack-migrator \
+slack-migrator migrate \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
   --workspace_admin admin@company.com \
   --update_mode
 
-# Debug a problematic migration with detailed logging
-slack-migrator \
+# Complete import mode on stuck spaces (no export needed)
+slack-migrator cleanup \
   --creds_path /path/to/key.json \
-  --export_path ./slack_export \
-  --workspace_admin admin@company.com \
-  --verbose
+  --workspace_admin admin@company.com
 
-# Enable API debugging for development or complex troubleshooting
-slack-migrator \
+# Debug a problematic migration with detailed logging
+slack-migrator migrate \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
   --workspace_admin admin@company.com \
   --verbose --debug_api
 ```
-
-> **Note:** For backward compatibility, you can also use `python slack_to_chat_migration.py` with the same arguments.
 
 ### Migration Workflow
 
@@ -286,61 +321,54 @@ For a successful migration, follow this recommended workflow:
 
    After running the script, complete the domain-wide delegation setup in Google Workspace Admin Console as instructed.
 
-2. **Verify permissions** (recommended before each migration):
+   > **Note:** You only need to run the permissions setup script once, unless you change Google Cloud projects, need a new service account, or encounter permission errors.
+
+3. **Verify permissions** (recommended before each migration):
    ```bash
-   slack-migrator-check-permissions \
+   slack-migrator check-permissions \
      --creds_path /path/to/credentials.json \
      --workspace_admin admin@domain.com
    ```
 
-3. **Configure migration settings** (before first migration):
+4. **Configure migration settings** (before first migration):
    ```bash
    # Create and edit your configuration
    cp config.yaml.example config.yaml
    nano config.yaml  # or your preferred editor
    ```
 
-4. **Run comprehensive validation** (automatically performed before every migration):
+5. **Run comprehensive validation** (automatically performed before every migration):
    ```bash
-   # The tool automatically runs a comprehensive validation first:
-   # • Validates all user mappings and detects unmapped users
-   # • Checks file attachments and permissions
-   # • Verifies channel structure and memberships
-   # • Tests message formatting and content
-   # • Estimates migration scope and requirements
-
    # For validation-only runs:
-   slack-migrator \
-     --creds_path /path/to/credentials.json \
-     --export_path ./slack_export \
-     --workspace_admin admin@domain.com \
-     --dry_run
-
-   # Regular migration (automatically includes validation step):
-   slack-migrator \
+   slack-migrator validate \
      --creds_path /path/to/credentials.json \
      --export_path ./slack_export \
      --workspace_admin admin@domain.com
    ```
-   The validation identifies potential issues before any changes are made.
+   The validation identifies potential issues before any changes are made:
+   - Validates all user mappings and detects unmapped users
+   - Checks file attachments and permissions
+   - Verifies channel structure and memberships
+   - Tests message formatting and content
+   - Estimates migration scope and requirements
 
-5. **Execute the migration** (validation runs automatically first):
+6. **Execute the migration** (validation runs automatically first):
    ```bash
    # The migration process includes automatic validation:
    # Step 1: Comprehensive validation (dry run)
    # Step 2: User confirmation to proceed
    # Step 3: Actual migration
 
-   slack-migrator \
+   slack-migrator migrate \
      --creds_path /path/to/credentials.json \
      --export_path ./slack_export \
      --workspace_admin admin@domain.com
    ```
 
-6. **If migration is interrupted** (optional):
+7. **If migration is interrupted** (optional):
    ```bash
    # Resume migration with update mode
-   slack-migrator \
+   slack-migrator migrate \
      --creds_path /path/to/credentials.json \
      --export_path ./slack_export \
      --workspace_admin admin@domain.com \
@@ -361,11 +389,12 @@ For a successful migration, follow this recommended workflow:
      "random": "AAAABbTr456"   # Use this space ID for the random channel
    ```
 
-> **Note:** You only need to run the permissions setup script once, unless you change Google Cloud projects, need a new service account, or encounter permission errors.
-
-4. The migration tool will automatically check permissions before running. If you want to skip this check:
+8. **If spaces are stuck in import mode** (optional):
    ```bash
-   slack-migrator --creds_path ... --export_path ... --workspace_admin ... --config ... --skip_permission_check
+   # Complete import mode on stuck spaces without needing the export
+   slack-migrator cleanup \
+     --creds_path /path/to/credentials.json \
+     --workspace_admin admin@domain.com
    ```
 
 ### Migration Process and Cleanup
@@ -523,7 +552,10 @@ To identify users that need mapping:
 
 1. Run comprehensive validation to generate a report:
    ```bash
-   slack-migrator --creds_path ... --export_path ... --workspace_admin ... --config ... --dry_run
+   slack-migrator validate \
+     --creds_path /path/to/key.json \
+     --export_path ./slack_export \
+     --workspace_admin admin@company.com
    ```
    This validates all aspects of the migration including user mappings, file access, and content formatting.
 
@@ -546,13 +578,13 @@ The codebase is organized into the following modules:
   - `slack_migrator/services/file.py` - File and attachment handling
   - `slack_migrator/services/user.py` - User mapping utilities
 - `slack_migrator/cli/` - Command-line interface components
-  - `slack_migrator/cli/commands.py` - Main CLI commands
+  - `slack_migrator/cli/commands.py` - CLI group and subcommands (migrate, check-permissions, validate, cleanup)
   - `slack_migrator/cli/report.py` - Report generation
-  - `slack_migrator/cli/permission.py` - Permission checking
 - `slack_migrator/utils/` - Utility functions
-    - `slack_migrator/utils/logging.py` - Logging utilities
-    - `slack_migrator/utils/api.py` - API and retry utilities
-    - `slack_migrator/utils/formatting.py` - Message formatting utilities
+  - `slack_migrator/utils/logging.py` - Logging utilities
+  - `slack_migrator/utils/api.py` - API and retry utilities
+  - `slack_migrator/utils/formatting.py` - Message formatting utilities
+  - `slack_migrator/utils/permissions.py` - Permission validation
 
 
 ### GCP on Cloud Run

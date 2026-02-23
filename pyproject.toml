@@ -93,7 +93,7 @@ python_functions = "test_*"
 [tool.commitizen]
 name = "cz_conventional_commits"
 tag_format = "v$version"
-version = "0.3.1"
+version = "0.3.2"
 version_files = ["slack_migrator/__init__.py:__version__"]
 update_changelog_on_bump = true
 

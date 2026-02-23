@@ -92,12 +92,12 @@ done
 # Function to check for prerequisites and validate inputs
 check_prerequisites() {
   echo "Checking prerequisites..."
-  
+
   # Check if gcloud is installed
   if ! command -v gcloud &> /dev/null; then
     echo "❌ Error: Google Cloud SDK (gcloud CLI) not found."
     echo "The gcloud command must be installed as a system component, not via pip."
-    
+
     # Check if in Python environment, but explain we need the full SDK
     if [ -n "$VIRTUAL_ENV" ]; then
       echo "Detected Python virtual environment: $(basename "$VIRTUAL_ENV")"
@@ -141,14 +141,14 @@ check_prerequisites() {
     echo "  gcloud config set project PROJECT_ID"
     exit 1
   fi
-  
+
   # Verify gcloud auth
   if ! gcloud auth list --filter=status:ACTIVE --format="value(account)" &> /dev/null; then
     echo "❌ Error: No active gcloud account found"
     echo "Please run: gcloud auth login"
     exit 1
   fi
-  
+
   echo "✅ Prerequisites check passed"
 }
 
@@ -166,25 +166,25 @@ echo "Project ID:            ${PROJECT_ID}"
 echo "Service Account:       ${SERVICE_ACCOUNT_NAME}"
 echo "Service Account Email: ${SERVICE_ACCOUNT_EMAIL}"
 echo "Key File Path:         ${KEY_FILE}"
-echo "======================================================================" 
+echo "======================================================================"
 echo
 
 # Function to enable required APIs
 enable_apis() {
   echo "1️⃣ Enabling required Google Cloud APIs..."
-  
+
   echo "   - Enabling Chat API"
   gcloud services enable chat.googleapis.com --project "${PROJECT_ID}" || {
     echo "❌ Failed to enable Chat API"
     exit 1
   }
-  
+
   echo "   - Enabling Drive API"
   gcloud services enable drive.googleapis.com --project "${PROJECT_ID}" || {
     echo "❌ Failed to enable Drive API"
     exit 1
   }
-  
+
   echo "✅ APIs enabled successfully"
   echo
 }
@@ -192,7 +192,7 @@ enable_apis() {
 # Function to set up service account
 setup_service_account() {
   echo "2️⃣ Setting up service account..."
-  
+
   # Check if service account exists
   if ! gcloud iam service-accounts describe ${SERVICE_ACCOUNT_EMAIL} --project "${PROJECT_ID}" &> /dev/null; then
     echo "   - Creating service account '${SERVICE_ACCOUNT_NAME}'..."
@@ -207,14 +207,14 @@ setup_service_account() {
   else
     echo "   ✅ Service account '${SERVICE_ACCOUNT_NAME}' already exists"
   fi
-  
+
   echo
 }
 
 # Function to create and download service account key
 create_service_account_key() {
   echo "3️⃣ Setting up service account key..."
-  
+
   # Check if key file exists
   if [ ! -f "${KEY_FILE}" ]; then
     echo "   - Creating and downloading service account key to '${KEY_FILE}'..."
@@ -230,7 +230,7 @@ create_service_account_key() {
   else
     echo "   ✅ Key file '${KEY_FILE}' already exists (using existing key)"
   fi
-  
+
   echo
 }
 
@@ -242,7 +242,7 @@ create_service_account_key
 # Function to assign IAM roles to service account
 assign_iam_roles() {
   echo "4️⃣ Assigning IAM roles to service account..."
-  
+
   echo "   - Assigning Chat Owner role"
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
@@ -251,7 +251,7 @@ assign_iam_roles() {
       echo "❌ Failed to assign Chat Owner role"
       # Don't exit on error, try the next role
     }
-  
+
   echo "   - Assigning Service Account Token Creator role"
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
@@ -260,7 +260,7 @@ assign_iam_roles() {
       echo "❌ Failed to assign Service Account Token Creator role"
       # Don't exit on error, try the next role
     }
-  
+
   echo "   - Assigning Service Account User role"
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
@@ -269,7 +269,7 @@ assign_iam_roles() {
       echo "❌ Failed to assign Service Account User role"
       # Don't exit on error, try the next role
     }
-  
+
   echo "   ✅ IAM roles assignment completed"
   echo
 }
@@ -280,9 +280,9 @@ extract_client_id() {
     echo "❌ Key file not found: ${KEY_FILE}"
     exit 1
   fi
-  
+
   CLIENT_ID=$(grep -o '"client_id": "[^"]*' "${KEY_FILE}" | cut -d'"' -f4)
-  
+
   if [ -z "${CLIENT_ID}" ]; then
     echo "❌ Could not extract client ID from key file"
     exit 1
@@ -301,13 +301,13 @@ display_next_steps() {
   echo "2️⃣ Navigate to Security → API Controls → Domain-wide Delegation"
   echo "3️⃣ Click 'Add new' to add your service account"
   echo "4️⃣ Enter the following Client ID:"
-  echo 
+  echo
   echo "   ${CLIENT_ID}"
-  echo 
+  echo
   echo "5️⃣ Enter the following OAuth scopes (copy and paste the entire line):"
-  echo 
+  echo
   echo "   https://www.googleapis.com/auth/chat.import,https://www.googleapis.com/auth/chat.spaces,https://www.googleapis.com/auth/chat.messages,https://www.googleapis.com/auth/chat.spaces.readonly,https://www.googleapis.com/auth/chat.memberships.readonly,https://www.googleapis.com/auth/drive"
-  echo 
+  echo
   echo "6️⃣ Click 'Authorize'"
   echo "======================================================================"
   echo
@@ -316,8 +316,8 @@ display_next_steps() {
   echo "1. VERIFY PERMISSIONS (ALWAYS DO THIS FIRST)"
   echo "   This confirms your service account is properly set up:"
   echo
-  echo "   slack-migrator-check-permissions --creds_path \"$(pwd)/${KEY_FILE}\" \\"
-  echo "                                   --workspace_admin your-admin@domain.com"
+  echo "   slack-migrator check-permissions --creds_path \"$(pwd)/${KEY_FILE}\" \\"
+  echo "                                  --workspace_admin your-admin@domain.com"
   echo
   echo "2. CREATE AND CUSTOMIZE CONFIG FILE (ONE-TIME SETUP)"
   echo "   If you haven't already, create a config file to customize the migration:"
@@ -360,4 +360,4 @@ display_next_steps() {
 # Run remaining setup steps
 assign_iam_roles
 extract_client_id
-display_next_steps 
+display_next_steps
