@@ -280,7 +280,8 @@ def validate(
 
 @cli.command()
 @common_options
-def cleanup(creds_path, workspace_admin, config, verbose, debug_api):
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def cleanup(creds_path, workspace_admin, config, verbose, debug_api, yes):
     """Complete import mode on spaces that are stuck.
 
     Lists all spaces visible to the service account and calls completeImport()
@@ -291,6 +292,13 @@ def cleanup(creds_path, workspace_admin, config, verbose, debug_api):
     from slack_migrator.utils.api import get_gcp_service
 
     setup_logger(verbose, debug_api)
+
+    if not yes:
+        if not click.confirm(
+            "This will complete import mode on all stuck spaces. Continue?"
+        ):
+            click.echo("Cleanup cancelled.")
+            sys.exit(0)
 
     cfg = load_config(Path(config))
     chat = get_gcp_service(creds_path, workspace_admin, "chat", "v1", retry_config=cfg)

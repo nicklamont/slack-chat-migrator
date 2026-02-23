@@ -1,14 +1,8 @@
-## 0.3.1 (2025-02-23)
+## Unreleased
 
-### Fix
+### Feat
 
-- Harden error handling in config, user, and file modules
-- Add input validation, Python 3.9 compat, and improve update mode logic
-- Address PR review feedback
-
-### Refactor
-
-- Harden credential handling and remove frame introspection in API utils
+- migrate CLI from argparse to click with subcommands (migrate, check-permissions, validate, cleanup)
 
 ## v0.3.2 (2026-02-23)
 

@@ -127,7 +127,7 @@ class TestValidateCommand:
         mock_orch_cls.return_value = mock_orch
 
         runner = CliRunner()
-        runner.invoke(
+        result = runner.invoke(
             cli,
             [
                 "validate",
@@ -139,6 +139,7 @@ class TestValidateCommand:
                 "a@b.com",
             ],
         )
+        assert result.exit_code == 0
         # The args namespace passed to MigrationOrchestrator must have dry_run=True
         args = mock_orch_cls.call_args[0][0]
         assert args.dry_run is True
@@ -178,10 +179,35 @@ class TestCleanupCommand:
                 "fake.json",
                 "--workspace_admin",
                 "a@b.com",
+                "--yes",
             ],
         )
         assert result.exit_code == 0
         mock_cleanup.assert_called_once_with(mock_chat)
+
+    @patch("slack_migrator.cli.commands.cleanup_import_mode_spaces")
+    @patch("slack_migrator.utils.api.get_gcp_service")
+    @patch("slack_migrator.core.config.load_config")
+    def test_prompts_for_confirmation_without_yes(
+        self, mock_config, mock_svc, mock_cleanup
+    ):
+        """Without --yes, cleanup should prompt and abort on 'n'."""
+        mock_config.return_value = {}
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "cleanup",
+                "--creds_path",
+                "fake.json",
+                "--workspace_admin",
+                "a@b.com",
+            ],
+            input="n\n",
+        )
+        assert result.exit_code == 0
+        assert "Cleanup cancelled" in result.output
+        mock_cleanup.assert_not_called()
 
 
 class TestBackwardsCompatibility:

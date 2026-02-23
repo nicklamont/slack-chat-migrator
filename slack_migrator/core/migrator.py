@@ -36,7 +36,7 @@ from slack_migrator.utils.api import get_gcp_service
 from slack_migrator.utils.logging import log_with_context
 
 
-def _list_all_spaces(chat_service) -> List:
+def _list_all_spaces(chat_service) -> List[Dict[str, Any]]:
     """Paginate through ``spaces().list()`` and return every space."""
     spaces = []
     page_token = None
