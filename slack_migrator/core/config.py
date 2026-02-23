@@ -8,14 +8,14 @@ which Slack channels should be processed based on the configuration.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import yaml
 
 from slack_migrator.utils.logging import log_with_context
 
 
-def load_config(config_path: Path) -> Dict[str, Any]:
+def load_config(config_path: Path) -> dict[str, Any]:
     """
     Load configuration from YAML file and apply default values.
 
@@ -123,7 +123,7 @@ def create_default_config(output_path: Path) -> bool:
         return False
 
 
-def should_process_channel(channel_name: str, config: Dict[str, Any]) -> bool:
+def should_process_channel(channel_name: str, config: dict[str, Any]) -> bool:
     """
     Determine if a Slack channel should be processed based on configuration filters.
 

@@ -3,7 +3,7 @@ Folder management for Google Drive integration.
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Optional
 
 from googleapiclient.errors import HttpError
 
@@ -31,7 +31,7 @@ class FolderManager:
         self.drive_service = drive_service
         self.workspace_domain = workspace_domain
         self.dry_run = dry_run
-        self.folder_cache: Dict[str, str] = {}
+        self.folder_cache: dict[str, str] = {}
 
     def create_root_folder_in_shared_drive(
         self, folder_name: str, shared_drive_id: str

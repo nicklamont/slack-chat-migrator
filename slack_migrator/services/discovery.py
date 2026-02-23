@@ -4,14 +4,14 @@ Functions for discovering existing Google Chat resources for migration resumptio
 
 import logging
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 from googleapiclient.errors import HttpError
 
 from slack_migrator.utils.logging import log_with_context
 
 
-def discover_existing_spaces(migrator):
+def discover_existing_spaces(migrator):  # noqa: C901
     """
     Query Google Chat API to find spaces that match our Slack channel naming pattern.
 
@@ -36,7 +36,7 @@ def discover_existing_spaces(migrator):
     )
 
     # Track all spaces by channel name to detect duplicates
-    all_spaces_by_channel: Dict[str, List[Dict[str, Any]]] = {}
+    all_spaces_by_channel: dict[str, list[dict[str, Any]]] = {}
     space_mappings = {}
     duplicate_spaces = {}
 

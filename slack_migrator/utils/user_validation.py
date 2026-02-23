@@ -4,7 +4,7 @@ Simple unmapped user tracking integrated into existing user mapping logic.
 
 import logging
 from collections import defaultdict
-from typing import Any, Dict, Set
+from typing import Any
 
 from slack_migrator.utils.logging import log_with_context
 
@@ -13,8 +13,8 @@ class UnmappedUserTracker:
     """Simple tracker for unmapped users detected during migration."""
 
     def __init__(self):
-        self.unmapped_users: Set[str] = set()  # Just track the user IDs
-        self.user_contexts: Dict[str, Set[str]] = defaultdict(
+        self.unmapped_users: set[str] = set()  # Just track the user IDs
+        self.user_contexts: dict[str, set[str]] = defaultdict(
             set
         )  # Track where they were encountered
 
@@ -215,7 +215,7 @@ def log_unmapped_user_summary_for_dry_run(migrator) -> None:
 
 def analyze_unmapped_users(
     migrator, unmapped_user_ids: list
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """Analyze unmapped users to determine their types and provide better guidance.
 
     Args:
@@ -228,7 +228,7 @@ def analyze_unmapped_users(
     import json
     from pathlib import Path
 
-    analysis: Dict[str, Dict[str, Any]] = {}
+    analysis: dict[str, dict[str, Any]] = {}
 
     try:
         # Load users.json to get detailed user information
@@ -239,7 +239,7 @@ def analyze_unmapped_users(
             )
             return analysis
 
-        with open(users_file, "r") as f:
+        with open(users_file) as f:
             users_data = json.load(f)
 
         # Create lookup map for user data
@@ -289,8 +289,8 @@ def analyze_unmapped_users(
 
 
 def categorize_user_analysis(
-    user_analysis: Dict[str, Dict[str, Any]],
-) -> Dict[str, int]:
+    user_analysis: dict[str, dict[str, Any]],
+) -> dict[str, int]:
     """Categorize analyzed users for summary reporting.
 
     Args:
@@ -368,7 +368,7 @@ def scan_channel_members_for_unmapped_users(migrator) -> None:
             )
             return
 
-        with open(channels_file, "r") as f:
+        with open(channels_file) as f:
             channels_data = json.load(f)
 
         channels_to_check = []
@@ -397,7 +397,7 @@ def scan_channel_members_for_unmapped_users(migrator) -> None:
             try:
                 users_file = Path(migrator.export_root) / "users.json"
                 if users_file.exists():
-                    with open(users_file, "r") as f:
+                    with open(users_file) as f:
                         users_data = json.load(f)
                     user_lookup = {user["id"]: user for user in users_data}
             except (OSError, json.JSONDecodeError) as e:

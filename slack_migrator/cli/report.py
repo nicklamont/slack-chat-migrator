@@ -6,7 +6,7 @@ import datetime
 import json
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any
 
 import yaml
 
@@ -78,7 +78,7 @@ def print_dry_run_summary(migrator, report_file=None):
     print("=" * 80)
 
 
-def generate_report(migrator):
+def generate_report(migrator):  # noqa: C901
     """Generate a detailed migration report."""
     # Get the output directory
     output_dir = migrator.output_dir if hasattr(migrator, "output_dir") else "."
@@ -87,7 +87,7 @@ def generate_report(migrator):
     report_path = os.path.join(output_dir, "migration_report.yaml")
 
     # Group failed messages by channel
-    failed_by_channel: Dict[str, List[Dict[str, Any]]] = {}
+    failed_by_channel: dict[str, list[dict[str, Any]]] = {}
     if hasattr(migrator, "failed_messages") and migrator.failed_messages:
         for failed_msg in migrator.failed_messages:
             channel = failed_msg.get("channel", "unknown")
@@ -133,7 +133,7 @@ def generate_report(migrator):
                                         f"Payload: {json.dumps(payload, indent=2)}\n"
                                     )
                                 except Exception:
-                                    f.write(f"Payload: {repr(payload)}\n")
+                                    f.write(f"Payload: {payload!r}\n")
 
                             f.write("\n" + "-" * 40 + "\n\n")
 
@@ -158,7 +158,7 @@ def generate_report(migrator):
         except Exception as e:
             print(f"Warning: Could not retrieve detailed file statistics: {e}")
 
-    report: Dict[str, Any] = {
+    report: dict[str, Any] = {
         "migration_summary": {
             "timestamp": datetime.datetime.now().isoformat(),
             "dry_run": migrator.dry_run,
@@ -239,7 +239,7 @@ def generate_report(migrator):
             continue
 
         # Get stats for this space
-        space_stats: Dict[str, Any] = {
+        space_stats: dict[str, Any] = {
             "messages_migrated": 0,
             "reactions_migrated": 0,
             "files_migrated": 0,

@@ -5,7 +5,7 @@ Google Drive file upload functionality.
 import hashlib
 import logging
 import mimetypes
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Optional
 
 # Third-party imports
 # pylint: disable=import-error
@@ -39,8 +39,8 @@ class DriveFileUploader:
         self.workspace_domain = workspace_domain
         self.dry_run = dry_run
         self.service_account_email = service_account_email
-        self.file_hash_cache: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
-        self.folders_pre_cached: Set[str] = set()
+        self.file_hash_cache: dict[str, tuple[Optional[str], Optional[str]]] = {}
+        self.folders_pre_cached: set[str] = set()
         self.migrator = None  # Will be set by the FileHandler when it's created
 
     def _get_current_channel(self):
@@ -66,7 +66,7 @@ class DriveFileUploader:
         Returns:
             MD5 hash of the file as a hexadecimal string
         """
-        hash_md5 = hashlib.md5()
+        hash_md5 = hashlib.md5()  # noqa: S324 — not used for security
         with open(file_path, "rb") as f:
             for chunk in iter(lambda: f.read(4096), b""):
                 hash_md5.update(chunk)
@@ -118,7 +118,7 @@ class DriveFileUploader:
 
             while True:
                 # Build request parameters
-                params: Dict[str, Any] = {
+                params: dict[str, Any] = {
                     "q": query,
                     "fields": "nextPageToken, files(id, name, md5Checksum, webViewLink)",
                     "pageSize": 1000,  # Maximum allowed page size
@@ -177,7 +177,7 @@ class DriveFileUploader:
         filename: str,
         folder_id: str,
         shared_drive_id: Optional[str] = None,
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str]]:
         """Find a file in Drive by its MD5 hash.
 
         Args:
@@ -192,7 +192,7 @@ class DriveFileUploader:
         try:
             # Check if we've seen this hash before in our cache
             if file_hash in self.file_hash_cache:
-                cached_id, cached_url = self.file_hash_cache[file_hash]
+                cached_id, _cached_url = self.file_hash_cache[file_hash]
 
                 log_with_context(
                     logging.DEBUG,
@@ -202,7 +202,7 @@ class DriveFileUploader:
 
                 # Verify the file still exists
                 try:
-                    params: Dict[str, Any] = {
+                    params: dict[str, Any] = {
                         "fileId": cached_id,
                         "fields": "id,webViewLink",
                     }
@@ -229,7 +229,7 @@ class DriveFileUploader:
             )
 
             # Build request parameters
-            search_params: Dict[str, Any] = {
+            search_params: dict[str, Any] = {
                 "q": query,
                 "fields": "files(id,name,webViewLink)",
             }
@@ -280,7 +280,7 @@ class DriveFileUploader:
         folder_id: str,
         shared_drive_id: Optional[str] = None,
         message_poster_email: Optional[str] = None,
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str]]:
         """Upload a file to Google Drive.
 
         Args:
@@ -428,8 +428,7 @@ class DriveFileUploader:
         try:
             permission = {
                 "type": "user",
-                "role": shared_drive_id
-                and "writer"
+                "role": (shared_drive_id and "writer")
                 or "editor",  # 'writer' is used for shared drives
                 "emailAddress": message_poster_email,
             }

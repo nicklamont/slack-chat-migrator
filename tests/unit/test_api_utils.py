@@ -32,5 +32,5 @@ class TestSlackTsToRfc3339:
         # RFC3339: YYYY-MM-DDTHH:MM:SS.xxxxxxZ
         assert "T" in result
         assert result.endswith("Z")
-        date_part, time_part = result.split("T")
+        date_part, _time_part = result.split("T")
         assert len(date_part.split("-")) == 3

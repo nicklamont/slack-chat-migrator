@@ -10,7 +10,7 @@ import io
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
@@ -47,8 +47,8 @@ class PermissionValidator:
                 ``SlackToChatMigrator`` or ``PermissionCheckContext``.
         """
         self.migrator = migrator
-        self.permission_errors: List[str] = []
-        self.test_resources: Dict[str, Any] = {}
+        self.permission_errors: list[str] = []
+        self.test_resources: dict[str, Any] = {}
 
     def validate_all_permissions(self) -> bool:
         """

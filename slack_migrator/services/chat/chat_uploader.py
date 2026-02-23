@@ -6,7 +6,7 @@ import json
 import logging
 import mimetypes
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 from googleapiclient.http import MediaFileUpload
 
@@ -45,7 +45,7 @@ class ChatFileUploader:
 
     def upload_file_to_chat(
         self, file_path: str, filename: str, parent_space: Optional[str] = None
-    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
         """Upload a file directly to Google Chat API.
 
         Args:
@@ -162,8 +162,8 @@ class ChatFileUploader:
             return (None, None)
 
     def create_attachment_for_message(
-        self, upload_response: Dict[str, Any], attachment_metadata: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, upload_response: dict[str, Any], attachment_metadata: dict[str, Any]
+    ) -> dict[str, Any]:
         """Create an attachment object for a Chat message.
 
         Args:

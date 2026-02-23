@@ -6,7 +6,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 from slack_migrator.utils.logging import log_with_context
 
@@ -14,9 +14,9 @@ from slack_migrator.utils.logging import log_with_context
 logger = logging.getLogger("slack_migrator")
 
 
-def generate_user_map(
-    export_root: Path, config: Dict
-) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
+def generate_user_map(  # noqa: C901
+    export_root: Path, config: dict
+) -> tuple[dict[str, str], list[dict[str, Any]]]:
     """Generate user mapping from users.json file.
 
     Args:
