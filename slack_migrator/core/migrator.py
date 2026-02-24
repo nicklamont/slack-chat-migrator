@@ -498,7 +498,7 @@ class SlackToChatMigrator:
 
             # In update mode, discover existing spaces via API
             if self.update_mode:
-                from slack_migrator.services.message import load_space_mappings
+                from slack_migrator.services.discovery import load_space_mappings
 
                 discovered_spaces = load_space_mappings(self)
                 if discovered_spaces:
@@ -534,7 +534,7 @@ class SlackToChatMigrator:
                     break
 
             # Log any space mapping conflicts that should be added to config
-            from slack_migrator.services.message import log_space_mapping_conflicts
+            from slack_migrator.services.discovery import log_space_mapping_conflicts
 
             log_space_mapping_conflicts(self)
 

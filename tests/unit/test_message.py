@@ -6,13 +6,13 @@ from googleapiclient.errors import HttpError
 
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.state import MigrationState
+from slack_migrator.services.discovery import log_space_mapping_conflicts
 from slack_migrator.services.message import (
-    log_space_mapping_conflicts,
-    process_reactions_batch,
     send_intro,
     send_message,
     track_message_stats,
 )
+from slack_migrator.services.reaction_processor import process_reactions_batch
 
 
 def _make_migrator(dry_run=False, channel="general", ignore_bots=False):

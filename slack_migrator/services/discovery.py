@@ -315,3 +315,87 @@ def should_process_message(last_timestamp: float, message_ts: str) -> bool:
     except (ValueError, IndexError):
         # If we can't parse the timestamp, process the message to be safe
         return True
+
+
+def log_space_mapping_conflicts(migrator: SlackToChatMigrator) -> None:
+    """
+    Log information about space mapping conflicts that need to be resolved.
+    """
+    if migrator.dry_run:
+        log_with_context(logging.INFO, "[DRY RUN] Checking for space mapping conflicts")
+
+    # Log any conflicts that should be added to config
+    if (
+        hasattr(migrator.state, "channel_conflicts")
+        and migrator.state.channel_conflicts
+    ):
+        log_with_context(
+            logging.WARNING,
+            f"Found {len(migrator.state.channel_conflicts)} channels with duplicate space conflicts",
+        )
+        log_with_context(
+            logging.WARNING,
+            "Add the following entries to your config.yaml to resolve conflicts:",
+        )
+        log_with_context(logging.WARNING, "space_mapping:")
+        for channel_name in migrator.state.channel_conflicts:
+            log_with_context(
+                logging.WARNING,
+                f'  "{channel_name}": "<space_id>"  # Replace with the desired space ID',
+            )
+
+
+def load_space_mappings(migrator: SlackToChatMigrator) -> dict[str, str]:
+    """Load space mappings for update mode.
+
+    This uses the Google Chat API for discovery and the config file for overrides.
+    No persisted mapping files are used anymore.
+
+    Returns:
+        dict: Mapping from channel names to space IDs, or empty dict if not found
+    """
+    try:
+        # Initialize the channel_id_to_space_id mapping if not present
+        if not hasattr(migrator.state, "channel_id_to_space_id"):
+            migrator.state.channel_id_to_space_id = {}
+
+        # Use API discovery to find spaces
+        discovered_spaces, _duplicate_spaces = discover_existing_spaces(migrator)
+
+        # Log the discovery results
+        if discovered_spaces:
+            log_with_context(
+                logging.INFO,
+                f"Discovered {len(discovered_spaces)} existing spaces via API",
+            )
+
+        # Look for space_mapping overrides in config
+        space_mapping = migrator.config.space_mapping
+        if space_mapping:
+            log_with_context(
+                logging.INFO,
+                f"Found {len(space_mapping)} space mapping overrides in config",
+            )
+
+            # Apply space mappings from config (overriding API discovery)
+            for channel_name, space_id in space_mapping.items():
+                channel_id = migrator.channel_name_to_id.get(channel_name, "")
+                if channel_id:
+                    # Override any discovered mapping with the config value
+                    migrator.state.channel_id_to_space_id[channel_id] = space_id
+
+                    # Also update the name-based mapping for backward compatibility
+                    discovered_spaces[channel_name] = f"spaces/{space_id}"
+                else:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Channel '{channel_name}' in space_mapping config not found in workspace",
+                    )
+
+        return discovered_spaces if discovered_spaces else {}
+
+    except Exception as e:
+        log_with_context(
+            logging.WARNING, f"Failed to load space mappings: {e}", error=str(e)
+        )
+        return {}
