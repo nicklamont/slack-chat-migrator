@@ -42,7 +42,7 @@ def process_reactions_batch(  # noqa: C901
                 error=str(exception),
                 message_id=message_id,
                 request_id=request_id,
-                channel=getattr(migrator, "current_channel", None),
+                channel=getattr(migrator.state, "current_channel", None),
             )
         else:
             log_with_context(
@@ -50,7 +50,7 @@ def process_reactions_batch(  # noqa: C901
                 "Successfully added reaction in batch",
                 message_id=message_id,
                 request_id=request_id,
-                channel=getattr(migrator, "current_channel", None),
+                channel=getattr(migrator.state, "current_channel", None),
             )
 
     # Group reactions by user for batch processing
@@ -61,7 +61,7 @@ def process_reactions_batch(  # noqa: C901
         logging.DEBUG,
         f"Processing {len(reactions)} reaction types for message {message_id}",
         message_id=message_id,
-        channel=getattr(migrator, "current_channel", None),
+        channel=getattr(migrator.state, "current_channel", None),
     )
 
     for react in reactions:
@@ -78,7 +78,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Processing emoji :{emoji_name}: with {len(emoji_users)} users",
                 message_id=message_id,
                 emoji=emoji_name,
-                channel=getattr(migrator, "current_channel", None),
+                channel=getattr(migrator.state, "current_channel", None),
             )
 
             for uid in emoji_users:
@@ -92,7 +92,7 @@ def process_reactions_batch(  # noqa: C901
                             message_id=message_id,
                             emoji=emoji_name,
                             user_id=uid,
-                            channel=getattr(migrator, "current_channel", None),
+                            channel=getattr(migrator.state, "current_channel", None),
                         )
                         continue
 
@@ -109,7 +109,9 @@ def process_reactions_batch(  # noqa: C901
                 else:
                     # Handle unmapped user reaction with new graceful approach
                     reaction_name = react.get("name", "unknown")
-                    message_ts = getattr(migrator, "current_message_ts", "unknown")
+                    message_ts = getattr(
+                        migrator.state, "current_message_ts", "unknown"
+                    )
                     migrator.user_resolver.handle_unmapped_user_reaction(
                         uid, reaction_name, message_ts
                     )
@@ -120,18 +122,18 @@ def process_reactions_batch(  # noqa: C901
                 f"Failed to process reaction {react.get('name')}: {e!s}",
                 message_id=message_id,
                 error=str(e),
-                channel=getattr(migrator, "current_channel", None),
+                channel=getattr(migrator.state, "current_channel", None),
             )
 
     # Always increment the reaction count, regardless of dry run mode
-    migrator.migration_summary["reactions_created"] += reaction_count
+    migrator.state.migration_summary["reactions_created"] += reaction_count
 
     if migrator.dry_run:
         log_with_context(
             logging.DEBUG,
             f"[DRY RUN] Would add {reaction_count} reactions from {len(requests_by_user)} users to message {message_id}",
             message_id=message_id,
-            channel=getattr(migrator, "current_channel", None),
+            channel=getattr(migrator.state, "current_channel", None),
         )
         return
 
@@ -139,7 +141,7 @@ def process_reactions_batch(  # noqa: C901
         logging.DEBUG,
         f"Adding {reaction_count} reactions from {len(requests_by_user)} users to message {message_id}",
         message_id=message_id,
-        channel=getattr(migrator, "current_channel", None),
+        channel=getattr(migrator.state, "current_channel", None),
     )
 
     user_batches: dict[str, BatchHttpRequest] = {}
@@ -152,7 +154,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Skipping {len(emojis)} reactions from external user {email} to avoid admin attribution",
                 message_id=message_id,
                 user=email,
-                channel=getattr(migrator, "current_channel", None),
+                channel=getattr(migrator.state, "current_channel", None),
             )
             continue
 
@@ -168,7 +170,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Using admin account for user {email} (impersonation not available)",
                 message_id=message_id,
                 user=email,
-                channel=getattr(migrator, "current_channel", None),
+                channel=getattr(migrator.state, "current_channel", None),
             )
 
             for emo in emojis:
@@ -188,7 +190,7 @@ def process_reactions_batch(  # noqa: C901
                         error_code=e.resp.status,
                         user=email,
                         message_id=message_id,
-                        channel=getattr(migrator, "current_channel", None),
+                        channel=getattr(migrator.state, "current_channel", None),
                     )
             continue
 
@@ -201,7 +203,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Using admin account for user {email} (impersonation not available)",
                 message_id=message_id,
                 user=email,
-                channel=getattr(migrator, "current_channel", None),
+                channel=getattr(migrator.state, "current_channel", None),
             )
 
             for emo in emojis:
@@ -223,7 +225,7 @@ def process_reactions_batch(  # noqa: C901
                         error_code=e.resp.status,
                         user=email,
                         message_id=message_id,
-                        channel=getattr(migrator, "current_channel", None),
+                        channel=getattr(migrator.state, "current_channel", None),
                     )
             continue
 
@@ -233,7 +235,7 @@ def process_reactions_batch(  # noqa: C901
             f"Creating batch request for user {email} with {len(emojis)} reactions",
             message_id=message_id,
             user=email,
-            channel=getattr(migrator, "current_channel", None),
+            channel=getattr(migrator.state, "current_channel", None),
         )
 
         if email not in user_batches:
@@ -262,7 +264,7 @@ def process_reactions_batch(  # noqa: C901
                     message_id=message_id,
                     user=email,
                     emoji=emo,
-                    channel=getattr(migrator, "current_channel", None),
+                    channel=getattr(migrator.state, "current_channel", None),
                 )
                 # Fall back to direct API call
                 try:
@@ -289,7 +291,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Executing batch request for user {email}",
                 message_id=message_id,
                 user=email,
-                channel=getattr(migrator, "current_channel", None),
+                channel=getattr(migrator.state, "current_channel", None),
             )
             batch.execute()
         except HttpError as e:
@@ -298,7 +300,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Reaction batch execution failed for user {email}: {e}",
                 message_id=message_id,
                 user=email,
-                channel=getattr(migrator, "current_channel", None),
+                channel=getattr(migrator.state, "current_channel", None),
                 error=str(e),
             )
 
@@ -320,22 +322,11 @@ def send_message(  # noqa: C901
         The message name of the sent message, or None if there was an error
     """
     # Ensure thread_map exists
-    if not hasattr(migrator, "thread_map") or migrator.thread_map is None:
-        migrator.thread_map = {}
-
-    # Ensure sent_messages tracking set exists
-    if not hasattr(migrator, "sent_messages"):
-        migrator.sent_messages = set()  # type: ignore[attr-defined]
-
-    # Ensure message_id_map exists to track Slack ts -> Google Chat message name mapping
-    if not hasattr(migrator, "message_id_map"):
-        migrator.message_id_map = {}  # type: ignore[attr-defined]
-
     # Extract basic message info for logging
     ts = message.get("ts", "")
     user_id = message.get("user", "")
     thread_ts = message.get("thread_ts")
-    channel = migrator.current_channel
+    channel = migrator.state.current_channel
 
     # Check if this message is from a bot and bots should be ignored
     if migrator.config.ignore_bots:
@@ -380,8 +371,8 @@ def send_message(  # noqa: C901
     is_update_mode = getattr(migrator, "update_mode", False)
 
     # First, check if this message is older than the last processed timestamp
-    if is_update_mode and hasattr(migrator, "last_processed_timestamps"):
-        last_timestamp = migrator.last_processed_timestamps.get(channel, 0)  # type: ignore[arg-type]
+    if is_update_mode and hasattr(migrator.state, "last_processed_timestamps"):
+        last_timestamp = migrator.state.last_processed_timestamps.get(channel, 0)  # type: ignore[arg-type]
         if last_timestamp > 0:
             # Import the function to check if we should process this message
             from slack_migrator.services.discovery import should_process_message
@@ -399,7 +390,7 @@ def send_message(  # noqa: C901
                 return "ALREADY_SENT"
 
     # Also check the sent_messages set for additional protection
-    if is_update_mode and message_key in migrator.sent_messages:  # type: ignore[attr-defined]
+    if is_update_mode and message_key in migrator.state.sent_messages:
         log_with_context(
             logging.INFO,
             f"[UPDATE MODE] Skipping already sent message TS={ts} from user={user_id}",
@@ -413,7 +404,7 @@ def send_message(  # noqa: C901
     # Only increment the message count in non-dry run mode
     # In dry run mode, this is handled in the migrate method
     if not migrator.dry_run:
-        migrator.migration_summary["messages_created"] += 1
+        migrator.state.migration_summary["messages_created"] += 1
 
     if migrator.dry_run:
         mode_prefix = "[DRY RUN]"
@@ -478,7 +469,7 @@ def send_message(  # noqa: C901
             user_map_with_overrides[slack_user_id] = internal_email
 
     # Set current message context for enhanced user tracking
-    migrator.current_message_ts = ts
+    migrator.state.current_message_ts = ts
 
     # Convert Slack formatting to Google Chat formatting using the correct mapping
     formatted_text = convert_formatting(text, user_map_with_overrides, migrator)
@@ -562,7 +553,7 @@ def send_message(  # noqa: C901
         thread_ts_str = str(thread_ts)
 
         # Check if we have the thread name from a previous message
-        existing_thread_name = migrator.thread_map.get(thread_ts_str)
+        existing_thread_name = migrator.state.thread_map.get(thread_ts_str)
 
         log_with_context(
             logging.DEBUG,
@@ -799,7 +790,7 @@ def send_message(  # noqa: C901
             # For edited messages, store with a special key that includes the edit timestamp
             if is_edited:
                 edit_key = f"{ts}:edited:{edited_ts}"
-                migrator.message_id_map[edit_key] = message_name  # type: ignore[attr-defined]
+                migrator.state.message_id_map[edit_key] = message_name
                 log_with_context(
                     logging.DEBUG,
                     f"Stored message ID mapping for edited message: {edit_key} -> {message_name}",
@@ -808,7 +799,7 @@ def send_message(  # noqa: C901
                     edited_ts=edited_ts,
                 )
             else:
-                migrator.message_id_map[ts] = message_name  # type: ignore[attr-defined]
+                migrator.state.message_id_map[ts] = message_name
 
         # Store thread mapping for both parent messages and thread replies
         if message_name:
@@ -825,7 +816,7 @@ def send_message(  # noqa: C901
             if thread_name:
                 if not is_thread_reply:
                     # For new thread starters, store the mapping using their own timestamp
-                    migrator.thread_map[str(ts)] = thread_name
+                    migrator.state.thread_map[str(ts)] = thread_name
                     log_with_context(
                         logging.DEBUG,
                         f"Stored new thread mapping: {ts} -> {thread_name}",
@@ -835,9 +826,9 @@ def send_message(  # noqa: C901
                 else:
                     # For thread replies, ensure the original thread timestamp mapping exists
                     thread_ts_str = str(thread_ts)
-                    if thread_ts_str not in migrator.thread_map:
+                    if thread_ts_str not in migrator.state.thread_map:
                         # Store the mapping using the original thread timestamp
-                        migrator.thread_map[thread_ts_str] = thread_name
+                        migrator.state.thread_map[thread_ts_str] = thread_name
                         log_with_context(
                             logging.DEBUG,
                             f"Stored thread mapping from reply: {thread_ts_str} -> {thread_name}",
@@ -847,7 +838,7 @@ def send_message(  # noqa: C901
                         )
                     else:
                         # Verify the mapping is consistent
-                        existing_thread_name = migrator.thread_map[thread_ts_str]
+                        existing_thread_name = migrator.state.thread_map[thread_ts_str]
                         if existing_thread_name != thread_name:
                             log_with_context(
                                 logging.WARNING,
@@ -875,7 +866,7 @@ def send_message(  # noqa: C901
         # Process reactions if any
         if "reactions" in message and message_name:
             # Store the current message timestamp for context in reaction processing
-            migrator.current_message_ts = ts
+            migrator.state.current_message_ts = ts
 
             # The message_id for reactions should be the final segment of the message_name
             final_message_id = message_name.split("/")[-1]
@@ -899,7 +890,7 @@ def send_message(  # noqa: C901
         )
 
         # Mark this message as successfully sent to avoid duplicates
-        migrator.sent_messages.add(message_key)  # type: ignore[attr-defined]
+        migrator.state.sent_messages.add(message_key)
 
         return message_name
     except HttpError as e:
@@ -925,7 +916,7 @@ def send_message(  # noqa: C901
             "error_details": error_details,
             "payload": message,
         }
-        migrator.failed_messages.append(failed_msg)
+        migrator.state.failed_messages.append(failed_msg)
 
         return None
 
@@ -933,7 +924,7 @@ def send_message(  # noqa: C901
 def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> None:  # noqa: C901
     """Handle tracking message stats in both dry run and normal mode."""
     # Get the current channel being processed
-    channel = migrator.current_channel
+    channel = migrator.state.current_channel
     ts = m.get("ts", "")
     user_id = m.get("user", "")
 
@@ -969,11 +960,11 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
     is_update_mode = getattr(migrator, "update_mode", False)
 
     # Initialize channel stats if not already done
-    if not hasattr(migrator, "channel_stats"):
-        migrator.channel_stats = {}
+    if not hasattr(migrator.state, "channel_stats"):
+        migrator.state.channel_stats = {}
 
-    if channel not in migrator.channel_stats:
-        migrator.channel_stats[channel] = {  # type: ignore[index]
+    if channel not in migrator.state.channel_stats:
+        migrator.state.channel_stats[channel] = {  # type: ignore[index]
             "message_count": 0,
             "reaction_count": 0,
             "file_count": 0,
@@ -982,10 +973,6 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
     # In update mode, we might need to skip stats tracking for messages
     # that have already been processed
     if is_update_mode:
-        # Ensure sent_messages tracking set exists
-        if not hasattr(migrator, "sent_messages"):
-            migrator.sent_messages = set()  # type: ignore[attr-defined]
-
         message_key = f"{channel}:{ts}"
         edited = m.get("edited", {})
         edited_ts = edited.get("ts", "") if edited else ""
@@ -993,7 +980,7 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
             message_key = f"{channel}:{ts}:edited:{edited_ts}"
 
         # If this message has already been sent in a previous run, don't count it
-        if message_key in migrator.sent_messages:  # type: ignore[attr-defined]
+        if message_key in migrator.state.sent_messages:
             log_with_context(
                 logging.DEBUG,
                 f"[UPDATE MODE] Skipping stats for already sent message {ts}",
@@ -1003,7 +990,7 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
             return
 
     # Increment message count for this channel
-    migrator.channel_stats[channel]["message_count"] += 1  # type: ignore[index]
+    migrator.state.channel_stats[channel]["message_count"] += 1  # type: ignore[index]
 
     # Track reactions
     reaction_count = 0
@@ -1018,12 +1005,12 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
                         continue
                 reaction_count += 1
 
-        migrator.channel_stats[channel]["reaction_count"] += reaction_count  # type: ignore[index]
+        migrator.state.channel_stats[channel]["reaction_count"] += reaction_count  # type: ignore[index]
 
         # Also increment the global reaction count in dry run mode
         # (in normal mode this is done by process_reactions_batch)
         if migrator.dry_run:
-            migrator.migration_summary["reactions_created"] += reaction_count
+            migrator.state.migration_summary["reactions_created"] += reaction_count
 
             mode_prefix = "[DRY RUN]"
             if is_update_mode:
@@ -1049,10 +1036,10 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
             channel=channel,
             ts=ts,
         )
-        migrator.channel_stats[channel]["file_count"] += file_count  # type: ignore[index]
+        migrator.state.channel_stats[channel]["file_count"] += file_count  # type: ignore[index]
 
         # Also increment the global file count
-        migrator.migration_summary["files_created"] += file_count
+        migrator.state.migration_summary["files_created"] += file_count
 
     # We don't need to process files here - they are handled in send_message
 
@@ -1106,7 +1093,7 @@ def send_intro(migrator: SlackToChatMigrator, space: str, channel: str) -> None:
 
     if migrator.dry_run:
         # In dry run mode, just count the message
-        migrator.migration_summary["messages_created"] += 1
+        migrator.state.migration_summary["messages_created"] += 1
         return
 
     # Create the message
@@ -1126,7 +1113,7 @@ def send_intro(migrator: SlackToChatMigrator, space: str, channel: str) -> None:
             .execute()
         )
         # Increment the counter
-        migrator.migration_summary["messages_created"] += 1
+        migrator.state.migration_summary["messages_created"] += 1
 
         log_with_context(
             logging.INFO, f"Sent intro message to space {space}", channel=channel
@@ -1148,17 +1135,20 @@ def log_space_mapping_conflicts(migrator: SlackToChatMigrator) -> None:
         log_with_context(logging.INFO, "[DRY RUN] Checking for space mapping conflicts")
 
     # Log any conflicts that should be added to config
-    if hasattr(migrator, "channel_conflicts") and migrator.channel_conflicts:
+    if (
+        hasattr(migrator.state, "channel_conflicts")
+        and migrator.state.channel_conflicts
+    ):
         log_with_context(
             logging.WARNING,
-            f"Found {len(migrator.channel_conflicts)} channels with duplicate space conflicts",
+            f"Found {len(migrator.state.channel_conflicts)} channels with duplicate space conflicts",
         )
         log_with_context(
             logging.WARNING,
             "Add the following entries to your config.yaml to resolve conflicts:",
         )
         log_with_context(logging.WARNING, "space_mapping:")
-        for channel_name in migrator.channel_conflicts:
+        for channel_name in migrator.state.channel_conflicts:
             log_with_context(
                 logging.WARNING,
                 f'  "{channel_name}": "<space_id>"  # Replace with the desired space ID',
@@ -1176,8 +1166,8 @@ def load_space_mappings(migrator: SlackToChatMigrator) -> dict[str, str]:
     """
     try:
         # Initialize the channel_id_to_space_id mapping if not present
-        if not hasattr(migrator, "channel_id_to_space_id"):
-            migrator.channel_id_to_space_id = {}
+        if not hasattr(migrator.state, "channel_id_to_space_id"):
+            migrator.state.channel_id_to_space_id = {}
 
         # Use API discovery to find spaces
         from slack_migrator.services.discovery import discover_existing_spaces
@@ -1204,7 +1194,7 @@ def load_space_mappings(migrator: SlackToChatMigrator) -> dict[str, str]:
                 channel_id = migrator.channel_name_to_id.get(channel_name, "")
                 if channel_id:
                     # Override any discovered mapping with the config value
-                    migrator.channel_id_to_space_id[channel_id] = space_id
+                    migrator.state.channel_id_to_space_id[channel_id] = space_id
 
                     # Also update the name-based mapping for backward compatibility
                     discovered_spaces[channel_name] = f"spaces/{space_id}"

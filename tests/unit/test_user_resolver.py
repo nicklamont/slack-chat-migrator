@@ -8,6 +8,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
 from slack_migrator.core.config import MigrationConfig
+from slack_migrator.core.state import MigrationState
 from slack_migrator.services.user_resolver import UserResolver
 from slack_migrator.utils.user_validation import UnmappedUserTracker
 
@@ -23,20 +24,21 @@ def _make_migrator(
 ):
     """Create a mock migrator for UserResolver testing."""
     migrator = MagicMock()
+    migrator.state = MigrationState()
     migrator.config = MigrationConfig(
         ignore_bots=ignore_bots,
         user_mapping_overrides=user_mapping_overrides or {},
     )
-    migrator.current_channel = channel
+    migrator.state.current_channel = channel
     migrator.user_map = user_map or {}
     migrator.workspace_admin = workspace_admin
     migrator.workspace_domain = workspace_domain
     migrator.creds_path = Path("/tmp/creds.json")
-    migrator.valid_users = {}
-    migrator.chat_delegates = {}
+    migrator.state.valid_users = {}
+    migrator.state.chat_delegates = {}
     migrator.chat = MagicMock(name="admin_chat_service")
     migrator.unmapped_user_tracker = UnmappedUserTracker()
-    migrator.skipped_reactions = []
+    migrator.state.skipped_reactions = []
     migrator.export_root = export_root
     return migrator
 
@@ -75,16 +77,16 @@ class TestGetDelegate:
             retry_config=migrator.config,
         )
         mock_service.spaces.return_value.list.return_value.execute.assert_called_once()
-        assert migrator.valid_users["user@example.com"] is True
-        assert migrator.chat_delegates["user@example.com"] is mock_service
+        assert migrator.state.valid_users["user@example.com"] is True
+        assert migrator.state.chat_delegates["user@example.com"] is mock_service
         assert result is mock_service
 
     @patch("slack_migrator.services.user_resolver.get_gcp_service")
     def test_valid_email_already_cached_returns_from_cache(self, mock_get_service):
         migrator = _make_migrator()
         cached_service = MagicMock(name="cached_service")
-        migrator.valid_users["user@example.com"] = True
-        migrator.chat_delegates["user@example.com"] = cached_service
+        migrator.state.valid_users["user@example.com"] = True
+        migrator.state.chat_delegates["user@example.com"] = cached_service
         resolver = UserResolver(migrator)
 
         result = resolver.get_delegate("user@example.com")
@@ -107,7 +109,7 @@ class TestGetDelegate:
         result = resolver.get_delegate("bad@example.com")
 
         assert result is migrator.chat
-        assert migrator.valid_users["bad@example.com"] is False
+        assert migrator.state.valid_users["bad@example.com"] is False
 
     @patch("slack_migrator.services.user_resolver.get_gcp_service")
     def test_refresh_error_falls_back_to_admin_chat(self, mock_get_service):
@@ -119,13 +121,13 @@ class TestGetDelegate:
         result = resolver.get_delegate("expired@example.com")
 
         assert result is migrator.chat
-        assert migrator.valid_users["expired@example.com"] is False
+        assert migrator.state.valid_users["expired@example.com"] is False
 
     @patch("slack_migrator.services.user_resolver.get_gcp_service")
     def test_invalid_user_cached_returns_admin_chat(self, mock_get_service):
         """Second call for a previously-failed user returns admin chat without retrying."""
         migrator = _make_migrator()
-        migrator.valid_users["bad@example.com"] = False
+        migrator.state.valid_users["bad@example.com"] = False
         resolver = UserResolver(migrator)
 
         result = resolver.get_delegate("bad@example.com")
@@ -441,8 +443,8 @@ class TestHandleUnmappedUserReaction:
 
         resolver.handle_unmapped_user_reaction("U001", "thumbsup", "1234567890.123456")
 
-        assert len(migrator.skipped_reactions) == 1
-        entry = migrator.skipped_reactions[0]
+        assert len(migrator.state.skipped_reactions) == 1
+        entry = migrator.state.skipped_reactions[0]
         assert entry["user_id"] == "U001"
         assert entry["reaction"] == "thumbsup"
         assert entry["message_ts"] == "1234567890.123456"

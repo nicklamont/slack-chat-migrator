@@ -365,7 +365,7 @@ class MigrationOrchestrator:
 
         # Set output directory if we have one
         if self.output_dir:
-            migrator.output_dir = self.output_dir
+            migrator.state.output_dir = self.output_dir
 
         return migrator
 

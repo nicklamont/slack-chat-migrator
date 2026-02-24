@@ -148,8 +148,10 @@ class FileHandler:
         Returns:
             Current channel name or None if not available
         """
-        if hasattr(self, "migrator") and hasattr(self.migrator, "current_channel"):
-            return self.migrator.current_channel
+        if hasattr(self, "migrator") and hasattr(
+            self.migrator.state, "current_channel"
+        ):
+            return self.migrator.state.current_channel
         return None
 
     @property
@@ -1334,8 +1336,8 @@ class FileHandler:
 
             # If we're here, the file is not in a channel folder, so we need to set individual permissions
             if (
-                not hasattr(self.migrator, "active_users_by_channel")
-                or channel not in self.migrator.active_users_by_channel
+                not hasattr(self.migrator.state, "active_users_by_channel")
+                or channel not in self.migrator.state.active_users_by_channel
             ):
                 log_with_context(
                     logging.WARNING,
@@ -1344,7 +1346,7 @@ class FileHandler:
                 )
                 return False
 
-            active_users = self.migrator.active_users_by_channel[channel]
+            active_users = self.migrator.state.active_users_by_channel[channel]
             emails_to_share = []
 
             # Get emails for all active users (INCLUDING external users for channel folder access)

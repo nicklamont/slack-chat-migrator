@@ -7,12 +7,14 @@ import yaml
 
 from slack_migrator.cli.report import generate_report, print_dry_run_summary
 from slack_migrator.core.config import MigrationConfig
+from slack_migrator.core.state import MigrationState
 
 
 def _make_migrator(**overrides):
     """Build a MagicMock that behaves like SlackToChatMigrator."""
     m = MagicMock()
-    m.migration_summary = {
+    m.state = MigrationState()
+    m.state.migration_summary = {
         "channels_processed": ["general", "random"],
         "spaces_created": 2,
         "messages_created": 50,
@@ -21,27 +23,31 @@ def _make_migrator(**overrides):
     }
     m.user_map = {"U001": "alice@example.com", "U002": "bob@example.com"}
     m.user_resolver.is_external_user.return_value = False
-    m.output_dir = None
+    m.state.output_dir = None
     m.dry_run = True
     m.workspace_admin = "admin@example.com"
     m.export_root = "/tmp/slack_export"
     m.config = MigrationConfig()
-    m.failed_messages = []
-    m.created_spaces = {"general": "spaces/abc", "random": "spaces/def"}
-    m.channel_stats = {}
+    m.state.failed_messages = []
+    m.state.created_spaces = {"general": "spaces/abc", "random": "spaces/def"}
+    m.state.channel_stats = {}
     m.users_without_email = []
-    m.high_failure_rate_channels = {}
-    m.channel_conflicts = set()
-    m.migration_issues = {}
-    m.skipped_reactions = []
-    m.spaces_with_external_users = {}
-    m.active_users_by_channel = {}
+    m.state.high_failure_rate_channels = {}
+    m.state.channel_conflicts = set()
+    m.state.migration_issues = {}
+    m.state.skipped_reactions = []
+    m.state.spaces_with_external_users = {}
+    m.state.active_users_by_channel = {}
 
     # No file_handler by default — tests that need it can set it
     del m.file_handler
 
+    _state_attrs = {f.name for f in MigrationState.__dataclass_fields__.values()}
     for key, value in overrides.items():
-        setattr(m, key, value)
+        if key in _state_attrs:
+            setattr(m.state, key, value)
+        else:
+            setattr(m, key, value)
     return m
 
 
@@ -69,7 +75,7 @@ class TestPrintDryRunSummary:
 
     def test_zero_stats(self, capsys):
         migrator = _make_migrator()
-        migrator.migration_summary = {
+        migrator.state.migration_summary = {
             "channels_processed": [],
             "spaces_created": 0,
             "messages_created": 0,
@@ -246,7 +252,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_report_contains_spaces_section(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.channel_stats = {
+        migrator.state.channel_stats = {
             "general": {"message_count": 30, "reaction_count": 5, "file_count": 2},
             "random": {"message_count": 20, "reaction_count": 5, "file_count": 3},
         }
@@ -265,7 +271,7 @@ class TestGenerateReport:
     def test_skipped_channels_when_no_space_created(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
         # "random" is processed but has no created space
-        migrator.created_spaces = {"general": "spaces/abc"}
+        migrator.state.created_spaces = {"general": "spaces/abc"}
         result = generate_report(migrator)
 
         with open(result) as f:
@@ -277,7 +283,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_failed_messages_grouped_by_channel(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.failed_messages = [
+        migrator.state.failed_messages = [
             {"channel": "general", "ts": "1234.56", "error": "timeout"},
             {"channel": "general", "ts": "1234.57", "error": "rate limit"},
             {"channel": "random", "ts": "1234.58", "error": "unknown"},
@@ -297,7 +303,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_failed_messages_writes_channel_logs(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.failed_messages = [
+        migrator.state.failed_messages = [
             {
                 "channel": "general",
                 "ts": "1234.56",
@@ -320,7 +326,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_failed_messages_with_no_payload(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.failed_messages = [
+        migrator.state.failed_messages = [
             {"channel": "general", "ts": "1234.56", "error": "timeout"},
         ]
         generate_report(migrator)
@@ -337,7 +343,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_failed_messages_unknown_channel(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.failed_messages = [
+        migrator.state.failed_messages = [
             {"ts": "1234.56", "error": "timeout"},  # no "channel" key
         ]
         generate_report(migrator)
@@ -457,7 +463,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_high_failure_rate_channels_recommendation(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.high_failure_rate_channels = {
+        migrator.state.high_failure_rate_channels = {
             "general": {"failure_rate": 25.0, "failed": 5, "total": 20}
         }
         migrator.config.max_failure_percentage = 10
@@ -476,7 +482,7 @@ class TestGenerateReport:
         self, mock_log, tmp_path
     ):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.high_failure_rate_channels = {}
+        migrator.state.high_failure_rate_channels = {}
 
         result = generate_report(migrator)
 
@@ -489,7 +495,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_channel_conflicts_recommendation(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.channel_conflicts = {"general", "random"}
+        migrator.state.channel_conflicts = {"general", "random"}
 
         result = generate_report(migrator)
 
@@ -503,7 +509,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_no_channel_conflicts_no_recommendation(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.channel_conflicts = set()
+        migrator.state.channel_conflicts = set()
 
         result = generate_report(migrator)
 
@@ -517,7 +523,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_skipped_reactions_recommendation(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.skipped_reactions = [
+        migrator.state.skipped_reactions = [
             {"user": "U999", "reaction": "thumbsup", "channel": "general"},
         ]
 
@@ -577,7 +583,7 @@ class TestGenerateReport:
         migrator.user_resolver.is_external_user.side_effect = lambda email: (
             email == "ext@other.com"
         )
-        migrator.active_users_by_channel = {
+        migrator.state.active_users_by_channel = {
             "general": ["U001", "U002", "U003"],
         }
 
@@ -595,7 +601,7 @@ class TestGenerateReport:
     def test_active_users_unmapped_user_skipped(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
         migrator.user_map = {"U001": "alice@example.com"}
-        migrator.active_users_by_channel = {
+        migrator.state.active_users_by_channel = {
             "general": ["U001", "U999"],  # U999 not in user_map
         }
 
@@ -613,7 +619,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_spaces_with_external_users_flag(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.spaces_with_external_users = {"spaces/abc": True}
+        migrator.state.spaces_with_external_users = {"spaces/abc": True}
 
         result = generate_report(migrator)
 
@@ -626,7 +632,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_migration_issues_in_report(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.migration_issues = {"general": ["issue1", "issue2"]}
+        migrator.state.migration_issues = {"general": ["issue1", "issue2"]}
 
         result = generate_report(migrator)
 
@@ -647,7 +653,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_empty_channels_processed(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.migration_summary["channels_processed"] = []
+        migrator.state.migration_summary["channels_processed"] = []
 
         result = generate_report(migrator)
 
@@ -661,7 +667,7 @@ class TestGenerateReport:
     def test_failed_messages_channel_log_write_failure(self, mock_log, tmp_path):
         """When writing channel logs fails, it should log an error but not crash."""
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.failed_messages = [
+        migrator.state.failed_messages = [
             {"channel": "general", "ts": "1234.56", "error": "timeout"},
         ]
 
@@ -686,7 +692,7 @@ class TestGenerateReport:
             def __repr__(self):
                 return "<Unserializable>"
 
-        migrator.failed_messages = [
+        migrator.state.failed_messages = [
             {
                 "channel": "general",
                 "ts": "1234.56",
@@ -705,7 +711,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_no_failed_messages_no_channel_logs(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator.failed_messages = []
+        migrator.state.failed_messages = []
 
         generate_report(migrator)
 

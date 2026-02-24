@@ -156,7 +156,7 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
 
     if migrator.dry_run:
         # In dry run mode, increment the counter but don't make API call
-        migrator.migration_summary["spaces_created"] += 1
+        migrator.state.migration_summary["spaces_created"] += 1
         # Use a consistent space name format for tracking
         space_name = f"spaces/{channel}"
         log_with_context(
@@ -171,7 +171,7 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
             space_name = space["name"]
 
             # Increment the spaces created counter
-            migrator.migration_summary["spaces_created"] += 1
+            migrator.state.migration_summary["spaces_created"] += 1
 
             log_with_context(
                 logging.INFO,
@@ -236,12 +236,12 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
                 raise
 
     # Store the created space in the migrator
-    migrator.created_spaces[channel] = space_name
+    migrator.state.created_spaces[channel] = space_name
 
     # Store whether this space has external users for later reference
-    if not hasattr(migrator, "spaces_with_external_users"):
-        migrator.spaces_with_external_users = {}
-    migrator.spaces_with_external_users[space_name] = has_external_users
+    if not hasattr(migrator.state, "spaces_with_external_users"):
+        migrator.state.spaces_with_external_users = {}
+    migrator.state.spaces_with_external_users[space_name] = has_external_users
 
     return space_name
 
@@ -356,16 +356,15 @@ def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) 
 
     # Store active users in class variable to add back after import completes
     # We'll use this for both regular membership and file permissions
-    if not hasattr(migrator, "active_users_by_channel"):
-        migrator.active_users_by_channel = {}  # type: ignore[attr-defined]
-
+    if not hasattr(migrator.state, "active_users_by_channel"):
+        migrator.state.active_users_by_channel = {}
     # Log active user counts for debugging
     log_with_context(
         logging.DEBUG,
         f"Identified {len(active_users)} active users for channel {channel}",
         channel=channel,
     )
-    migrator.active_users_by_channel[channel] = active_users  # type: ignore[attr-defined]
+    migrator.state.active_users_by_channel[channel] = active_users
 
     # Log what we're doing
     log_with_context(
@@ -533,7 +532,7 @@ def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) 
                 user_email=user_email,
                 channel=channel,
             )
-            migrator.external_users.add(user_email)
+            migrator.state.external_users.add(user_email)
 
         try:
             # Create historical membership for this user
@@ -589,7 +588,7 @@ def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) 
                 f"Unexpected error adding user {internal_email} to space {space}: {e}",
                 user_email=internal_email,
                 space=space,
-                channel=migrator.current_channel,
+                channel=migrator.state.current_channel,
             )
             failed_count += 1
 
@@ -623,11 +622,10 @@ def add_regular_members(  # noqa: C901
     active members have access to shared files.
     """
     # Initialize the active_users_by_channel attribute if it doesn't exist
-    if not hasattr(migrator, "active_users_by_channel"):
-        migrator.active_users_by_channel = {}  # type: ignore[attr-defined]
-
+    if not hasattr(migrator.state, "active_users_by_channel"):
+        migrator.state.active_users_by_channel = {}
     # Get the list of active users we saved during add_users_to_space
-    if channel not in migrator.active_users_by_channel:  # type: ignore[attr-defined]
+    if channel not in migrator.state.active_users_by_channel:
         # If we don't have active users for this channel, try to get them from the channel directory
         log_with_context(
             logging.WARNING,
@@ -655,7 +653,7 @@ def add_regular_members(  # noqa: C901
                             f"Found {len(members)} members for channel {channel} in channels.json",
                             channel=channel,
                         )
-                        migrator.active_users_by_channel[channel] = members  # type: ignore[attr-defined]
+                        migrator.state.active_users_by_channel[channel] = members
                         break
         except Exception as e:
             log_with_context(
@@ -665,7 +663,7 @@ def add_regular_members(  # noqa: C901
             )
 
     # If we still don't have active users, we can't proceed
-    if channel not in migrator.active_users_by_channel:  # type: ignore[attr-defined]
+    if channel not in migrator.state.active_users_by_channel:
         log_with_context(
             logging.ERROR,
             f"No active users found for channel {channel}, can't add regular members",
@@ -673,7 +671,7 @@ def add_regular_members(  # noqa: C901
         )
         return
 
-    active_users = migrator.active_users_by_channel[channel]  # type: ignore[attr-defined]
+    active_users = migrator.state.active_users_by_channel[channel]
     log_with_context(
         logging.DEBUG,
         f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding {len(active_users)} regular members to space {space} for channel {channel}",
@@ -768,7 +766,7 @@ def add_regular_members(  # noqa: C901
                 user_email=user_email,
                 channel=channel,
             )
-            migrator.external_users.add(user_email)
+            migrator.state.external_users.add(user_email)
 
         try:
             # Log which user we're trying to add

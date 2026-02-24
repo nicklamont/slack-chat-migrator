@@ -32,9 +32,10 @@ class MessageAttachmentProcessor:
         if (
             hasattr(self, "file_handler")
             and hasattr(self.file_handler, "migrator")
-            and hasattr(self.file_handler.migrator, "current_channel")
+            and hasattr(self.file_handler.migrator, "state")
+            and hasattr(self.file_handler.migrator.state, "current_channel")
         ):
-            return self.file_handler.migrator.current_channel  # type: ignore[no-any-return]
+            return self.file_handler.migrator.state.current_channel  # type: ignore[no-any-return]
         return None
 
     def process_message_attachments(
@@ -184,9 +185,10 @@ class MessageAttachmentProcessor:
             if (
                 hasattr(self, "file_handler")
                 and hasattr(self.file_handler, "migrator")
-                and hasattr(self.file_handler.migrator, "current_channel")
+                and hasattr(self.file_handler.migrator, "state")
+                and hasattr(self.file_handler.migrator.state, "current_channel")
             ):
-                current_channel = self.file_handler.migrator.current_channel
+                current_channel = self.file_handler.migrator.state.current_channel
 
             log_with_context(
                 logging.WARNING,

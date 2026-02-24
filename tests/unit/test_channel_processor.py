@@ -9,6 +9,7 @@ from googleapiclient.errors import HttpError
 
 from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.config import MigrationConfig
+from slack_migrator.core.state import MigrationState
 
 
 def _make_migrator(
@@ -24,36 +25,26 @@ def _make_migrator(
     migrator.dry_run = dry_run
     migrator.update_mode = update_mode
     migrator.verbose = False
-    migrator.current_channel = "general"
-    migrator.current_space = None
     migrator.config = MigrationConfig(
         abort_on_error=abort_on_error,
         cleanup_on_error=cleanup_on_error,
         import_completion_strategy=import_completion_strategy,
         max_failure_percentage=max_failure_percentage,
     )
-    migrator.migration_summary = {
+    migrator.export_root = Path("/tmp/test_export")
+
+    # Mutable state lives under migrator.state
+    migrator.state = MigrationState()
+    migrator.state.current_channel = "general"
+    migrator.state.current_space = None
+    migrator.state.migration_summary = {
         "messages_created": 0,
         "reactions_created": 0,
         "files_created": 0,
         "channels_processed": [],
         "spaces_created": 0,
     }
-    migrator.migration_issues = {}
-    migrator.channel_to_space = {}
-    migrator.created_spaces = {}
-    migrator.channel_handlers = {}
-    migrator.space_cache = {}
-    migrator.high_failure_rate_channels = {}
-    migrator.failed_messages_by_channel = {}
-    migrator.incomplete_import_spaces = []
-    migrator.last_processed_timestamps = {}
-    migrator.output_dir = Path("/tmp/test_output")
-    migrator.export_root = Path("/tmp/test_export")
-
-    # Remove mock auto-creation for hasattr checks
-    del migrator.channel_conflicts
-    del migrator.thread_map
+    migrator.state.output_dir = Path("/tmp/test_output")
 
     return migrator
 
@@ -108,8 +99,8 @@ class TestProcessChannel:
             result = processor.process_channel(ch_dir)
 
         assert result is False
-        assert "general" in migrator.migration_summary["channels_processed"]
-        assert migrator.channel_to_space["general"] == "spaces/SPACE1"
+        assert "general" in migrator.state.migration_summary["channels_processed"]
+        assert migrator.state.channel_to_space["general"] == "spaces/SPACE1"
 
     @patch(
         "slack_migrator.core.channel_processor.should_process_channel",
@@ -134,7 +125,7 @@ class TestProcessChannel:
     def test_channel_with_space_conflict(self, mock_should, tmp_path):
         """Channel with unresolved space conflict is skipped."""
         migrator = _make_migrator()
-        migrator.channel_conflicts = {"general": ["spaces/A", "spaces/B"]}
+        migrator.state.channel_conflicts = {"general": ["spaces/A", "spaces/B"]}
 
         ch_dir = tmp_path / "general"
         ch_dir.mkdir()
@@ -143,7 +134,7 @@ class TestProcessChannel:
         result = processor.process_channel(ch_dir)
 
         assert result is False
-        assert "general" in migrator.migration_issues
+        assert "general" in migrator.state.migration_issues
 
     @patch(
         "slack_migrator.core.channel_processor.should_process_channel",
@@ -294,8 +285,10 @@ class TestSetupChannelLogging:
             ):
                 processor._setup_channel_logging("general")
 
-        mock_setup.assert_called_once_with(migrator.output_dir, "general", False, False)
-        assert "general" in migrator.channel_handlers
+        mock_setup.assert_called_once_with(
+            migrator.state.output_dir, "general", False, False
+        )
+        assert "general" in migrator.state.channel_handlers
 
 
 # ---------------------------------------------------------------------------
@@ -319,12 +312,12 @@ class TestCreateOrReuseSpace:
         assert space == "spaces/NEW1"
         assert is_new is True
         mock_create.assert_called_once_with(migrator, "general")
-        assert migrator.space_cache["general"] == "spaces/NEW1"
+        assert migrator.state.space_cache["general"] == "spaces/NEW1"
 
     def test_update_mode_reuses_existing_space(self, tmp_path):
         """In update mode with an existing space, reuses it."""
         migrator = _make_migrator(update_mode=True)
-        migrator.created_spaces["general"] = "spaces/EXISTING"
+        migrator.state.created_spaces["general"] = "spaces/EXISTING"
 
         ch_dir = tmp_path / "general"
         ch_dir.mkdir()
@@ -334,13 +327,13 @@ class TestCreateOrReuseSpace:
 
         assert space == "spaces/EXISTING"
         assert is_new is False
-        assert migrator.space_cache["general"] == "spaces/EXISTING"
+        assert migrator.state.space_cache["general"] == "spaces/EXISTING"
 
     @patch("slack_migrator.core.channel_processor.create_space")
     def test_space_from_cache(self, mock_create, tmp_path):
         """Uses cached space if available instead of creating a new one."""
         migrator = _make_migrator()
-        migrator.space_cache["general"] = "spaces/CACHED"
+        migrator.state.space_cache["general"] = "spaces/CACHED"
 
         ch_dir = tmp_path / "general"
         ch_dir.mkdir()
@@ -368,7 +361,7 @@ class TestProcessMessages:
         """Processes messages successfully and returns counts."""
         migrator = _make_migrator()
         migrator.export_root = tmp_path
-        migrator.channel_to_space = {"general": "spaces/S1"}
+        migrator.state.channel_to_space = {"general": "spaces/S1"}
 
         ch_dir = tmp_path / "general"
         ch_dir.mkdir()
@@ -411,7 +404,7 @@ class TestProcessMessages:
         )
 
         # In dry run, we just count messages
-        assert migrator.migration_summary["messages_created"] == 1
+        assert migrator.state.migration_summary["messages_created"] == 1
 
     @patch(
         "slack_migrator.core.channel_processor.send_message",
@@ -422,7 +415,7 @@ class TestProcessMessages:
         """Duplicate timestamps are deduplicated, only unique messages sent."""
         migrator = _make_migrator()
         migrator.export_root = tmp_path
-        migrator.channel_to_space = {"general": "spaces/S1"}
+        migrator.state.channel_to_space = {"general": "spaces/S1"}
 
         ch_dir = tmp_path / "general"
         ch_dir.mkdir()
@@ -468,7 +461,7 @@ class TestProcessMessages:
             ch_dir, "spaces/S1", False
         )
 
-        assert migrator.migration_summary["messages_created"] == 3
+        assert migrator.state.migration_summary["messages_created"] == 3
         assert processed == 0
         assert failed == 0
 
@@ -478,7 +471,7 @@ class TestProcessMessages:
         """When failure rate exceeds threshold, channel is flagged."""
         migrator = _make_migrator(max_failure_percentage=10)
         migrator.export_root = tmp_path
-        migrator.channel_to_space = {"general": "spaces/S1"}
+        migrator.state.channel_to_space = {"general": "spaces/S1"}
 
         ch_dir = tmp_path / "general"
         ch_dir.mkdir()
@@ -503,7 +496,7 @@ class TestProcessMessages:
             )
 
         assert had_errors is True
-        assert "general" in migrator.high_failure_rate_channels
+        assert "general" in migrator.state.high_failure_rate_channels
 
 
 # ---------------------------------------------------------------------------
@@ -538,7 +531,7 @@ class TestCompleteImportMode:
         result = processor._complete_import_mode("spaces/S1", "general", False)
 
         assert result is True
-        assert ("spaces/S1", "general") in migrator.incomplete_import_spaces
+        assert ("spaces/S1", "general") in migrator.state.incomplete_import_spaces
 
     def test_http_error(self):
         """HttpError during completion sets channel_had_errors to True."""
@@ -550,7 +543,7 @@ class TestCompleteImportMode:
         result = processor._complete_import_mode("spaces/S1", "general", False)
 
         assert result is True
-        assert ("spaces/S1", "general") in migrator.incomplete_import_spaces
+        assert ("spaces/S1", "general") in migrator.state.incomplete_import_spaces
 
     def test_skip_on_error_strategy(self):
         """With skip_on_error strategy and errors, skips completion."""
@@ -562,7 +555,7 @@ class TestCompleteImportMode:
         # Should not attempt to call completeImport
         migrator.chat.spaces.return_value.completeImport.assert_not_called()
         assert result is True
-        assert ("spaces/S1", "general") in migrator.incomplete_import_spaces
+        assert ("spaces/S1", "general") in migrator.state.incomplete_import_spaces
 
     def test_force_complete_despite_errors(self):
         """With force_complete strategy, completes even when there are errors."""
@@ -713,8 +706,8 @@ class TestDeleteSpaceIfErrors:
     def test_cleanup_enabled_deletes_space(self):
         """When cleanup_on_error is True, deletes the space and updates tracking."""
         migrator = _make_migrator(cleanup_on_error=True)
-        migrator.created_spaces["general"] = "spaces/S1"
-        migrator.migration_summary["spaces_created"] = 1
+        migrator.state.created_spaces["general"] = "spaces/S1"
+        migrator.state.migration_summary["spaces_created"] = 1
         migrator.chat.spaces.return_value.delete.return_value.execute.return_value = {}
 
         processor = ChannelProcessor(migrator)
@@ -723,8 +716,8 @@ class TestDeleteSpaceIfErrors:
         migrator.chat.spaces.return_value.delete.assert_called_once_with(
             name="spaces/S1"
         )
-        assert "general" not in migrator.created_spaces
-        assert migrator.migration_summary["spaces_created"] == 0
+        assert "general" not in migrator.state.created_spaces
+        assert migrator.state.migration_summary["spaces_created"] == 0
 
     def test_cleanup_disabled_skips(self):
         """When cleanup_on_error is False, does not delete the space."""
@@ -738,8 +731,8 @@ class TestDeleteSpaceIfErrors:
     def test_api_error_during_delete(self):
         """API error during space deletion is caught and logged."""
         migrator = _make_migrator(cleanup_on_error=True)
-        migrator.created_spaces["general"] = "spaces/S1"
-        migrator.migration_summary["spaces_created"] = 1
+        migrator.state.created_spaces["general"] = "spaces/S1"
+        migrator.state.migration_summary["spaces_created"] = 1
         migrator.chat.spaces.return_value.delete.return_value.execute.side_effect = (
             HttpError(resp=MagicMock(status=404), content=b"Not found")
         )
@@ -749,8 +742,8 @@ class TestDeleteSpaceIfErrors:
         processor._delete_space_if_errors("spaces/S1", "general")
 
         # Space was NOT removed from created_spaces because delete failed
-        assert "general" in migrator.created_spaces
-        assert migrator.migration_summary["spaces_created"] == 1
+        assert "general" in migrator.state.created_spaces
+        assert migrator.state.migration_summary["spaces_created"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -766,24 +759,24 @@ class TestDiscoverChannelResources:
     def test_found_last_timestamp(self, mock_get_ts):
         """When a last timestamp is found, stores it and initializes thread_map."""
         migrator = _make_migrator()
-        migrator.channel_to_space = {"general": "spaces/S1"}
+        migrator.state.channel_to_space = {"general": "spaces/S1"}
 
         processor = ChannelProcessor(migrator)
         processor._discover_channel_resources("general")
 
         mock_get_ts.assert_called_once_with(migrator, "general", "spaces/S1")
-        assert migrator.last_processed_timestamps["general"] == 12345.0
+        assert migrator.state.last_processed_timestamps["general"] == 12345.0
 
     def test_no_space_found_for_channel(self):
         """When no space mapping exists, returns early without calling API."""
         migrator = _make_migrator()
-        migrator.channel_to_space = {}
+        migrator.state.channel_to_space = {}
 
         processor = ChannelProcessor(migrator)
         # Should not raise
         processor._discover_channel_resources("general")
 
-        assert "general" not in migrator.last_processed_timestamps
+        assert "general" not in migrator.state.last_processed_timestamps
 
     @patch(
         "slack_migrator.services.discovery.get_last_message_timestamp", return_value=0
@@ -791,12 +784,12 @@ class TestDiscoverChannelResources:
     def test_no_messages_found_timestamp_zero(self, mock_get_ts):
         """When no messages found (timestamp=0), does not store a timestamp."""
         migrator = _make_migrator()
-        migrator.channel_to_space = {"general": "spaces/S1"}
+        migrator.state.channel_to_space = {"general": "spaces/S1"}
 
         processor = ChannelProcessor(migrator)
         processor._discover_channel_resources("general")
 
-        assert "general" not in migrator.last_processed_timestamps
+        assert "general" not in migrator.state.last_processed_timestamps
 
     @patch(
         "slack_migrator.services.discovery.get_last_message_timestamp",
@@ -805,10 +798,10 @@ class TestDiscoverChannelResources:
     def test_initializes_thread_map_when_missing(self, mock_get_ts):
         """When thread_map doesn't exist, it gets initialized to an empty dict."""
         migrator = _make_migrator()
-        migrator.channel_to_space = {"general": "spaces/S1"}
-        # thread_map was deleted in _make_migrator to prevent hasattr auto-creation
+        migrator.state.channel_to_space = {"general": "spaces/S1"}
+        # thread_map defaults to empty dict in MigrationState
 
         processor = ChannelProcessor(migrator)
         processor._discover_channel_resources("general")
 
-        assert migrator.thread_map == {}
+        assert migrator.state.thread_map == {}

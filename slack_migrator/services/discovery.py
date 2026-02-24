@@ -48,8 +48,8 @@ def discover_existing_spaces(  # noqa: C901
     duplicate_spaces: dict[str, list[dict[str, Any]]] = {}
 
     # Initialize the channel_id_to_space_id mapping if it doesn't exist
-    if not hasattr(migrator, "channel_id_to_space_id"):
-        migrator.channel_id_to_space_id = {}
+    if not hasattr(migrator.state, "channel_id_to_space_id"):
+        migrator.state.channel_id_to_space_id = {}
 
     spaces_found = 0
     prefix = "Slack #"  # The prefix we use for migrated spaces
@@ -98,8 +98,10 @@ def discover_existing_spaces(  # noqa: C901
                         if channel_id:
                             # Associate the space ID with this channel ID
                             # (only for first occurrence - duplicates will be handled later)
-                            if channel_id not in migrator.channel_id_to_space_id:
-                                migrator.channel_id_to_space_id[channel_id] = space_id
+                            if channel_id not in migrator.state.channel_id_to_space_id:
+                                migrator.state.channel_id_to_space_id[channel_id] = (
+                                    space_id
+                                )
 
             # Get the next page token
             page_token = response.get("nextPageToken")
@@ -119,7 +121,9 @@ def discover_existing_spaces(  # noqa: C901
                 channel_id = migrator.channel_name_to_id.get(channel_name, "")
                 if channel_id:
                     # This will overwrite any previous entry
-                    migrator.channel_id_to_space_id[channel_id] = spaces[0]["space_id"]
+                    migrator.state.channel_id_to_space_id[channel_id] = spaces[0][
+                        "space_id"
+                    ]
             else:
                 # Multiple spaces with the same channel name
                 # Store the first one by default, but also track the conflict
@@ -161,12 +165,12 @@ def discover_existing_spaces(  # noqa: C901
                 # For channels with duplicate spaces, remove any ID-based mappings
                 # until the user disambiguates via space_mapping config
                 channel_id = migrator.channel_name_to_id.get(channel_name, "")
-                if channel_id and channel_id in migrator.channel_id_to_space_id:
+                if channel_id and channel_id in migrator.state.channel_id_to_space_id:
                     log_with_context(
                         logging.WARNING,
                         f"Removing ambiguous ID mapping for channel {channel_name} (ID: {channel_id})",
                     )
-                    del migrator.channel_id_to_space_id[channel_id]
+                    del migrator.state.channel_id_to_space_id[channel_id]
 
         # Log duplicate spaces
         if duplicate_spaces:
@@ -201,10 +205,10 @@ def discover_existing_spaces(  # noqa: C901
         channel=None,  # Global operation
     )
 
-    if hasattr(migrator, "channel_id_to_space_id"):
+    if hasattr(migrator.state, "channel_id_to_space_id"):
         log_with_context(
             logging.INFO,
-            f"Created {len(migrator.channel_id_to_space_id)} channel ID to space ID mappings",
+            f"Created {len(migrator.state.channel_id_to_space_id)} channel ID to space ID mappings",
             channel=None,  # Global operation
         )
 

@@ -40,9 +40,10 @@ class ChatFileUploader:
         if (
             hasattr(self, "migrator")
             and self.migrator
-            and hasattr(self.migrator, "current_channel")
+            and hasattr(self.migrator, "state")
+            and hasattr(self.migrator.state, "current_channel")
         ):
-            return self.migrator.current_channel
+            return self.migrator.state.current_channel
         return None
 
     def upload_file_to_chat(

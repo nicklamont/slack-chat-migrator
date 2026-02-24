@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+from slack_migrator.core.state import MigrationState
 from slack_migrator.services.message_attachments import MessageAttachmentProcessor
 
 # ---------------------------------------------------------------------------
@@ -13,7 +14,8 @@ def _make_file_handler(**overrides):
     """Create a mock file handler with reasonable defaults."""
     handler = MagicMock()
     handler.migrator = MagicMock()
-    handler.migrator.current_channel = "general"
+    handler.migrator.state = MigrationState()
+    handler.migrator.state.current_channel = "general"
     for key, value in overrides.items():
         setattr(handler, key, value)
     return handler
@@ -56,7 +58,7 @@ class TestInit:
 class TestGetCurrentChannel:
     def test_returns_channel_when_available(self):
         handler = _make_file_handler()
-        handler.migrator.current_channel = "random"
+        handler.migrator.state.current_channel = "random"
         processor = _make_processor(file_handler=handler)
         assert processor._get_current_channel() == "random"
 
@@ -68,7 +70,7 @@ class TestGetCurrentChannel:
 
     def test_returns_none_when_current_channel_missing(self):
         handler = MagicMock()
-        del handler.migrator.current_channel
+        handler.migrator.state = MigrationState()
         processor = MessageAttachmentProcessor(file_handler=handler, dry_run=False)
         assert processor._get_current_channel() is None
 

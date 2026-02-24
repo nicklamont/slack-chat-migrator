@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from googleapiclient.errors import HttpError
 
+from slack_migrator.core.state import MigrationState
 from slack_migrator.services.drive.drive_uploader import (
     DriveFileUploader,
 )
@@ -96,7 +97,8 @@ class TestGetCurrentChannel:
         """Returns channel name when migrator is set."""
         uploader = _make_uploader()
         migrator = MagicMock()
-        migrator.current_channel = "general"
+        migrator.state = MigrationState()
+        migrator.state.current_channel = "general"
         uploader.migrator = migrator
 
         assert uploader._get_current_channel() == "general"

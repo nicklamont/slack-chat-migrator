@@ -21,6 +21,7 @@ from slack_migrator.cli.report import (
     generate_report,
     print_dry_run_summary,
 )
+from slack_migrator.core.state import MigrationState
 from slack_migrator.services.file import FileHandler
 from slack_migrator.services.space import add_regular_members
 from slack_migrator.services.user import generate_user_map
@@ -173,40 +174,15 @@ class SlackToChatMigrator:
                 logging.INFO, "Running in update mode - will update existing spaces"
             )
 
-        # Initialize caches and state tracking
-        self.space_cache: dict[str, str] = {}  # channel -> space_name
-        self.created_spaces: dict[str, str] = {}  # channel -> space_name
+        # All mutable tracking state lives in MigrationState
+        self.state = MigrationState()
+
+        # Immutable data loaded once during init
         self.user_map: dict[str, str] = {}  # slack_user_id -> google_email
-        self.drive_files_cache: dict[str, Any] = {}  # file_id -> drive_file
-        self.progress_file = self.export_root / ".migration_progress.json"
-        self.thread_map: dict[
-            str, str
-        ] = {}  # slack_thread_ts -> google_chat_thread_name
-        self.external_users: set[str] = set()  # Set of external user emails
         self.users_without_email: list[
             dict[str, Any]
         ] = []  # List of users without email mappings
-        self.failed_messages: list[
-            dict[str, Any]
-        ] = []  # List of failed message details
-        self.channel_handlers: dict[
-            str, Any
-        ] = {}  # Store channel-specific log handlers
-        self.channel_to_space: dict[
-            str, str
-        ] = {}  # channel -> space_name for file attachments
-        self.current_space: Optional[str] = None  # Current space being processed
-        self.migration_summary: dict[str, Any] = {}
-        self.output_dir: Optional[str] = None
-
-        # Per-channel tracking (populated during migrate())
-        self.high_failure_rate_channels: dict[str, float] = {}
-        self.failed_messages_by_channel: dict[str, list[str]] = {}
-        self.incomplete_import_spaces: list[tuple[str, str]] = []
-        self.last_processed_timestamps: dict[str, float] = {}
-        self.migration_issues: dict[str, Any] = {}
-        self.channel_conflicts: set[str] = set()
-        self.skipped_reactions: list[dict[str, str]] = []
+        self.progress_file = self.export_root / ".migration_progress.json"
 
         # Validate workspace admin email format
         if (
@@ -254,13 +230,6 @@ class SlackToChatMigrator:
         self.chat: Optional[Any] = None
         self.drive: Optional[Any] = None
         self._api_services_initialized = False
-
-        self.chat_delegates: dict[str, Any] = {}
-        self.valid_users: dict[str, bool] = {}
-        self.channel_to_space.clear()
-
-        # Initialize channel ID mapping
-        self.channel_id_to_space_id: dict[str, str] = {}
 
         # Load channel metadata from channels.json
         self.channels_meta, self.channel_id_to_name = self._load_channels_meta()
@@ -317,20 +286,9 @@ class SlackToChatMigrator:
             self.file_handler, dry_run=self.dry_run
         )
 
-        # Reset caches and state tracking
-        self.created_spaces.clear()
-        self.current_channel: Optional[str] = (
-            None  # Track current channel being processed
-        )
-
-        # Track spaces with external users
-        self.spaces_with_external_users: dict[str, bool] = {}
-
-        # Track message statistics per channel
-        self.channel_stats: dict[str, dict[str, int]] = {}
-
-        # Track current message timestamp for enhanced error context
-        self.current_message_ts: Optional[str] = None
+        # Reset mutable state for this run
+        self.state.created_spaces.clear()
+        self.state.current_channel = None
 
         # Permission validation is now handled by the CLI layer to avoid duplicates
         # The CLI will call validate_permissions() unless --skip_permission_check is used
@@ -488,38 +446,34 @@ class SlackToChatMigrator:
             # Ensure API services are initialized (if not done during permission checks)
             self._initialize_api_services()
 
-            # Initialize the thread map if not already done
-            if not hasattr(self, "thread_map"):
-                self.thread_map = {}
-
             # Output directory should already be set up by CLI, but provide a sensible default
-            if not hasattr(self, "output_dir") or not self.output_dir:
+            if not self.state.output_dir:
                 # Create default output directory with timestamp
                 import datetime
 
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.output_dir = f"migration_logs/run_{timestamp}"
+                self.state.output_dir = f"migration_logs/run_{timestamp}"
                 log_with_context(
-                    logging.INFO, f"Using default output directory: {self.output_dir}"
+                    logging.INFO,
+                    f"Using default output directory: {self.state.output_dir}",
                 )
                 # Create the directory
                 import os
 
-                os.makedirs(self.output_dir, exist_ok=True)
+                os.makedirs(self.state.output_dir, exist_ok=True)
 
-            # Initialize dictionary to store channel-specific log handlers
-            self.channel_handlers = {}
-
-            # Initialize migration summary and error tracking
-            self.migration_summary = {
+            # Reset per-run state
+            self.state.channel_handlers = {}
+            self.state.thread_map = {}
+            self.state.migration_summary = {
                 "channels_processed": [],
                 "spaces_created": 0,
                 "messages_created": 0,
                 "reactions_created": 0,
                 "files_created": 0,
             }
-            self.migration_errors = []
-            self.channels_with_errors = []
+            self.state.migration_errors = []
+            self.state.channels_with_errors = []
 
             # Report unmapped user issues before starting migration (if any detected during initialization)
             if (
@@ -546,7 +500,7 @@ class SlackToChatMigrator:
                         logging.INFO,
                         f"[UPDATE MODE] Discovered {len(discovered_spaces)} existing spaces via API",
                     )
-                    self.created_spaces = discovered_spaces
+                    self.state.created_spaces = discovered_spaces
                 else:
                     log_with_context(
                         logging.WARNING,
@@ -561,8 +515,8 @@ class SlackToChatMigrator:
             )
 
             # Add ability to abort after first channel error
-            self.channel_error_count = 0
-            self.first_channel_processed = False
+            self.state.channel_error_count = 0
+            self.state.first_channel_processed = False
 
             # Process each channel
             from slack_migrator.core.channel_processor import ChannelProcessor
@@ -669,12 +623,12 @@ class SlackToChatMigrator:
 
     def _cleanup_channel_handlers(self):
         """Clean up and close all channel-specific log handlers."""
-        if not hasattr(self, "channel_handlers") or not self.channel_handlers:
+        if not self.state.channel_handlers:
             return
 
         logger = logging.getLogger("slack_migrator")
 
-        for channel_name, handler in list(self.channel_handlers.items()):
+        for channel_name, handler in list(self.state.channel_handlers.items()):
             try:
                 # Flush any pending log entries
                 handler.flush()
@@ -693,12 +647,12 @@ class SlackToChatMigrator:
                 )
 
         # Clear the handlers dictionary
-        self.channel_handlers.clear()
+        self.state.channel_handlers.clear()
 
     def cleanup(self):  # noqa: C901
         """Clean up resources and complete import mode on spaces."""
         # Clear current_channel so cleanup operations don't get tagged with channel context
-        self.current_channel = None
+        self.state.current_channel = None
 
         if self.dry_run:
             log_with_context(
@@ -780,13 +734,13 @@ class SlackToChatMigrator:
                 # Log the current channel_to_space mapping
                 log_with_context(
                     logging.INFO,
-                    f"Current channel_to_space mapping: {self.channel_to_space}",
+                    f"Current channel_to_space mapping: {self.state.channel_to_space}",
                 )
 
                 # Log the created_spaces mapping
                 log_with_context(
                     logging.INFO,
-                    f"Current created_spaces mapping: {self.created_spaces}",
+                    f"Current created_spaces mapping: {self.state.created_spaces}",
                 )
 
                 pbar = tqdm(
@@ -805,11 +759,11 @@ class SlackToChatMigrator:
                         )
 
                         # Also check if this space has external users based on our tracking
-                        if not external_users_allowed and hasattr(
-                            self, "spaces_with_external_users"
-                        ):
+                        if not external_users_allowed:
                             external_users_allowed = (
-                                self.spaces_with_external_users.get(space_name, False)
+                                self.state.spaces_with_external_users.get(
+                                    space_name, False
+                                )
                             )
 
                             # If we detect external users but the flag isn't set, log this
@@ -893,7 +847,7 @@ class SlackToChatMigrator:
 
                         # First try to find the channel using our channel_to_space mapping
                         channel_name = None
-                        for ch, sp in self.channel_to_space.items():
+                        for ch, sp in self.state.channel_to_space.items():
                             if sp == space_name:
                                 channel_name = ch
                                 log_with_context(
@@ -1076,7 +1030,7 @@ class SlackToChatMigrator:
                         else:
                             # The configured space ID doesn't match any of the duplicates
                             unresolved_conflicts.append(channel_name)
-                            self.channel_conflicts.add(channel_name)
+                            self.state.channel_conflicts.add(channel_name)
                             log_with_context(
                                 logging.ERROR,
                                 f"Configured space ID for channel '{channel_name}' ({configured_space_id}) "
@@ -1085,7 +1039,7 @@ class SlackToChatMigrator:
                     else:
                         # No mapping in config - this is an unresolved conflict
                         unresolved_conflicts.append(channel_name)
-                        self.channel_conflicts.add(channel_name)
+                        self.state.channel_conflicts.add(channel_name)
                         log_with_context(
                             logging.ERROR,
                             f"Channel '{channel_name}' has {len(spaces)} duplicate spaces and no mapping in config",
@@ -1109,7 +1063,7 @@ class SlackToChatMigrator:
                 # Mark unresolved conflicts but don't abort the entire migration
                 if unresolved_conflicts:
                     for channel in unresolved_conflicts:
-                        self.migration_issues[channel] = (
+                        self.state.migration_issues[channel] = (
                             "Duplicate spaces found - requires disambiguation in config.yaml"
                         )
 
@@ -1147,13 +1101,12 @@ class SlackToChatMigrator:
                     )
 
                 # Initialize channel_id_to_space_id mapping if it doesn't exist
-                if not hasattr(self, "channel_id_to_space_id"):
-                    self.channel_id_to_space_id = {}
+                # channel_id_to_space_id is initialized by MigrationState
 
                 # Update the channel_to_space mapping
                 for channel, space_name in discovered_spaces.items():
                     # Store the space name for backward compatibility
-                    self.channel_to_space[channel] = space_name
+                    self.state.channel_to_space[channel] = space_name
 
                     # Extract space ID from space_name (format: spaces/{space_id})
                     space_id = (
@@ -1166,7 +1119,7 @@ class SlackToChatMigrator:
                     channel_id = self.channel_name_to_id.get(channel, "")
                     if channel_id:
                         # Store using channel ID -> space ID mapping for more robust identification
-                        self.channel_id_to_space_id[channel_id] = space_id
+                        self.state.channel_id_to_space_id[channel_id] = space_id
 
                         log_with_context(
                             logging.DEBUG,
@@ -1175,11 +1128,11 @@ class SlackToChatMigrator:
 
                     # Also update created_spaces for consistency
                     if self.update_mode:
-                        self.created_spaces[channel] = space_name
+                        self.state.created_spaces[channel] = space_name
 
                 log_with_context(
                     logging.INFO,
-                    f"Space discovery complete: {len(self.channel_to_space)} channels have existing spaces, others will create new spaces",
+                    f"Space discovery complete: {len(self.state.channel_to_space)} channels have existing spaces, others will create new spaces",
                 )
             else:
                 log_with_context(
@@ -1203,14 +1156,16 @@ class SlackToChatMigrator:
         duration_minutes = duration / 60
 
         # Count various statistics
-        channels_processed = len(self.migration_summary.get("channels_processed", []))
-        spaces_created = self.migration_summary.get("spaces_created", 0)
-        messages_created = self.migration_summary.get("messages_created", 0)
-        reactions_created = self.migration_summary.get("reactions_created", 0)
-        files_created = self.migration_summary.get("files_created", 0)
+        channels_processed = len(
+            self.state.migration_summary.get("channels_processed", [])
+        )
+        spaces_created = self.state.migration_summary.get("spaces_created", 0)
+        messages_created = self.state.migration_summary.get("messages_created", 0)
+        reactions_created = self.state.migration_summary.get("reactions_created", 0)
+        files_created = self.state.migration_summary.get("files_created", 0)
 
         # Count channels with errors
-        channels_with_errors = len(getattr(self, "channels_with_errors", []))
+        channels_with_errors = len(self.state.channels_with_errors)
 
         # Count unmapped users
         unmapped_user_count = 0
@@ -1221,7 +1176,7 @@ class SlackToChatMigrator:
             unmapped_user_count = self.unmapped_user_tracker.get_unmapped_count()
 
         # Count incomplete imports
-        incomplete_imports = len(getattr(self, "incomplete_import_spaces", []))
+        incomplete_imports = len(self.state.incomplete_import_spaces)
 
         # Log comprehensive final status
         if self.dry_run:
@@ -1389,9 +1344,11 @@ class SlackToChatMigrator:
         duration_minutes = duration / 60
 
         # Count what we accomplished before failure
-        channels_processed = len(self.migration_summary.get("channels_processed", []))
-        spaces_created = self.migration_summary.get("spaces_created", 0)
-        messages_created = self.migration_summary.get("messages_created", 0)
+        channels_processed = len(
+            self.state.migration_summary.get("channels_processed", [])
+        )
+        spaces_created = self.state.migration_summary.get("spaces_created", 0)
+        messages_created = self.state.migration_summary.get("messages_created", 0)
 
         log_with_context(
             logging.ERROR,

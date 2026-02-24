@@ -26,19 +26,19 @@ def print_dry_run_summary(
     print("DRY RUN SUMMARY")
     print("=" * 80)
     print(
-        f"Channels processed: {len(migrator.migration_summary['channels_processed'])}"
+        f"Channels processed: {len(migrator.state.migration_summary['channels_processed'])}"
     )
     print(
-        f"Spaces that would be created: {migrator.migration_summary['spaces_created']}"
+        f"Spaces that would be created: {migrator.state.migration_summary['spaces_created']}"
     )
     print(
-        f"Messages that would be migrated: {migrator.migration_summary['messages_created']}"
+        f"Messages that would be migrated: {migrator.state.migration_summary['messages_created']}"
     )
     print(
-        f"Reactions that would be migrated: {migrator.migration_summary['reactions_created']}"
+        f"Reactions that would be migrated: {migrator.state.migration_summary['reactions_created']}"
     )
     print(
-        f"Files that would be migrated: {migrator.migration_summary['files_created']}"
+        f"Files that would be migrated: {migrator.state.migration_summary['files_created']}"
     )
 
     # Show file upload details if available
@@ -78,7 +78,7 @@ def print_dry_run_summary(
     # Get the report file path
     if report_file is None:
         # Get the output directory
-        output_dir = migrator.output_dir or "."
+        output_dir = migrator.state.output_dir or "."
         report_file = os.path.join(output_dir, "migration_report.yaml")
 
     print(f"\nDetailed report saved to {report_file}")
@@ -90,15 +90,15 @@ def print_dry_run_summary(
 def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
     """Generate a detailed migration report."""
     # Get the output directory
-    output_dir = migrator.output_dir or "."
+    output_dir = migrator.state.output_dir or "."
 
     # Set the output file path in the run directory
     report_path = os.path.join(output_dir, "migration_report.yaml")
 
     # Group failed messages by channel
     failed_by_channel: dict[str, list[dict[str, Any]]] = {}
-    if hasattr(migrator, "failed_messages") and migrator.failed_messages:
-        for failed_msg in migrator.failed_messages:
+    if hasattr(migrator.state, "failed_messages") and migrator.state.failed_messages:
+        for failed_msg in migrator.state.failed_messages:
             channel = failed_msg.get("channel", "unknown")
             if channel not in failed_by_channel:
                 failed_by_channel[channel] = []
@@ -107,7 +107,7 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
         # Log summary of failed messages
         log_with_context(
             logging.WARNING,
-            f"Migration completed with {len(migrator.failed_messages)} failed messages across {len(failed_by_channel)} channels",
+            f"Migration completed with {len(migrator.state.failed_messages)} failed messages across {len(failed_by_channel)} channels",
         )
 
         # For each channel with failures, write detailed logs
@@ -118,8 +118,8 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
             )
 
             # Write detailed failure info to channel log
-            if migrator.output_dir:
-                logs_dir = os.path.join(migrator.output_dir, "channel_logs")
+            if migrator.state.output_dir:
+                logs_dir = os.path.join(migrator.state.output_dir, "channel_logs")
                 os.makedirs(logs_dir, exist_ok=True)
                 log_file = os.path.join(logs_dir, f"{channel}_migration.log")
 
@@ -174,21 +174,25 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
             "workspace_admin": migrator.workspace_admin,
             "export_path": str(migrator.export_root),
             "output_path": str(output_dir),
-            "channels_processed": len(migrator.migration_summary["channels_processed"]),
-            "spaces_created": migrator.migration_summary["spaces_created"],
-            "messages_migrated": migrator.migration_summary["messages_created"],
-            "reactions_migrated": migrator.migration_summary["reactions_created"],
-            "files_migrated": migrator.migration_summary["files_created"],
-            "failed_messages_count": len(getattr(migrator, "failed_messages", [])),
+            "channels_processed": len(
+                migrator.state.migration_summary["channels_processed"]
+            ),
+            "spaces_created": migrator.state.migration_summary["spaces_created"],
+            "messages_migrated": migrator.state.migration_summary["messages_created"],
+            "reactions_migrated": migrator.state.migration_summary["reactions_created"],
+            "files_migrated": migrator.state.migration_summary["files_created"],
+            "failed_messages_count": len(
+                getattr(migrator.state, "failed_messages", [])
+            ),
             "channels_with_failures": len(failed_by_channel),
         },
         "spaces": {},
         "skipped_channels": [],
         "failed_channels": list(failed_by_channel.keys()),
         "high_failure_rate_channels": {},
-        "channel_issues": getattr(migrator, "migration_issues", {}),
+        "channel_issues": getattr(migrator.state, "migration_issues", {}),
         "duplicate_space_conflicts": list(
-            getattr(migrator, "channel_conflicts", set())
+            getattr(migrator.state, "channel_conflicts", set())
         ),
         "users": {
             "external_users": {},
@@ -200,33 +204,36 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
     }
 
     # Add high failure rate channels to the report
-    if hasattr(migrator, "high_failure_rate_channels"):
-        report["high_failure_rate_channels"] = migrator.high_failure_rate_channels
+    if hasattr(migrator.state, "high_failure_rate_channels"):
+        report["high_failure_rate_channels"] = migrator.state.high_failure_rate_channels
 
         # Add recommendation for high failure rate channels
-        if migrator.high_failure_rate_channels:
+        if migrator.state.high_failure_rate_channels:
             max_failure_percentage = migrator.config.max_failure_percentage
             report["recommendations"].append(
                 {
                     "type": "high_failure_rate",
-                    "message": f"Found {len(migrator.high_failure_rate_channels)} channels with failure rates exceeding {max_failure_percentage}%. Check the detailed logs for more information.",
+                    "message": f"Found {len(migrator.state.high_failure_rate_channels)} channels with failure rates exceeding {max_failure_percentage}%. Check the detailed logs for more information.",
                     "severity": "warning",
                 }
             )
 
     # Add recommendation for duplicate space conflicts
-    if hasattr(migrator, "channel_conflicts") and migrator.channel_conflicts:
+    if (
+        hasattr(migrator.state, "channel_conflicts")
+        and migrator.state.channel_conflicts
+    ):
         report["recommendations"].append(
             {
                 "type": "duplicate_space_conflicts",
-                "message": f"Found {len(migrator.channel_conflicts)} channels with duplicate space conflicts. "
-                f"These channels were skipped. Add entries to space_mapping in config.yaml to resolve: {', '.join(migrator.channel_conflicts)}",
+                "message": f"Found {len(migrator.state.channel_conflicts)} channels with duplicate space conflicts. "
+                f"These channels were skipped. Add entries to space_mapping in config.yaml to resolve: {', '.join(migrator.state.channel_conflicts)}",
                 "severity": "error",
             }
         )
 
     # Add skipped reactions from unmapped users
-    skipped_reactions = getattr(migrator, "skipped_reactions", [])
+    skipped_reactions = getattr(migrator.state, "skipped_reactions", [])
     if skipped_reactions:
         report["skipped_reactions"] = skipped_reactions
         report["recommendations"].append(
@@ -239,8 +246,8 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
         )
 
     # Add detailed info for each space
-    for channel in migrator.migration_summary["channels_processed"]:
-        space_name = migrator.created_spaces.get(channel)
+    for channel in migrator.state.migration_summary["channels_processed"]:
+        space_name = migrator.state.created_spaces.get(channel)
 
         if not space_name:
             # Track skipped channels
@@ -260,15 +267,15 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
 
         # Check if this space has external users enabled
         space_stats["external_users_allowed"] = getattr(
-            migrator, "spaces_with_external_users", {}
+            migrator.state, "spaces_with_external_users", {}
         ).get(space_name, False)
 
         # Get users for this channel
         if (
-            hasattr(migrator, "active_users_by_channel")
-            and channel in migrator.active_users_by_channel
+            hasattr(migrator.state, "active_users_by_channel")
+            and channel in migrator.state.active_users_by_channel
         ):
-            active_users = migrator.active_users_by_channel[channel]
+            active_users = migrator.state.active_users_by_channel[channel]
 
             # Process each user
             for user_id in active_users:
@@ -283,8 +290,11 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
                     space_stats["internal_users"].append(user_email)
 
         # Get message stats if available
-        if hasattr(migrator, "channel_stats") and channel in migrator.channel_stats:
-            ch_stats = migrator.channel_stats[channel]
+        if (
+            hasattr(migrator.state, "channel_stats")
+            and channel in migrator.state.channel_stats
+        ):
+            ch_stats = migrator.state.channel_stats[channel]
             space_stats["messages_migrated"] = ch_stats.get("message_count", 0)
             space_stats["reactions_migrated"] = ch_stats.get("reaction_count", 0)
             space_stats["files_migrated"] = ch_stats.get("file_count", 0)
@@ -294,10 +304,10 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
 
     # Add users without email to the report
     if hasattr(migrator, "users_without_email") and migrator.users_without_email:
-        users_without_email_data = {}
+        users_without_email_data: dict[str, dict[str, str]] = {}
         for user in migrator.users_without_email:
-            user_id = user.get("id")
-            if not user_id:
+            uid = user.get("id")
+            if not uid:
                 continue
 
             user_type = (
@@ -306,7 +316,7 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
             name = user.get("name", "")
             real_name = user.get("real_name", "")
 
-            users_without_email_data[user_id] = {
+            users_without_email_data[uid] = {
                 "name": name,
                 "real_name": real_name,
                 "type": user_type,
