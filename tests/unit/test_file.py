@@ -23,7 +23,7 @@ def _make_migrator(**overrides):
     migrator.current_channel = "general"
     migrator.user_map = {"U123": "alice@example.com"}
     migrator.is_external_user = MagicMock(return_value=False)
-    migrator._is_external_user = MagicMock(return_value=False)
+    migrator.user_resolver.is_external_user = MagicMock(return_value=False)
     for key, value in overrides.items():
         setattr(migrator, key, value)
     return migrator

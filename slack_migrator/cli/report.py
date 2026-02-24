@@ -67,7 +67,9 @@ def print_dry_run_summary(
 
     # Count external users
     external_users = sum(
-        1 for _, email in migrator.user_map.items() if migrator._is_external_user(email)
+        1
+        for _, email in migrator.user_map.items()
+        if migrator.user_resolver.is_external_user(email)
     )
     if external_users > 0:
         print(f"\nExternal users detected: {external_users}")
@@ -275,7 +277,7 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
                     continue
 
                 # Check if this is an external user
-                if migrator._is_external_user(user_email):
+                if migrator.user_resolver.is_external_user(user_email):
                     space_stats["external_users"].append(user_email)
                 else:
                     space_stats["internal_users"].append(user_email)
@@ -326,7 +328,7 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
     # Collect all external users with their Slack user IDs
     external_users = {}
     for user_id, email in migrator.user_map.items():
-        if migrator._is_external_user(email):
+        if migrator.user_resolver.is_external_user(email):
             external_users[user_id] = email
 
     # Add external users to the report

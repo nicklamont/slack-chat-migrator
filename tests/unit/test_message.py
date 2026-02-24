@@ -58,9 +58,9 @@ def _make_send_migrator(
     migrator.workspace_admin = "admin@example.com"
 
     # Internal email handling
-    migrator._get_internal_email.side_effect = lambda uid, email: email
-    migrator._is_external_user.return_value = False
-    migrator._get_delegate.return_value = migrator.chat
+    migrator.user_resolver.get_internal_email.side_effect = lambda uid, email: email
+    migrator.user_resolver.is_external_user.return_value = False
+    migrator.user_resolver.get_delegate.return_value = migrator.chat
 
     # Attachment processor returns no attachments by default
     migrator.attachment_processor.process_message_attachments.return_value = []
@@ -111,7 +111,7 @@ class TestTrackMessageStats:
             "user": "U001",
             "reactions": [{"name": "thumbsup", "users": ["U001", "U002"]}],
         }
-        migrator._get_user_data.return_value = None
+        migrator.user_resolver.get_user_data.return_value = None
 
         track_message_stats(migrator, msg)
 
@@ -134,7 +134,7 @@ class TestTrackMessageStats:
             "user": "U001",
             "reactions": [{"name": "wave", "users": ["U001"]}],
         }
-        migrator._get_user_data.return_value = None
+        migrator.user_resolver.get_user_data.return_value = None
 
         track_message_stats(migrator, msg)
 
@@ -153,7 +153,10 @@ class TestTrackMessageStats:
 
     def test_skips_bot_user_when_ignore_bots(self):
         migrator = _make_migrator(ignore_bots=True)
-        migrator._get_user_data.return_value = {"is_bot": True, "real_name": "Bot"}
+        migrator.user_resolver.get_user_data.return_value = {
+            "is_bot": True,
+            "real_name": "Bot",
+        }
         msg = {"ts": "1234.5", "user": "B001"}
 
         track_message_stats(migrator, msg)
@@ -164,7 +167,7 @@ class TestTrackMessageStats:
 
     def test_processes_non_bot_when_ignore_bots(self):
         migrator = _make_migrator(ignore_bots=True)
-        migrator._get_user_data.return_value = {"is_bot": False}
+        migrator.user_resolver.get_user_data.return_value = {"is_bot": False}
         msg = {"ts": "1234.5", "user": "U001"}
 
         track_message_stats(migrator, msg)
@@ -212,7 +215,7 @@ class TestTrackMessageStats:
     def test_reaction_counting_skips_bot_reactions_when_ignore_bots(self):
         migrator = _make_migrator(ignore_bots=True)
         # First call for the message user check (non-bot), subsequent for reaction users
-        migrator._get_user_data.side_effect = [
+        migrator.user_resolver.get_user_data.side_effect = [
             {"is_bot": False},  # message user
             {"is_bot": True},  # reaction user U001 (bot)
             {"is_bot": False},  # reaction user U002 (human)
@@ -291,7 +294,10 @@ class TestSendMessage:
     def test_skips_bot_user_when_ignore_bots(self):
         """Messages from a bot user (is_bot flag) are skipped when ignore_bots is True."""
         migrator = _make_send_migrator(ignore_bots=True)
-        migrator._get_user_data.return_value = {"is_bot": True, "real_name": "BotUser"}
+        migrator.user_resolver.get_user_data.return_value = {
+            "is_bot": True,
+            "real_name": "BotUser",
+        }
         msg = {"ts": "1700000000.000001", "user": "B001", "text": "Bot says hi"}
 
         result = send_message(migrator, "spaces/SPACE1", msg)
@@ -404,7 +410,7 @@ class TestSendMessage:
     def test_unmapped_user_uses_admin_attribution(self):
         """Messages from unmapped users are attributed via _handle_unmapped_user_message."""
         migrator = _make_send_migrator(user_map={})
-        migrator._handle_unmapped_user_message.return_value = (
+        migrator.user_resolver.handle_unmapped_user_message.return_value = (
             "admin@example.com",
             "[Unknown User U099] Hello",
         )
@@ -413,7 +419,7 @@ class TestSendMessage:
         result = send_message(migrator, "spaces/SPACE1", msg)
 
         assert result == "spaces/SPACE1/messages/MSG001"
-        migrator._handle_unmapped_user_message.assert_called_once()
+        migrator.user_resolver.handle_unmapped_user_message.assert_called_once()
         call_kwargs = (
             migrator.chat.spaces.return_value.messages.return_value.create.call_args
         )
@@ -423,8 +429,8 @@ class TestSendMessage:
     def test_external_user_uses_admin_attribution(self):
         """External users are sent via admin with attribution."""
         migrator = _make_send_migrator(user_map={"U001": "external@other.com"})
-        migrator._is_external_user.return_value = True
-        migrator._handle_unmapped_user_message.return_value = (
+        migrator.user_resolver.is_external_user.return_value = True
+        migrator.user_resolver.handle_unmapped_user_message.return_value = (
             "admin@example.com",
             "[External User] Hello",
         )
@@ -674,9 +680,11 @@ class TestProcessReactionsBatch:
         """Create a migrator configured for reactions testing."""
         migrator = _make_migrator(dry_run=dry_run, ignore_bots=ignore_bots)
         migrator.user_map = {"U001": "user1@example.com", "U002": "user2@example.com"}
-        migrator._get_internal_email.side_effect = lambda uid, email: email
-        migrator._is_external_user.return_value = False
-        migrator._get_delegate.return_value = MagicMock()  # impersonated service
+        migrator.user_resolver.get_internal_email.side_effect = lambda uid, email: email
+        migrator.user_resolver.is_external_user.return_value = False
+        migrator.user_resolver.get_delegate.return_value = (
+            MagicMock()
+        )  # impersonated service
         return migrator
 
     def test_dry_run_counts_reactions_but_does_not_call_api(self):
@@ -709,14 +717,17 @@ class TestProcessReactionsBatch:
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
 
-        migrator._handle_unmapped_user_reaction.assert_called_once_with(
+        migrator.user_resolver.handle_unmapped_user_reaction.assert_called_once_with(
             "U099", "thumbsup", "1700000000.000001"
         )
 
     def test_skips_bot_reactions_when_ignore_bots(self):
         """Bot user reactions are skipped when ignore_bots is True."""
         migrator = self._make_reactions_migrator(dry_run=True, ignore_bots=True)
-        migrator._get_user_data.return_value = {"is_bot": True, "real_name": "Bot"}
+        migrator.user_resolver.get_user_data.return_value = {
+            "is_bot": True,
+            "real_name": "Bot",
+        }
         reactions = [{"name": "thumbsup", "users": ["U001"]}]
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
@@ -726,7 +737,7 @@ class TestProcessReactionsBatch:
     def test_processes_non_bot_reactions_when_ignore_bots(self):
         """Non-bot reactions are counted when ignore_bots is True."""
         migrator = self._make_reactions_migrator(dry_run=True, ignore_bots=True)
-        migrator._get_user_data.return_value = {"is_bot": False}
+        migrator.user_resolver.get_user_data.return_value = {"is_bot": False}
         reactions = [{"name": "thumbsup", "users": ["U001"]}]
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
@@ -736,7 +747,7 @@ class TestProcessReactionsBatch:
     def test_external_user_reactions_skipped(self):
         """Reactions from external users are skipped to avoid admin attribution."""
         migrator = self._make_reactions_migrator()
-        migrator._is_external_user.return_value = True
+        migrator.user_resolver.is_external_user.return_value = True
         reactions = [{"name": "thumbsup", "users": ["U001"]}]
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
@@ -748,7 +759,7 @@ class TestProcessReactionsBatch:
         """When impersonation fails (delegate == admin), reactions are sent one by one."""
         migrator = self._make_reactions_migrator()
         # Make _get_delegate return the admin service (same as migrator.chat)
-        migrator._get_delegate.return_value = migrator.chat
+        migrator.user_resolver.get_delegate.return_value = migrator.chat
         reactions = [{"name": "thumbsup", "users": ["U001"]}]
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
@@ -760,7 +771,7 @@ class TestProcessReactionsBatch:
         """HttpError during batch.execute() is logged and does not raise."""
         migrator = self._make_reactions_migrator()
         mock_delegate = MagicMock()
-        migrator._get_delegate.return_value = mock_delegate
+        migrator.user_resolver.get_delegate.return_value = mock_delegate
         mock_batch = MagicMock()
         mock_batch.execute.side_effect = _make_http_error(500)
         mock_delegate.new_batch_http_request.return_value = mock_batch

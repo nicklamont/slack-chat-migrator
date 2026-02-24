@@ -83,7 +83,7 @@ def channel_has_external_users(migrator, channel: str) -> bool:
                 "is_app_user", False
             )
 
-        if migrator._is_external_user(email) and not is_bot:
+        if migrator.user_resolver.is_external_user(email) and not is_bot:
             log_with_context(
                 logging.INFO,
                 f"Channel {channel} has external user {user_id} with email {email}",
@@ -517,10 +517,10 @@ def add_users_to_space(migrator, space: str, channel: str) -> None:  # noqa: C90
             continue
 
         # Get the internal email for this user (handles external users)
-        internal_email = migrator._get_internal_email(user_id, user_email)
+        internal_email = migrator.user_resolver.get_internal_email(user_id, user_email)
 
         # Track external users for message attribution
-        if migrator._is_external_user(user_email):
+        if migrator.user_resolver.is_external_user(user_email):
             log_with_context(
                 logging.INFO,
                 f"Adding external user {user_id} with internal email {internal_email} as historical member",
@@ -682,12 +682,14 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
         user_email = migrator.user_map.get(user_id)
         if user_email:
             # Get the internal email for proper handling
-            internal_email = migrator._get_internal_email(user_id, user_email)
+            internal_email = migrator.user_resolver.get_internal_email(
+                user_id, user_email
+            )
             if internal_email and internal_email not in active_user_emails:
                 active_user_emails.append(internal_email)
 
             # Track if we have external users
-            if migrator._is_external_user(user_email):
+            if migrator.user_resolver.is_external_user(user_email):
                 has_external_users = True
 
     # If we have external users, ensure the space has externalUserAllowed=True
@@ -748,10 +750,10 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
             continue
 
         # Get the internal email for this user (handles external users)
-        internal_email = migrator._get_internal_email(user_id, user_email)
+        internal_email = migrator.user_resolver.get_internal_email(user_id, user_email)
 
         # Track external users for message attribution
-        if migrator._is_external_user(user_email):
+        if migrator.user_resolver.is_external_user(user_email):
             log_with_context(
                 logging.INFO,
                 f"Adding external user {user_id} with email {user_email} as regular member",
@@ -765,10 +767,10 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
             # Log which user we're trying to add
             log_with_context(
                 logging.DEBUG,  # Changed from INFO for less verbose output
-                f"Attempting to add user {user_email if migrator._is_external_user(user_email) else internal_email} as regular member",
+                f"Attempting to add user {user_email if migrator.user_resolver.is_external_user(user_email) else internal_email} as regular member",
                 user=(
                     user_email
-                    if migrator._is_external_user(user_email)
+                    if migrator.user_resolver.is_external_user(user_email)
                     else internal_email
                 ),
                 channel=channel,
