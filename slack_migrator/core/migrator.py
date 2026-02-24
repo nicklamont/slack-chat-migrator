@@ -267,6 +267,10 @@ class SlackToChatMigrator:
             retry_delay=self.config.retry_delay,
         )
 
+        # Update the user resolver's chat reference — it was None at construction
+        # time because API services are initialized after the resolver.
+        self.user_resolver.chat = self.chat
+
         self._api_services_initialized = True
         log_with_context(
             logging.INFO, "Google Chat and Drive API services initialized successfully"
