@@ -17,12 +17,12 @@ from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
 from slack_migrator.core.config import should_process_channel
-from slack_migrator.services.message import send_message, track_message_stats
-from slack_migrator.services.space import (
+from slack_migrator.services.membership_manager import (
     add_regular_members,
     add_users_to_space,
-    create_space,
 )
+from slack_migrator.services.message import send_message, track_message_stats
+from slack_migrator.services.space_creator import create_space
 from slack_migrator.utils.logging import log_with_context
 
 

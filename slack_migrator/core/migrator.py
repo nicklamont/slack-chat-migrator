@@ -23,7 +23,7 @@ from slack_migrator.cli.report import (
 )
 from slack_migrator.core.state import MigrationState
 from slack_migrator.services.file import FileHandler
-from slack_migrator.services.space import add_regular_members
+from slack_migrator.services.membership_manager import add_regular_members
 from slack_migrator.services.user import generate_user_map
 from slack_migrator.services.user_resolver import UserResolver
 from slack_migrator.utils.api import get_gcp_service
