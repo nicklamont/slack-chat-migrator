@@ -2,17 +2,19 @@
 Logging module for the Slack to Google Chat migration tool
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 # Module-level flag to track if API debug logging is enabled
 _DEBUG_API_ENABLED = False
 
 
 class JsonFormatter(logging.Formatter):
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         data = {
             "time": self.formatTime(record, self.datefmt),
             "level": record.levelname,
@@ -79,7 +81,7 @@ def setup_main_log_file(
         # Ensure the file handler flushes immediately on each log write
         old_emit = file_handler.emit
 
-        def immediate_flush_emit(record):
+        def immediate_flush_emit(record: logging.LogRecord) -> None:
             old_emit(record)
             file_handler.flush()
 
@@ -96,7 +98,7 @@ def setup_main_log_file(
     # 2. All logs without a channel attribute (migration-level events)
     # 3. API logs when debug_api is enabled AND they have no channel context
     class MainLogFilter(logging.Filter):
-        def filter(self, record):
+        def filter(self, record: logging.LogRecord) -> bool:
             # Check if the record has a channel attribute
             record_channel = getattr(record, "channel", None)
 
@@ -153,12 +155,12 @@ class EnhancedFormatter(logging.Formatter):
 
     def __init__(
         self,
-        fmt=None,
-        datefmt=None,
-        style="%",
-        verbose=False,
-        include_api_details=False,
-    ):
+        fmt: str | None = None,
+        datefmt: str | None = None,
+        style: str = "%",
+        verbose: bool = False,
+        include_api_details: bool = False,
+    ) -> None:
         # Use more detailed format for verbose mode
         if verbose:
             fmt = "%(asctime)s - %(name)s - %(levelname)s - [%(module)s:%(lineno)d] - %(message)s"
@@ -168,7 +170,7 @@ class EnhancedFormatter(logging.Formatter):
         super().__init__(fmt, datefmt)
         self.include_api_details = include_api_details
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         # First apply the base format
         result = super().format(record)
 
@@ -212,7 +214,7 @@ class EnhancedFormatter(logging.Formatter):
 
 
 def setup_logger(
-    verbose: bool = False, debug_api: bool = False, output_dir: Optional[str] = None
+    verbose: bool = False, debug_api: bool = False, output_dir: str | None = None
 ) -> logging.Logger:
     """
     Set up and return the logger with appropriate formatting.
@@ -270,7 +272,7 @@ def setup_logger(
     return logger
 
 
-def _enable_http_client_debug():
+def _enable_http_client_debug() -> None:
     """
     Enable http.client debug logging by routing debug output through the
     logging module with auth token redaction.
@@ -285,7 +287,7 @@ def _enable_http_client_debug():
 
     http_logger = logging.getLogger("http.client")
 
-    def _debug_putheader(self, header, *values):
+    def _debug_putheader(self: Any, header: str, *values: str) -> None:
         if header and values:
             header_value = ", ".join(str(v) for v in values)
             if header.lower() == "authorization":
@@ -293,7 +295,7 @@ def _enable_http_client_debug():
             http_logger.debug("Header: %s: %s", header, header_value)
         return _orig_putheader(self, header, *values)
 
-    http.client.HTTPConnection.putheader = _debug_putheader  # type: ignore[method-assign]
+    http.client.HTTPConnection.putheader = _debug_putheader  # type: ignore[assignment]
 
 
 def setup_channel_logger(
@@ -328,7 +330,7 @@ def setup_channel_logger(
         # This sacrifices some performance for data safety
         old_emit = file_handler.emit
 
-        def immediate_flush_emit(record):
+        def immediate_flush_emit(record: logging.LogRecord) -> None:
             old_emit(record)
             file_handler.flush()
 
@@ -340,7 +342,7 @@ def setup_channel_logger(
 
     # Create a filter to only include logs for this specific channel and related API calls
     class ChannelFilter(logging.Filter):
-        def filter(self, record):
+        def filter(self, record: logging.LogRecord) -> bool:
             # Always include logs that have a channel attribute matching this channel
             record_channel = getattr(record, "channel", None)
             if record_channel == channel:
@@ -516,7 +518,7 @@ def _extract_api_operation(method: str, url: str) -> str:
 
 
 def log_api_request(
-    method: str, url: str, data: Optional[dict] = None, **kwargs: Any
+    method: str, url: str, data: dict[str, Any] | None = None, **kwargs: Any
 ) -> None:
     """
     Log an API request with appropriate detail level based on debug mode.
@@ -642,7 +644,7 @@ def is_debug_api_enabled() -> bool:
     return _DEBUG_API_ENABLED
 
 
-def get_logger():
+def get_logger() -> logging.Logger:
     """Get the slack_migrator logger, creating it with defaults if needed."""
     slack_logger = logging.getLogger("slack_migrator")
     if not slack_logger.handlers:

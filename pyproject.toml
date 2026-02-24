@@ -94,12 +94,6 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     "slack_migrator.core.migrator",
-    "slack_migrator.services.*",
-    "slack_migrator.services.drive.*",
-    "slack_migrator.services.chat.*",
-    "slack_migrator.utils.api",
-    "slack_migrator.utils.logging",
-    "slack_migrator.utils.permissions",
 ]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false

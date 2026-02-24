@@ -2,16 +2,23 @@
 Functions for discovering existing Google Chat resources for migration resumption
 """
 
+from __future__ import annotations
+
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
 from slack_migrator.utils.logging import log_with_context
 
+if TYPE_CHECKING:
+    from slack_migrator.core.migrator import SlackToChatMigrator
 
-def discover_existing_spaces(migrator):  # noqa: C901
+
+def discover_existing_spaces(  # noqa: C901
+    migrator: SlackToChatMigrator,
+) -> tuple[dict[str, str], dict[str, list[dict[str, Any]]]]:
     """
     Query Google Chat API to find spaces that match our Slack channel naming pattern.
 
@@ -37,8 +44,8 @@ def discover_existing_spaces(migrator):  # noqa: C901
 
     # Track all spaces by channel name to detect duplicates
     all_spaces_by_channel: dict[str, list[dict[str, Any]]] = {}
-    space_mappings = {}
-    duplicate_spaces = {}
+    space_mappings: dict[str, str] = {}
+    duplicate_spaces: dict[str, list[dict[str, Any]]] = {}
 
     # Initialize the channel_id_to_space_id mapping if it doesn't exist
     if not hasattr(migrator, "channel_id_to_space_id"):
@@ -51,7 +58,7 @@ def discover_existing_spaces(migrator):  # noqa: C901
         # Paginate through all spaces accessible to the service account
         page_token = None
         while True:
-            request = migrator.chat.spaces().list(pageSize=100, pageToken=page_token)
+            request = migrator.chat.spaces().list(pageSize=100, pageToken=page_token)  # type: ignore[union-attr]
             response = request.execute()
 
             # Process each space
@@ -124,7 +131,7 @@ def discover_existing_spaces(migrator):  # noqa: C901
                     try:
                         # Try to get member count for each duplicate space
                         members_response = (
-                            migrator.chat.spaces()
+                            migrator.chat.spaces()  # type: ignore[union-attr]
                             .members()
                             .list(
                                 parent=space_info["space_name"],
@@ -204,7 +211,9 @@ def discover_existing_spaces(migrator):  # noqa: C901
     return space_mappings, duplicate_spaces
 
 
-def get_last_message_timestamp(migrator, channel: str, space: str):
+def get_last_message_timestamp(
+    migrator: SlackToChatMigrator, channel: str, space: str
+) -> float:
     """
     Query Google Chat API to get the timestamp of the last message in a space.
 
@@ -230,7 +239,7 @@ def get_last_message_timestamp(migrator, channel: str, space: str):
     try:
         # We only need the most recent message, so limit to 1 result sorted by createTime desc
         request = (
-            migrator.chat.spaces()
+            migrator.chat.spaces()  # type: ignore[union-attr]
             .messages()
             .list(parent=space, pageSize=1, orderBy="createTime desc")
         )

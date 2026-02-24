@@ -2,17 +2,22 @@
 Functions for managing Google Chat spaces during Slack migration
 """
 
+from __future__ import annotations
+
 import datetime
 import json
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
 from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.logging import log_with_context
+
+if TYPE_CHECKING:
+    from slack_migrator.core.migrator import SlackToChatMigrator
 
 # Named constants for magic numbers used in membership time calculations
 IMPORT_MODE_DAYS_LIMIT = 90
@@ -22,7 +27,7 @@ EARLIEST_MESSAGE_OFFSET_MINUTES = 2
 FIRST_MESSAGE_OFFSET_MINUTES = 1
 
 
-def channel_has_external_users(migrator, channel: str) -> bool:
+def channel_has_external_users(migrator: SlackToChatMigrator, channel: str) -> bool:
     """Check if a channel has external users that need access.
 
     Args:
@@ -94,7 +99,7 @@ def channel_has_external_users(migrator, channel: str) -> bool:
     return False
 
 
-def create_space(migrator, channel: str) -> str:
+def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
     """Create a Google Chat space for a Slack channel in import mode."""
     # Get channel metadata
     meta = migrator.channels_meta.get(channel, {})
@@ -162,7 +167,7 @@ def create_space(migrator, channel: str) -> str:
     else:
         try:
             # Create the space in import mode
-            space = migrator.chat.spaces().create(body=body).execute()
+            space = migrator.chat.spaces().create(body=body).execute()  # type: ignore[union-attr]
             space_name = space["name"]
 
             # Increment the spaces created counter
@@ -204,7 +209,7 @@ def create_space(migrator, channel: str) -> str:
 
                         update_mask = "spaceDetails"
 
-                        migrator.chat.spaces().patch(
+                        migrator.chat.spaces().patch(  # type: ignore[union-attr]
                             name=space_name, updateMask=update_mask, body=space_details
                         ).execute()
 
@@ -241,7 +246,7 @@ def create_space(migrator, channel: str) -> str:
     return space_name
 
 
-def add_users_to_space(migrator, space: str, channel: str) -> None:  # noqa: C901
+def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) -> None:  # noqa: C901
     """Add users to a space as historical members."""
     log_with_context(
         logging.DEBUG,
@@ -352,7 +357,7 @@ def add_users_to_space(migrator, space: str, channel: str) -> None:  # noqa: C90
     # Store active users in class variable to add back after import completes
     # We'll use this for both regular membership and file permissions
     if not hasattr(migrator, "active_users_by_channel"):
-        migrator.active_users_by_channel = {}
+        migrator.active_users_by_channel = {}  # type: ignore[attr-defined]
 
     # Log active user counts for debugging
     log_with_context(
@@ -360,7 +365,7 @@ def add_users_to_space(migrator, space: str, channel: str) -> None:  # noqa: C90
         f"Identified {len(active_users)} active users for channel {channel}",
         channel=channel,
     )
-    migrator.active_users_by_channel[channel] = active_users
+    migrator.active_users_by_channel[channel] = active_users  # type: ignore[attr-defined]
 
     # Log what we're doing
     log_with_context(
@@ -548,7 +553,7 @@ def add_users_to_space(migrator, space: str, channel: str) -> None:  # noqa: C90
             )
 
             # Use the admin user for adding members
-            migrator.chat.spaces().members().create(
+            migrator.chat.spaces().members().create(  # type: ignore[union-attr]
                 parent=space, body=membership_body
             ).execute()
 
@@ -605,7 +610,9 @@ def add_users_to_space(migrator, space: str, channel: str) -> None:  # noqa: C90
     )
 
 
-def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C901
+def add_regular_members(  # noqa: C901
+    migrator: SlackToChatMigrator, space: str, channel: str
+) -> None:
     """Add regular members to a space after import mode is complete.
 
     After completing import mode, this method adds back all active members
@@ -617,10 +624,10 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
     """
     # Initialize the active_users_by_channel attribute if it doesn't exist
     if not hasattr(migrator, "active_users_by_channel"):
-        migrator.active_users_by_channel = {}
+        migrator.active_users_by_channel = {}  # type: ignore[attr-defined]
 
     # Get the list of active users we saved during add_users_to_space
-    if channel not in migrator.active_users_by_channel:
+    if channel not in migrator.active_users_by_channel:  # type: ignore[attr-defined]
         # If we don't have active users for this channel, try to get them from the channel directory
         log_with_context(
             logging.WARNING,
@@ -648,7 +655,7 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
                             f"Found {len(members)} members for channel {channel} in channels.json",
                             channel=channel,
                         )
-                        migrator.active_users_by_channel[channel] = members
+                        migrator.active_users_by_channel[channel] = members  # type: ignore[attr-defined]
                         break
         except Exception as e:
             log_with_context(
@@ -658,7 +665,7 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
             )
 
     # If we still don't have active users, we can't proceed
-    if channel not in migrator.active_users_by_channel:
+    if channel not in migrator.active_users_by_channel:  # type: ignore[attr-defined]
         log_with_context(
             logging.ERROR,
             f"No active users found for channel {channel}, can't add regular members",
@@ -666,7 +673,7 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
         )
         return
 
-    active_users = migrator.active_users_by_channel[channel]
+    active_users = migrator.active_users_by_channel[channel]  # type: ignore[attr-defined]
     log_with_context(
         logging.DEBUG,
         f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding {len(active_users)} regular members to space {space} for channel {channel}",
@@ -703,14 +710,14 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
         if not migrator.dry_run:
             try:
                 # Get current space settings
-                space_info = migrator.chat.spaces().get(name=space).execute()
+                space_info = migrator.chat.spaces().get(name=space).execute()  # type: ignore[union-attr]
                 external_users_allowed = space_info.get("externalUserAllowed", False)
 
                 # If external users are not allowed, update the space
                 if not external_users_allowed:
                     update_body = {"externalUserAllowed": True}
                     update_mask = "externalUserAllowed"
-                    migrator.chat.spaces().patch(
+                    migrator.chat.spaces().patch(  # type: ignore[union-attr]
                         name=space, updateMask=update_mask, body=update_body
                     ).execute()
                     log_with_context(
@@ -786,7 +793,7 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
 
             # API request details are already logged by API utilities
             # Use the admin user for adding members
-            migrator.chat.spaces().members().create(
+            migrator.chat.spaces().members().create(  # type: ignore[union-attr]
                 parent=space, body=membership_body
             ).execute()
 
@@ -872,7 +879,7 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
         )
 
         # List members to verify they were added
-        members_result = migrator.chat.spaces().members().list(parent=space).execute()
+        members_result = migrator.chat.spaces().members().list(parent=space).execute()  # type: ignore[union-attr]
         members = members_result.get("memberships", [])
         actual_member_count = len(members)
 
@@ -959,7 +966,7 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
 
                 # Remove the admin from the space
                 try:
-                    migrator.chat.spaces().members().delete(
+                    migrator.chat.spaces().members().delete(  # type: ignore[union-attr]
                         name=admin_membership
                     ).execute()
                     log_with_context(
@@ -1004,7 +1011,7 @@ def add_regular_members(migrator, space: str, channel: str) -> None:  # noqa: C9
             # Get the channel folder if it exists
             folder_id = migrator.file_handler.folder_manager.get_channel_folder_id(
                 channel,
-                migrator.file_handler._root_folder_id,
+                migrator.file_handler._root_folder_id,  # type: ignore[arg-type]
                 migrator.file_handler._shared_drive_id,
             )
 

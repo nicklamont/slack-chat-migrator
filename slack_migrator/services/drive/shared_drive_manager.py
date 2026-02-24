@@ -2,9 +2,11 @@
 Shared Drive management for Google Drive integration.
 """
 
+from __future__ import annotations
+
 import logging
 import uuid
-from typing import Optional
+from typing import Any
 
 from googleapiclient.errors import HttpError
 
@@ -17,7 +19,9 @@ from slack_migrator.utils.logging import (
 class SharedDriveManager:
     """Manages Google Drive shared drives for the migration process."""
 
-    def __init__(self, drive_service, config: MigrationConfig, dry_run: bool = False):
+    def __init__(
+        self, drive_service: Any, config: MigrationConfig, dry_run: bool = False
+    ) -> None:
         """Initialize the SharedDriveManager.
 
         Args:
@@ -50,7 +54,7 @@ class SharedDriveManager:
             )
             return False
 
-    def get_or_create_shared_drive(self) -> Optional[str]:
+    def get_or_create_shared_drive(self) -> str | None:
         """Get or create the shared drive for storing attachments.
 
         Returns:
@@ -80,7 +84,7 @@ class SharedDriveManager:
                         logging.INFO,
                         f"Using configured shared drive: {drive_info.get('name', 'Unknown')} (ID: {shared_drive_id})",
                     )
-                    drive_id_result: Optional[str] = shared_drive_id
+                    drive_id_result: str | None = shared_drive_id
                     return drive_id_result
                 except HttpError as e:
                     log_with_context(
@@ -100,7 +104,7 @@ class SharedDriveManager:
             )
             return None
 
-    def _find_or_create_shared_drive(self, drive_name: str) -> Optional[str]:
+    def _find_or_create_shared_drive(self, drive_name: str) -> str | None:
         """Find an existing shared drive by name or create a new one.
 
         Args:
@@ -120,7 +124,7 @@ class SharedDriveManager:
 
             for drive in drives:
                 if drive.get("name") == drive_name:
-                    found_drive_id: Optional[str] = drive.get("id")
+                    found_drive_id: str | None = drive.get("id")
                     log_with_context(
                         logging.INFO,
                         f"Found existing shared drive: {drive_name} (ID: {found_drive_id})",
@@ -141,7 +145,7 @@ class SharedDriveManager:
                 .execute()
             )
 
-            created_drive_id: Optional[str] = created_drive.get("id")
+            created_drive_id: str | None = created_drive.get("id")
 
             log_with_context(
                 logging.INFO,
