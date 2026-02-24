@@ -58,7 +58,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: pip install bandit pip-audit
+      - run: pip install "bandit[toml]" pip-audit
       - name: Run bandit (SAST)
         run: bandit -r slack_migrator/ -c pyproject.toml
       - name: Run pip-audit (dependency CVEs)
