@@ -174,7 +174,7 @@ def process_reactions_batch(  # noqa: C901
                 except HttpError as e:
                     log_with_context(
                         logging.WARNING,
-                        f"Failed to add reaction for external user: {e}",
+                        f"Failed to add reaction via admin fallback: {e}",
                         error_code=e.resp.status,
                         user=email,
                         message_id=message_id,

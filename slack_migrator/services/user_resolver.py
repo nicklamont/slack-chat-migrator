@@ -68,14 +68,15 @@ class UserResolver:
     def get_internal_email(
         self, user_id: str, user_email: str | None = None
     ) -> str | None:
-        """Get internal email for a user, handling external users and tracking unmapped users.
+        """Get internal email for a user, optionally ignoring bots and tracking unmapped users.
 
         Args:
             user_id: The Slack user ID
             user_email: Optional email if already known
 
         Returns:
-            The internal email to use for this user, or None if user should be ignored
+            The internal email to use for this user, or None if the user should be
+            ignored (e.g. bot user with ignore_bots enabled, or no email mapping exists)
         """
         if self.migrator.config.ignore_bots:
             user_data = self.get_user_data(user_id)
