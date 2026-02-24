@@ -20,7 +20,7 @@ def _make_migrator(**overrides):
         "files_created": 5,
     }
     m.user_map = {"U001": "alice@example.com", "U002": "bob@example.com"}
-    m._is_external_user.return_value = False
+    m.user_resolver.is_external_user.return_value = False
     m.output_dir = None
     m.dry_run = True
     m.workspace_admin = "admin@example.com"
@@ -123,7 +123,9 @@ class TestPrintDryRunSummary:
             "U001": "alice@example.com",
             "U002": "ext@other.com",
         }
-        migrator._is_external_user.side_effect = lambda email: email == "ext@other.com"
+        migrator.user_resolver.is_external_user.side_effect = lambda email: (
+            email == "ext@other.com"
+        )
         print_dry_run_summary(migrator)
         out = capsys.readouterr().out
 
@@ -132,7 +134,7 @@ class TestPrintDryRunSummary:
 
     def test_no_external_users_hides_section(self, capsys):
         migrator = _make_migrator()
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
         print_dry_run_summary(migrator)
         out = capsys.readouterr().out
 
@@ -352,7 +354,9 @@ class TestGenerateReport:
             "U001": "alice@example.com",
             "U002": "ext@other.com",
         }
-        migrator._is_external_user.side_effect = lambda email: email == "ext@other.com"
+        migrator.user_resolver.is_external_user.side_effect = lambda email: (
+            email == "ext@other.com"
+        )
 
         result = generate_report(migrator)
 
@@ -375,7 +379,7 @@ class TestGenerateReport:
     @patch("slack_migrator.cli.report.log_with_context")
     def test_no_external_users_no_recommendation(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
 
         result = generate_report(migrator)
 
@@ -570,7 +574,9 @@ class TestGenerateReport:
             "U002": "ext@other.com",
             "U003": "bob@example.com",
         }
-        migrator._is_external_user.side_effect = lambda email: email == "ext@other.com"
+        migrator.user_resolver.is_external_user.side_effect = lambda email: (
+            email == "ext@other.com"
+        )
         migrator.active_users_by_channel = {
             "general": ["U001", "U002", "U003"],
         }

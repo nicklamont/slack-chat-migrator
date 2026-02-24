@@ -8,9 +8,12 @@ import signal
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from google.auth.exceptions import RefreshError
+if TYPE_CHECKING:
+    from slack_migrator.core.channel_processor import ChannelProcessor
+
+from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
@@ -18,20 +21,10 @@ from slack_migrator.cli.report import (
     generate_report,
     print_dry_run_summary,
 )
-from slack_migrator.core.config import should_process_channel
 from slack_migrator.services.file import FileHandler
-from slack_migrator.services.message import (
-    send_message,
-    track_message_stats,
-)
-
-# Import functionality from service modules
-from slack_migrator.services.space import (
-    add_regular_members,
-    add_users_to_space,
-    create_space,
-)
+from slack_migrator.services.space import add_regular_members
 from slack_migrator.services.user import generate_user_map
+from slack_migrator.services.user_resolver import UserResolver
 from slack_migrator.utils.api import get_gcp_service
 from slack_migrator.utils.logging import log_with_context
 
@@ -56,7 +49,7 @@ def _list_all_spaces(chat_service) -> list[dict[str, Any]]:
                 f"(Status: {http_e.resp.status})",
             )
             break
-        except Exception as e:
+        except (RefreshError, TransportError) as e:
             log_with_context(logging.ERROR, f"Failed to list spaces: {e}")
             break
     return spaces
@@ -92,7 +85,7 @@ def cleanup_import_mode_spaces(chat_service) -> None:
             space_info = chat_service.spaces().get(name=space_name).execute()
             if space_info.get("importMode"):
                 import_mode_spaces.append((space_name, space_info))
-        except Exception as e:
+        except (HttpError, RefreshError, TransportError) as e:
             log_with_context(
                 logging.WARNING,
                 f"Failed to check space {space_name}: {e}",
@@ -127,7 +120,7 @@ def cleanup_import_mode_spaces(chat_service) -> None:
                         logging.INFO,
                         f"Preserved external user access for: {space_name}",
                     )
-                except Exception as e:
+                except (HttpError, RefreshError, TransportError) as e:
                     log_with_context(
                         logging.WARNING,
                         f"Failed to preserve external user access for "
@@ -139,7 +132,7 @@ def cleanup_import_mode_spaces(chat_service) -> None:
                 f"HTTP error completing import for {space_name}: {http_e} "
                 f"(Status: {http_e.resp.status})",
             )
-        except Exception as e:
+        except (RefreshError, TransportError) as e:
             log_with_context(
                 logging.ERROR,
                 f"Failed to complete import for {space_name}: {e}",
@@ -206,6 +199,15 @@ class SlackToChatMigrator:
         self.migration_summary: dict[str, Any] = {}
         self.output_dir: Optional[str] = None
 
+        # Per-channel tracking (populated during migrate())
+        self.high_failure_rate_channels: dict[str, float] = {}
+        self.failed_messages_by_channel: dict[str, list[str]] = {}
+        self.incomplete_import_spaces: list[tuple[str, str]] = []
+        self.last_processed_timestamps: dict[str, float] = {}
+        self.migration_issues: dict[str, Any] = {}
+        self.channel_conflicts: set[str] = set()
+        self.skipped_reactions: list[dict[str, str]] = []
+
         # Validate workspace admin email format
         if (
             "@" not in self.workspace_admin
@@ -244,6 +246,9 @@ class SlackToChatMigrator:
         # Scan channel members to ensure all channel members have user mappings
         # This is crucial because Google Chat needs to add all channel members to spaces
         scan_channel_members_for_unmapped_users(self)
+
+        # User resolver is needed before API services (e.g. for _is_external_user)
+        self.user_resolver = UserResolver(self)
 
         # API services will be initialized later after permission checks
         self.chat: Optional[Any] = None
@@ -395,356 +400,55 @@ class SlackToChatMigrator:
 
     def _get_delegate(self, email: str):
         """Get a Google Chat API service with user impersonation."""
-        if not email:
-            return self.chat
-
-        if email not in self.valid_users:
-            try:
-                # Verify user exists by making a simple API call
-                test_service = get_gcp_service(
-                    str(self.creds_path),
-                    email,
-                    "chat",
-                    "v1",
-                    getattr(self, "current_channel", None),
-                    retry_config=self.config,
-                )
-                test_service.spaces().list(pageSize=1).execute()
-                self.valid_users[email] = True
-                self.chat_delegates[email] = test_service
-            except (HttpError, RefreshError) as e:
-                # If we get an error on impersonation, fall back to admin
-                error_code = e.resp.status if isinstance(e, HttpError) else "N/A"
-                log_with_context(
-                    logging.WARNING,
-                    f"Impersonation failed for {email}, falling back to admin user. Error: {e}",
-                    user=email,
-                    error_code=error_code,
-                )
-                self.valid_users[email] = False
-                return self.chat
-
-        return self.chat_delegates.get(email, self.chat)
+        return self.user_resolver.get_delegate(email)
 
     def _discover_channel_resources(self, channel: str):
-        """
-        Find the last message timestamp in a space to determine where to resume migration.
-
-        This approach simply finds the timestamp of the last message in the space and
-        only imports messages after that time.
-
-        Args:
-            channel: The Slack channel name
-        """
-        # Check if we have a space for this channel
-        space_name = self.channel_to_space.get(channel)
-        if not space_name:
-            log_with_context(
-                logging.WARNING,
-                f"No space found for channel {channel}, cannot determine last message timestamp",
-                channel=channel,
-            )
-            return
-
-        # Import discovery functions
-        from slack_migrator.services.discovery import get_last_message_timestamp
-
-        # Initialize the last_processed_timestamps dict if it doesn't exist
-        if not hasattr(self, "last_processed_timestamps"):
-            self.last_processed_timestamps = {}
-
-        # Get the timestamp of the last message in the space
-        last_timestamp = get_last_message_timestamp(self, channel, space_name)
-
-        if last_timestamp > 0:
-            log_with_context(
-                logging.INFO,
-                f"Found last message timestamp for channel {channel}: {last_timestamp}",
-                channel=channel,
-            )
-
-            # Store the last timestamp for this channel
-            self.last_processed_timestamps[channel] = last_timestamp
-
-            # Initialize an empty thread_map so we don't try to load it again
-            if not hasattr(self, "thread_map") or self.thread_map is None:
-                self.thread_map = {}
-        else:
-            # If no messages were found, log it but don't set a last timestamp
-            # This will cause all messages to be imported
-            log_with_context(
-                logging.INFO,
-                f"No existing messages found in space for channel {channel}, will import all messages",
-                channel=channel,
-            )
+        """Find the last message timestamp in a space to determine where to resume."""
+        self._get_channel_processor()._discover_channel_resources(channel)
 
     def _should_abort_import(
         self, channel: str, processed_count: int, failed_count: int
     ) -> bool:
-        """Determine if we should abort the import after errors in a channel.
-
-        This can be configured in the config file with abort_on_error: true|false
-        """
-        if self.dry_run:
-            return False
-
-        # Only consider aborting if we had failures
-        if failed_count > 0:
-            log_with_context(
-                logging.WARNING,
-                f"Channel '{channel}' had {failed_count} message import errors.",
-                channel=channel,
-            )
-
-            # Check config for abort_on_error setting
-            should_abort = self.config.abort_on_error
-
-            if should_abort:
-                log_with_context(
-                    logging.WARNING,
-                    "Aborting import due to errors (abort_on_error is enabled in config)",
-                    channel=channel,
-                )
-                return True
-            else:
-                log_with_context(
-                    logging.WARNING,
-                    "Continuing with migration despite errors (abort_on_error is disabled in config)",
-                    channel=channel,
-                )
-
-        return False
+        """Determine if we should abort the import after errors in a channel."""
+        return self._get_channel_processor()._should_abort_import(
+            channel, processed_count, failed_count
+        )
 
     def _delete_space_if_errors(self, space_name, channel):
         """Delete a space if it had errors and cleanup is enabled."""
-        if not self.config.cleanup_on_error:
-            log_with_context(
-                logging.INFO,
-                f"Not deleting space {space_name} despite errors (cleanup_on_error is disabled in config)",
-                space_name=space_name,
-            )
-            return
+        self._get_channel_processor()._delete_space_if_errors(space_name, channel)
 
-        try:
-            log_with_context(
-                logging.WARNING,
-                f"Deleting space {space_name} due to errors",
-                space_name=space_name,
-            )
-            assert self.chat is not None
-            self.chat.spaces().delete(name=space_name).execute()
-            log_with_context(
-                logging.INFO,
-                f"Successfully deleted space {space_name}",
-                space_name=space_name,
-            )
+    def _get_channel_processor(self) -> "ChannelProcessor":
+        """Get or create the ChannelProcessor instance."""
+        if not hasattr(self, "channel_processor"):
+            from slack_migrator.core.channel_processor import ChannelProcessor
 
-            # Remove from created_spaces
-            if channel in self.created_spaces:
-                del self.created_spaces[channel]
-
-            # Decrement space count
-            self.migration_summary["spaces_created"] -= 1
-        except Exception as e:
-            log_with_context(
-                logging.ERROR,
-                f"Failed to delete space {space_name}: {e}",
-                space_name=space_name,
-            )
-
-        log_with_context(logging.INFO, "Cleanup completed")
+            self.channel_processor = ChannelProcessor(self)
+        return self.channel_processor
 
     def _get_internal_email(
         self, user_id: str, user_email: Optional[str] = None
     ) -> Optional[str]:
-        """Get internal email for a user, handling external users and tracking unmapped users.
-
-        Args:
-            user_id: The Slack user ID
-            user_email: Optional email if already known
-
-        Returns:
-            The internal email to use for this user, or None if user should be ignored
-        """
-        # Check if this user is a bot and bots are being ignored FIRST
-        if self.config.ignore_bots:
-            # Check if this is a bot user
-            user_data = self._get_user_data(user_id)
-            if user_data and user_data.get("is_bot", False):
-                log_with_context(
-                    logging.DEBUG,
-                    f"Ignoring bot user {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
-                    user_id=user_id,
-                    channel=getattr(self, "current_channel", "unknown"),
-                )
-                return None  # Explicitly ignore this bot - don't track as unmapped
-
-        # Get the email from our user mapping if not provided
-        if user_email is None:
-            user_email = self.user_map.get(user_id)
-            if not user_email:
-                # Track this unmapped user automatically (only non-ignored users reach here)
-                if hasattr(self, "unmapped_user_tracker"):
-                    current_channel = getattr(self, "current_channel", "unknown")
-                    self.unmapped_user_tracker.add_unmapped_user(
-                        user_id, current_channel
-                    )
-
-                log_with_context(
-                    logging.DEBUG,  # Reduced to DEBUG since we now handle this gracefully
-                    f"No email mapping found for user {user_id}",
-                    user_id=user_id,
-                    channel=getattr(self, "current_channel", "unknown"),
-                )
-                return None  # Return None instead of fallback email
-
-        # Always return the mapped email - don't create fake external emails
-        # If the user has a mapping override, that takes precedence
-        # If they're external but have a real email mapping, use that
-        return user_email
+        """Get internal email for a user, handling external users and tracking unmapped users."""
+        return self.user_resolver.get_internal_email(user_id, user_email)
 
     def _get_user_data(self, user_id: str) -> Optional[dict]:
-        """Get user data from the users.json export file.
-
-        Args:
-            user_id: The Slack user ID
-
-        Returns:
-            User data dictionary or None if not found
-        """
-        if not hasattr(self, "_users_data"):
-            # Load and cache users data
-            import json
-            from pathlib import Path
-
-            users_file = Path(self.export_root) / "users.json"
-            if users_file.exists():
-                try:
-                    with open(users_file) as f:
-                        users_list = json.load(f)
-                    self._users_data = {user["id"]: user for user in users_list}
-                except Exception as e:
-                    log_with_context(logging.WARNING, f"Error loading users.json: {e}")
-                    self._users_data = {}
-            else:
-                self._users_data = {}
-
-        return self._users_data.get(user_id)
+        """Get user data from the users.json export file."""
+        return self.user_resolver.get_user_data(user_id)
 
     def _handle_unmapped_user_message(
         self, user_id: str, original_text: str
     ) -> tuple[str, str]:
-        """Handle messages from unmapped users by using workspace admin with attribution.
-
-        Args:
-            user_id: The unmapped Slack user ID
-            original_text: The original message text
-
-        Returns:
-            Tuple of (sender_email, modified_message_text)
-        """
-        # Track this unmapped user
-        if hasattr(self, "unmapped_user_tracker"):
-            current_channel = getattr(self, "current_channel", "unknown")
-            self.unmapped_user_tracker.add_unmapped_user(
-                user_id, f"message_sender:{current_channel}"
-            )
-
-        # Try to get any additional info about this user from users.json
-        user_info = None
-        try:
-            import json
-            from pathlib import Path
-
-            users_file = Path(self.export_root) / "users.json"
-            if users_file.exists():
-                with open(users_file) as f:
-                    users_data = json.load(f)
-                    user_info = next(
-                        (u for u in users_data if u.get("id") == user_id), None
-                    )
-        except Exception:
-            pass  # Continue without user info if we can't load it
-
-        # Create attribution prefix
-        # First check if we have a mapping override (this takes precedence)
-        override_email = self.config.user_mapping_overrides.get(user_id)
-        if override_email:
-            attribution = f"*[From: {override_email}]*"
-        elif user_info:
-            real_name = user_info.get("profile", {}).get("real_name", "")
-            email = user_info.get("profile", {}).get("email", "")
-
-            if real_name and email:
-                attribution = f"*[From: {real_name} ({email})]*"
-            elif email:
-                attribution = f"*[From: {email}]*"
-            elif real_name:
-                attribution = f"*[From: {real_name}]*"
-            else:
-                attribution = f"*[From: {user_id}]*"
-        else:
-            # User not in users.json (external or deactivated) and no override
-            attribution = f"*[From: {user_id}]*"
-
-        # Combine attribution with original message
-        modified_text = f"{attribution}\n{original_text}"
-
-        # Use workspace admin as sender
-        admin_email = self.workspace_admin
-
-        log_with_context(
-            logging.WARNING,
-            f"Sending message from unmapped user {user_id} via workspace admin {admin_email}",
-            user_id=user_id,
-            channel=getattr(self, "current_channel", "unknown"),
-            attribution=attribution,
-        )
-
-        return admin_email, modified_text
+        """Handle messages from unmapped users by using workspace admin with attribution."""
+        return self.user_resolver.handle_unmapped_user_message(user_id, original_text)
 
     def _handle_unmapped_user_reaction(
         self, user_id: str, reaction: str, message_ts: str
     ) -> bool:
-        """Handle reactions from unmapped users by logging and skipping.
-
-        Args:
-            user_id: The unmapped Slack user ID
-            reaction: The reaction emoji
-            message_ts: The timestamp of the message being reacted to
-
-        Returns:
-            False to indicate the reaction should be skipped
-        """
-        # Track this unmapped user
-        if hasattr(self, "unmapped_user_tracker"):
-            current_channel = getattr(self, "current_channel", "unknown")
-            self.unmapped_user_tracker.add_unmapped_user(
-                user_id, f"reaction:{current_channel}"
-            )
-
-        log_with_context(
-            logging.WARNING,
-            f"Skipping reaction '{reaction}' from unmapped user {user_id} on message {message_ts}",
-            user_id=user_id,
-            reaction=reaction,
-            message_ts=message_ts,
-            channel=getattr(self, "current_channel", "unknown"),
+        """Handle reactions from unmapped users by logging and skipping."""
+        return self.user_resolver.handle_unmapped_user_reaction(
+            user_id, reaction, message_ts
         )
-
-        if not hasattr(self, "skipped_reactions"):
-            self.skipped_reactions = []
-
-        self.skipped_reactions.append(
-            {
-                "user_id": user_id,
-                "reaction": reaction,
-                "message_ts": message_ts,
-                "channel": getattr(self, "current_channel", "unknown"),
-            }
-        )
-
-        return False  # Skip this reaction
 
     def _get_space_name(self, channel: str) -> str:
         """Get a consistent display name for a Google Chat space based on channel name."""
@@ -755,27 +459,10 @@ class SlackToChatMigrator:
         return [d.name for d in self.export_root.iterdir() if d.is_dir()]
 
     def _is_external_user(self, email: Optional[str]) -> bool:
-        """Check if a user is external based on their email domain.
+        """Check if a user is external based on their email domain."""
+        return self.user_resolver.is_external_user(email)
 
-        Args:
-            email: The user's email address
-
-        Returns:
-            True if the user is external, False otherwise
-        """
-        # Fix for syntax error: ensure email is a string before calling .split()
-        if not email or not isinstance(email, str) or not self.workspace_domain:
-            return False
-
-        # Extract domain from email
-        try:
-            domain = email.split("@")[-1]
-            # Compare with workspace domain
-            return domain.lower() != self.workspace_domain.lower()
-        except Exception:
-            return False
-
-    def migrate(self):  # noqa: C901
+    def migrate(self):
         """Main migration function that orchestrates the entire process."""
         migration_start_time = time.time()
         log_with_context(logging.INFO, "Starting migration process")
@@ -878,431 +565,13 @@ class SlackToChatMigrator:
             self.first_channel_processed = False
 
             # Process each channel
+            from slack_migrator.core.channel_processor import ChannelProcessor
+
+            self.channel_processor = ChannelProcessor(self)
             for ch in all_channel_dirs:
-                # Track the current channel being processed
-                self.current_channel = ch.name
-
-                mode_prefix = "[DRY RUN] "
-                if self.update_mode:
-                    mode_prefix = (
-                        "[UPDATE MODE] "
-                        if not self.dry_run
-                        else "[DRY RUN] [UPDATE MODE] "
-                    )
-
-                log_with_context(
-                    logging.INFO,
-                    f"{mode_prefix if self.dry_run or self.update_mode else ''}Processing channel: {ch.name}",
-                    channel=ch.name,
-                )
-                self.migration_summary["channels_processed"].append(ch.name)
-
-                # Check if channel should be processed
-                if not should_process_channel(ch.name, self.config):
-                    log_with_context(
-                        logging.WARNING,
-                        f"Skipping channel {ch.name} based on configuration",
-                        channel=ch.name,
-                    )
-                    continue
-
-                # Check if this channel has unresolved space conflicts
-                if (
-                    hasattr(self, "channel_conflicts")
-                    and ch.name in self.channel_conflicts
-                ):
-                    log_with_context(
-                        logging.ERROR,
-                        f"Skipping channel {ch.name} due to unresolved duplicate space conflict",
-                        channel=ch.name,
-                    )
-                    # Mark this channel as having a conflict in the migration report
-                    if not hasattr(self, "migration_issues"):
-                        self.migration_issues = {}
-                    self.migration_issues[ch.name] = (
-                        "Skipped due to duplicate space conflict - requires disambiguation in config.yaml"
-                    )
-                    continue
-
-                # Setup channel-specific logging for channels that will be processed
-                from slack_migrator.utils.logging import (
-                    is_debug_api_enabled,
-                    setup_channel_logger,
-                )
-
-                channel_handler = setup_channel_logger(
-                    self.output_dir, ch.name, self.verbose, is_debug_api_enabled()
-                )
-                self.channel_handlers[ch.name] = channel_handler
-
-                # Initialize error tracking variables
-                channel_had_errors = False
-                space_name = None
-                is_newly_created_space = (
-                    False  # Track if this space was created in this session
-                )
-
-                # Check if we're in update mode and already have a space for this channel
-                if self.update_mode and ch.name in self.created_spaces:
-                    space = self.created_spaces[ch.name]
-                    space_id = (
-                        space.split("/")[-1] if space.startswith("spaces/") else space
-                    )
-                    log_with_context(
-                        logging.INFO,
-                        f"[UPDATE MODE] Using existing space {space_id} for channel {ch.name}",
-                        channel=ch.name,
-                    )
-                    self.space_cache[ch.name] = space
-                    is_newly_created_space = False  # This space already existed
-                else:
-                    # Create new space (either in import mode, or update mode with no existing space)
-                    action_desc = (
-                        "Creating new import mode space"
-                        if not self.update_mode
-                        else "Creating new space (none found in update mode)"
-                    )
-                    log_with_context(
-                        logging.INFO,
-                        f"{'[DRY RUN] ' if self.dry_run else ''}Step 1/6: {action_desc} for {ch.name}",
-                        channel=ch.name,
-                    )
-                    space = self.space_cache.get(ch.name) or create_space(self, ch.name)
-                    self.space_cache[ch.name] = space
-                    is_newly_created_space = True  # This space was just created
-
-                # Skip processing if we couldn't create a space due to permissions
-                if space and space.startswith("ERROR_NO_PERMISSION_"):
-                    log_with_context(
-                        logging.WARNING,
-                        f"Skipping channel {ch.name} due to space creation permission error",
-                        channel=ch.name,
-                    )
-                    continue
-
-                # Set current space for file attachments
-                self.current_space = space
-                self.channel_to_space[ch.name] = space
-
-                # Store in created_spaces for future reference
-                self.created_spaces[ch.name] = space
-
-                # Log that we're setting the current space
-                log_with_context(
-                    logging.DEBUG,  # Changed to DEBUG for less verbose output
-                    f"Setting current space to {space} for channel {ch.name} and storing in channel_to_space mapping",
-                    channel=ch.name,
-                )
-
-                # Add historical memberships: only for newly created spaces (which are in import mode)
-                # Historical memberships are only needed when creating a space from scratch
-                if is_newly_created_space:
-                    # Step 2: Add historical memberships
-                    log_with_context(
-                        logging.INFO,
-                        f"{'[DRY RUN] ' if self.dry_run else ''}Step 2/6: Adding historical memberships for {ch.name}",
-                        channel=ch.name,
-                    )
-                    add_users_to_space(self, space, ch.name)
-                else:
-                    log_with_context(
-                        logging.INFO,
-                        "[UPDATE MODE] Skipping historical memberships for existing space (already has history)",
-                        channel=ch.name,
-                    )
-
-                # Track if we had errors processing this channel
-                space_name = space
-
-                # Process messages for this channel
-                mode_prefix = "[DRY RUN]"
-                if self.update_mode:
-                    mode_prefix = (
-                        "[UPDATE MODE]"
-                        if not self.dry_run
-                        else "[DRY RUN] [UPDATE MODE]"
-                    )
-
-                log_with_context(
-                    logging.INFO,
-                    f"{mode_prefix if self.dry_run or self.update_mode else ''} Step 3/6: Processing messages for {ch.name}",
-                    channel=ch.name,
-                )
-
-                # Get all messages for this channel
-                ch_dir = self.export_root / ch.name
-                msgs = []
-                for jf in sorted(ch_dir.glob("*.json")):
-                    try:
-                        with open(jf) as f:
-                            msgs.extend(json.load(f))
-                    except Exception as e:
-                        log_with_context(
-                            logging.WARNING,
-                            f"Failed to load messages from {jf}: {e}",
-                            channel=ch.name,
-                        )
-
-                # Sort messages by timestamp to maintain chronological order
-                msgs = sorted(msgs, key=lambda m: float(m.get("ts", "0")))
-
-                # Deduplicate messages by timestamp to prevent processing thread replies twice
-                # Thread replies appear both in parent's "replies" array and as standalone message objects
-                seen_timestamps = set()
-                deduped_msgs = []
-                duplicate_count = 0
-
-                for msg in msgs:
-                    ts = msg.get("ts")
-                    if ts and ts not in seen_timestamps:
-                        seen_timestamps.add(ts)
-                        deduped_msgs.append(msg)
-                    elif ts:
-                        duplicate_count += 1
-                        log_with_context(
-                            logging.DEBUG,
-                            f"Skipping duplicate message with timestamp {ts}",
-                            channel=ch.name,
-                            ts=ts,
-                        )
-
-                if duplicate_count > 0:
-                    log_with_context(
-                        logging.INFO,
-                        f"Deduplicated {duplicate_count} messages in channel {ch.name} (likely thread reply duplicates)",
-                        channel=ch.name,
-                    )
-
-                msgs = deduped_msgs
-
-                # Count messages in dry run mode
-                if self.dry_run:
-                    # Count only actual messages, not other events
-                    message_count = sum(1 for m in msgs if m.get("type") == "message")
-                    log_with_context(
-                        logging.INFO,
-                        f"{mode_prefix} Found {message_count} messages in channel {ch.name}",
-                        channel=ch.name,
-                    )
-                    # Add to the total message count
-                    self.migration_summary["messages_created"] += message_count
-
-                # Load previously processed messages and thread mappings
-                processed_ts = []
-
-                # Discover existing resources (find the last message timestamp) from Google Chat
-                if not self.dry_run or self.update_mode:
-                    self._discover_channel_resources(ch.name)
-
-                processed_count = 0
-                failed_count = 0
-
-                # Get failure threshold configuration
-                max_failure_percentage = self.config.max_failure_percentage
-
-                # Track failures for this channel
-                channel_failures = []
-
-                # Create more informative progress bar description
-                mode_prefix = ""
-                if self.dry_run:
-                    mode_prefix = "[DRY RUN] "
-                elif self.update_mode:
-                    mode_prefix = "[UPDATE] "
-
-                progress_desc = f"{mode_prefix}Adding messages to {ch.name}"
-                pbar = tqdm(msgs, desc=progress_desc)
-                for m in pbar:
-                    if m.get("type") != "message":
-                        continue
-
-                    ts = m["ts"]
-
-                    # Skip already processed messages (only in non-dry run mode)
-                    if ts in processed_ts and not self.dry_run:
-                        processed_count += 1
-                        continue
-
-                    # Track statistics for this message
-                    track_message_stats(self, m)
-
-                    if self.dry_run:
-                        continue
-
-                    # Send message using the new method
-                    result = send_message(self, space, m)
-
-                    if result:
-                        if result != "SKIPPED":
-                            # Message was sent successfully
-                            processed_ts.append(ts)
-                            processed_count += 1
-                    else:
-                        failed_count += 1
-                        channel_failures.append(ts)
-
-                        # Check if we've exceeded our failure threshold
-                        if processed_count > 0:  # Avoid division by zero
-                            failure_percentage = (
-                                failed_count / (processed_count + failed_count)
-                            ) * 100
-                            if failure_percentage > max_failure_percentage:
-                                log_with_context(
-                                    logging.WARNING,
-                                    f"Failure rate {failure_percentage:.1f}% exceeds threshold {max_failure_percentage}% for channel {ch.name}",
-                                    channel=ch.name,
-                                )
-                                # Flag the channel as having a high error rate, but don't break the loop
-                                channel_had_errors = True
-                                # Track channels with high failure rates
-                                if not hasattr(self, "high_failure_rate_channels"):
-                                    self.high_failure_rate_channels = {}
-                                self.high_failure_rate_channels[ch.name] = (
-                                    failure_percentage
-                                )
-                                # Don't break the loop - continue processing messages
-                                # break  # This line is commented out to continue processing
-
-                    # Add a small delay between messages to avoid rate limits
-                    time.sleep(0.05)
-
-                # Record failures for reporting
-                if channel_failures:
-                    if not hasattr(self, "failed_messages_by_channel"):
-                        self.failed_messages_by_channel = {}
-                    self.failed_messages_by_channel[ch.name] = channel_failures
-                    channel_had_errors = True
-
-                log_with_context(
-                    logging.INFO,
-                    f"Channel {ch.name} message import: processed {processed_count}, failed {failed_count}",
-                    channel=ch.name,
-                )
-
-                # Step 4: Complete import mode and add current members
-                # For newly created spaces: complete import mode first, then add current members
-                # For existing spaces: just add/update current members
-                if is_newly_created_space:
-                    log_with_context(
-                        logging.INFO,
-                        f"{'[DRY RUN] ' if self.dry_run else ''}Step 4/6: Completing import mode for {ch.name}",
-                        channel=ch.name,
-                    )
-
-                    # Get the completion strategy from config
-                    completion_strategy = self.config.import_completion_strategy
-
-                    # Only complete import if there were no errors or we're using force_complete strategy
-                    if (
-                        not channel_had_errors
-                        or completion_strategy == "force_complete"
-                    ) and not self.dry_run:
-                        try:
-                            log_with_context(
-                                logging.DEBUG,
-                                f"Attempting to complete import mode for space {space}",
-                                channel=ch.name,
-                            )
-
-                            assert self.chat is not None
-                            result = (
-                                self.chat.spaces().completeImport(name=space).execute()
-                            )
-
-                            log_with_context(
-                                logging.INFO,
-                                f"Successfully completed import mode for space: {space}",
-                                channel=ch.name,
-                            )
-
-                        except Exception as e:
-                            log_with_context(
-                                logging.ERROR,
-                                f"Failed to complete import for space {space}: {e}",
-                                channel=ch.name,
-                            )
-                            channel_had_errors = True
-
-                            # Track spaces that failed to complete import
-                            if not hasattr(self, "incomplete_import_spaces"):
-                                self.incomplete_import_spaces = []
-                            self.incomplete_import_spaces.append((space, ch.name))
-                    elif channel_had_errors and not self.dry_run:
-                        log_with_context(
-                            logging.WARNING,
-                            f"Skipping import completion for space {space} due to errors (strategy: {completion_strategy})",
-                            channel=ch.name,
-                        )
-
-                        # Track spaces that weren't completed due to errors
-                        if not hasattr(self, "incomplete_import_spaces"):
-                            self.incomplete_import_spaces = []
-                        self.incomplete_import_spaces.append((space, ch.name))
-
-                # Step 5: Add/update current members (for both new and existing spaces)
-                step_desc = (
-                    "Adding current members to space"
-                    if is_newly_created_space
-                    else "Updating current members in existing space"
-                )
-                log_with_context(
-                    logging.INFO,
-                    f"{'[DRY RUN] ' if self.dry_run else ''}Step 5/6: {step_desc} for {ch.name}",
-                    channel=ch.name,
-                )
-
-                if not channel_had_errors or not is_newly_created_space:
-                    # For existing spaces, we always try to update members even if there were message errors
-                    # For new spaces, only add members if import completed successfully
-                    try:
-                        from slack_migrator.services.space import (
-                            add_regular_members,
-                        )
-
-                        add_regular_members(self, space, ch.name)
-                        log_with_context(
-                            logging.DEBUG,
-                            f"Successfully updated current members for space {space} and channel {ch.name}",
-                            channel=ch.name,
-                        )
-                    except Exception as e:
-                        log_with_context(
-                            logging.ERROR,
-                            f"Error updating current members for space {space}: {e}",
-                            channel=ch.name,
-                        )
-
-                        log_with_context(
-                            logging.DEBUG,
-                            f"Exception traceback: {traceback.format_exc()}",
-                            channel=ch.name,
-                        )
-                else:
-                    log_with_context(
-                        logging.WARNING,
-                        f"Skipping member addition for newly created space {space} due to import completion errors",
-                        channel=ch.name,
-                    )
-
-                # Log completion for this channel
-                log_with_context(
-                    logging.DEBUG,
-                    f"Channel log file completed for channel: {ch.name}",
-                    channel=ch.name,
-                )
-
-                # Check if we should abort after first channel error
-                if self._should_abort_import(ch.name, processed_count, failed_count):
-                    log_with_context(
-                        logging.WARNING,
-                        "Aborting import after first channel due to errors",
-                        channel=ch.name,
-                    )
+                should_abort = self.channel_processor.process_channel(ch)
+                if should_abort:
                     break
-
-                # Delete space if there were errors and we're not in dry run mode
-                if channel_had_errors and not self.dry_run and not self.update_mode:
-                    self._delete_space_if_errors(space_name, ch.name)
 
             # Log any space mapping conflicts that should be added to config
             from slack_migrator.services.message import log_space_mapping_conflicts
@@ -1460,7 +729,7 @@ class SlackToChatMigrator:
                         "Server error listing spaces - this might be a temporary issue, skipping cleanup",
                     )
                 return
-            except Exception as list_e:
+            except (RefreshError, TransportError) as list_e:
                 log_with_context(
                     logging.ERROR,
                     f"Failed to list spaces during cleanup: {list_e}",
@@ -1494,7 +763,7 @@ class SlackToChatMigrator:
                             "Server error checking space - this might be a temporary issue",
                             space_name=space_name,
                         )
-                except Exception as e:
+                except (RefreshError, TransportError) as e:
                     log_with_context(
                         logging.WARNING,
                         f"Failed to get space info during cleanup: {e}",
@@ -1578,7 +847,7 @@ class SlackToChatMigrator:
                                     space_name=space_name,
                                 )
                             continue
-                        except Exception as e:
+                        except (RefreshError, TransportError) as e:
                             log_with_context(
                                 logging.ERROR,
                                 f"Failed to complete import: {e}",
@@ -1615,7 +884,7 @@ class SlackToChatMigrator:
                                         "Server error updating space - this might be a temporary issue",
                                         space_name=space_name,
                                     )
-                            except Exception as e:
+                            except (RefreshError, TransportError) as e:
                                 log_with_context(
                                     logging.WARNING,
                                     f"Failed to preserve external user access: {e}",
@@ -1670,8 +939,6 @@ class SlackToChatMigrator:
                                     f"Error adding regular members to space {space_name}: {e}",
                                     channel=channel_name,
                                 )
-                                import traceback
-
                                 log_with_context(
                                     logging.DEBUG,
                                     f"Exception traceback: {traceback.format_exc()}",
@@ -1697,7 +964,7 @@ class SlackToChatMigrator:
                                 "Server error during cleanup - this might be a temporary issue",
                                 space_name=space_name,
                             )
-                    except Exception as e:
+                    except (RefreshError, TransportError) as e:
                         log_with_context(
                             logging.ERROR,
                             f"Failed to complete import mode for space {space_name} during cleanup: {e}",
@@ -1734,8 +1001,6 @@ class SlackToChatMigrator:
                 logging.ERROR,
                 f"Unexpected error during cleanup: {e}",
             )
-            import traceback
-
             log_with_context(
                 logging.DEBUG,
                 f"Cleanup exception traceback: {traceback.format_exc()}",
@@ -1770,10 +1035,6 @@ class SlackToChatMigrator:
             # Query Google Chat API to find spaces that match our naming pattern
             # This will also detect duplicate spaces with the same channel name
             discovered_spaces, duplicate_spaces = discover_existing_spaces(self)
-
-            # Initialize conflict tracking
-            if not hasattr(self, "channel_conflicts"):
-                self.channel_conflicts = set()
 
             # Check if we have any spaces with duplicate names that need disambiguation
             if duplicate_spaces:
@@ -1847,9 +1108,6 @@ class SlackToChatMigrator:
 
                 # Mark unresolved conflicts but don't abort the entire migration
                 if unresolved_conflicts:
-                    if not hasattr(self, "migration_issues"):
-                        self.migration_issues = {}
-
                     for channel in unresolved_conflicts:
                         self.migration_issues[channel] = (
                             "Duplicate spaces found - requires disambiguation in config.yaml"
@@ -2127,7 +1385,6 @@ class SlackToChatMigrator:
             exception: The exception that caused the failure
             duration: Migration duration in seconds before failure
         """
-        import traceback
 
         duration_minutes = duration / 60
 

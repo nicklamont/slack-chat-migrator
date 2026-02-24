@@ -70,7 +70,7 @@ class TestChannelHasExternalUsers:
             user_map={"U001": "alice@example.com"},
             channels_meta={"general": {"members": ["U001"]}},
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
 
         result = channel_has_external_users(migrator, "general")
         assert result is False
@@ -80,7 +80,9 @@ class TestChannelHasExternalUsers:
             user_map={"U001": "alice@example.com", "U002": "ext@other.com"},
             channels_meta={"general": {"members": ["U001", "U002"]}},
         )
-        migrator._is_external_user.side_effect = lambda email: email == "ext@other.com"
+        migrator.user_resolver.is_external_user.side_effect = lambda email: (
+            email == "ext@other.com"
+        )
 
         result = channel_has_external_users(migrator, "general")
         assert result is True
@@ -123,7 +125,9 @@ class TestChannelHasExternalUsers:
             channels_meta={"dev": {}},
             export_root=tmp_path,
         )
-        migrator._is_external_user.side_effect = lambda e: e == "ext@other.com"
+        migrator.user_resolver.is_external_user.side_effect = lambda e: (
+            e == "ext@other.com"
+        )
 
         assert channel_has_external_users(migrator, "dev") is True
 
@@ -134,7 +138,7 @@ class TestChannelHasExternalUsers:
             channels_meta={"general": {"members": ["U001"]}},
         )
         migrator.users_without_email = [{"id": "U001", "is_bot": True}]
-        migrator._is_external_user.return_value = True
+        migrator.user_resolver.is_external_user.return_value = True
 
         assert channel_has_external_users(migrator, "general") is False
 
@@ -145,7 +149,7 @@ class TestChannelHasExternalUsers:
             channels_meta={"general": {"members": ["U001"]}},
         )
         migrator.users_without_email = [{"id": "U001", "is_app_user": True}]
-        migrator._is_external_user.return_value = True
+        migrator.user_resolver.is_external_user.return_value = True
 
         assert channel_has_external_users(migrator, "general") is False
 
@@ -170,7 +174,7 @@ class TestChannelHasExternalUsers:
             channels_meta={"general": {"members": ["U001"]}},
         )
         migrator.users_without_email = None
-        migrator._is_external_user.return_value = True
+        migrator.user_resolver.is_external_user.return_value = True
 
         assert channel_has_external_users(migrator, "general") is True
 
@@ -189,7 +193,7 @@ class TestCreateSpace:
             channels_meta={"general": {"members": []}},
             dry_run=True,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
 
         result = create_space(migrator, "general")
 
@@ -205,7 +209,7 @@ class TestCreateSpace:
             channels_meta={"general": {"is_general": True, "members": []}},
             dry_run=True,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
 
         result = create_space(migrator, "general")
         assert result == "spaces/general"
@@ -216,7 +220,7 @@ class TestCreateSpace:
             channels_meta={"dev": {"members": []}},
             dry_run=False,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
         mock_execute = MagicMock(return_value={"name": "spaces/abc123"})
         migrator.chat.spaces().create.return_value.execute = mock_execute
 
@@ -232,7 +236,7 @@ class TestCreateSpace:
             channels_meta={"dev": {"members": []}},
             dry_run=False,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
         mock_create = migrator.chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
 
@@ -257,7 +261,7 @@ class TestCreateSpace:
             channels_meta={"dev": {"created": 1700000000, "members": []}},
             dry_run=False,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
         mock_create = migrator.chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
 
@@ -273,7 +277,7 @@ class TestCreateSpace:
             channels_meta={"dev": {"members": ["U001"]}},
             dry_run=False,
         )
-        migrator._is_external_user.return_value = True
+        migrator.user_resolver.is_external_user.return_value = True
         mock_create = migrator.chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
 
@@ -294,7 +298,7 @@ class TestCreateSpace:
             },
             dry_run=False,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
         mock_create = migrator.chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
 
@@ -315,7 +319,7 @@ class TestCreateSpace:
             },
             dry_run=False,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
         mock_create = migrator.chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
 
@@ -329,7 +333,7 @@ class TestCreateSpace:
             channels_meta={"dev": {"members": []}},
             dry_run=False,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
         error = _make_http_error(403, content=b"PERMISSION_DENIED")
         migrator.chat.spaces().create.return_value.execute.side_effect = error
 
@@ -343,7 +347,7 @@ class TestCreateSpace:
             channels_meta={"dev": {"members": []}},
             dry_run=False,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
         error = _make_http_error(500, content=b"Internal Server Error")
         migrator.chat.spaces().create.return_value.execute.side_effect = error
 
@@ -364,7 +368,7 @@ class TestCreateSpace:
             },
             dry_run=False,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
         mock_create = migrator.chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
         # Patch fails with HttpError
@@ -380,7 +384,7 @@ class TestCreateSpace:
             channels_meta={"dev": {"members": []}},
             dry_run=True,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
 
         create_space(migrator, "dev")
 
@@ -393,7 +397,7 @@ class TestCreateSpace:
             channels_meta={"general": {"is_general": True, "members": []}},
             dry_run=False,
         )
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.is_external_user.return_value = False
         mock_create = migrator.chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/gen"}
 
@@ -448,8 +452,8 @@ class TestAddUsersToSpace:
             export_root=tmp_path,
             dry_run=False,
         )
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         add_users_to_space(migrator, "spaces/dev", "dev")
 
@@ -498,8 +502,8 @@ class TestAddUsersToSpace:
             export_root=tmp_path,
             dry_run=False,
         )
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         error = _make_http_error(409, content=b"Conflict")
         migrator.chat.spaces().members().create.return_value.execute.side_effect = error
@@ -520,8 +524,8 @@ class TestAddUsersToSpace:
             export_root=tmp_path,
             dry_run=False,
         )
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         error = _make_http_error(500, content=b"Server Error")
         migrator.chat.spaces().members().create.return_value.execute.side_effect = error
@@ -542,8 +546,8 @@ class TestAddUsersToSpace:
             export_root=tmp_path,
             dry_run=False,
         )
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         migrator.chat.spaces().members().create.return_value.execute.side_effect = (
             RuntimeError("boom")
@@ -573,8 +577,8 @@ class TestAddUsersToSpace:
             export_root=tmp_path,
             dry_run=False,
         )
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         add_users_to_space(migrator, "spaces/dev", "dev")
 
@@ -609,8 +613,8 @@ class TestAddUsersToSpace:
             export_root=tmp_path,
             dry_run=False,
         )
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         add_users_to_space(migrator, "spaces/dev", "dev")
 
@@ -631,8 +635,8 @@ class TestAddUsersToSpace:
             export_root=tmp_path,
             dry_run=False,
         )
-        migrator._get_internal_email.return_value = "ext@other.com"
-        migrator._is_external_user.return_value = True
+        migrator.user_resolver.get_internal_email.return_value = "ext@other.com"
+        migrator.user_resolver.is_external_user.return_value = True
 
         add_users_to_space(migrator, "spaces/dev", "dev")
 
@@ -671,8 +675,8 @@ class TestAddUsersToSpace:
             export_root=tmp_path,
             dry_run=False,
         )
-        migrator._get_internal_email.return_value = "quiet@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "quiet@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         add_users_to_space(migrator, "spaces/dev", "dev")
 
@@ -708,8 +712,8 @@ class TestAddRegularMembers:
         migrator = _make_migrator(dry_run=True)
         migrator.active_users_by_channel = {"dev": {"U001"}}
         migrator.user_map = {"U001": "alice@example.com"}
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         add_regular_members(migrator, "spaces/dev", "dev")
 
@@ -722,8 +726,8 @@ class TestAddRegularMembers:
         migrator = _make_migrator(dry_run=False)
         migrator.active_users_by_channel = {"dev": {"U001"}}
         migrator.user_map = {"U001": "alice@example.com"}
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
         # Members list for verification
         migrator.chat.spaces().members().list.return_value.execute.return_value = {
             "memberships": []
@@ -762,8 +766,8 @@ class TestAddRegularMembers:
         migrator = _make_migrator(dry_run=False)
         migrator.active_users_by_channel = {"dev": {"U001"}}
         migrator.user_map = {"U001": "alice@example.com"}
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         error = _make_http_error(409, content=b"Conflict")
         migrator.chat.spaces().members().create.return_value.execute.side_effect = error
@@ -781,8 +785,8 @@ class TestAddRegularMembers:
         migrator = _make_migrator(dry_run=False)
         migrator.active_users_by_channel = {"dev": {"U001"}}
         migrator.user_map = {"U001": "alice@example.com"}
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         error = _make_http_error(400, content=b"Bad Request")
         migrator.chat.spaces().members().create.return_value.execute.side_effect = error
@@ -800,8 +804,8 @@ class TestAddRegularMembers:
         migrator = _make_migrator(dry_run=False)
         migrator.active_users_by_channel = {"dev": {"U001"}}
         migrator.user_map = {"U001": "alice@example.com"}
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         error = _make_http_error(403, content=b"Forbidden")
         migrator.chat.spaces().members().create.return_value.execute.side_effect = error
@@ -819,8 +823,8 @@ class TestAddRegularMembers:
         migrator = _make_migrator(dry_run=False)
         migrator.active_users_by_channel = {"dev": {"U001"}}
         migrator.user_map = {"U001": "alice@example.com"}
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         migrator.chat.spaces().members().create.return_value.execute.side_effect = (
             RuntimeError("boom")
@@ -854,8 +858,8 @@ class TestAddRegularMembers:
             dry_run=True,
         )
         migrator.active_users_by_channel = {}
-        migrator._get_internal_email.side_effect = lambda uid, email: email
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.side_effect = lambda uid, email: email
+        migrator.user_resolver.is_external_user.return_value = False
 
         add_regular_members(migrator, "spaces/dev", "dev")
 
@@ -875,8 +879,8 @@ class TestAddRegularMembers:
             "U001": "alice@example.com",
             "U_ADMIN": "admin@example.com",
         }
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         # Admin is in the members list returned by the API
         migrator.chat.spaces().members().list.return_value.execute.return_value = {
@@ -907,8 +911,8 @@ class TestAddRegularMembers:
             "U001": "alice@example.com",
             "U_ADMIN": "admin@example.com",
         }
-        migrator._get_internal_email.side_effect = lambda uid, email: email
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.side_effect = lambda uid, email: email
+        migrator.user_resolver.is_external_user.return_value = False
 
         migrator.chat.spaces().members().list.return_value.execute.return_value = {
             "memberships": [
@@ -931,8 +935,8 @@ class TestAddRegularMembers:
         migrator = _make_migrator(dry_run=False)
         migrator.active_users_by_channel = {"dev": {"U001"}}
         migrator.user_map = {"U001": "ext@other.com"}
-        migrator._get_internal_email.return_value = "ext@other.com"
-        migrator._is_external_user.return_value = True
+        migrator.user_resolver.get_internal_email.return_value = "ext@other.com"
+        migrator.user_resolver.is_external_user.return_value = True
 
         # Space currently doesn't have external users allowed
         migrator.chat.spaces().get.return_value.execute.return_value = {
@@ -954,8 +958,8 @@ class TestAddRegularMembers:
         migrator = _make_migrator(dry_run=False)
         migrator.active_users_by_channel = {"dev": {"U001"}}
         migrator.user_map = {"U001": "ext@other.com"}
-        migrator._get_internal_email.return_value = "ext@other.com"
-        migrator._is_external_user.return_value = True
+        migrator.user_resolver.get_internal_email.return_value = "ext@other.com"
+        migrator.user_resolver.is_external_user.return_value = True
 
         migrator.chat.spaces().get.return_value.execute.return_value = {
             "externalUserAllowed": True
@@ -975,8 +979,8 @@ class TestAddRegularMembers:
         migrator = _make_migrator(dry_run=False)
         migrator.active_users_by_channel = {"dev": {"U001"}}
         migrator.user_map = {"U001": "alice@example.com"}
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
         migrator.chat.spaces().members().list.return_value.execute.return_value = {
             "memberships": []
         }
@@ -998,8 +1002,8 @@ class TestAddRegularMembers:
         migrator = _make_migrator(dry_run=False)
         migrator.active_users_by_channel = {"dev": {"U001"}}
         migrator.user_map = {"U001": "alice@example.com"}
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         # Make the list call fail
         migrator.chat.spaces().members().list.return_value.execute.side_effect = (
@@ -1022,8 +1026,8 @@ class TestAddRegularMembers:
             "U001": "alice@example.com",
             "U_ADMIN": "admin@example.com",
         }
-        migrator._get_internal_email.return_value = "alice@example.com"
-        migrator._is_external_user.return_value = False
+        migrator.user_resolver.get_internal_email.return_value = "alice@example.com"
+        migrator.user_resolver.is_external_user.return_value = False
 
         # Admin found via email field, not name field
         migrator.chat.spaces().members().list.return_value.execute.return_value = {

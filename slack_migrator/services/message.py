@@ -74,7 +74,7 @@ def process_reactions_batch(  # noqa: C901
             for uid in emoji_users:
                 # Check if this reaction is from a bot and bots should be ignored
                 if migrator.config.ignore_bots:
-                    user_data = migrator._get_user_data(uid)
+                    user_data = migrator.user_resolver.get_user_data(uid)
                     if user_data and user_data.get("is_bot", False):
                         log_with_context(
                             logging.DEBUG,
@@ -89,7 +89,9 @@ def process_reactions_batch(  # noqa: C901
                 email = migrator.user_map.get(uid)
                 if email:
                     # Get the internal email for this user (handles external users)
-                    internal_email = migrator._get_internal_email(uid, email)
+                    internal_email = migrator.user_resolver.get_internal_email(
+                        uid, email
+                    )
                     if internal_email:  # Only process if we get a valid internal email
                         requests_by_user[internal_email].append(emo)
                         reaction_count += 1  # Count every reaction we process
@@ -98,7 +100,7 @@ def process_reactions_batch(  # noqa: C901
                     # Handle unmapped user reaction with new graceful approach
                     reaction_name = react.get("name", "unknown")
                     message_ts = getattr(migrator, "current_message_ts", "unknown")
-                    migrator._handle_unmapped_user_reaction(
+                    migrator.user_resolver.handle_unmapped_user_reaction(
                         uid, reaction_name, message_ts
                     )
                     continue
@@ -134,7 +136,7 @@ def process_reactions_batch(  # noqa: C901
 
     for email, emojis in requests_by_user.items():
         # Always skip external users' reactions to avoid false attribution to admin
-        if migrator._is_external_user(email):
+        if migrator.user_resolver.is_external_user(email):
             log_with_context(
                 logging.INFO,
                 f"Skipping {len(emojis)} reactions from external user {email} to avoid admin attribution",
@@ -147,7 +149,7 @@ def process_reactions_batch(  # noqa: C901
         # Process reactions normally for mapped internal users
         # We already skipped unmapped users earlier in the code
 
-        svc = migrator._get_delegate(email)
+        svc = migrator.user_resolver.get_delegate(email)
         # If impersonation failed, svc will be the admin service.
         # We process these synchronously as we can't batch across users.
         if svc == migrator.chat:
@@ -172,7 +174,7 @@ def process_reactions_batch(  # noqa: C901
                 except HttpError as e:
                     log_with_context(
                         logging.WARNING,
-                        f"Failed to add reaction for external user: {e}",
+                        f"Failed to add reaction via admin fallback: {e}",
                         error_code=e.resp.status,
                         user=email,
                         message_id=message_id,
@@ -180,7 +182,7 @@ def process_reactions_batch(  # noqa: C901
                     )
             continue
 
-        svc = migrator._get_delegate(email)
+        svc = migrator.user_resolver.get_delegate(email)
         # If impersonation failed, svc will be the admin service.
         # We process these synchronously as we can't batch across users.
         if svc == migrator.chat:
@@ -340,7 +342,7 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
 
         # Also check for user-based bots (bots that are in users.json)
         if user_id:
-            user_data = migrator._get_user_data(user_id)
+            user_data = migrator.user_resolver.get_user_data(user_id)
             if user_data and user_data.get("is_bot", False):
                 log_with_context(
                     logging.DEBUG,
@@ -459,7 +461,7 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
     # Map ALL user IDs with their proper overrides by iterating over .items()
     # This ensures we never miss any mentions and handles all potential edge cases
     for slack_user_id, email in migrator.user_map.items():
-        internal_email = migrator._get_internal_email(slack_user_id, email)
+        internal_email = migrator.user_resolver.get_internal_email(slack_user_id, email)
         if internal_email:  # Only add if we got a valid email back
             user_map_with_overrides[slack_user_id] = internal_email
 
@@ -489,13 +491,15 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
 
     if user_email:
         # Get the internal email for this user (now just returns the mapped email)
-        internal_email = migrator._get_internal_email(user_id, user_email)
+        internal_email = migrator.user_resolver.get_internal_email(user_id, user_email)
         if internal_email:
             # Check if this is an external user - if so, use admin with attribution
-            if migrator._is_external_user(internal_email):
+            if migrator.user_resolver.is_external_user(internal_email):
                 # External user - send via admin with attribution
-                admin_email, attributed_text = migrator._handle_unmapped_user_message(
-                    user_id, formatted_text
+                admin_email, attributed_text = (
+                    migrator.user_resolver.handle_unmapped_user_message(
+                        user_id, formatted_text
+                    )
                 )
                 sender_email = admin_email
                 final_text = attributed_text
@@ -506,16 +510,18 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
                 payload["sender"] = {"type": "HUMAN", "name": f"users/{internal_email}"}
         else:
             # This shouldn't happen if user_email exists, but handle it gracefully
-            admin_email, attributed_text = migrator._handle_unmapped_user_message(
-                user_id, formatted_text
+            admin_email, attributed_text = (
+                migrator.user_resolver.handle_unmapped_user_message(
+                    user_id, formatted_text
+                )
             )
             sender_email = admin_email
             final_text = attributed_text
             payload["sender"] = {"type": "HUMAN", "name": f"users/{admin_email}"}
     elif user_id:  # We have a user_id but no mapping
         # Handle unmapped user with new graceful approach
-        admin_email, attributed_text = migrator._handle_unmapped_user_message(
-            user_id, formatted_text
+        admin_email, attributed_text = (
+            migrator.user_resolver.handle_unmapped_user_message(user_id, formatted_text)
         )
         sender_email = admin_email
         final_text = attributed_text
@@ -608,8 +614,8 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
         chat_service = migrator.chat  # Default to admin service
 
         # If we have a valid user email, try to use impersonation
-        if user_email and not migrator._is_external_user(user_email):
-            chat_service = migrator._get_delegate(user_email)
+        if user_email and not migrator.user_resolver.is_external_user(user_email):
+            chat_service = migrator.user_resolver.get_delegate(user_email)
 
             # Log whether we're using impersonation or falling back to admin
             if chat_service != migrator.chat:
@@ -676,7 +682,7 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
 
         # For impersonated users, ensure they have access to any drive files
         sender_email = None
-        if user_email and not migrator._is_external_user(user_email):
+        if user_email and not migrator.user_resolver.is_external_user(user_email):
             sender_email = user_email
 
         # Process file attachments with the sender's email to ensure proper permissions
@@ -931,7 +937,7 @@ def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
 
         # Also check for user-based bots (bots that are in users.json)
         if user_id:
-            user_data = migrator._get_user_data(user_id)
+            user_data = migrator.user_resolver.get_user_data(user_id)
             if user_data and user_data.get("is_bot", False):
                 log_with_context(
                     logging.DEBUG,
@@ -990,7 +996,7 @@ def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
             for user_id in reaction.get("users", []):
                 # Skip bot reactions if ignore_bots is enabled
                 if migrator.config.ignore_bots:
-                    user_data = migrator._get_user_data(user_id)
+                    user_data = migrator.user_resolver.get_user_data(user_id)
                     if user_data and user_data.get("is_bot", False):
                         continue
                 reaction_count += 1

@@ -895,7 +895,7 @@ class FileHandler:
                 # Also, external users cannot be made owners of files
                 if (
                     user_email
-                    and not self.migrator._is_external_user(user_email)
+                    and not self.migrator.user_resolver.is_external_user(user_email)
                     and not self._shared_drive_id
                 ):
                     # For regular Drive folders, transfer ownership to the original internal poster
@@ -917,7 +917,9 @@ class FileHandler:
                             channel=channel,
                             file_id=file_id,
                         )
-                elif user_email and self.migrator._is_external_user(user_email):
+                elif user_email and self.migrator.user_resolver.is_external_user(
+                    user_email
+                ):
                     log_with_context(
                         logging.DEBUG,
                         f"External user {user_email} cannot be made file owner, using service account ownership",

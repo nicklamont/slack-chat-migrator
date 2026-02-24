@@ -575,14 +575,57 @@ class TestDeleteSpaceIfErrors:
         assert m.migration_summary["spaces_created"] == 0
 
     def test_delete_handles_api_error(self, tmp_path):
+        from google.auth.exceptions import RefreshError
+
         m = _make_migrator(tmp_path)
         m.config = MigrationConfig(cleanup_on_error=True)
         m.chat = MagicMock()
-        m.chat.spaces().delete().execute.side_effect = Exception("API error")
+        m.chat.spaces().delete().execute.side_effect = RefreshError("API error")
         m.created_spaces = {"general": "spaces/abc123"}
         m.migration_summary = {"spaces_created": 1}
         # Should not raise
         m._delete_space_if_errors("spaces/abc123", "general")
+
+    def test_delete_handles_transport_error(self, tmp_path):
+        from google.auth.exceptions import TransportError
+
+        m = _make_migrator(tmp_path)
+        m.config = MigrationConfig(cleanup_on_error=True)
+        m.chat = MagicMock()
+        m.chat.spaces().delete().execute.side_effect = TransportError("network down")
+        m.created_spaces = {"general": "spaces/abc123"}
+        m.migration_summary = {"spaces_created": 1}
+        # Should not raise — TransportError is a recoverable network issue
+        m._delete_space_if_errors("spaces/abc123", "general")
+
+    def test_delete_handles_http_error(self, tmp_path):
+        from googleapiclient.errors import HttpError
+
+        m = _make_migrator(tmp_path)
+        m.config = MigrationConfig(cleanup_on_error=True)
+        m.chat = MagicMock()
+        resp = MagicMock()
+        resp.status = 500
+        m.chat.spaces().delete().execute.side_effect = HttpError(
+            resp=resp, content=b"Server Error"
+        )
+        m.created_spaces = {"general": "spaces/abc123"}
+        m.migration_summary = {"spaces_created": 1}
+        # Should not raise — HttpError is caught and logged
+        m._delete_space_if_errors("spaces/abc123", "general")
+        # Space should NOT be removed from created_spaces (delete failed)
+        assert "general" in m.created_spaces
+
+    def test_delete_propagates_unexpected_error(self, tmp_path):
+        m = _make_migrator(tmp_path)
+        m.config = MigrationConfig(cleanup_on_error=True)
+        m.chat = MagicMock()
+        m.chat.spaces().delete().execute.side_effect = RuntimeError("truly unexpected")
+        m.created_spaces = {"general": "spaces/abc123"}
+        m.migration_summary = {"spaces_created": 1}
+        # Should raise — RuntimeError is not a known API/transport error
+        with pytest.raises(RuntimeError):
+            m._delete_space_if_errors("spaces/abc123", "general")
 
 
 # ---------------------------------------------------------------------------
@@ -756,7 +799,7 @@ class TestGetUserData:
     def test_caches_after_first_call(self, tmp_path):
         m = _make_migrator(tmp_path)
         m._get_user_data("U001")
-        assert hasattr(m, "_users_data")
+        assert m.user_resolver._users_data is not None
         # Second call should use cache
         m._get_user_data("U001")
 
@@ -1038,11 +1081,27 @@ class TestListAllSpaces:
         result = _list_all_spaces(chat_service)
         assert result == []
 
-    def test_generic_exception_returns_empty(self):
+    def test_refresh_error_returns_empty(self):
+        from google.auth.exceptions import RefreshError
+
         chat_service = MagicMock()
-        chat_service.spaces().list().execute.side_effect = Exception("network error")
+        chat_service.spaces().list().execute.side_effect = RefreshError("network error")
         result = _list_all_spaces(chat_service)
         assert result == []
+
+    def test_transport_error_returns_empty(self):
+        from google.auth.exceptions import TransportError
+
+        chat_service = MagicMock()
+        chat_service.spaces().list().execute.side_effect = TransportError("DNS failure")
+        result = _list_all_spaces(chat_service)
+        assert result == []
+
+    def test_connection_error_propagates(self):
+        chat_service = MagicMock()
+        chat_service.spaces().list().execute.side_effect = ConnectionError("refused")
+        with pytest.raises(ConnectionError):
+            _list_all_spaces(chat_service)
 
 
 # ---------------------------------------------------------------------------
@@ -1115,15 +1174,35 @@ class TestCleanupImportModeSpaces:
         cleanup_import_mode_spaces(chat_service)
 
     @patch("slack_migrator.core.migrator._list_all_spaces")
-    def test_handles_complete_import_generic_error(self, mock_list):
+    def test_handles_complete_import_refresh_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/fail"}]
         chat_service = MagicMock()
         chat_service.spaces().get().execute.return_value = {
             "importMode": True,
             "externalUserAllowed": False,
         }
-        chat_service.spaces().completeImport().execute.side_effect = Exception("boom")
+        from google.auth.exceptions import RefreshError
+
+        chat_service.spaces().completeImport().execute.side_effect = RefreshError(
+            "boom"
+        )
         # Should not raise
+        cleanup_import_mode_spaces(chat_service)
+
+    @patch("slack_migrator.core.migrator._list_all_spaces")
+    def test_handles_complete_import_transport_error(self, mock_list):
+        mock_list.return_value = [{"name": "spaces/fail"}]
+        chat_service = MagicMock()
+        chat_service.spaces().get().execute.return_value = {
+            "importMode": True,
+            "externalUserAllowed": False,
+        }
+        from google.auth.exceptions import TransportError
+
+        chat_service.spaces().completeImport().execute.side_effect = TransportError(
+            "network timeout"
+        )
+        # Should not raise — TransportError is caught
         cleanup_import_mode_spaces(chat_service)
 
     @patch("slack_migrator.core.migrator._list_all_spaces")
@@ -1142,8 +1221,20 @@ class TestCleanupImportModeSpaces:
     def test_handles_get_exception(self, mock_list):
         mock_list.return_value = [{"name": "spaces/err"}]
         chat_service = MagicMock()
-        chat_service.spaces().get().execute.side_effect = Exception("get failed")
+        from google.auth.exceptions import RefreshError
+
+        chat_service.spaces().get().execute.side_effect = RefreshError("get failed")
         # Should not raise
+        cleanup_import_mode_spaces(chat_service)
+
+    @patch("slack_migrator.core.migrator._list_all_spaces")
+    def test_handles_get_transport_error(self, mock_list):
+        mock_list.return_value = [{"name": "spaces/err"}]
+        chat_service = MagicMock()
+        from google.auth.exceptions import TransportError
+
+        chat_service.spaces().get().execute.side_effect = TransportError("DNS timeout")
+        # Should not raise — TransportError is caught
         cleanup_import_mode_spaces(chat_service)
 
     @patch("slack_migrator.core.migrator._list_all_spaces")
@@ -1154,8 +1245,26 @@ class TestCleanupImportModeSpaces:
             "importMode": True,
             "externalUserAllowed": True,
         }
-        chat_service.spaces().patch().execute.side_effect = Exception("patch failed")
+        from google.auth.exceptions import RefreshError
+
+        chat_service.spaces().patch().execute.side_effect = RefreshError("patch failed")
         # Should not raise
+        cleanup_import_mode_spaces(chat_service)
+
+    @patch("slack_migrator.core.migrator._list_all_spaces")
+    def test_handles_patch_transport_error(self, mock_list):
+        mock_list.return_value = [{"name": "spaces/ok"}]
+        chat_service = MagicMock()
+        chat_service.spaces().get().execute.return_value = {
+            "importMode": True,
+            "externalUserAllowed": True,
+        }
+        from google.auth.exceptions import TransportError
+
+        chat_service.spaces().patch().execute.side_effect = TransportError(
+            "connection reset"
+        )
+        # Should not raise — TransportError is caught
         cleanup_import_mode_spaces(chat_service)
 
 
