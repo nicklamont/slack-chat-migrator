@@ -5,9 +5,12 @@ This module provides functions to parse Slack's block kit structure and
 convert Slack's markdown syntax to the format expected by Google Chat.
 """
 
+from __future__ import annotations
+
 import logging
 import re
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import emoji
 
@@ -15,6 +18,9 @@ import emoji
 # you can replace `from slack_migrator.utils.logging import logger`
 # with `import logging; logger = logging.getLogger(__name__)`
 from slack_migrator.utils.logging import log_with_context
+
+if TYPE_CHECKING:
+    from slack_migrator.core.migrator import SlackToChatMigrator
 
 
 def _parse_rich_text_elements(elements: list[dict]) -> str:
@@ -399,7 +405,9 @@ def parse_slack_blocks(message: dict) -> str:  # noqa: C901
     return result
 
 
-def convert_formatting(text: str, user_map: dict[str, str], migrator=None) -> str:
+def convert_formatting(
+    text: str, user_map: dict[str, str], migrator: SlackToChatMigrator | None = None
+) -> str:
     """
     Convert Slack-specific markdown to Google Chat compatible format.
 

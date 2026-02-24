@@ -11,9 +11,12 @@ import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar, Optional
+from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 
 import click
+
+if TYPE_CHECKING:
+    from googleapiclient.errors import HttpError
 
 import slack_migrator
 from slack_migrator.core.migrator import SlackToChatMigrator, cleanup_import_mode_spaces
@@ -44,7 +47,7 @@ class DefaultGroup(click.Group):
     # ``migrate`` default.
     _GROUP_FLAGS: ClassVar[set[str]] = {"--help", "--version", "-h"}
 
-    def parse_args(self, ctx, args):
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         # If no args at all, let click show help as usual.
         if args and args[0].startswith("-") and args[0] not in self._GROUP_FLAGS:
             args = ["migrate", *args]
@@ -56,7 +59,7 @@ class DefaultGroup(click.Group):
 # ---------------------------------------------------------------------------
 
 
-def common_options(f):
+def common_options(f: Callable[..., None]) -> Callable[..., None]:
     """Decorator that adds options shared across multiple subcommands."""
     f = click.option(
         "--creds_path",
@@ -102,7 +105,7 @@ def common_options(f):
 )
 @click.version_option(version=slack_migrator.__version__, prog_name="slack-migrator")
 @click.pass_context
-def cli(ctx):
+def cli(ctx: click.Context) -> None:
     """Slack to Google Chat migration tool."""
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
@@ -139,16 +142,16 @@ def cli(ctx):
     help="Skip permission checks (not recommended)",
 )
 def migrate(
-    creds_path,
-    export_path,
-    workspace_admin,
-    config,
-    verbose,
-    debug_api,
-    dry_run,
-    update_mode,
-    skip_permission_check,
-):
+    creds_path: str,
+    export_path: str,
+    workspace_admin: str,
+    config: str,
+    verbose: bool,
+    debug_api: bool,
+    dry_run: bool,
+    update_mode: bool,
+    skip_permission_check: bool,
+) -> None:
     """Run the full Slack-to-Google-Chat migration."""
     args = SimpleNamespace(
         creds_path=creds_path,
@@ -193,7 +196,9 @@ def migrate(
 
 @cli.command("check-permissions")
 @common_options
-def check_permissions(creds_path, workspace_admin, config, verbose, debug_api):
+def check_permissions(
+    creds_path: str, workspace_admin: str, config: str, verbose: bool, debug_api: bool
+) -> None:
     """Validate API permissions without running a migration.
 
     Tests that the service account has all required scopes for the Chat and
@@ -232,8 +237,14 @@ def check_permissions(creds_path, workspace_admin, config, verbose, debug_api):
     help="(ignored — validate always runs in dry-run mode)",
 )
 def validate(
-    creds_path, export_path, workspace_admin, config, verbose, debug_api, dry_run
-):
+    creds_path: str,
+    export_path: str,
+    workspace_admin: str,
+    config: str,
+    verbose: bool,
+    debug_api: bool,
+    dry_run: bool,
+) -> None:
     """Dry-run validation of export data, user mappings, and channels.
 
     Equivalent to ``migrate --dry_run`` but expressed as an explicit command.
@@ -284,7 +295,14 @@ def validate(
 @cli.command()
 @common_options
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
-def cleanup(creds_path, workspace_admin, config, verbose, debug_api, yes):
+def cleanup(
+    creds_path: str,
+    workspace_admin: str,
+    config: str,
+    verbose: bool,
+    debug_api: bool,
+    yes: bool,
+) -> None:
     """Complete import mode on spaces that are stuck.
 
     Lists all spaces visible to the service account and calls completeImport()
@@ -321,10 +339,10 @@ def cleanup(creds_path, workspace_admin, config, verbose, debug_api, yes):
 class MigrationOrchestrator:
     """Orchestrates the migration process with validation and error handling."""
 
-    def __init__(self, args):
+    def __init__(self, args: SimpleNamespace) -> None:
         self.args = args
-        self.migrator = None
-        self.dry_run_migrator = None
+        self.migrator: Optional[SlackToChatMigrator] = None
+        self.dry_run_migrator: Optional[SlackToChatMigrator] = None
         self.output_dir: Optional[str] = None
 
     def create_migrator(self, force_dry_run: bool = False) -> SlackToChatMigrator:
@@ -346,7 +364,7 @@ class MigrationOrchestrator:
 
         return migrator
 
-    def validate_prerequisites(self):
+    def validate_prerequisites(self) -> None:
         """Validate all prerequisites before migration."""
         # Check credentials file
         creds_path = Path(self.args.creds_path)
@@ -469,7 +487,7 @@ class MigrationOrchestrator:
                 log_with_context(logging.INFO, "\nMigration cancelled by user.")
                 return False
 
-    def report_validation_success(self, is_explicit_dry_run: bool = False):
+    def report_validation_success(self, is_explicit_dry_run: bool = False) -> None:
         """Report successful validation."""
         log_with_context(logging.INFO, "")
         log_with_context(logging.INFO, "✅ Validation completed successfully!")
@@ -538,7 +556,7 @@ class MigrationOrchestrator:
             log_with_context(logging.INFO, "\nMigration cancelled by user.")
             return False
 
-    def run_migration(self):
+    def run_migration(self) -> None:
         """Execute the main migration logic."""
         if self.args.dry_run:
             # Explicit dry run mode
@@ -581,7 +599,7 @@ class MigrationOrchestrator:
                     log_with_context(logging.INFO, "Migration cancelled by user.")
                     sys.exit(0)
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Perform cleanup operations."""
         if self.migrator:
             try:
@@ -633,7 +651,7 @@ class MigrationOrchestrator:
 # ---------------------------------------------------------------------------
 
 
-def log_startup_info(args):
+def log_startup_info(args: SimpleNamespace) -> None:
     """Log startup information."""
     config_path = Path(args.config)
     if not config_path.is_absolute():
@@ -649,7 +667,7 @@ def log_startup_info(args):
     log_with_context(logging.INFO, f"- Debug API calls: {args.debug_api}")
 
 
-def handle_http_error(e):
+def handle_http_error(e: "HttpError") -> None:
     """Handle HTTP errors with specific messages."""
 
     if e.resp.status == 403 and "PERMISSION_DENIED" in str(e):
@@ -691,7 +709,7 @@ def handle_http_error(e):
         log_with_context(logging.ERROR, f"API error during migration: {e}")
 
 
-def handle_exception(e):
+def handle_exception(e: Exception) -> None:
     """Handle different types of exceptions."""
     from googleapiclient.errors import HttpError
 
@@ -721,7 +739,7 @@ def handle_exception(e):
         log_with_context(logging.ERROR, f"Migration failed: {e}", exc_info=True)
 
 
-def show_security_warning():
+def show_security_warning() -> None:
     """Show security warning about tokens in export files."""
     log_with_context(
         logging.WARNING,
@@ -737,7 +755,7 @@ def show_security_warning():
     )
 
 
-def create_migration_output_directory():
+def create_migration_output_directory() -> str:
     """Create output directory for migration with timestamp."""
     import datetime
     import os
@@ -757,7 +775,7 @@ def create_migration_output_directory():
 # ---------------------------------------------------------------------------
 
 
-def main():
+def main() -> None:
     """Entry point for the slack-migrator command."""
     cli()
 
