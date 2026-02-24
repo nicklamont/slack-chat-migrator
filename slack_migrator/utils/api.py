@@ -113,7 +113,7 @@ class RetryWrapper:
                         # Extract actual status code from the response
                         status_code = self._extract_status_code(execute_method, result)
                         self._log_api_response(
-                            status_code or 0, request_details, result, channel_context
+                            status_code, request_details, result, channel_context
                         )
 
                     return result
@@ -277,7 +277,7 @@ class RetryWrapper:
                 "body": None,
             }
 
-    def _extract_status_code(self, execute_method: Any, result: Any) -> int | None:  # noqa: C901
+    def _extract_status_code(self, execute_method: Any, result: Any) -> int:  # noqa: C901
         """Extract the actual HTTP status code from the response."""
         try:
             # Try to get the status code from the underlying HTTP response
