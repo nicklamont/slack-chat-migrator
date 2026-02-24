@@ -74,7 +74,8 @@ class TestGetDelegate:
             "chat",
             "v1",
             "general",
-            retry_config=migrator.config,
+            max_retries=migrator.config.max_retries,
+            retry_delay=migrator.config.retry_delay,
         )
         mock_service.spaces.return_value.list.return_value.execute.assert_called_once()
         assert migrator.state.valid_users["user@example.com"] is True

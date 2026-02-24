@@ -251,14 +251,20 @@ class SlackToChatMigrator:
         # Convert Path to str for API clients
         creds_path_str = str(self.creds_path)
         self.chat = get_gcp_service(
-            creds_path_str, self.workspace_admin, "chat", "v1", retry_config=self.config
+            creds_path_str,
+            self.workspace_admin,
+            "chat",
+            "v1",
+            max_retries=self.config.max_retries,
+            retry_delay=self.config.retry_delay,
         )
         self.drive = get_gcp_service(
             creds_path_str,
             self.workspace_admin,
             "drive",
             "v3",
-            retry_config=self.config,
+            max_retries=self.config.max_retries,
+            retry_delay=self.config.retry_delay,
         )
 
         self._api_services_initialized = True

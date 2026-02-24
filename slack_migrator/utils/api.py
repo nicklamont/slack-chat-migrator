@@ -14,7 +14,6 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from slack_migrator.core.config import MigrationConfig
 from slack_migrator.utils.logging import log_with_context
 
 REQUIRED_SCOPES = [
@@ -37,11 +36,13 @@ class RetryWrapper:
         self,
         wrapped_obj: Any,
         channel_context_getter: Any = None,
-        retry_config: MigrationConfig | None = None,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
     ) -> None:
         self._wrapped_obj = wrapped_obj
         self._channel_context_getter = channel_context_getter
-        self._retry_config = retry_config
+        self._max_retries = max_retries
+        self._retry_delay = retry_delay
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._wrapped_obj, name)
@@ -62,7 +63,10 @@ class RetryWrapper:
                         or hasattr(result, "create")
                     ):
                         return RetryWrapper(
-                            result, self._channel_context_getter, self._retry_config
+                            result,
+                            self._channel_context_getter,
+                            self._max_retries,
+                            self._retry_delay,
                         )
                     return result
 
@@ -75,9 +79,8 @@ class RetryWrapper:
 
         @functools.wraps(execute_method)
         def wrapper(*args: Any, **kwargs: Any) -> Any:  # noqa: C901
-            # Get retry config from configuration or use defaults
-            max_retries = self._retry_config.max_retries if self._retry_config else 3
-            initial_delay = self._retry_config.retry_delay if self._retry_config else 1
+            max_retries = self._max_retries
+            initial_delay = self._retry_delay
             max_delay = 60
             backoff_factor = 2.0
 
@@ -420,7 +423,8 @@ def get_gcp_service(
     api: str,
     version: str,
     channel: str | None = None,
-    retry_config: MigrationConfig | None = None,
+    max_retries: int = 3,
+    retry_delay: float = 1.0,
 ) -> Any:
     """Get a Google API client service using service account impersonation."""
     cache_key = f"{creds_path}:{user_email}:{api}:{version}"
@@ -463,7 +467,9 @@ def get_gcp_service(
         def get_channel_context() -> str | None:
             return channel
 
-        wrapped_service = RetryWrapper(service, get_channel_context, retry_config)
+        wrapped_service = RetryWrapper(
+            service, get_channel_context, max_retries, retry_delay
+        )
 
         _service_cache[cache_key] = wrapped_service
         return wrapped_service

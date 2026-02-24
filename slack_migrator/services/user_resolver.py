@@ -47,7 +47,8 @@ class UserResolver:
                     "chat",
                     "v1",
                     getattr(self.migrator.state, "current_channel", None),
-                    retry_config=self.migrator.config,
+                    max_retries=self.migrator.config.max_retries,
+                    retry_delay=self.migrator.config.retry_delay,
                 )
                 test_service.spaces().list(pageSize=1).execute()
                 self.migrator.state.valid_users[email] = True
