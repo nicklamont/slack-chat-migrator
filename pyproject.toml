@@ -104,6 +104,13 @@ module = [
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 
+[tool.bandit]
+exclude_dirs = ["tests"]
+# B101: assert used for type narrowing
+# B110/B112: intentional error suppression in migration recovery logic
+# B324: MD5 used for file deduplication, not security
+skips = ["B101", "B110", "B112", "B324"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"

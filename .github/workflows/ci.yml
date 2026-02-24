@@ -42,13 +42,27 @@ jobs:
       - run: pytest tests/ -v --tb=short
       - name: Run coverage
         if: matrix.python-version == '3.12'
-        run: pytest tests/ --cov=slack_migrator --cov-report=xml
+        run: pytest tests/ --cov=slack_migrator --cov-report=xml --cov-fail-under=55
       - name: Upload coverage artifact
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v6
         with:
           name: coverage-report
           path: coverage.xml
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: pip install "bandit[toml]" pip-audit
+      - name: Run bandit (SAST)
+        run: bandit -r slack_migrator/ -c pyproject.toml
+      - name: Run pip-audit (dependency CVEs)
+        run: pip-audit
 
   commitlint:
     if: github.event_name == 'pull_request'
