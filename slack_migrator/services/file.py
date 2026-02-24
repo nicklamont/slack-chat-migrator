@@ -167,9 +167,8 @@ class FileHandler:
         """Initialize the shared drive and root folder for attachments."""
         try:
             # Get shared drive configuration
-            shared_drive_config = self.migrator.config.get("shared_drive", {})
-            shared_drive_name = shared_drive_config.get("name")
-            shared_drive_id: Optional[str] = shared_drive_config.get("id")
+            shared_drive_name = self.migrator.config.shared_drive.name
+            shared_drive_id: Optional[str] = self.migrator.config.shared_drive.id
 
             # If no shared drive specified, use default name
             if not shared_drive_name and not shared_drive_id:

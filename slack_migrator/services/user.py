@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from slack_migrator.core.config import MigrationConfig
 from slack_migrator.exceptions import ExportError, UserMappingError
 from slack_migrator.utils.logging import log_with_context
 
@@ -15,7 +16,7 @@ logger = logging.getLogger("slack_migrator")
 
 
 def generate_user_map(  # noqa: C901
-    export_root: Path, config: dict
+    export_root: Path, config: MigrationConfig
 ) -> tuple[dict[str, str], list[dict[str, Any]]]:
     """Generate user mapping from users.json file.
 
@@ -44,13 +45,13 @@ def generate_user_map(  # noqa: C901
         raise ExportError(f"Failed to read users.json: {e}") from e
 
     # Get email domain override from config
-    email_domain_override = config.get("email_domain_override", "")
+    email_domain_override = config.email_domain_override
 
     # Get user mapping overrides from config
-    user_mapping_overrides = config.get("user_mapping_overrides") or {}
+    user_mapping_overrides = config.user_mapping_overrides
 
     # Get bot ignoring setting from config
-    ignore_bots = config.get("ignore_bots", False)
+    ignore_bots = config.ignore_bots
     ignored_bots_count = 0
 
     for user in users:

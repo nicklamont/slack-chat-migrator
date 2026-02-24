@@ -196,7 +196,7 @@ def generate_report(migrator):  # noqa: C901
 
         # Add recommendation for high failure rate channels
         if migrator.high_failure_rate_channels:
-            max_failure_percentage = migrator.config.get("max_failure_percentage", 10)
+            max_failure_percentage = migrator.config.max_failure_percentage
             report["recommendations"].append(
                 {
                     "type": "high_failure_rate",

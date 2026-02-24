@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+from slack_migrator.core.config import MigrationConfig
 from slack_migrator.services.message import track_message_stats
 
 
@@ -10,7 +11,7 @@ def _make_migrator(dry_run=False, channel="general", ignore_bots=False):
     migrator = MagicMock()
     migrator.dry_run = dry_run
     migrator.current_channel = channel
-    migrator.config = {"ignore_bots": ignore_bots}
+    migrator.config = MigrationConfig(ignore_bots=ignore_bots)
     migrator.migration_summary = {
         "messages_created": 0,
         "reactions_created": 0,

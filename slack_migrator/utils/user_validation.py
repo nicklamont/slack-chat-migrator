@@ -374,15 +374,15 @@ def scan_channel_members_for_unmapped_users(migrator) -> None:
         channels_to_check = []
 
         # Determine which channels to check based on include/exclude settings
-        if migrator.config.get("include_channels"):
+        if migrator.config.include_channels:
             # Only check included channels
-            include_set = set(migrator.config["include_channels"])
+            include_set = set(migrator.config.include_channels)
             channels_to_check = [
                 ch for ch in channels_data if ch.get("name") in include_set
             ]
         else:
             # Check all channels except excluded ones
-            exclude_set = set(migrator.config.get("exclude_channels", []))
+            exclude_set = set(migrator.config.exclude_channels)
             channels_to_check = [
                 ch for ch in channels_data if ch.get("name") not in exclude_set
             ]
@@ -392,7 +392,7 @@ def scan_channel_members_for_unmapped_users(migrator) -> None:
 
         # Load user data once if ignore_bots is enabled
         user_lookup = {}
-        ignore_bots = migrator.config.get("ignore_bots", False)
+        ignore_bots = migrator.config.ignore_bots
         if ignore_bots:
             try:
                 users_file = Path(migrator.export_root) / "users.json"
