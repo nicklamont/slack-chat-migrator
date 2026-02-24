@@ -5,6 +5,8 @@ This module provides comprehensive permission testing that validates all
 required scopes and operations before starting migration.
 """
 
+from __future__ import annotations
+
 import datetime
 import io
 import logging
@@ -38,7 +40,7 @@ class PermissionValidator:
     starting the actual migration process.
     """
 
-    def __init__(self, migrator):
+    def __init__(self, migrator: PermissionCheckContext | Any) -> None:
         """
         Initialize the permission validator.
 
@@ -86,7 +88,7 @@ class PermissionValidator:
         # Report results
         return self._report_results()
 
-    def _test_space_operations(self):
+    def _test_space_operations(self) -> None:
         """Test all space-related operations."""
         log_with_context(logging.INFO, "Testing space operations...")
 
@@ -144,7 +146,7 @@ class PermissionValidator:
             logging.INFO, "    ✓ Space update: SKIPPED (not applicable for import mode)"
         )
 
-    def _test_member_operations(self):
+    def _test_member_operations(self) -> None:
         """Test member-related operations."""
         if "space" not in self.test_resources:
             log_with_context(
@@ -250,7 +252,7 @@ class PermissionValidator:
                 self.permission_errors.append(f"Member creation failed: {e}")
                 log_with_context(logging.ERROR, "    ✗ Member creation: FAILED")
 
-    def _test_message_operations(self):
+    def _test_message_operations(self) -> None:
         """Test message-related operations."""
         if "space" not in self.test_resources:
             log_with_context(
@@ -287,7 +289,7 @@ class PermissionValidator:
             "    ✓ Import completion: SKIPPED (not needed for permission validation)",
         )
 
-    def _test_drive_operations(self):
+    def _test_drive_operations(self) -> None:
         """Test Drive-related operations."""
         log_with_context(logging.INFO, "Testing Drive operations...")
 
@@ -319,7 +321,7 @@ class PermissionValidator:
             self.permission_errors.append(f"Drive operations failed: {e}")
             log_with_context(logging.ERROR, f"    ✗ Drive operations: FAILED - {e}")
 
-    def _cleanup_test_resources(self):
+    def _cleanup_test_resources(self) -> None:
         """Clean up all test resources."""
         log_with_context(logging.INFO, "Cleaning up test resources...")
 
@@ -394,7 +396,7 @@ class PermissionValidator:
             return True
 
 
-def validate_permissions(migrator) -> bool:
+def validate_permissions(migrator: Any) -> bool:
     """
     Convenience function to validate all permissions.
 

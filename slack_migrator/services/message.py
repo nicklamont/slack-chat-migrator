@@ -2,12 +2,14 @@
 Functions for handling message processing during Slack to Google Chat migration
 """
 
+from __future__ import annotations
+
 import datetime
 import hashlib
 import logging
 import time
 from collections import defaultdict
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import BatchHttpRequest
@@ -18,13 +20,21 @@ from slack_migrator.utils.logging import (
     log_with_context,
 )
 
+if TYPE_CHECKING:
+    from slack_migrator.core.migrator import SlackToChatMigrator
+
 
 def process_reactions_batch(  # noqa: C901
-    migrator, message_name: str, reactions: list[dict], message_id: str
-):
+    migrator: SlackToChatMigrator,
+    message_name: str,
+    reactions: list[dict[str, Any]],
+    message_id: str,
+) -> None:
     """Process reactions for a message in import mode."""
 
-    def reaction_callback(request_id, response, exception):
+    def reaction_callback(
+        request_id: str, response: dict[str, Any] | None, exception: HttpError | None
+    ) -> None:
         if exception:
             log_with_context(
                 logging.WARNING,
@@ -293,7 +303,9 @@ def process_reactions_batch(  # noqa: C901
             )
 
 
-def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa: C901
+def send_message(  # noqa: C901
+    migrator: SlackToChatMigrator, space: str, message: dict[str, Any]
+) -> str | None:
     """Send a message to a Google Chat space.
 
     This method handles converting a Slack message to a Google Chat message format
@@ -313,11 +325,11 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
 
     # Ensure sent_messages tracking set exists
     if not hasattr(migrator, "sent_messages"):
-        migrator.sent_messages = set()
+        migrator.sent_messages = set()  # type: ignore[attr-defined]
 
     # Ensure message_id_map exists to track Slack ts -> Google Chat message name mapping
     if not hasattr(migrator, "message_id_map"):
-        migrator.message_id_map = {}
+        migrator.message_id_map = {}  # type: ignore[attr-defined]
 
     # Extract basic message info for logging
     ts = message.get("ts", "")
@@ -369,7 +381,7 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
 
     # First, check if this message is older than the last processed timestamp
     if is_update_mode and hasattr(migrator, "last_processed_timestamps"):
-        last_timestamp = migrator.last_processed_timestamps.get(channel, 0)
+        last_timestamp = migrator.last_processed_timestamps.get(channel, 0)  # type: ignore[arg-type]
         if last_timestamp > 0:
             # Import the function to check if we should process this message
             from slack_migrator.services.discovery import should_process_message
@@ -387,7 +399,7 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
                 return "ALREADY_SENT"
 
     # Also check the sent_messages set for additional protection
-    if is_update_mode and message_key in migrator.sent_messages:
+    if is_update_mode and message_key in migrator.sent_messages:  # type: ignore[attr-defined]
         log_with_context(
             logging.INFO,
             f"[UPDATE MODE] Skipping already sent message TS={ts} from user={user_id}",
@@ -687,7 +699,12 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
 
         # Process file attachments with the sender's email to ensure proper permissions
         attachments = migrator.attachment_processor.process_message_attachments(
-            message, channel, space, user_id, chat_service, sender_email=sender_email
+            message,
+            channel,  # type: ignore[arg-type]
+            space,
+            user_id,
+            chat_service,
+            sender_email=sender_email,
         )
 
         # TEMPORARY SOLUTION: For Drive files, append links to message text instead of using attachments
@@ -774,15 +791,15 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
             channel=channel,
             ts=ts,
         )
-        result = chat_service.spaces().messages().create(**request_params).execute()
-        message_name: Optional[str] = result.get("name")
+        result = chat_service.spaces().messages().create(**request_params).execute()  # type: ignore[union-attr]
+        message_name: str | None = result.get("name")
 
         # Store the message ID mapping for potential future edits
         if message_name:
             # For edited messages, store with a special key that includes the edit timestamp
             if is_edited:
                 edit_key = f"{ts}:edited:{edited_ts}"
-                migrator.message_id_map[edit_key] = message_name
+                migrator.message_id_map[edit_key] = message_name  # type: ignore[attr-defined]
                 log_with_context(
                     logging.DEBUG,
                     f"Stored message ID mapping for edited message: {edit_key} -> {message_name}",
@@ -791,7 +808,7 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
                     edited_ts=edited_ts,
                 )
             else:
-                migrator.message_id_map[ts] = message_name
+                migrator.message_id_map[ts] = message_name  # type: ignore[attr-defined]
 
         # Store thread mapping for both parent messages and thread replies
         if message_name:
@@ -882,7 +899,7 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
         )
 
         # Mark this message as successfully sent to avoid duplicates
-        migrator.sent_messages.add(message_key)
+        migrator.sent_messages.add(message_key)  # type: ignore[attr-defined]
 
         return message_name
     except HttpError as e:
@@ -913,7 +930,7 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
         return None
 
 
-def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
+def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> None:  # noqa: C901
     """Handle tracking message stats in both dry run and normal mode."""
     # Get the current channel being processed
     channel = migrator.current_channel
@@ -956,7 +973,7 @@ def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
         migrator.channel_stats = {}
 
     if channel not in migrator.channel_stats:
-        migrator.channel_stats[channel] = {
+        migrator.channel_stats[channel] = {  # type: ignore[index]
             "message_count": 0,
             "reaction_count": 0,
             "file_count": 0,
@@ -967,7 +984,7 @@ def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
     if is_update_mode:
         # Ensure sent_messages tracking set exists
         if not hasattr(migrator, "sent_messages"):
-            migrator.sent_messages = set()
+            migrator.sent_messages = set()  # type: ignore[attr-defined]
 
         message_key = f"{channel}:{ts}"
         edited = m.get("edited", {})
@@ -976,7 +993,7 @@ def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
             message_key = f"{channel}:{ts}:edited:{edited_ts}"
 
         # If this message has already been sent in a previous run, don't count it
-        if message_key in migrator.sent_messages:
+        if message_key in migrator.sent_messages:  # type: ignore[attr-defined]
             log_with_context(
                 logging.DEBUG,
                 f"[UPDATE MODE] Skipping stats for already sent message {ts}",
@@ -986,7 +1003,7 @@ def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
             return
 
     # Increment message count for this channel
-    migrator.channel_stats[channel]["message_count"] += 1
+    migrator.channel_stats[channel]["message_count"] += 1  # type: ignore[index]
 
     # Track reactions
     reaction_count = 0
@@ -1001,7 +1018,7 @@ def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
                         continue
                 reaction_count += 1
 
-        migrator.channel_stats[channel]["reaction_count"] += reaction_count
+        migrator.channel_stats[channel]["reaction_count"] += reaction_count  # type: ignore[index]
 
         # Also increment the global reaction count in dry run mode
         # (in normal mode this is done by process_reactions_batch)
@@ -1032,7 +1049,7 @@ def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
             channel=channel,
             ts=ts,
         )
-        migrator.channel_stats[channel]["file_count"] += file_count
+        migrator.channel_stats[channel]["file_count"] += file_count  # type: ignore[index]
 
         # Also increment the global file count
         migrator.migration_summary["files_created"] += file_count
@@ -1040,7 +1057,7 @@ def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
     # We don't need to process files here - they are handled in send_message
 
 
-def send_intro(migrator, space: str, channel: str) -> None:
+def send_intro(migrator: SlackToChatMigrator, space: str, channel: str) -> None:
     """Send an intro message with channel metadata."""
     # Check if we're in update mode - if so, don't send intro message again
     is_update_mode = getattr(migrator, "update_mode", False)
@@ -1103,7 +1120,7 @@ def send_intro(migrator, space: str, channel: str) -> None:
 
         # Send the message
         (
-            migrator.chat.spaces()
+            migrator.chat.spaces()  # type: ignore[union-attr]
             .messages()
             .create(parent=space, body=message_body)
             .execute()
@@ -1123,7 +1140,7 @@ def send_intro(migrator, space: str, channel: str) -> None:
         )
 
 
-def log_space_mapping_conflicts(migrator) -> None:
+def log_space_mapping_conflicts(migrator: SlackToChatMigrator) -> None:
     """
     Log information about space mapping conflicts that need to be resolved.
     """
@@ -1148,7 +1165,7 @@ def log_space_mapping_conflicts(migrator) -> None:
             )
 
 
-def load_space_mappings(migrator) -> dict[str, str]:
+def load_space_mappings(migrator: SlackToChatMigrator) -> dict[str, str]:
     """Load space mappings for update mode.
 
     This uses the Google Chat API for discovery and the config file for overrides.

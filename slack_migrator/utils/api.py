@@ -35,15 +35,15 @@ class RetryWrapper:
 
     def __init__(
         self,
-        wrapped_obj,
-        channel_context_getter=None,
+        wrapped_obj: Any,
+        channel_context_getter: Any = None,
         retry_config: MigrationConfig | None = None,
-    ):
+    ) -> None:
         self._wrapped_obj = wrapped_obj
         self._channel_context_getter = channel_context_getter
         self._retry_config = retry_config
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         attr = getattr(self._wrapped_obj, name)
 
         # If this is a callable method, wrap it with retry logic
@@ -53,7 +53,7 @@ class RetryWrapper:
                 return self._wrap_execute(attr)
             else:
                 # For other methods, return a new wrapper that maintains the chain
-                def wrapped_method(*args, **kwargs):
+                def wrapped_method(*args: Any, **kwargs: Any) -> Any:
                     result = attr(*args, **kwargs)
                     # If the result has methods that might need retry, wrap it too
                     if (
@@ -70,11 +70,11 @@ class RetryWrapper:
 
         return attr
 
-    def _wrap_execute(self, execute_method):  # noqa: C901
+    def _wrap_execute(self, execute_method: Any) -> Any:  # noqa: C901
         """Wrap an execute method with retry logic and automatic API logging."""
 
         @functools.wraps(execute_method)
-        def wrapper(*args, **kwargs):  # noqa: C901
+        def wrapper(*args: Any, **kwargs: Any) -> Any:  # noqa: C901
             # Get retry config from configuration or use defaults
             max_retries = self._retry_config.max_retries if self._retry_config else 3
             initial_delay = self._retry_config.retry_delay if self._retry_config else 1
@@ -113,7 +113,7 @@ class RetryWrapper:
                         # Extract actual status code from the response
                         status_code = self._extract_status_code(execute_method, result)
                         self._log_api_response(
-                            status_code, request_details, result, channel_context
+                            status_code or 0, request_details, result, channel_context
                         )
 
                     return result
@@ -213,7 +213,9 @@ class RetryWrapper:
 
         return wrapper
 
-    def _extract_request_details(self, execute_method):
+    def _extract_request_details(
+        self, execute_method: Any
+    ) -> dict[str, str | None] | None:
         """Extract request details from the API method for logging purposes."""
         try:
             # Try to get the underlying HttpRequest object
@@ -275,7 +277,7 @@ class RetryWrapper:
                 "body": None,
             }
 
-    def _extract_status_code(self, execute_method, result):  # noqa: C901
+    def _extract_status_code(self, execute_method: Any, result: Any) -> int | None:  # noqa: C901
         """Extract the actual HTTP status code from the response."""
         try:
             # Try to get the status code from the underlying HTTP response
@@ -337,7 +339,9 @@ class RetryWrapper:
         # Final fallback - assume 200 OK for successful responses
         return 200
 
-    def _log_api_request(self, request_details, channel_context):
+    def _log_api_request(
+        self, request_details: dict[str, str | None], channel_context: str | None
+    ) -> None:
         """Log API request automatically if debug mode is enabled."""
         try:
             # Import here to avoid circular imports
@@ -365,8 +369,8 @@ class RetryWrapper:
                     request_data = {"body": str(request_details["body"])[:500]}
 
             log_api_request(
-                method=request_details["method"],
-                url=request_details["uri"],
+                method=request_details["method"],  # type: ignore[arg-type]
+                url=request_details["uri"],  # type: ignore[arg-type]
                 data=request_data,
                 channel=channel_context,
             )
@@ -375,8 +379,12 @@ class RetryWrapper:
             pass
 
     def _log_api_response(
-        self, status_code, request_details, response_data, channel_context
-    ):
+        self,
+        status_code: int,
+        request_details: dict[str, str | None],
+        response_data: Any,
+        channel_context: str | None,
+    ) -> None:
         """Log API response automatically if debug mode is enabled."""
         try:
             # Import here to avoid circular imports
@@ -390,7 +398,7 @@ class RetryWrapper:
 
             log_api_response(
                 status_code=status_code,
-                url=request_details["uri"],
+                url=request_details["uri"],  # type: ignore[arg-type]
                 response_data=response_data,
                 channel=channel_context,
             )
@@ -452,7 +460,7 @@ def get_gcp_service(
 
         # Wrap the service with retry logic
         # Use the explicitly passed channel parameter for context
-        def get_channel_context():
+        def get_channel_context() -> str | None:
             return channel
 
         wrapped_service = RetryWrapper(service, get_channel_context, retry_config)

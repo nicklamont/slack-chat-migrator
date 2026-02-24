@@ -2,8 +2,9 @@
 Folder management for Google Drive integration.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Optional
 
 from googleapiclient.errors import HttpError
 
@@ -18,9 +19,9 @@ class FolderManager:
     def __init__(
         self,
         drive_service,
-        workspace_domain: Optional[str] = None,
+        workspace_domain: str | None = None,
         dry_run: bool = False,
-    ):
+    ) -> None:
         """Initialize the FolderManager.
 
         Args:
@@ -35,7 +36,7 @@ class FolderManager:
 
     def create_root_folder_in_shared_drive(
         self, folder_name: str, shared_drive_id: str
-    ) -> Optional[str]:
+    ) -> str | None:
         """Create the root attachments folder in the shared drive.
 
         Args:
@@ -73,7 +74,7 @@ class FolderManager:
 
             files = results.get("files", [])
             if files:
-                folder_id: Optional[str] = files[0]["id"]
+                folder_id: str | None = files[0]["id"]
                 log_with_context(
                     logging.INFO,
                     f"Found existing root folder in shared drive: {folder_name} (ID: {folder_id})",
@@ -97,7 +98,7 @@ class FolderManager:
                 .execute()
             )
 
-            new_folder_id: Optional[str] = folder.get("id")
+            new_folder_id: str | None = folder.get("id")
             log_with_context(
                 logging.INFO,
                 f"Successfully created root folder in shared drive: {folder_name} (ID: {new_folder_id})",
@@ -111,7 +112,7 @@ class FolderManager:
             )
             return None
 
-    def create_regular_drive_folder(self, folder_name: str) -> Optional[str]:
+    def create_regular_drive_folder(self, folder_name: str) -> str | None:
         """Create a regular Drive folder with domain permissions as fallback.
 
         Args:
@@ -140,7 +141,7 @@ class FolderManager:
 
             files = results.get("files", [])
             if files:
-                existing_folder_id: Optional[str] = files[0]["id"]
+                existing_folder_id: str | None = files[0]["id"]
                 log_with_context(
                     logging.INFO,
                     f"Found existing regular Drive folder: {folder_name} (ID: {existing_folder_id})",
@@ -165,7 +166,7 @@ class FolderManager:
                 .execute()
             )
 
-            new_folder_id: Optional[str] = folder.get("id")
+            new_folder_id: str | None = folder.get("id")
             # Note: No domain-wide permissions set to avoid org-wide access
             # Individual channel folders will have their own space-specific permissions
 
@@ -183,8 +184,8 @@ class FolderManager:
             return None
 
     def get_or_create_channel_folder(
-        self, channel: str, parent_folder_id: str, shared_drive_id: Optional[str] = None
-    ) -> Optional[str]:
+        self, channel: str, parent_folder_id: str, shared_drive_id: str | None = None
+    ) -> str | None:
         """Get or create a channel-specific folder.
 
         Args:
@@ -290,7 +291,7 @@ class FolderManager:
                     .execute()
                 )
 
-            created_folder_id: Optional[str] = folder.get("id")
+            created_folder_id: str | None = folder.get("id")
 
             if created_folder_id:
                 log_with_context(
@@ -323,8 +324,8 @@ class FolderManager:
             return None
 
     def get_channel_folder_id(
-        self, channel: str, parent_folder_id: str, shared_drive_id: Optional[str] = None
-    ) -> Optional[str]:
+        self, channel: str, parent_folder_id: str, shared_drive_id: str | None = None
+    ) -> str | None:
         """Get the ID of a channel folder if it exists.
 
         This is a read-only operation that doesn't create a folder if it doesn't exist.
@@ -378,7 +379,7 @@ class FolderManager:
             files = response.get("files", [])
 
             if files:
-                found_folder_id: Optional[str] = files[0].get("id")
+                found_folder_id: str | None = files[0].get("id")
                 if found_folder_id:
                     self.folder_cache[cache_key] = found_folder_id
                     log_with_context(
@@ -410,7 +411,7 @@ class FolderManager:
         folder_id: str,
         channel: str,
         user_emails: list,
-        shared_drive_id: Optional[str] = None,
+        shared_drive_id: str | None = None,
     ) -> bool:
         """Set permissions on a channel folder for all channel members.
 

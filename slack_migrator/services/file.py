@@ -2,12 +2,14 @@
 File handling module for the Slack to Google Chat migration tool
 """
 
+from __future__ import annotations
+
 import hashlib
 import logging
 import mimetypes
 import os
 import tempfile
-from typing import Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import requests
 
@@ -18,6 +20,9 @@ from slack_migrator.services.drive import (
     SharedDriveManager,
 )
 from slack_migrator.utils.logging import log_with_context
+
+if TYPE_CHECKING:
+    from slack_migrator.core.migrator import SlackToChatMigrator
 
 
 class FileHandler:
@@ -38,12 +43,12 @@ class FileHandler:
 
     def __init__(
         self,
-        drive_service,
-        chat_service,
-        folder_id: Optional[str],
-        migrator,
+        drive_service: Any,
+        chat_service: Any,
+        folder_id: str | None,
+        migrator: SlackToChatMigrator,
         dry_run: bool = False,
-    ):
+    ) -> None:
         """Initialize the FileHandler.
 
         Args:
@@ -92,12 +97,12 @@ class FileHandler:
         self.chat_uploader = ChatFileUploader(chat_service, dry_run=dry_run)
 
         # Set migrator reference on sub-services for channel context
-        self.drive_uploader.migrator = migrator
-        self.chat_uploader.migrator = migrator
+        self.drive_uploader.migrator = migrator  # type: ignore[assignment]
+        self.chat_uploader.migrator = migrator  # type: ignore[assignment]
 
         # Initialize the root folder and shared drive
-        self._shared_drive_id: Optional[str] = None
-        self._root_folder_id: Optional[str] = None
+        self._shared_drive_id: str | None = None
+        self._root_folder_id: str | None = None
         self._drive_initialized = False
 
         # Don't initialize drive structures during construction - defer until needed
@@ -114,7 +119,7 @@ class FileHandler:
                 channel=self._get_current_channel(),
             )
 
-    def ensure_drive_initialized(self):
+    def ensure_drive_initialized(self) -> None:
         """Ensure drive structures are initialized. Call this after permission validation."""
         if not self._drive_initialized and not self.dry_run:
             log_with_context(
@@ -126,18 +131,18 @@ class FileHandler:
             self._drive_initialized = True
 
     @property
-    def folder_id(self) -> Optional[str]:
+    def folder_id(self) -> str | None:
         """Backward compatibility property for the root folder ID."""
         # Ensure drive is initialized when accessing folder_id
         self.ensure_drive_initialized()
         return self._root_folder_id
 
     @folder_id.setter
-    def folder_id(self, value: Optional[str]) -> None:
+    def folder_id(self, value: str | None) -> None:
         """Backward compatibility setter for the root folder ID."""
         self._root_folder_id = value
 
-    def _get_current_channel(self):
+    def _get_current_channel(self) -> str | None:
         """Helper method to get the current channel from the migrator.
 
         Returns:
@@ -148,11 +153,11 @@ class FileHandler:
         return None
 
     @property
-    def shared_drive_id(self):
+    def shared_drive_id(self) -> str | None:
         """Property to access the shared drive ID."""
         return self._shared_drive_id
 
-    def reset_shared_folder_cache(self):
+    def reset_shared_folder_cache(self) -> None:
         """Reset the cache of shared channel folders.
 
         This can be useful when starting a fresh migration or for testing.
@@ -168,7 +173,7 @@ class FileHandler:
         try:
             # Get shared drive configuration
             shared_drive_name = self.migrator.config.shared_drive.name
-            shared_drive_id: Optional[str] = self.migrator.config.shared_drive.id
+            shared_drive_id: str | None = self.migrator.config.shared_drive.id
 
             # If no shared drive specified, use default name
             if not shared_drive_name and not shared_drive_id:
@@ -319,12 +324,12 @@ class FileHandler:
 
     def upload_attachment(  # noqa: C901
         self,
-        file_obj: dict,
-        channel: Optional[str] = None,
-        space: Optional[str] = None,
-        user_service=None,
-        sender_email: Optional[str] = None,
-    ) -> Optional[dict[str, Any]]:
+        file_obj: dict[str, Any],
+        channel: str | None = None,
+        space: str | None = None,
+        user_service: Any = None,
+        sender_email: str | None = None,
+    ) -> dict[str, Any] | None:
         """Upload a file using the most appropriate method based on file type.
 
         This method determines whether to use direct upload to Chat or Google Drive
@@ -381,7 +386,7 @@ class FileHandler:
 
             # Check if we've already processed this file
             if file_id in self.processed_files:
-                cached_result: Optional[dict[str, Any]] = self.processed_files[file_id]
+                cached_result: dict[str, Any] | None = self.processed_files[file_id]
                 log_with_context(
                     logging.DEBUG,
                     f"File {name} already processed, using cached result",
@@ -552,8 +557,8 @@ class FileHandler:
             return None
 
     def upload_file(
-        self, file_obj: dict, channel: Optional[str] = None
-    ) -> Optional[str]:
+        self, file_obj: dict[str, Any], channel: str | None = None
+    ) -> str | None:
         """Upload a file from Slack to Google Drive.
 
         This method is maintained for backward compatibility.
@@ -584,13 +589,13 @@ class FileHandler:
 
     def _upload_direct_to_chat(
         self,
-        file_obj: dict,
+        file_obj: dict[str, Any],
         file_content: bytes,
-        channel: Optional[str] = None,
-        space: Optional[str] = None,
-        user_service=None,
-        sender_email: Optional[str] = None,
-    ) -> Optional[dict[str, Any]]:
+        channel: str | None = None,
+        space: str | None = None,
+        user_service: Any = None,
+        sender_email: str | None = None,
+    ) -> dict[str, Any] | None:
         """Upload a file directly to Google Chat API.
 
         Args:
@@ -627,7 +632,7 @@ class FileHandler:
                         user_service, dry_run=self.dry_run
                     )
                     # Set migrator reference for channel context logging
-                    user_chat_uploader.migrator = self.migrator
+                    user_chat_uploader.migrator = self.migrator  # type: ignore[assignment]
                     upload_response, attachment_metadata = (
                         user_chat_uploader.upload_file_to_chat(
                             temp_file_path, name, space
@@ -698,11 +703,11 @@ class FileHandler:
 
     def _upload_to_drive(  # noqa: C901
         self,
-        file_obj: dict,
+        file_obj: dict[str, Any],
         file_content: bytes,
-        channel: Optional[str] = None,
-        sender_email: Optional[str] = None,
-    ) -> Optional[dict[str, Any]]:
+        channel: str | None = None,
+        sender_email: str | None = None,
+    ) -> dict[str, Any] | None:
         """Upload a file to Google Drive.
 
         Args:
@@ -1033,7 +1038,7 @@ class FileHandler:
             log_with_context(logging.WARNING, f"Failed to transfer file ownership: {e}")
             return False
 
-    def _download_file(self, file_obj: dict) -> Optional[bytes]:
+    def _download_file(self, file_obj: dict[str, Any]) -> bytes | None:
         """Download a file from Slack export or URL.
 
         Args:
@@ -1186,8 +1191,8 @@ class FileHandler:
             return None
 
     def _create_drive_reference(
-        self, file_obj: dict, channel: Optional[str] = None
-    ) -> Optional[dict[str, Any]]:
+        self, file_obj: dict[str, Any], channel: str | None = None
+    ) -> dict[str, Any] | None:
         """Create a direct reference to an existing Google Drive file.
 
         Args:

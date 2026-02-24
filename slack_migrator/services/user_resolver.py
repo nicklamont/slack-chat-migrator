@@ -32,7 +32,7 @@ class UserResolver:
             migrator: The SlackToChatMigrator instance.
         """
         self.migrator = migrator
-        self._users_data: dict[str, dict] | None = None
+        self._users_data: dict[str, dict[str, Any]] | None = None
 
     def get_delegate(self, email: str) -> Any:
         """Get a Google Chat API service with user impersonation."""
@@ -107,7 +107,7 @@ class UserResolver:
 
         return user_email
 
-    def get_user_data(self, user_id: str) -> dict | None:
+    def get_user_data(self, user_id: str) -> dict[str, Any] | None:
         """Get user data from the users.json export file.
 
         Args:

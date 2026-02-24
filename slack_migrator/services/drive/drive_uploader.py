@@ -2,10 +2,12 @@
 Google Drive file upload functionality.
 """
 
+from __future__ import annotations
+
 import hashlib
 import logging
 import mimetypes
-from typing import Any, Optional
+from typing import Any
 
 # Third-party imports
 # pylint: disable=import-error
@@ -23,10 +25,10 @@ class DriveFileUploader:
     def __init__(
         self,
         drive_service,
-        workspace_domain: Optional[str] = None,
+        workspace_domain: str | None = None,
         dry_run: bool = False,
-        service_account_email: Optional[str] = None,
-    ):
+        service_account_email: str | None = None,
+    ) -> None:
         """Initialize the DriveFileUploader.
 
         Args:
@@ -39,11 +41,11 @@ class DriveFileUploader:
         self.workspace_domain = workspace_domain
         self.dry_run = dry_run
         self.service_account_email = service_account_email
-        self.file_hash_cache: dict[str, tuple[Optional[str], Optional[str]]] = {}
+        self.file_hash_cache: dict[str, tuple[str | None, str | None]] = {}
         self.folders_pre_cached: set[str] = set()
         self.migrator = None  # Will be set by the FileHandler when it's created
 
-    def _get_current_channel(self):
+    def _get_current_channel(self) -> str | None:
         """Helper method to get the current channel from the migrator.
 
         Returns:
@@ -73,7 +75,7 @@ class DriveFileUploader:
         return hash_md5.hexdigest()
 
     def pre_cache_folder_file_hashes(
-        self, folder_id: str, shared_drive_id: Optional[str] = None
+        self, folder_id: str, shared_drive_id: str | None = None
     ) -> int:
         """Pre-cache MD5 hashes of all files in a folder.
 
@@ -176,8 +178,8 @@ class DriveFileUploader:
         file_hash: str,
         filename: str,
         folder_id: str,
-        shared_drive_id: Optional[str] = None,
-    ) -> tuple[Optional[str], Optional[str]]:
+        shared_drive_id: str | None = None,
+    ) -> tuple[str | None, str | None]:
         """Find a file in Drive by its MD5 hash.
 
         Args:
@@ -278,9 +280,9 @@ class DriveFileUploader:
         file_path: str,
         filename: str,
         folder_id: str,
-        shared_drive_id: Optional[str] = None,
-        message_poster_email: Optional[str] = None,
-    ) -> tuple[Optional[str], Optional[str]]:
+        shared_drive_id: str | None = None,
+        message_poster_email: str | None = None,
+    ) -> tuple[str | None, str | None]:
         """Upload a file to Google Drive.
 
         Args:
@@ -408,7 +410,7 @@ class DriveFileUploader:
         self,
         file_id: str,
         message_poster_email: str,
-        shared_drive_id: Optional[str] = None,
+        shared_drive_id: str | None = None,
     ) -> bool:
         """Set editor permission for the message poster on a file.
 
@@ -466,7 +468,7 @@ class DriveFileUploader:
         self,
         file_id: str,
         user_emails: list,
-        message_poster_email: Optional[str] = None,
+        message_poster_email: str | None = None,
     ) -> bool:
         """Set file permissions for specific users only (not domain-wide).
 

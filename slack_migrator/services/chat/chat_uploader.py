@@ -2,11 +2,13 @@
 Google Chat API file upload functionality.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import mimetypes
 import os
-from typing import Any, Optional
+from typing import Any
 
 from googleapiclient.http import MediaFileUpload
 
@@ -18,7 +20,7 @@ from slack_migrator.utils.logging import (
 class ChatFileUploader:
     """Handles direct file uploads to Google Chat API."""
 
-    def __init__(self, chat_service, dry_run: bool = False):
+    def __init__(self, chat_service: Any, dry_run: bool = False) -> None:
         """Initialize the ChatFileUploader.
 
         Args:
@@ -29,7 +31,7 @@ class ChatFileUploader:
         self.dry_run = dry_run
         self.migrator = None  # Will be set by the migrator when this service is used
 
-    def _get_current_channel(self):
+    def _get_current_channel(self) -> str | None:
         """Helper method to get the current channel from the migrator.
 
         Returns:
@@ -44,8 +46,8 @@ class ChatFileUploader:
         return None
 
     def upload_file_to_chat(
-        self, file_path: str, filename: str, parent_space: Optional[str] = None
-    ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+        self, file_path: str, filename: str, parent_space: str | None = None
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """Upload a file directly to Google Chat API.
 
         Args:
@@ -230,7 +232,7 @@ class ChatFileUploader:
         # Return the complete upload response object
         return upload_response
 
-    def get_supported_mime_types(self) -> list:
+    def get_supported_mime_types(self) -> list[str]:
         """Get list of MIME types supported by Chat API direct upload.
 
         Returns:
