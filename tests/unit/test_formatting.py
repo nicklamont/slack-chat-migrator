@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+from slack_migrator.core.state import MigrationState
 from slack_migrator.utils.formatting import (
     _parse_rich_text_elements,
     convert_formatting,
@@ -325,8 +326,9 @@ class TestConvertFormatting:
     def test_unmapped_user_with_migrator_tracker(self):
         """Covers lines 436-444: unmapped user with migrator.unmapped_user_tracker."""
         migrator = MagicMock()
-        migrator.current_channel = "general"
-        migrator.current_message_ts = "1234567890.000100"
+        migrator.state = MigrationState()
+        migrator.state.current_channel = "general"
+        migrator.state.current_message_ts = "1234567890.000100"
         tracker = MagicMock()
         migrator.unmapped_user_tracker = tracker
 

@@ -17,12 +17,12 @@ from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
 from slack_migrator.core.config import should_process_channel
-from slack_migrator.services.message import send_message, track_message_stats
-from slack_migrator.services.space import (
+from slack_migrator.services.membership_manager import (
     add_regular_members,
     add_users_to_space,
-    create_space,
 )
+from slack_migrator.services.message import send_message, track_message_stats
+from slack_migrator.services.space_creator import create_space
 from slack_migrator.utils.logging import log_with_context
 
 
@@ -40,7 +40,7 @@ class ChannelProcessor:
         migrator = self.migrator
         channel = ch_dir.name
 
-        migrator.current_channel = channel
+        migrator.state.current_channel = channel
 
         # Determine mode prefix for logging
         mode_prefix = "[DRY RUN] "
@@ -54,7 +54,7 @@ class ChannelProcessor:
             f"{mode_prefix if migrator.dry_run or migrator.update_mode else ''}Processing channel: {channel}",
             channel=channel,
         )
-        migrator.migration_summary["channels_processed"].append(channel)
+        migrator.state.migration_summary["channels_processed"].append(channel)
 
         # Check if channel should be processed
         if not should_process_channel(channel, migrator.config):
@@ -67,15 +67,15 @@ class ChannelProcessor:
 
         # Check for unresolved space conflicts
         if (
-            hasattr(migrator, "channel_conflicts")
-            and channel in migrator.channel_conflicts
+            hasattr(migrator.state, "channel_conflicts")
+            and channel in migrator.state.channel_conflicts
         ):
             log_with_context(
                 logging.ERROR,
                 f"Skipping channel {channel} due to unresolved duplicate space conflict",
                 channel=channel,
             )
-            migrator.migration_issues[channel] = (
+            migrator.state.migration_issues[channel] = (
                 "Skipped due to duplicate space conflict - requires disambiguation in config.yaml"
             )
             return False
@@ -99,9 +99,9 @@ class ChannelProcessor:
             return False
 
         # Set current space
-        migrator.current_space = space
-        migrator.channel_to_space[channel] = space
-        migrator.created_spaces[channel] = space
+        migrator.state.current_space = space
+        migrator.state.channel_to_space[channel] = space
+        migrator.state.created_spaces[channel] = space
 
         log_with_context(
             logging.DEBUG,
@@ -170,11 +170,11 @@ class ChannelProcessor:
         )
 
         migrator = self.migrator
-        assert migrator.output_dir is not None
+        assert migrator.state.output_dir is not None
         channel_handler = setup_channel_logger(
-            migrator.output_dir, channel, migrator.verbose, is_debug_api_enabled()
+            migrator.state.output_dir, channel, migrator.verbose, is_debug_api_enabled()
         )
-        migrator.channel_handlers[channel] = channel_handler
+        migrator.state.channel_handlers[channel] = channel_handler
 
     def _create_or_reuse_space(self, ch_dir: Path) -> tuple[str, bool]:
         """Create a new space or reuse an existing one.
@@ -184,15 +184,15 @@ class ChannelProcessor:
         migrator = self.migrator
         channel = ch_dir.name
 
-        if migrator.update_mode and channel in migrator.created_spaces:
-            space = migrator.created_spaces[channel]
+        if migrator.update_mode and channel in migrator.state.created_spaces:
+            space = migrator.state.created_spaces[channel]
             space_id = space.split("/")[-1] if space.startswith("spaces/") else space
             log_with_context(
                 logging.INFO,
                 f"[UPDATE MODE] Using existing space {space_id} for channel {channel}",
                 channel=channel,
             )
-            migrator.space_cache[channel] = space
+            migrator.state.space_cache[channel] = space
             return space, False
         else:
             action_desc = (
@@ -205,8 +205,10 @@ class ChannelProcessor:
                 f"{'[DRY RUN] ' if migrator.dry_run else ''}Step 1/6: {action_desc} for {channel}",
                 channel=channel,
             )
-            space = migrator.space_cache.get(channel) or create_space(migrator, channel)
-            migrator.space_cache[channel] = space
+            space = migrator.state.space_cache.get(channel) or create_space(
+                migrator, channel
+            )
+            migrator.state.space_cache[channel] = space
             return space, True
 
     def _process_messages(  # noqa: C901
@@ -285,7 +287,7 @@ class ChannelProcessor:
                 f"{mode_prefix} Found {message_count} messages in channel {channel}",
                 channel=channel,
             )
-            migrator.migration_summary["messages_created"] += message_count
+            migrator.state.migration_summary["messages_created"] += message_count
 
         # Load previously processed messages and thread mappings
         processed_ts: list[str] = []
@@ -354,7 +356,7 @@ class ChannelProcessor:
                         )
                         # Flag the channel as having a high error rate
                         channel_had_errors = True
-                        migrator.high_failure_rate_channels[channel] = (
+                        migrator.state.high_failure_rate_channels[channel] = (
                             failure_percentage
                         )
 
@@ -363,7 +365,7 @@ class ChannelProcessor:
 
         # Record failures for reporting
         if channel_failures:
-            migrator.failed_messages_by_channel[channel] = channel_failures
+            migrator.state.failed_messages_by_channel[channel] = channel_failures
             channel_had_errors = True
 
         log_with_context(
@@ -419,14 +421,14 @@ class ChannelProcessor:
                     channel=channel,
                 )
                 channel_had_errors = True
-                migrator.incomplete_import_spaces.append((space, channel))
+                migrator.state.incomplete_import_spaces.append((space, channel))
         elif channel_had_errors and not migrator.dry_run:
             log_with_context(
                 logging.WARNING,
                 f"Skipping import completion for space {space} due to errors (strategy: {completion_strategy})",
                 channel=channel,
             )
-            migrator.incomplete_import_spaces.append((space, channel))
+            migrator.state.incomplete_import_spaces.append((space, channel))
 
         return channel_had_errors
 
@@ -562,11 +564,11 @@ class ChannelProcessor:
             )
 
             # Remove from created_spaces
-            if channel in migrator.created_spaces:
-                del migrator.created_spaces[channel]
+            if channel in migrator.state.created_spaces:
+                del migrator.state.created_spaces[channel]
 
             # Decrement space count
-            migrator.migration_summary["spaces_created"] -= 1
+            migrator.state.migration_summary["spaces_created"] -= 1
         except (HttpError, RefreshError, TransportError) as e:
             log_with_context(
                 logging.ERROR,
@@ -581,7 +583,7 @@ class ChannelProcessor:
         migrator = self.migrator
 
         # Check if we have a space for this channel
-        space_name = migrator.channel_to_space.get(channel)
+        space_name = migrator.state.channel_to_space.get(channel)
         if not space_name:
             log_with_context(
                 logging.WARNING,
@@ -604,11 +606,14 @@ class ChannelProcessor:
             )
 
             # Store the last timestamp for this channel
-            migrator.last_processed_timestamps[channel] = last_timestamp
+            migrator.state.last_processed_timestamps[channel] = last_timestamp
 
             # Initialize an empty thread_map so we don't try to load it again
-            if not hasattr(migrator, "thread_map") or migrator.thread_map is None:
-                migrator.thread_map = {}
+            if (
+                not hasattr(migrator.state, "thread_map")
+                or migrator.state.thread_map is None
+            ):
+                migrator.state.thread_map = {}
         else:
             # If no messages were found, log it but don't set a last timestamp
             # This will cause all messages to be imported

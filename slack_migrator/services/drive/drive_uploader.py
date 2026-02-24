@@ -54,9 +54,10 @@ class DriveFileUploader:
         if (
             hasattr(self, "migrator")
             and self.migrator is not None
-            and hasattr(self.migrator, "current_channel")
+            and hasattr(self.migrator, "state")
+            and hasattr(self.migrator.state, "current_channel")
         ):
-            return self.migrator.current_channel
+            return self.migrator.state.current_channel
         return None
 
     def _calculate_file_hash(self, file_path: str) -> str:

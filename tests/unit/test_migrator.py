@@ -170,11 +170,11 @@ class TestInitCaches:
 
     def test_space_cache_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.space_cache == {}
+        assert m.state.space_cache == {}
 
     def test_created_spaces_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.created_spaces == {}
+        assert m.state.created_spaces == {}
 
     def test_user_map_populated(self, tmp_path):
         m = _make_migrator(tmp_path)
@@ -183,31 +183,31 @@ class TestInitCaches:
 
     def test_thread_map_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.thread_map == {}
+        assert m.state.thread_map == {}
 
     def test_external_users_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.external_users == set()
+        assert m.state.external_users == set()
 
     def test_failed_messages_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.failed_messages == []
+        assert m.state.failed_messages == []
 
     def test_channel_handlers_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.channel_handlers == {}
+        assert m.state.channel_handlers == {}
 
     def test_channel_to_space_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.channel_to_space == {}
+        assert m.state.channel_to_space == {}
 
     def test_current_space_none(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.current_space is None
+        assert m.state.current_space is None
 
     def test_migration_summary_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.migration_summary == {}
+        assert m.state.migration_summary == {}
 
     def test_api_services_not_initialized(self, tmp_path):
         m = _make_migrator(tmp_path)
@@ -217,15 +217,15 @@ class TestInitCaches:
 
     def test_chat_delegates_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.chat_delegates == {}
+        assert m.state.chat_delegates == {}
 
     def test_valid_users_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.valid_users == {}
+        assert m.state.valid_users == {}
 
     def test_channel_id_to_space_id_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.channel_id_to_space_id == {}
+        assert m.state.channel_id_to_space_id == {}
 
 
 class TestInitConfig:
@@ -567,12 +567,12 @@ class TestDeleteSpaceIfErrors:
         m = _make_migrator(tmp_path)
         m.config = MigrationConfig(cleanup_on_error=True)
         m.chat = MagicMock()
-        m.created_spaces = {"general": "spaces/abc123"}
-        m.migration_summary = {"spaces_created": 1}
+        m.state.created_spaces = {"general": "spaces/abc123"}
+        m.state.migration_summary = {"spaces_created": 1}
         m._delete_space_if_errors("spaces/abc123", "general")
         m.chat.spaces().delete.assert_called_once_with(name="spaces/abc123")
-        assert "general" not in m.created_spaces
-        assert m.migration_summary["spaces_created"] == 0
+        assert "general" not in m.state.created_spaces
+        assert m.state.migration_summary["spaces_created"] == 0
 
     def test_delete_handles_api_error(self, tmp_path):
         from google.auth.exceptions import RefreshError
@@ -581,8 +581,8 @@ class TestDeleteSpaceIfErrors:
         m.config = MigrationConfig(cleanup_on_error=True)
         m.chat = MagicMock()
         m.chat.spaces().delete().execute.side_effect = RefreshError("API error")
-        m.created_spaces = {"general": "spaces/abc123"}
-        m.migration_summary = {"spaces_created": 1}
+        m.state.created_spaces = {"general": "spaces/abc123"}
+        m.state.migration_summary = {"spaces_created": 1}
         # Should not raise
         m._delete_space_if_errors("spaces/abc123", "general")
 
@@ -593,8 +593,8 @@ class TestDeleteSpaceIfErrors:
         m.config = MigrationConfig(cleanup_on_error=True)
         m.chat = MagicMock()
         m.chat.spaces().delete().execute.side_effect = TransportError("network down")
-        m.created_spaces = {"general": "spaces/abc123"}
-        m.migration_summary = {"spaces_created": 1}
+        m.state.created_spaces = {"general": "spaces/abc123"}
+        m.state.migration_summary = {"spaces_created": 1}
         # Should not raise — TransportError is a recoverable network issue
         m._delete_space_if_errors("spaces/abc123", "general")
 
@@ -609,20 +609,20 @@ class TestDeleteSpaceIfErrors:
         m.chat.spaces().delete().execute.side_effect = HttpError(
             resp=resp, content=b"Server Error"
         )
-        m.created_spaces = {"general": "spaces/abc123"}
-        m.migration_summary = {"spaces_created": 1}
+        m.state.created_spaces = {"general": "spaces/abc123"}
+        m.state.migration_summary = {"spaces_created": 1}
         # Should not raise — HttpError is caught and logged
         m._delete_space_if_errors("spaces/abc123", "general")
         # Space should NOT be removed from created_spaces (delete failed)
-        assert "general" in m.created_spaces
+        assert "general" in m.state.created_spaces
 
     def test_delete_propagates_unexpected_error(self, tmp_path):
         m = _make_migrator(tmp_path)
         m.config = MigrationConfig(cleanup_on_error=True)
         m.chat = MagicMock()
         m.chat.spaces().delete().execute.side_effect = RuntimeError("truly unexpected")
-        m.created_spaces = {"general": "spaces/abc123"}
-        m.migration_summary = {"spaces_created": 1}
+        m.state.created_spaces = {"general": "spaces/abc123"}
+        m.state.migration_summary = {"spaces_created": 1}
         # Should raise — RuntimeError is not a known API/transport error
         with pytest.raises(RuntimeError):
             m._delete_space_if_errors("spaces/abc123", "general")
@@ -670,45 +670,44 @@ class TestCleanupChannelHandlers:
     def test_cleanup_flushes_and_closes(self, tmp_path):
         m = _make_migrator(tmp_path)
         handler = MagicMock()
-        m.channel_handlers = {"general": handler}
+        m.state.channel_handlers = {"general": handler}
         m._cleanup_channel_handlers()
         handler.flush.assert_called_once()
         handler.close.assert_called_once()
-        assert m.channel_handlers == {}
+        assert m.state.channel_handlers == {}
 
     def test_cleanup_with_no_handlers(self, tmp_path):
         m = _make_migrator(tmp_path)
-        m.channel_handlers = {}
+        m.state.channel_handlers = {}
         # Should not raise
         m._cleanup_channel_handlers()
 
-    def test_cleanup_without_attribute(self, tmp_path):
+    def test_cleanup_with_empty_handlers(self, tmp_path):
         m = _make_migrator(tmp_path)
-        if hasattr(m, "channel_handlers"):
-            del m.channel_handlers
-        # Should not raise
+        m.state.channel_handlers = {}
+        # Should not raise — channel_handlers always exists on MigrationState
         m._cleanup_channel_handlers()
 
     def test_cleanup_handles_handler_error(self, tmp_path):
         m = _make_migrator(tmp_path)
         handler = MagicMock()
         handler.flush.side_effect = Exception("flush failed")
-        m.channel_handlers = {"general": handler}
+        m.state.channel_handlers = {"general": handler}
         # Should not raise despite handler error
         m._cleanup_channel_handlers()
-        assert m.channel_handlers == {}
+        assert m.state.channel_handlers == {}
 
     def test_cleanup_multiple_handlers(self, tmp_path):
         m = _make_migrator(tmp_path)
         handler1 = MagicMock()
         handler2 = MagicMock()
-        m.channel_handlers = {"general": handler1, "random": handler2}
+        m.state.channel_handlers = {"general": handler1, "random": handler2}
         m._cleanup_channel_handlers()
         handler1.flush.assert_called_once()
         handler1.close.assert_called_once()
         handler2.flush.assert_called_once()
         handler2.close.assert_called_once()
-        assert m.channel_handlers == {}
+        assert m.state.channel_handlers == {}
 
 
 # ---------------------------------------------------------------------------
@@ -746,7 +745,7 @@ class TestGetInternalEmail:
         ]
         channels = [{"id": "C001", "name": "general", "members": ["U001"]}]
         m = _make_migrator(tmp_path, users=users, channels=channels)
-        m.config = MigrationConfig(ignore_bots=True)
+        m.config.ignore_bots = True
         result = m._get_internal_email("B001")
         assert result is None
 
@@ -762,7 +761,7 @@ class TestGetInternalEmail:
         ]
         channels = [{"id": "C001", "name": "general", "members": ["U001"]}]
         m = _make_migrator(tmp_path, users=users, channels=channels)
-        m.config = MigrationConfig(ignore_bots=False)
+        m.config.ignore_bots = False
         # Bot has email mapping
         m.user_map["B001"] = "bot@example.com"
         result = m._get_internal_email("B001")
@@ -814,7 +813,7 @@ class TestHandleUnmappedUserMessage:
 
     def test_returns_admin_email_and_attributed_text(self, tmp_path):
         m = _make_migrator(tmp_path)
-        m.current_channel = "general"
+        m.state.current_channel = "general"
         email, text = m._handle_unmapped_user_message("U999", "Hello world")
         assert email == "admin@example.com"
         assert "Hello world" in text
@@ -835,29 +834,27 @@ class TestHandleUnmappedUserMessage:
         ]
         channels = [{"id": "C001", "name": "general", "members": ["U001"]}]
         m = _make_migrator(tmp_path, users=users, channels=channels)
-        m.current_channel = "general"
+        m.state.current_channel = "general"
         _email, text = m._handle_unmapped_user_message("U002", "Hi")
         assert "Bob Jones" in text
         assert "bob@other.com" in text
 
     def test_attribution_with_user_id_only(self, tmp_path):
         m = _make_migrator(tmp_path)
-        m.current_channel = "general"
+        m.state.current_channel = "general"
         _email, text = m._handle_unmapped_user_message("U_UNKNOWN", "Hi")
         assert "U_UNKNOWN" in text
 
     def test_attribution_with_user_mapping_override(self, tmp_path):
         m = _make_migrator(tmp_path)
-        m.config = MigrationConfig(
-            user_mapping_overrides={"U999": "mapped@example.com"}
-        )
-        m.current_channel = "general"
+        m.config.user_mapping_overrides = {"U999": "mapped@example.com"}
+        m.state.current_channel = "general"
         _email, text = m._handle_unmapped_user_message("U999", "Hi")
         assert "mapped@example.com" in text
 
     def test_tracks_unmapped_user(self, tmp_path):
         m = _make_migrator(tmp_path)
-        m.current_channel = "general"
+        m.state.current_channel = "general"
         m._handle_unmapped_user_message("U999", "text")
         assert "U999" in m.unmapped_user_tracker.unmapped_users
 
@@ -872,24 +869,24 @@ class TestHandleUnmappedUserReaction:
 
     def test_returns_false(self, tmp_path):
         m = _make_migrator(tmp_path)
-        m.current_channel = "general"
+        m.state.current_channel = "general"
         result = m._handle_unmapped_user_reaction("U999", "thumbsup", "123.456")
         assert result is False
 
     def test_tracks_unmapped_user(self, tmp_path):
         m = _make_migrator(tmp_path)
-        m.current_channel = "general"
+        m.state.current_channel = "general"
         m._handle_unmapped_user_reaction("U999", "thumbsup", "123.456")
         assert "U999" in m.unmapped_user_tracker.unmapped_users
 
     def test_records_skipped_reaction(self, tmp_path):
         m = _make_migrator(tmp_path)
-        m.current_channel = "general"
+        m.state.current_channel = "general"
         m._handle_unmapped_user_reaction("U999", "heart", "123.456")
-        assert hasattr(m, "skipped_reactions")
-        assert len(m.skipped_reactions) == 1
-        assert m.skipped_reactions[0]["reaction"] == "heart"
-        assert m.skipped_reactions[0]["user_id"] == "U999"
+        assert hasattr(m.state, "skipped_reactions")
+        assert len(m.state.skipped_reactions) == 1
+        assert m.state.skipped_reactions[0]["reaction"] == "heart"
+        assert m.state.skipped_reactions[0]["user_id"] == "U999"
 
 
 # ---------------------------------------------------------------------------
@@ -902,7 +899,7 @@ class TestLogMigrationSuccess:
 
     def test_logs_success_dry_run(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=True)
-        m.migration_summary = {
+        m.state.migration_summary = {
             "channels_processed": ["general"],
             "spaces_created": 0,
             "messages_created": 10,
@@ -917,7 +914,7 @@ class TestLogMigrationSuccess:
 
     def test_logs_success_real_run(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.migration_summary = {
+        m.state.migration_summary = {
             "channels_processed": ["general", "random"],
             "spaces_created": 2,
             "messages_created": 50,
@@ -933,15 +930,15 @@ class TestLogMigrationSuccess:
 
     def test_logs_issues_when_present(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.migration_summary = {
+        m.state.migration_summary = {
             "channels_processed": ["general"],
             "spaces_created": 1,
             "messages_created": 10,
             "reactions_created": 0,
             "files_created": 0,
         }
-        m.channels_with_errors = ["general"]
-        m.incomplete_import_spaces = [("spaces/abc", "general")]
+        m.state.channels_with_errors = ["general"]
+        m.state.incomplete_import_spaces = [("spaces/abc", "general")]
         with caplog.at_level(logging.WARNING, logger="slack_migrator"):
             m._log_migration_success(30.0)
         messages = " ".join(r.message for r in caplog.records)
@@ -950,7 +947,7 @@ class TestLogMigrationSuccess:
 
     def test_logs_no_work_done(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.migration_summary = {
+        m.state.migration_summary = {
             "channels_processed": [],
             "spaces_created": 0,
             "messages_created": 0,
@@ -973,7 +970,7 @@ class TestLogMigrationFailure:
 
     def test_logs_generic_exception(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.migration_summary = {
+        m.state.migration_summary = {
             "channels_processed": ["general"],
             "spaces_created": 1,
             "messages_created": 5,
@@ -988,7 +985,7 @@ class TestLogMigrationFailure:
 
     def test_logs_keyboard_interrupt(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.migration_summary = {
+        m.state.migration_summary = {
             "channels_processed": ["general"],
             "spaces_created": 1,
             "messages_created": 5,
@@ -1002,7 +999,7 @@ class TestLogMigrationFailure:
 
     def test_logs_dry_run_failure(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=True)
-        m.migration_summary = {
+        m.state.migration_summary = {
             "channels_processed": [],
             "spaces_created": 0,
             "messages_created": 0,
@@ -1015,7 +1012,7 @@ class TestLogMigrationFailure:
 
     def test_logs_progress_before_failure(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.migration_summary = {
+        m.state.migration_summary = {
             "channels_processed": ["general", "random"],
             "spaces_created": 2,
             "messages_created": 100,
@@ -1285,9 +1282,9 @@ class TestCleanup:
 
     def test_clears_current_channel(self, tmp_path):
         m = _make_migrator(tmp_path, dry_run=True)
-        m.current_channel = "general"
+        m.state.current_channel = "general"
         m.cleanup()
-        assert m.current_channel is None
+        assert m.state.current_channel is None
 
 
 # ---------------------------------------------------------------------------

@@ -449,10 +449,20 @@ def check_permissions_standalone(
     config = load_config(Path(config_path))
 
     chat = get_gcp_service(
-        creds_path, workspace_admin, "chat", "v1", retry_config=config
+        creds_path,
+        workspace_admin,
+        "chat",
+        "v1",
+        max_retries=config.max_retries,
+        retry_delay=config.retry_delay,
     )
     drive = get_gcp_service(
-        creds_path, workspace_admin, "drive", "v3", retry_config=config
+        creds_path,
+        workspace_admin,
+        "drive",
+        "v3",
+        max_retries=config.max_retries,
+        retry_delay=config.retry_delay,
     )
 
     ctx = PermissionCheckContext(

@@ -5,31 +5,30 @@ from unittest.mock import MagicMock, patch
 from googleapiclient.errors import HttpError
 
 from slack_migrator.core.config import MigrationConfig
+from slack_migrator.core.state import MigrationState
+from slack_migrator.services.discovery import log_space_mapping_conflicts
 from slack_migrator.services.message import (
-    log_space_mapping_conflicts,
-    process_reactions_batch,
     send_intro,
     send_message,
     track_message_stats,
 )
+from slack_migrator.services.reaction_processor import process_reactions_batch
 
 
 def _make_migrator(dry_run=False, channel="general", ignore_bots=False):
     """Create a mock migrator for message testing."""
     migrator = MagicMock()
     migrator.dry_run = dry_run
-    migrator.current_channel = channel
+    migrator.state = MigrationState()
+    migrator.state.current_channel = channel
     migrator.config = MigrationConfig(ignore_bots=ignore_bots)
-    migrator.migration_summary = {
+    migrator.state.migration_summary = {
         "messages_created": 0,
         "reactions_created": 0,
         "files_created": 0,
         "channels_processed": [],
         "spaces_created": 0,
     }
-    # Remove mock auto-creation for hasattr checks
-    del migrator.channel_stats
-    del migrator.sent_messages
     migrator.update_mode = False
 
     # Set up attachment processor
@@ -48,11 +47,11 @@ def _make_send_migrator(
     # user_map for resolving user IDs to emails
     migrator.user_map = user_map or {"U001": "user1@example.com"}
 
-    # Thread tracking
-    migrator.thread_map = {}
-    migrator.sent_messages = set()
-    migrator.message_id_map = {}
-    migrator.failed_messages = []
+    # Thread tracking (state attributes already initialized by MigrationState defaults)
+    migrator.state.thread_map = {}
+    migrator.state.sent_messages = set()
+    migrator.state.message_id_map = {}
+    migrator.state.failed_messages = []
 
     # Workspace admin
     migrator.workspace_admin = "admin@example.com"
@@ -64,9 +63,6 @@ def _make_send_migrator(
 
     # Attachment processor returns no attachments by default
     migrator.attachment_processor.process_message_attachments.return_value = []
-
-    # Prevent hasattr from auto-creating last_processed_timestamps on MagicMock
-    del migrator.last_processed_timestamps
 
     # Chat service mock — create chain: spaces().messages().create().execute()
     mock_result = {
@@ -102,7 +98,7 @@ class TestTrackMessageStats:
 
         track_message_stats(migrator, msg)
 
-        assert migrator.channel_stats["general"]["message_count"] == 1
+        assert migrator.state.channel_stats["general"]["message_count"] == 1
 
     def test_reaction_counting(self):
         migrator = _make_migrator()
@@ -115,7 +111,7 @@ class TestTrackMessageStats:
 
         track_message_stats(migrator, msg)
 
-        assert migrator.channel_stats["general"]["reaction_count"] == 2
+        assert migrator.state.channel_stats["general"]["reaction_count"] == 2
 
     def test_file_counting(self):
         migrator = _make_migrator()
@@ -124,8 +120,8 @@ class TestTrackMessageStats:
 
         track_message_stats(migrator, msg)
 
-        assert migrator.channel_stats["general"]["file_count"] == 3
-        assert migrator.migration_summary["files_created"] == 3
+        assert migrator.state.channel_stats["general"]["file_count"] == 3
+        assert migrator.state.migration_summary["files_created"] == 3
 
     def test_dry_run_counts_reactions(self):
         migrator = _make_migrator(dry_run=True)
@@ -138,7 +134,7 @@ class TestTrackMessageStats:
 
         track_message_stats(migrator, msg)
 
-        assert migrator.migration_summary["reactions_created"] == 1
+        assert migrator.state.migration_summary["reactions_created"] == 1
 
     def test_skips_bot_messages_when_ignore_bots(self):
         migrator = _make_migrator(ignore_bots=True)
@@ -147,9 +143,7 @@ class TestTrackMessageStats:
         track_message_stats(migrator, msg)
 
         # channel_stats should not be created since the message was skipped
-        assert not hasattr(migrator, "channel_stats") or (
-            "general" not in migrator.channel_stats
-        )
+        assert "general" not in migrator.state.channel_stats
 
     def test_skips_bot_user_when_ignore_bots(self):
         migrator = _make_migrator(ignore_bots=True)
@@ -161,9 +155,7 @@ class TestTrackMessageStats:
 
         track_message_stats(migrator, msg)
 
-        assert not hasattr(migrator, "channel_stats") or (
-            "general" not in migrator.channel_stats
-        )
+        assert "general" not in migrator.state.channel_stats
 
     def test_processes_non_bot_when_ignore_bots(self):
         migrator = _make_migrator(ignore_bots=True)
@@ -172,35 +164,35 @@ class TestTrackMessageStats:
 
         track_message_stats(migrator, msg)
 
-        assert migrator.channel_stats["general"]["message_count"] == 1
+        assert migrator.state.channel_stats["general"]["message_count"] == 1
 
     def test_multiple_messages_increment(self):
         migrator = _make_migrator()
         for i in range(5):
             track_message_stats(migrator, {"ts": f"{i}.0", "user": "U001"})
 
-        assert migrator.channel_stats["general"]["message_count"] == 5
+        assert migrator.state.channel_stats["general"]["message_count"] == 5
 
     def test_update_mode_skips_already_sent(self):
         migrator = _make_migrator()
         migrator.update_mode = True
-        migrator.sent_messages = {"general:1234.5"}
+        migrator.state.sent_messages = {"general:1234.5"}
         msg = {"ts": "1234.5", "user": "U001"}
 
         track_message_stats(migrator, msg)
 
         # Should not count as it was already sent
-        assert migrator.channel_stats["general"]["message_count"] == 0
+        assert migrator.state.channel_stats["general"]["message_count"] == 0
 
     def test_update_mode_skips_edited_already_sent(self):
         migrator = _make_migrator()
         migrator.update_mode = True
-        migrator.sent_messages = {"general:1234.5:edited:1235.0"}
+        migrator.state.sent_messages = {"general:1234.5:edited:1235.0"}
         msg = {"ts": "1234.5", "user": "U001", "edited": {"ts": "1235.0"}}
 
         track_message_stats(migrator, msg)
 
-        assert migrator.channel_stats["general"]["message_count"] == 0
+        assert migrator.state.channel_stats["general"]["message_count"] == 0
 
     def test_skips_app_message_when_ignore_bots(self):
         migrator = _make_migrator(ignore_bots=True)
@@ -208,9 +200,7 @@ class TestTrackMessageStats:
 
         track_message_stats(migrator, msg)
 
-        assert not hasattr(migrator, "channel_stats") or (
-            "general" not in migrator.channel_stats
-        )
+        assert "general" not in migrator.state.channel_stats
 
     def test_reaction_counting_skips_bot_reactions_when_ignore_bots(self):
         migrator = _make_migrator(ignore_bots=True)
@@ -228,7 +218,7 @@ class TestTrackMessageStats:
 
         track_message_stats(migrator, msg)
 
-        assert migrator.channel_stats["general"]["reaction_count"] == 1
+        assert migrator.state.channel_stats["general"]["reaction_count"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +237,7 @@ class TestSendMessage:
         result = send_message(migrator, "spaces/SPACE1", msg)
 
         assert result == "spaces/SPACE1/messages/MSG001"
-        assert migrator.migration_summary["messages_created"] == 1
+        assert migrator.state.migration_summary["messages_created"] == 1
         migrator.chat.spaces.return_value.messages.return_value.create.assert_called_once()
 
     def test_dry_run_returns_none_and_does_not_call_api(self):
@@ -259,7 +249,7 @@ class TestSendMessage:
 
         assert result is None
         # messages_created should NOT be incremented in dry run (handled elsewhere)
-        assert migrator.migration_summary["messages_created"] == 0
+        assert migrator.state.migration_summary["messages_created"] == 0
         migrator.chat.spaces.return_value.messages.return_value.create.return_value.execute.assert_not_called()
 
     def test_skips_bot_message_subtype_when_ignore_bots(self):
@@ -340,7 +330,9 @@ class TestSendMessage:
     def test_thread_reply_uses_existing_thread_name(self):
         """Thread replies use the stored thread name from thread_map."""
         migrator = _make_send_migrator()
-        migrator.thread_map = {"1700000000.000001": "spaces/SPACE1/threads/THREAD001"}
+        migrator.state.thread_map = {
+            "1700000000.000001": "spaces/SPACE1/threads/THREAD001"
+        }
         msg = {
             "ts": "1700000000.000050",
             "user": "U001",
@@ -367,7 +359,7 @@ class TestSendMessage:
     def test_thread_reply_falls_back_to_thread_key(self):
         """Thread replies without stored thread name fall back to thread_key."""
         migrator = _make_send_migrator()
-        migrator.thread_map = {}  # No thread mapping exists
+        migrator.state.thread_map = {}  # No thread mapping exists
         msg = {
             "ts": "1700000000.000050",
             "user": "U001",
@@ -403,7 +395,7 @@ class TestSendMessage:
         send_message(migrator, "spaces/SPACE1", msg)
 
         assert (
-            migrator.thread_map["1700000000.000001"]
+            migrator.state.thread_map["1700000000.000001"]
             == "spaces/SPACE1/threads/THREAD001"
         )
 
@@ -475,8 +467,10 @@ class TestSendMessage:
         send_message(migrator, "spaces/SPACE1", msg)
 
         edit_key = "1700000000.000001:edited:1700000001.000000"
-        assert edit_key in migrator.message_id_map
-        assert migrator.message_id_map[edit_key] == "spaces/SPACE1/messages/MSG001"
+        assert edit_key in migrator.state.message_id_map
+        assert (
+            migrator.state.message_id_map[edit_key] == "spaces/SPACE1/messages/MSG001"
+        )
 
     def test_message_with_reactions_calls_process_reactions_batch(self):
         """Messages with reactions trigger process_reactions_batch."""
@@ -512,15 +506,15 @@ class TestSendMessage:
         result = send_message(migrator, "spaces/SPACE1", msg)
 
         assert result is None
-        assert len(migrator.failed_messages) == 1
-        assert migrator.failed_messages[0]["channel"] == "general"
-        assert migrator.failed_messages[0]["ts"] == "1700000000.000001"
+        assert len(migrator.state.failed_messages) == 1
+        assert migrator.state.failed_messages[0]["channel"] == "general"
+        assert migrator.state.failed_messages[0]["ts"] == "1700000000.000001"
 
     def test_update_mode_skips_already_sent_message(self):
         """Update mode skips messages already in sent_messages set."""
         migrator = _make_send_migrator()
         migrator.update_mode = True
-        migrator.sent_messages = {"general:1700000000.000001"}
+        migrator.state.sent_messages = {"general:1700000000.000001"}
         msg = {"ts": "1700000000.000001", "user": "U001", "text": "Hello"}
 
         result = send_message(migrator, "spaces/SPACE1", msg)
@@ -531,7 +525,7 @@ class TestSendMessage:
         """Update mode skips messages older than last_processed_timestamps."""
         migrator = _make_send_migrator()
         migrator.update_mode = True
-        migrator.last_processed_timestamps = {"general": 1700000010.0}
+        migrator.state.last_processed_timestamps = {"general": 1700000010.0}
 
         with patch(
             "slack_migrator.services.discovery.should_process_message",
@@ -550,37 +544,25 @@ class TestSendMessage:
 
         send_message(migrator, "spaces/SPACE1", msg)
 
-        assert "general:1700000000.000001" in migrator.sent_messages
+        assert "general:1700000000.000001" in migrator.state.sent_messages
 
-    def test_initializes_thread_map_if_missing(self):
-        """send_message initializes thread_map if not present."""
+    def test_state_has_thread_map_by_default(self):
+        """MigrationState initializes thread_map as an empty dict."""
         migrator = _make_send_migrator()
-        del migrator.thread_map
-        msg = {"ts": "1700000000.000001", "user": "U001", "text": "Hello"}
 
-        send_message(migrator, "spaces/SPACE1", msg)
+        assert isinstance(migrator.state.thread_map, dict)
 
-        assert isinstance(migrator.thread_map, dict)
-
-    def test_initializes_sent_messages_if_missing(self):
-        """send_message initializes sent_messages if not present."""
+    def test_state_has_sent_messages_by_default(self):
+        """MigrationState initializes sent_messages as an empty set."""
         migrator = _make_send_migrator()
-        del migrator.sent_messages
-        msg = {"ts": "1700000000.000001", "user": "U001", "text": "Hello"}
 
-        send_message(migrator, "spaces/SPACE1", msg)
+        assert isinstance(migrator.state.sent_messages, set)
 
-        assert isinstance(migrator.sent_messages, set)
-
-    def test_initializes_message_id_map_if_missing(self):
-        """send_message initializes message_id_map if not present."""
+    def test_state_has_message_id_map_by_default(self):
+        """MigrationState initializes message_id_map as an empty dict."""
         migrator = _make_send_migrator()
-        del migrator.message_id_map
-        msg = {"ts": "1700000000.000001", "user": "U001", "text": "Hello"}
 
-        send_message(migrator, "spaces/SPACE1", msg)
-
-        assert isinstance(migrator.message_id_map, dict)
+        assert isinstance(migrator.state.message_id_map, dict)
 
     def test_message_with_files_is_not_skipped(self):
         """Messages with no text but with files are not skipped."""
@@ -694,7 +676,7 @@ class TestProcessReactionsBatch:
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
 
-        assert migrator.migration_summary["reactions_created"] == 1
+        assert migrator.state.migration_summary["reactions_created"] == 1
 
     def test_counts_reactions_for_mapped_users(self):
         """Reactions from mapped users are counted in migration_summary."""
@@ -706,13 +688,13 @@ class TestProcessReactionsBatch:
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
 
-        assert migrator.migration_summary["reactions_created"] == 3
+        assert migrator.state.migration_summary["reactions_created"] == 3
 
     def test_unmapped_user_calls_handle_unmapped(self):
         """Unmapped user reactions call _handle_unmapped_user_reaction."""
         migrator = self._make_reactions_migrator(dry_run=True)
         migrator.user_map = {"U001": "user1@example.com"}  # U099 is unmapped
-        migrator.current_message_ts = "1700000000.000001"
+        migrator.state.current_message_ts = "1700000000.000001"
         reactions = [{"name": "thumbsup", "users": ["U099"]}]
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
@@ -732,7 +714,7 @@ class TestProcessReactionsBatch:
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
 
-        assert migrator.migration_summary["reactions_created"] == 0
+        assert migrator.state.migration_summary["reactions_created"] == 0
 
     def test_processes_non_bot_reactions_when_ignore_bots(self):
         """Non-bot reactions are counted when ignore_bots is True."""
@@ -742,7 +724,7 @@ class TestProcessReactionsBatch:
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
 
-        assert migrator.migration_summary["reactions_created"] == 1
+        assert migrator.state.migration_summary["reactions_created"] == 1
 
     def test_external_user_reactions_skipped(self):
         """Reactions from external users are skipped to avoid admin attribution."""
@@ -753,7 +735,7 @@ class TestProcessReactionsBatch:
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
 
         # Reaction is counted in the summary (happens before external check)
-        assert migrator.migration_summary["reactions_created"] == 1
+        assert migrator.state.migration_summary["reactions_created"] == 1
 
     def test_admin_service_fallback_sends_reactions_synchronously(self):
         """When impersonation fails (delegate == admin), reactions are sent one by one."""
@@ -798,7 +780,7 @@ class TestProcessReactionsBatch:
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
 
-        assert migrator.migration_summary["reactions_created"] == 0
+        assert migrator.state.migration_summary["reactions_created"] == 0
 
     def test_reaction_with_no_users(self):
         """A reaction entry with no users list is handled."""
@@ -807,7 +789,7 @@ class TestProcessReactionsBatch:
 
         process_reactions_batch(migrator, "spaces/S1/messages/M1", reactions, "M1")
 
-        assert migrator.migration_summary["reactions_created"] == 0
+        assert migrator.state.migration_summary["reactions_created"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -839,7 +821,7 @@ class TestSendIntro:
         send_intro(migrator, "spaces/SPACE1", "general")
 
         migrator.chat.spaces.return_value.messages.return_value.create.assert_called_once()
-        assert migrator.migration_summary["messages_created"] == 1
+        assert migrator.state.migration_summary["messages_created"] == 1
 
     def test_dry_run_counts_but_does_not_call_api(self):
         """In dry run, intro message is counted but not sent."""
@@ -847,7 +829,7 @@ class TestSendIntro:
 
         send_intro(migrator, "spaces/SPACE1", "general")
 
-        assert migrator.migration_summary["messages_created"] == 1
+        assert migrator.state.migration_summary["messages_created"] == 1
         migrator.chat.spaces.return_value.messages.return_value.create.return_value.execute.assert_not_called()
 
     def test_update_mode_skips_intro(self):
@@ -858,7 +840,7 @@ class TestSendIntro:
         send_intro(migrator, "spaces/SPACE1", "general")
 
         migrator.chat.spaces.return_value.messages.return_value.create.return_value.execute.assert_not_called()
-        assert migrator.migration_summary["messages_created"] == 0
+        assert migrator.state.migration_summary["messages_created"] == 0
 
     @patch("slack_migrator.services.message.time")
     def test_api_error_is_caught(self, mock_time):
@@ -895,7 +877,7 @@ class TestLogSpaceMappingConflicts:
     def test_no_conflicts(self):
         """No-op when there are no conflicts."""
         migrator = _make_migrator()
-        migrator.channel_conflicts = {}
+        migrator.state.channel_conflicts = set()
 
         # Should not raise
         log_space_mapping_conflicts(migrator)
@@ -903,21 +885,21 @@ class TestLogSpaceMappingConflicts:
     def test_with_conflicts_logs_without_error(self):
         """Conflicts are logged without raising exceptions."""
         migrator = _make_migrator()
-        migrator.channel_conflicts = {"channel-a": True, "channel-b": True}
+        migrator.state.channel_conflicts = {"channel-a", "channel-b"}
 
         log_space_mapping_conflicts(migrator)
 
     def test_dry_run_with_no_conflicts(self):
         """Dry run with no conflicts works fine."""
         migrator = _make_migrator(dry_run=True)
-        migrator.channel_conflicts = {}
+        migrator.state.channel_conflicts = set()
 
         log_space_mapping_conflicts(migrator)
 
     def test_missing_channel_conflicts_attr(self):
         """Works when channel_conflicts attribute does not exist."""
         migrator = _make_migrator()
-        del migrator.channel_conflicts
+        del migrator.state.channel_conflicts
 
         # Should not raise
         log_space_mapping_conflicts(migrator)

@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from googleapiclient.errors import HttpError
 
+from slack_migrator.core.state import MigrationState
 from slack_migrator.services.discovery import (
     discover_existing_spaces,
     get_last_message_timestamp,
@@ -15,11 +16,10 @@ def _make_migrator(channel_name_to_id=None, channel_id_to_space_id=None):
     """Create a mock migrator with common attributes for discovery tests."""
     migrator = MagicMock()
     migrator.channel_name_to_id = channel_name_to_id or {}
+    state = MigrationState()
     if channel_id_to_space_id is not None:
-        migrator.channel_id_to_space_id = channel_id_to_space_id
-    else:
-        # Let discover_existing_spaces create it if needed
-        del migrator.channel_id_to_space_id
+        state.channel_id_to_space_id = channel_id_to_space_id
+    migrator.state = state
     return migrator
 
 
@@ -71,7 +71,7 @@ class TestDiscoverExistingSpaces:
 
         assert space_mappings == {"general": "spaces/abc123"}
         assert duplicate_spaces == {}
-        assert migrator.channel_id_to_space_id["C001"] == "abc123"
+        assert migrator.state.channel_id_to_space_id["C001"] == "abc123"
 
     @patch("slack_migrator.services.discovery.time.sleep")
     def test_empty_response(self, mock_sleep):
@@ -142,7 +142,7 @@ class TestDiscoverExistingSpaces:
             "random": "spaces/def",
         }
         assert duplicate_spaces == {}
-        assert migrator.channel_id_to_space_id == {"C001": "abc", "C002": "def"}
+        assert migrator.state.channel_id_to_space_id == {"C001": "abc", "C002": "def"}
         # Verify sleep was called between pages
         mock_sleep.assert_called_once_with(0.2)
 
@@ -214,7 +214,7 @@ class TestDiscoverExistingSpaces:
         assert "general" in duplicate_spaces
         assert len(duplicate_spaces["general"]) == 2
         # Channel ID mapping should be removed for ambiguous channels
-        assert "C001" not in migrator.channel_id_to_space_id
+        assert "C001" not in migrator.state.channel_id_to_space_id
 
     @patch("slack_migrator.services.discovery.time.sleep")
     def test_duplicate_spaces_member_count(self, mock_sleep):
@@ -296,18 +296,15 @@ class TestDiscoverExistingSpaces:
         assert duplicate_spaces == {}
 
     @patch("slack_migrator.services.discovery.time.sleep")
-    def test_channel_id_to_space_id_initialized_when_missing(self, mock_sleep):
-        """channel_id_to_space_id is created on the migrator when it doesn't exist."""
+    def test_channel_id_to_space_id_stays_empty_with_no_matches(self, mock_sleep):
+        """channel_id_to_space_id remains empty when no spaces match."""
         migrator = _make_migrator()
-        # Verify the attribute doesn't exist initially
-        assert not hasattr(migrator, "channel_id_to_space_id")
 
         _setup_list_response(migrator, [{"spaces": []}])
 
         discover_existing_spaces(migrator)
 
-        assert hasattr(migrator, "channel_id_to_space_id")
-        assert migrator.channel_id_to_space_id == {}
+        assert migrator.state.channel_id_to_space_id == {}
 
     @patch("slack_migrator.services.discovery.time.sleep")
     def test_channel_id_to_space_id_preserved_when_exists(self, mock_sleep):
@@ -317,7 +314,7 @@ class TestDiscoverExistingSpaces:
 
         discover_existing_spaces(migrator)
 
-        assert migrator.channel_id_to_space_id["C999"] == "existing"
+        assert migrator.state.channel_id_to_space_id["C999"] == "existing"
 
     @patch("slack_migrator.services.discovery.time.sleep")
     def test_space_without_display_name_ignored(self, mock_sleep):
@@ -413,7 +410,7 @@ class TestDiscoverExistingSpaces:
 
         discover_existing_spaces(migrator)
 
-        assert migrator.channel_id_to_space_id["C010"] == "AAAA1234"
+        assert migrator.state.channel_id_to_space_id["C010"] == "AAAA1234"
 
     @patch("slack_migrator.services.discovery.time.sleep")
     def test_duplicate_channel_id_first_occurrence_wins_in_pagination(self, mock_sleep):
@@ -445,7 +442,7 @@ class TestDiscoverExistingSpaces:
         # Duplicates detected
         assert "general" in duplicate_spaces
         # Ambiguous mapping removed
-        assert "C001" not in migrator.channel_id_to_space_id
+        assert "C001" not in migrator.state.channel_id_to_space_id
 
 
 class TestGetLastMessageTimestamp:

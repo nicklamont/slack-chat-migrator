@@ -327,7 +327,14 @@ def cleanup(
             sys.exit(0)
 
     cfg = load_config(Path(config))
-    chat = get_gcp_service(creds_path, workspace_admin, "chat", "v1", retry_config=cfg)
+    chat = get_gcp_service(
+        creds_path,
+        workspace_admin,
+        "chat",
+        "v1",
+        max_retries=cfg.max_retries,
+        retry_delay=cfg.retry_delay,
+    )
 
     try:
         cleanup_import_mode_spaces(chat)
@@ -365,7 +372,7 @@ class MigrationOrchestrator:
 
         # Set output directory if we have one
         if self.output_dir:
-            migrator.output_dir = self.output_dir
+            migrator.state.output_dir = self.output_dir
 
         return migrator
 

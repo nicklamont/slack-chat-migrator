@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from slack_migrator.core.state import MigrationState
 from slack_migrator.services.chat.chat_uploader import (
     ChatFileUploader,
 )
@@ -34,7 +35,8 @@ class TestGetCurrentChannel:
     def test_returns_channel_when_migrator_is_set(self):
         uploader = _make_uploader()
         migrator = MagicMock()
-        migrator.current_channel = "general"
+        migrator.state = MigrationState()
+        migrator.state.current_channel = "general"
         uploader.migrator = migrator
 
         assert uploader._get_current_channel() == "general"

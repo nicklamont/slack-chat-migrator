@@ -6,6 +6,7 @@ import pytest
 import requests
 
 from slack_migrator.core.config import MigrationConfig, SharedDriveConfig
+from slack_migrator.core.state import MigrationState
 from slack_migrator.services.file import FileHandler
 
 # ---------------------------------------------------------------------------
@@ -16,16 +17,21 @@ from slack_migrator.services.file import FileHandler
 def _make_migrator(**overrides):
     """Create a mock migrator with reasonable defaults."""
     migrator = MagicMock()
+    migrator.state = MigrationState()
     migrator.config = MigrationConfig(
         shared_drive=SharedDriveConfig(name="Test Drive", id=None),
     )
     migrator.workspace_domain = "example.com"
-    migrator.current_channel = "general"
+    migrator.state.current_channel = "general"
     migrator.user_map = {"U123": "alice@example.com"}
     migrator.is_external_user = MagicMock(return_value=False)
     migrator.user_resolver.is_external_user = MagicMock(return_value=False)
+    _state_attrs = {f.name for f in MigrationState.__dataclass_fields__.values()}
     for key, value in overrides.items():
-        setattr(migrator, key, value)
+        if key in _state_attrs:
+            setattr(migrator.state, key, value)
+        else:
+            setattr(migrator, key, value)
     return migrator
 
 
@@ -190,7 +196,7 @@ class TestGetCurrentChannel:
 
     def test_returns_none_without_current_channel(self):
         migrator = _make_migrator()
-        del migrator.current_channel
+        migrator.state.current_channel = None
         handler = _make_handler(migrator=migrator)
         assert handler._get_current_channel() is None
 

@@ -10,17 +10,22 @@ slack_migrator/
 │   ├── commands.py # Main CLI commands (migrate, validate, etc.)
 │   └── report.py   # Migration report formatting
 ├── core/           # Core logic
-│   ├── config.py   # YAML config loading and validation
-│   └── migrator.py # Main migration orchestrator
+│   ├── channel_processor.py # Per-channel migration processing
+│   ├── config.py            # YAML config loading and validation
+│   ├── migrator.py          # Main migration orchestrator
+│   └── state.py             # MigrationState dataclass (mutable state)
 ├── services/       # External API integrations
 │   ├── chat/       # Google Chat API (spaces, messages)
 │   ├── drive/      # Google Drive API (file uploads, shared drives)
-│   ├── discovery.py
-│   ├── file.py     # Slack export file parsing
-│   ├── message.py  # Message transformation (Slack → Chat format)
+│   ├── discovery.py          # Space discovery and mapping for migration resumption
+│   ├── file.py               # Slack export file parsing
+│   ├── membership_manager.py # Space membership (historical + regular members)
+│   ├── message.py            # Message transformation (Slack → Chat format)
 │   ├── message_attachments.py
-│   ├── space.py    # Space creation and management
-│   └── user.py     # User mapping (Slack → Google)
+│   ├── reaction_processor.py # Batch reaction processing
+│   ├── space_creator.py      # Space creation and import mode setup
+│   ├── user.py               # User mapping (Slack → Google)
+│   └── user_resolver.py      # User identity resolution and impersonation
 └── utils/          # Shared utilities
     ├── api.py      # API retry logic, credential handling
     ├── formatting.py

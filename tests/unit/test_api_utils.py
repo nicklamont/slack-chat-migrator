@@ -8,7 +8,6 @@ import httplib2
 import pytest
 from googleapiclient.errors import HttpError
 
-from slack_migrator.core.config import MigrationConfig
 from slack_migrator.utils.api import (
     RetryWrapper,
     _service_cache,
@@ -116,18 +115,18 @@ class TestRetryWrapperDelegation:
         assert isinstance(child, RetryWrapper)
         assert child._channel_context_getter is getter
 
-    def test_retry_config_passed_to_child_wrappers(self):
+    def test_retry_params_passed_to_child_wrappers(self):
         inner_result = MagicMock()
         inner_result.execute = MagicMock(return_value="ok")
 
         inner = MagicMock()
         inner.members.return_value = inner_result
 
-        config = MigrationConfig(max_retries=5, retry_delay=10)
-        wrapper = RetryWrapper(inner, retry_config=config)
+        wrapper = RetryWrapper(inner, max_retries=5, retry_delay=10)
         child = wrapper.members()
         assert isinstance(child, RetryWrapper)
-        assert child._retry_config is config
+        assert child._max_retries == 5
+        assert child._retry_delay == 10
 
 
 # ---------------------------------------------------------------------------
@@ -306,12 +305,11 @@ class TestRetryWrapperMaxRetries:
 
     @patch("slack_migrator.utils.api.time.sleep")
     def test_raises_after_custom_max_retries(self, mock_sleep):
-        """Honour max_retries from MigrationConfig."""
+        """Honour max_retries parameter."""
         inner = MagicMock()
         inner.execute.side_effect = _make_http_error(500, "Server Error")
 
-        config = MigrationConfig(max_retries=1, retry_delay=1)
-        wrapper = RetryWrapper(inner, retry_config=config)
+        wrapper = RetryWrapper(inner, max_retries=1, retry_delay=1)
         with pytest.raises(HttpError):
             wrapper.execute()
         # initial + 1 retry = 2 calls
@@ -322,8 +320,7 @@ class TestRetryWrapperMaxRetries:
         inner = MagicMock()
         inner.execute.side_effect = _make_http_error(500, "Server Error")
 
-        config = MigrationConfig(max_retries=0, retry_delay=1)
-        wrapper = RetryWrapper(inner, retry_config=config)
+        wrapper = RetryWrapper(inner, max_retries=0, retry_delay=1)
         with pytest.raises(HttpError):
             wrapper.execute()
         assert inner.execute.call_count == 1
@@ -334,8 +331,7 @@ class TestRetryWrapperMaxRetries:
         inner = MagicMock()
         inner.execute.side_effect = RuntimeError("always fails")
 
-        config = MigrationConfig(max_retries=2, retry_delay=1)
-        wrapper = RetryWrapper(inner, retry_config=config)
+        wrapper = RetryWrapper(inner, max_retries=2, retry_delay=1)
         with pytest.raises(RuntimeError, match="always fails"):
             wrapper.execute()
         assert inner.execute.call_count == 3
@@ -347,8 +343,7 @@ class TestRetryWrapperMaxRetries:
             "Resource object has no attribute 'create'"
         )
 
-        config = MigrationConfig(max_retries=1, retry_delay=1)
-        wrapper = RetryWrapper(inner, retry_config=config)
+        wrapper = RetryWrapper(inner, max_retries=1, retry_delay=1)
         with pytest.raises(AttributeError):
             wrapper.execute()
         assert inner.execute.call_count == 2
@@ -385,8 +380,7 @@ class TestRetryWrapperBackoff:
             _make_http_error(500, "err"),
             "ok",
         ]
-        config = MigrationConfig(max_retries=3, retry_delay=5)
-        wrapper = RetryWrapper(inner, retry_config=config)
+        wrapper = RetryWrapper(inner, max_retries=3, retry_delay=5)
         result = wrapper.execute()
         assert result == "ok"
         # first attempt (attempt=0): delay * backoff^0 = 5 * 1 = 5
@@ -403,8 +397,7 @@ class TestRetryWrapperBackoff:
             _make_http_error(500, "err"),
             "ok",
         ]
-        config = MigrationConfig(max_retries=3, retry_delay=30)
-        wrapper = RetryWrapper(inner, retry_config=config)
+        wrapper = RetryWrapper(inner, max_retries=3, retry_delay=30)
         result = wrapper.execute()
         assert result == "ok"
         sleep_values = [call.args[0] for call in mock_sleep.call_args_list]
@@ -958,18 +951,23 @@ class TestGetGcpService:
     @patch(
         "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
-    def test_passes_retry_config_to_wrapper(self, mock_creds, mock_build):
+    def test_passes_retry_params_to_wrapper(self, mock_creds, mock_build):
         mock_cred_instance = MagicMock()
         mock_creds.return_value = mock_cred_instance
         mock_cred_instance.with_subject.return_value = MagicMock()
         mock_build.return_value = MagicMock()
 
-        config = MigrationConfig(max_retries=7, retry_delay=5)
         result = get_gcp_service(
-            "/path/creds.json", "user@example.com", "chat", "v1", retry_config=config
+            "/path/creds.json",
+            "user@example.com",
+            "chat",
+            "v1",
+            max_retries=7,
+            retry_delay=5,
         )
         assert isinstance(result, RetryWrapper)
-        assert result._retry_config is config
+        assert result._max_retries == 7
+        assert result._retry_delay == 5
 
     @patch("slack_migrator.utils.api.build")
     @patch(
