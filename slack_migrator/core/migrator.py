@@ -8,7 +8,10 @@ import signal
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from slack_migrator.core.channel_processor import ChannelProcessor
 
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
@@ -201,6 +204,9 @@ class SlackToChatMigrator:
         self.failed_messages_by_channel: dict[str, list[str]] = {}
         self.incomplete_import_spaces: list[tuple[str, str]] = []
         self.last_processed_timestamps: dict[str, float] = {}
+        self.migration_issues: dict[str, Any] = {}
+        self.channel_conflicts: set[str] = set()
+        self.skipped_reactions: list[dict[str, str]] = []
 
         # Validate workspace admin email format
         if (
@@ -398,25 +404,27 @@ class SlackToChatMigrator:
 
     def _discover_channel_resources(self, channel: str):
         """Find the last message timestamp in a space to determine where to resume."""
-        from slack_migrator.core.channel_processor import ChannelProcessor
-
-        ChannelProcessor(self)._discover_channel_resources(channel)
+        self._get_channel_processor()._discover_channel_resources(channel)
 
     def _should_abort_import(
         self, channel: str, processed_count: int, failed_count: int
     ) -> bool:
         """Determine if we should abort the import after errors in a channel."""
-        from slack_migrator.core.channel_processor import ChannelProcessor
-
-        return ChannelProcessor(self)._should_abort_import(
+        return self._get_channel_processor()._should_abort_import(
             channel, processed_count, failed_count
         )
 
     def _delete_space_if_errors(self, space_name, channel):
         """Delete a space if it had errors and cleanup is enabled."""
-        from slack_migrator.core.channel_processor import ChannelProcessor
+        self._get_channel_processor()._delete_space_if_errors(space_name, channel)
 
-        ChannelProcessor(self)._delete_space_if_errors(space_name, channel)
+    def _get_channel_processor(self) -> "ChannelProcessor":
+        """Get or create the ChannelProcessor instance."""
+        if not hasattr(self, "channel_processor"):
+            from slack_migrator.core.channel_processor import ChannelProcessor
+
+            self.channel_processor = ChannelProcessor(self)
+        return self.channel_processor
 
     def _get_internal_email(
         self, user_id: str, user_email: Optional[str] = None
@@ -559,9 +567,9 @@ class SlackToChatMigrator:
             # Process each channel
             from slack_migrator.core.channel_processor import ChannelProcessor
 
-            processor = ChannelProcessor(self)
+            self.channel_processor = ChannelProcessor(self)
             for ch in all_channel_dirs:
-                should_abort = processor.process_channel(ch)
+                should_abort = self.channel_processor.process_channel(ch)
                 if should_abort:
                     break
 
@@ -1028,10 +1036,6 @@ class SlackToChatMigrator:
             # This will also detect duplicate spaces with the same channel name
             discovered_spaces, duplicate_spaces = discover_existing_spaces(self)
 
-            # Initialize conflict tracking
-            if not hasattr(self, "channel_conflicts"):
-                self.channel_conflicts = set()
-
             # Check if we have any spaces with duplicate names that need disambiguation
             if duplicate_spaces:
                 # Check config for space_mapping to disambiguate
@@ -1104,9 +1108,6 @@ class SlackToChatMigrator:
 
                 # Mark unresolved conflicts but don't abort the entire migration
                 if unresolved_conflicts:
-                    if not hasattr(self, "migration_issues"):
-                        self.migration_issues = {}
-
                     for channel in unresolved_conflicts:
                         self.migration_issues[channel] = (
                             "Duplicate spaces found - requires disambiguation in config.yaml"

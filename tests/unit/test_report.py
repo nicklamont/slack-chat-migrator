@@ -20,7 +20,7 @@ def _make_migrator(**overrides):
         "files_created": 5,
     }
     m.user_map = {"U001": "alice@example.com", "U002": "bob@example.com"}
-    m._is_external_user.return_value = False
+    m.user_resolver.is_external_user.return_value = False
     m.output_dir = None
     m.dry_run = True
     m.workspace_admin = "admin@example.com"

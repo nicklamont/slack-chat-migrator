@@ -799,7 +799,7 @@ class TestGetUserData:
     def test_caches_after_first_call(self, tmp_path):
         m = _make_migrator(tmp_path)
         m._get_user_data("U001")
-        assert hasattr(m, "_users_data")
+        assert m.user_resolver._users_data is not None
         # Second call should use cache
         m._get_user_data("U001")
 

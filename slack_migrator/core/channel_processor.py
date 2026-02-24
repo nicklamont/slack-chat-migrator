@@ -75,8 +75,6 @@ class ChannelProcessor:
                 f"Skipping channel {channel} due to unresolved duplicate space conflict",
                 channel=channel,
             )
-            if not hasattr(migrator, "migration_issues"):
-                migrator.migration_issues = {}
             migrator.migration_issues[channel] = (
                 "Skipped due to duplicate space conflict - requires disambiguation in config.yaml"
             )
@@ -138,7 +136,9 @@ class ChannelProcessor:
             )
 
         # Add members
-        self._add_members(space, channel, is_newly_created, channel_had_errors)
+        channel_had_errors = self._add_members(
+            space, channel, is_newly_created, channel_had_errors
+        )
 
         # Log completion
         log_with_context(
@@ -176,7 +176,7 @@ class ChannelProcessor:
         )
         migrator.channel_handlers[channel] = channel_handler
 
-    def _create_or_reuse_space(self, ch_dir: Path) -> tuple:
+    def _create_or_reuse_space(self, ch_dir: Path) -> tuple[str, bool]:
         """Create a new space or reuse an existing one.
 
         Returns (space_name, is_newly_created).
@@ -211,7 +211,7 @@ class ChannelProcessor:
 
     def _process_messages(  # noqa: C901
         self, ch_dir: Path, space: str, channel_had_errors: bool
-    ) -> tuple:
+    ) -> tuple[int, int, bool]:
         """Load, deduplicate, and send messages for a channel.
 
         Returns (processed_count, failed_count, channel_had_errors).
@@ -354,9 +354,6 @@ class ChannelProcessor:
                         )
                         # Flag the channel as having a high error rate
                         channel_had_errors = True
-                        # Track channels with high failure rates
-                        if not hasattr(migrator, "high_failure_rate_channels"):
-                            migrator.high_failure_rate_channels = {}
                         migrator.high_failure_rate_channels[channel] = (
                             failure_percentage
                         )
@@ -366,8 +363,6 @@ class ChannelProcessor:
 
         # Record failures for reporting
         if channel_failures:
-            if not hasattr(migrator, "failed_messages_by_channel"):
-                migrator.failed_messages_by_channel = {}
             migrator.failed_messages_by_channel[channel] = channel_failures
             channel_had_errors = True
 
@@ -424,10 +419,6 @@ class ChannelProcessor:
                     channel=channel,
                 )
                 channel_had_errors = True
-
-                # Track spaces that failed to complete import
-                if not hasattr(migrator, "incomplete_import_spaces"):
-                    migrator.incomplete_import_spaces = []
                 migrator.incomplete_import_spaces.append((space, channel))
         elif channel_had_errors and not migrator.dry_run:
             log_with_context(
@@ -435,10 +426,6 @@ class ChannelProcessor:
                 f"Skipping import completion for space {space} due to errors (strategy: {completion_strategy})",
                 channel=channel,
             )
-
-            # Track spaces that weren't completed due to errors
-            if not hasattr(migrator, "incomplete_import_spaces"):
-                migrator.incomplete_import_spaces = []
             migrator.incomplete_import_spaces.append((space, channel))
 
         return channel_had_errors
@@ -449,8 +436,11 @@ class ChannelProcessor:
         channel: str,
         is_newly_created: bool,
         channel_had_errors: bool,
-    ) -> None:
-        """Add or update current members in a space."""
+    ) -> bool:
+        """Add or update current members in a space.
+
+        Returns updated channel_had_errors.
+        """
         migrator = self.migrator
 
         step_desc = (
@@ -485,7 +475,10 @@ class ChannelProcessor:
                     f"Exception traceback: {traceback.format_exc()}",
                     channel=channel,
                 )
+                channel_had_errors = True
             except Exception as e:
+                # Catch-all: add_regular_members is a complex function that can raise
+                # unexpected errors from file I/O, data lookups, and multiple API calls
                 log_with_context(
                     logging.ERROR,
                     f"Unexpected error updating current members for space {space}: {e}",
@@ -496,12 +489,15 @@ class ChannelProcessor:
                     f"Exception traceback: {traceback.format_exc()}",
                     channel=channel,
                 )
+                channel_had_errors = True
         else:
             log_with_context(
                 logging.WARNING,
                 f"Skipping member addition for newly created space {space} due to import completion errors",
                 channel=channel,
             )
+
+        return channel_had_errors
 
     def _should_abort_import(
         self, channel: str, processed_count: int, failed_count: int
@@ -596,10 +592,6 @@ class ChannelProcessor:
 
         # Import discovery functions
         from slack_migrator.services.discovery import get_last_message_timestamp
-
-        # Initialize the last_processed_timestamps dict if it doesn't exist
-        if not hasattr(migrator, "last_processed_timestamps"):
-            migrator.last_processed_timestamps = {}
 
         # Get the timestamp of the last message in the space
         last_timestamp = get_last_message_timestamp(migrator, channel, space_name)

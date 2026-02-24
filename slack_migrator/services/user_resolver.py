@@ -5,12 +5,17 @@ Handles mapping Slack users to Google Workspace identities, including
 impersonation delegation, external user detection, and unmapped user handling.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Any
 
-from google.auth.exceptions import RefreshError
+if TYPE_CHECKING:
+    from slack_migrator.core.migrator import SlackToChatMigrator
+
+from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 
 from slack_migrator.utils.api import get_gcp_service
@@ -20,15 +25,16 @@ from slack_migrator.utils.logging import log_with_context
 class UserResolver:
     """Resolves Slack users to Google Workspace identities."""
 
-    def __init__(self, migrator):
+    def __init__(self, migrator: SlackToChatMigrator) -> None:
         """Initialize with a reference to the parent migrator.
 
         Args:
             migrator: The SlackToChatMigrator instance.
         """
         self.migrator = migrator
+        self._users_data: dict[str, dict] | None = None
 
-    def get_delegate(self, email: str):
+    def get_delegate(self, email: str) -> Any:
         """Get a Google Chat API service with user impersonation."""
         if not email:
             return self.migrator.chat
@@ -46,7 +52,7 @@ class UserResolver:
                 test_service.spaces().list(pageSize=1).execute()
                 self.migrator.valid_users[email] = True
                 self.migrator.chat_delegates[email] = test_service
-            except (HttpError, RefreshError) as e:
+            except (HttpError, RefreshError, TransportError) as e:
                 error_code = e.resp.status if isinstance(e, HttpError) else "N/A"
                 log_with_context(
                     logging.WARNING,
@@ -60,8 +66,8 @@ class UserResolver:
         return self.migrator.chat_delegates.get(email, self.migrator.chat)
 
     def get_internal_email(
-        self, user_id: str, user_email: Optional[str] = None
-    ) -> Optional[str]:
+        self, user_id: str, user_email: str | None = None
+    ) -> str | None:
         """Get internal email for a user, handling external users and tracking unmapped users.
 
         Args:
@@ -85,13 +91,10 @@ class UserResolver:
         if user_email is None:
             user_email = self.migrator.user_map.get(user_id)
             if not user_email:
-                if hasattr(self.migrator, "unmapped_user_tracker"):
-                    current_channel = getattr(
-                        self.migrator, "current_channel", "unknown"
-                    )
-                    self.migrator.unmapped_user_tracker.add_unmapped_user(
-                        user_id, current_channel
-                    )
+                current_channel = getattr(self.migrator, "current_channel", "unknown")
+                self.migrator.unmapped_user_tracker.add_unmapped_user(
+                    user_id, current_channel
+                )
 
                 log_with_context(
                     logging.DEBUG,
@@ -103,7 +106,7 @@ class UserResolver:
 
         return user_email
 
-    def get_user_data(self, user_id: str) -> Optional[dict]:
+    def get_user_data(self, user_id: str) -> dict | None:
         """Get user data from the users.json export file.
 
         Args:
@@ -112,22 +115,20 @@ class UserResolver:
         Returns:
             User data dictionary or None if not found
         """
-        if not hasattr(self.migrator, "_users_data"):
+        if self._users_data is None:
             users_file = Path(self.migrator.export_root) / "users.json"
             if users_file.exists():
                 try:
                     with open(users_file) as f:
                         users_list = json.load(f)
-                    self.migrator._users_data = {
-                        user["id"]: user for user in users_list
-                    }
+                    self._users_data = {user["id"]: user for user in users_list}
                 except (OSError, json.JSONDecodeError) as e:
                     log_with_context(logging.WARNING, f"Error loading users.json: {e}")
-                    self.migrator._users_data = {}
+                    self._users_data = {}
             else:
-                self.migrator._users_data = {}
+                self._users_data = {}
 
-        return self.migrator._users_data.get(user_id)
+        return self._users_data.get(user_id)
 
     def handle_unmapped_user_message(
         self, user_id: str, original_text: str
@@ -141,23 +142,12 @@ class UserResolver:
         Returns:
             Tuple of (sender_email, modified_message_text)
         """
-        if hasattr(self.migrator, "unmapped_user_tracker"):
-            current_channel = getattr(self.migrator, "current_channel", "unknown")
-            self.migrator.unmapped_user_tracker.add_unmapped_user(
-                user_id, f"message_sender:{current_channel}"
-            )
+        current_channel = getattr(self.migrator, "current_channel", "unknown")
+        self.migrator.unmapped_user_tracker.add_unmapped_user(
+            user_id, f"message_sender:{current_channel}"
+        )
 
-        user_info = None
-        try:
-            users_file = Path(self.migrator.export_root) / "users.json"
-            if users_file.exists():
-                with open(users_file) as f:
-                    users_data = json.load(f)
-                    user_info = next(
-                        (u for u in users_data if u.get("id") == user_id), None
-                    )
-        except (OSError, json.JSONDecodeError):
-            pass
+        user_info = self.get_user_data(user_id)
 
         override_email = self.migrator.config.user_mapping_overrides.get(user_id)
         if override_email:
@@ -203,11 +193,10 @@ class UserResolver:
         Returns:
             False to indicate the reaction should be skipped
         """
-        if hasattr(self.migrator, "unmapped_user_tracker"):
-            current_channel = getattr(self.migrator, "current_channel", "unknown")
-            self.migrator.unmapped_user_tracker.add_unmapped_user(
-                user_id, f"reaction:{current_channel}"
-            )
+        current_channel = getattr(self.migrator, "current_channel", "unknown")
+        self.migrator.unmapped_user_tracker.add_unmapped_user(
+            user_id, f"reaction:{current_channel}"
+        )
 
         log_with_context(
             logging.WARNING,
@@ -215,11 +204,8 @@ class UserResolver:
             user_id=user_id,
             reaction=reaction,
             message_ts=message_ts,
-            channel=getattr(self.migrator, "current_channel", "unknown"),
+            channel=current_channel,
         )
-
-        if not hasattr(self.migrator, "skipped_reactions"):
-            self.migrator.skipped_reactions = []
 
         self.migrator.skipped_reactions.append(
             {
@@ -232,7 +218,7 @@ class UserResolver:
 
         return False
 
-    def is_external_user(self, email: Optional[str]) -> bool:
+    def is_external_user(self, email: str | None) -> bool:
         """Check if a user is external based on their email domain.
 
         Args:
