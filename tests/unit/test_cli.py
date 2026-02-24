@@ -1,10 +1,18 @@
 """Tests for the click-based CLI."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
-from slack_migrator.cli.commands import cli
+from slack_migrator.cli.commands import cli, handle_exception
+from slack_migrator.core.config import MigrationConfig
+from slack_migrator.exceptions import (
+    ConfigError,
+    MigrationAbortedError,
+    MigratorError,
+    PermissionCheckError,
+)
 
 
 class TestCLIGroup:
@@ -166,7 +174,7 @@ class TestCleanupCommand:
     @patch("slack_migrator.utils.api.get_gcp_service")
     @patch("slack_migrator.core.config.load_config")
     def test_invokes_standalone_cleanup(self, mock_config, mock_svc, mock_cleanup):
-        mock_config.return_value = {}
+        mock_config.return_value = MigrationConfig()
         mock_chat = MagicMock()
         mock_svc.return_value = mock_chat
 
@@ -192,7 +200,7 @@ class TestCleanupCommand:
         self, mock_config, mock_svc, mock_cleanup
     ):
         """Without --yes, cleanup should prompt and abort on 'n'."""
-        mock_config.return_value = {}
+        mock_config.return_value = MigrationConfig()
         runner = CliRunner()
         result = runner.invoke(
             cli,
@@ -227,3 +235,99 @@ class TestBackwardsCompatibility:
         # The error should be about a missing required option, not about
         # an invalid subcommand
         assert "Missing option" in result.output or "workspace_admin" in result.output
+
+
+class TestHandleException:
+    """Tests for handle_exception()."""
+
+    @patch("slack_migrator.cli.commands.log_with_context")
+    def test_handles_migrator_error(self, mock_log):
+        handle_exception(MigratorError("test error"))
+        mock_log.assert_called_once_with(logging.ERROR, "test error")
+
+    @patch("slack_migrator.cli.commands.log_with_context")
+    def test_handles_config_error(self, mock_log):
+        handle_exception(ConfigError("bad config"))
+        mock_log.assert_called_once_with(logging.ERROR, "bad config")
+
+    @patch("slack_migrator.cli.commands.log_with_context")
+    def test_handles_permission_check_error(self, mock_log):
+        handle_exception(PermissionCheckError("missing scope"))
+        mock_log.assert_called_once_with(logging.ERROR, "missing scope")
+
+    @patch("slack_migrator.cli.commands.log_with_context")
+    def test_handles_migration_aborted_error(self, mock_log):
+        handle_exception(MigrationAbortedError("aborted"))
+        mock_log.assert_called_once_with(logging.ERROR, "aborted")
+
+    @patch("slack_migrator.cli.commands.log_with_context")
+    def test_handles_file_not_found(self, mock_log):
+        handle_exception(FileNotFoundError("missing.json"))
+        assert mock_log.call_count == 2
+        assert "missing.json" in str(mock_log.call_args_list[0])
+
+    @patch("slack_migrator.cli.commands.log_with_context")
+    def test_handles_generic_exception(self, mock_log):
+        handle_exception(RuntimeError("unexpected"))
+        mock_log.assert_called_once_with(
+            logging.ERROR, "Migration failed: unexpected", exc_info=True
+        )
+
+
+class TestMigrateExceptionPaths:
+    """Tests for exception paths in the migrate command."""
+
+    @patch("slack_migrator.cli.commands.show_security_warning")
+    @patch("slack_migrator.cli.commands.create_migration_output_directory")
+    @patch("slack_migrator.cli.commands.setup_logger")
+    @patch("slack_migrator.cli.commands.MigrationOrchestrator")
+    def test_config_error_exits_with_code_1(
+        self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
+    ):
+        mock_outdir.return_value = "/tmp/fake"
+        mock_orch = MagicMock()
+        mock_orch.validate_prerequisites.side_effect = ConfigError("creds not found")
+        mock_orch_cls.return_value = mock_orch
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "migrate",
+                "--creds_path",
+                "fake.json",
+                "--export_path",
+                "fake",
+                "--workspace_admin",
+                "a@b.com",
+            ],
+        )
+        assert result.exit_code == 1
+
+    @patch("slack_migrator.cli.commands.show_security_warning")
+    @patch("slack_migrator.cli.commands.create_migration_output_directory")
+    @patch("slack_migrator.cli.commands.setup_logger")
+    @patch("slack_migrator.cli.commands.MigrationOrchestrator")
+    def test_migration_aborted_exits_with_code_1(
+        self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
+    ):
+        mock_outdir.return_value = "/tmp/fake"
+        mock_orch = MagicMock()
+        mock_orch.validate_prerequisites.return_value = None
+        mock_orch.run_migration.side_effect = MigrationAbortedError("unmapped users")
+        mock_orch_cls.return_value = mock_orch
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "migrate",
+                "--creds_path",
+                "fake.json",
+                "--export_path",
+                "fake",
+                "--workspace_admin",
+                "a@b.com",
+            ],
+        )
+        assert result.exit_code == 1
