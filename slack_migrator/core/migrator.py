@@ -10,6 +10,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Optional
 
+from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
@@ -45,7 +46,7 @@ def _list_all_spaces(chat_service) -> list[dict[str, Any]]:
                 f"(Status: {http_e.resp.status})",
             )
             break
-        except Exception as e:
+        except (RefreshError, TransportError) as e:
             log_with_context(logging.ERROR, f"Failed to list spaces: {e}")
             break
     return spaces
@@ -81,7 +82,7 @@ def cleanup_import_mode_spaces(chat_service) -> None:
             space_info = chat_service.spaces().get(name=space_name).execute()
             if space_info.get("importMode"):
                 import_mode_spaces.append((space_name, space_info))
-        except Exception as e:
+        except (HttpError, RefreshError, TransportError) as e:
             log_with_context(
                 logging.WARNING,
                 f"Failed to check space {space_name}: {e}",
@@ -116,7 +117,7 @@ def cleanup_import_mode_spaces(chat_service) -> None:
                         logging.INFO,
                         f"Preserved external user access for: {space_name}",
                     )
-                except Exception as e:
+                except (HttpError, RefreshError, TransportError) as e:
                     log_with_context(
                         logging.WARNING,
                         f"Failed to preserve external user access for "
@@ -128,7 +129,7 @@ def cleanup_import_mode_spaces(chat_service) -> None:
                 f"HTTP error completing import for {space_name}: {http_e} "
                 f"(Status: {http_e.resp.status})",
             )
-        except Exception as e:
+        except (RefreshError, TransportError) as e:
             log_with_context(
                 logging.ERROR,
                 f"Failed to complete import for {space_name}: {e}",
@@ -720,7 +721,7 @@ class SlackToChatMigrator:
                         "Server error listing spaces - this might be a temporary issue, skipping cleanup",
                     )
                 return
-            except Exception as list_e:
+            except (RefreshError, TransportError) as list_e:
                 log_with_context(
                     logging.ERROR,
                     f"Failed to list spaces during cleanup: {list_e}",
@@ -754,7 +755,7 @@ class SlackToChatMigrator:
                             "Server error checking space - this might be a temporary issue",
                             space_name=space_name,
                         )
-                except Exception as e:
+                except (RefreshError, TransportError) as e:
                     log_with_context(
                         logging.WARNING,
                         f"Failed to get space info during cleanup: {e}",
@@ -838,7 +839,7 @@ class SlackToChatMigrator:
                                     space_name=space_name,
                                 )
                             continue
-                        except Exception as e:
+                        except (RefreshError, TransportError) as e:
                             log_with_context(
                                 logging.ERROR,
                                 f"Failed to complete import: {e}",
@@ -875,7 +876,7 @@ class SlackToChatMigrator:
                                         "Server error updating space - this might be a temporary issue",
                                         space_name=space_name,
                                     )
-                            except Exception as e:
+                            except (RefreshError, TransportError) as e:
                                 log_with_context(
                                     logging.WARNING,
                                     f"Failed to preserve external user access: {e}",
@@ -955,7 +956,7 @@ class SlackToChatMigrator:
                                 "Server error during cleanup - this might be a temporary issue",
                                 space_name=space_name,
                             )
-                    except Exception as e:
+                    except (RefreshError, TransportError) as e:
                         log_with_context(
                             logging.ERROR,
                             f"Failed to complete import mode for space {space_name} during cleanup: {e}",

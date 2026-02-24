@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
 
+from google.auth.exceptions import RefreshError, TransportError
+from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
 from slack_migrator.core.config import should_process_channel
@@ -237,7 +239,7 @@ class ChannelProcessor:
             try:
                 with open(jf) as f:
                     msgs.extend(json.load(f))
-            except Exception as e:
+            except (OSError, ValueError) as e:
                 log_with_context(
                     logging.WARNING,
                     f"Failed to load messages from {jf}: {e}",
@@ -415,7 +417,7 @@ class ChannelProcessor:
                     channel=channel,
                 )
 
-            except Exception as e:
+            except (HttpError, RefreshError, TransportError) as e:
                 log_with_context(
                     logging.ERROR,
                     f"Failed to complete import for space {space}: {e}",
@@ -472,13 +474,23 @@ class ChannelProcessor:
                     f"Successfully updated current members for space {space} and channel {channel}",
                     channel=channel,
                 )
-            except Exception as e:
+            except (HttpError, RefreshError, TransportError) as e:
                 log_with_context(
                     logging.ERROR,
                     f"Error updating current members for space {space}: {e}",
                     channel=channel,
                 )
-
+                log_with_context(
+                    logging.DEBUG,
+                    f"Exception traceback: {traceback.format_exc()}",
+                    channel=channel,
+                )
+            except Exception as e:
+                log_with_context(
+                    logging.ERROR,
+                    f"Unexpected error updating current members for space {space}: {e}",
+                    channel=channel,
+                )
                 log_with_context(
                     logging.DEBUG,
                     f"Exception traceback: {traceback.format_exc()}",
@@ -559,7 +571,7 @@ class ChannelProcessor:
 
             # Decrement space count
             migrator.migration_summary["spaces_created"] -= 1
-        except Exception as e:
+        except (HttpError, RefreshError, TransportError) as e:
             log_with_context(
                 logging.ERROR,
                 f"Failed to delete space {space_name}: {e}",
