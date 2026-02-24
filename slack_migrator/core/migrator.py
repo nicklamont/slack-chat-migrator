@@ -223,13 +223,13 @@ class SlackToChatMigrator:
         # This is crucial because Google Chat needs to add all channel members to spaces
         scan_channel_members_for_unmapped_users(self)
 
-        # User resolver is needed before API services (e.g. for _is_external_user)
-        self.user_resolver = UserResolver(self)
-
         # API services will be initialized later after permission checks
         self.chat: Optional[Any] = None
         self.drive: Optional[Any] = None
         self._api_services_initialized = False
+
+        # User resolver is needed before API services (e.g. for _is_external_user)
+        self.user_resolver = UserResolver.from_migrator(self)
 
         # Load channel metadata from channels.json
         self.channels_meta, self.channel_id_to_name = self._load_channels_meta()

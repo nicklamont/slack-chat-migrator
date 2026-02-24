@@ -745,7 +745,7 @@ class TestGetInternalEmail:
         ]
         channels = [{"id": "C001", "name": "general", "members": ["U001"]}]
         m = _make_migrator(tmp_path, users=users, channels=channels)
-        m.config = MigrationConfig(ignore_bots=True)
+        m.config.ignore_bots = True
         result = m._get_internal_email("B001")
         assert result is None
 
@@ -761,7 +761,7 @@ class TestGetInternalEmail:
         ]
         channels = [{"id": "C001", "name": "general", "members": ["U001"]}]
         m = _make_migrator(tmp_path, users=users, channels=channels)
-        m.config = MigrationConfig(ignore_bots=False)
+        m.config.ignore_bots = False
         # Bot has email mapping
         m.user_map["B001"] = "bot@example.com"
         result = m._get_internal_email("B001")
@@ -847,9 +847,7 @@ class TestHandleUnmappedUserMessage:
 
     def test_attribution_with_user_mapping_override(self, tmp_path):
         m = _make_migrator(tmp_path)
-        m.config = MigrationConfig(
-            user_mapping_overrides={"U999": "mapped@example.com"}
-        )
+        m.config.user_mapping_overrides = {"U999": "mapped@example.com"}
         m.state.current_channel = "general"
         _email, text = m._handle_unmapped_user_message("U999", "Hi")
         assert "mapped@example.com" in text

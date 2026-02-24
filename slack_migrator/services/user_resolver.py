@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from slack_migrator.core.config import MigrationConfig
     from slack_migrator.core.migrator import SlackToChatMigrator
+    from slack_migrator.core.state import MigrationState
+    from slack_migrator.utils.user_validation import UnmappedUserTracker
 
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
@@ -25,34 +28,77 @@ from slack_migrator.utils.logging import log_with_context
 class UserResolver:
     """Resolves Slack users to Google Workspace identities."""
 
-    def __init__(self, migrator: SlackToChatMigrator) -> None:
-        """Initialize with a reference to the parent migrator.
+    def __init__(
+        self,
+        *,
+        config: MigrationConfig,
+        state: MigrationState,
+        chat: Any,
+        creds_path: str,
+        user_map: dict[str, str],
+        unmapped_user_tracker: UnmappedUserTracker,
+        export_root: str | Path,
+        workspace_admin: str,
+        workspace_domain: str,
+    ) -> None:
+        """Initialize with explicit dependencies.
 
         Args:
-            migrator: The SlackToChatMigrator instance.
+            config: Migration configuration.
+            state: Shared mutable migration state.
+            chat: Admin Google Chat API service.
+            creds_path: Path to service account credentials file.
+            user_map: Slack user ID to Google email mapping.
+            unmapped_user_tracker: Tracker for unmapped users.
+            export_root: Path to Slack export directory.
+            workspace_admin: Admin email for fallback impersonation.
+            workspace_domain: Google Workspace domain for external user detection.
         """
-        self.migrator = migrator
+        self.config = config
+        self.state = state
+        self.chat = chat
+        self.creds_path = creds_path
+        self.user_map = user_map
+        self.unmapped_user_tracker = unmapped_user_tracker
+        self.export_root = export_root
+        self.workspace_admin = workspace_admin
+        self.workspace_domain = workspace_domain
         self._users_data: dict[str, dict[str, Any]] | None = None
+
+    @classmethod
+    def from_migrator(cls, migrator: SlackToChatMigrator) -> UserResolver:
+        """Create a UserResolver from a SlackToChatMigrator instance."""
+        return cls(
+            config=migrator.config,
+            state=migrator.state,
+            chat=migrator.chat,
+            creds_path=migrator.creds_path,
+            user_map=migrator.user_map,
+            unmapped_user_tracker=migrator.unmapped_user_tracker,
+            export_root=migrator.export_root,
+            workspace_admin=migrator.workspace_admin,
+            workspace_domain=migrator.workspace_domain,
+        )
 
     def get_delegate(self, email: str) -> Any:
         """Get a Google Chat API service with user impersonation."""
         if not email:
-            return self.migrator.chat
+            return self.chat
 
-        if email not in self.migrator.state.valid_users:
+        if email not in self.state.valid_users:
             try:
                 test_service = get_gcp_service(
-                    str(self.migrator.creds_path),
+                    str(self.creds_path),
                     email,
                     "chat",
                     "v1",
-                    getattr(self.migrator.state, "current_channel", None),
-                    max_retries=self.migrator.config.max_retries,
-                    retry_delay=self.migrator.config.retry_delay,
+                    self.state.current_channel,
+                    max_retries=self.config.max_retries,
+                    retry_delay=self.config.retry_delay,
                 )
                 test_service.spaces().list(pageSize=1).execute()
-                self.migrator.state.valid_users[email] = True
-                self.migrator.state.chat_delegates[email] = test_service
+                self.state.valid_users[email] = True
+                self.state.chat_delegates[email] = test_service
             except (HttpError, RefreshError, TransportError) as e:
                 error_code = e.resp.status if isinstance(e, HttpError) else "N/A"
                 log_with_context(
@@ -61,10 +107,10 @@ class UserResolver:
                     user=email,
                     error_code=error_code,
                 )
-                self.migrator.state.valid_users[email] = False
-                return self.migrator.chat
+                self.state.valid_users[email] = False
+                return self.chat
 
-        return self.migrator.state.chat_delegates.get(email, self.migrator.chat)
+        return self.state.chat_delegates.get(email, self.chat)
 
     def get_internal_email(
         self, user_id: str, user_email: str | None = None
@@ -79,32 +125,28 @@ class UserResolver:
             The internal email to use for this user, or None if the user should be
             ignored (e.g. bot user with ignore_bots enabled, or no email mapping exists)
         """
-        if self.migrator.config.ignore_bots:
+        if self.config.ignore_bots:
             user_data = self.get_user_data(user_id)
             if user_data and user_data.get("is_bot", False):
                 log_with_context(
                     logging.DEBUG,
                     f"Ignoring bot user {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
                     user_id=user_id,
-                    channel=getattr(self.migrator.state, "current_channel", "unknown"),
+                    channel=self.state.current_channel or "unknown",
                 )
                 return None
 
         if user_email is None:
-            user_email = self.migrator.user_map.get(user_id)
+            user_email = self.user_map.get(user_id)
             if not user_email:
-                current_channel = getattr(
-                    self.migrator.state, "current_channel", "unknown"
-                )
-                self.migrator.unmapped_user_tracker.add_unmapped_user(
-                    user_id, current_channel
-                )
+                current_channel = self.state.current_channel or "unknown"
+                self.unmapped_user_tracker.add_unmapped_user(user_id, current_channel)
 
                 log_with_context(
                     logging.DEBUG,
                     f"No email mapping found for user {user_id}",
                     user_id=user_id,
-                    channel=getattr(self.migrator.state, "current_channel", "unknown"),
+                    channel=self.state.current_channel or "unknown",
                 )
                 return None
 
@@ -120,7 +162,7 @@ class UserResolver:
             User data dictionary or None if not found
         """
         if self._users_data is None:
-            users_file = Path(self.migrator.export_root) / "users.json"
+            users_file = Path(self.export_root) / "users.json"
             if users_file.exists():
                 try:
                     with open(users_file) as f:
@@ -146,14 +188,14 @@ class UserResolver:
         Returns:
             Tuple of (sender_email, modified_message_text)
         """
-        current_channel = getattr(self.migrator.state, "current_channel", "unknown")
-        self.migrator.unmapped_user_tracker.add_unmapped_user(
+        current_channel = self.state.current_channel or "unknown"
+        self.unmapped_user_tracker.add_unmapped_user(
             user_id, f"message_sender:{current_channel}"
         )
 
         user_info = self.get_user_data(user_id)
 
-        override_email = self.migrator.config.user_mapping_overrides.get(user_id)
+        override_email = self.config.user_mapping_overrides.get(user_id)
         if override_email:
             attribution = f"*[From: {override_email}]*"
         elif user_info:
@@ -172,13 +214,13 @@ class UserResolver:
             attribution = f"*[From: {user_id}]*"
 
         modified_text = f"{attribution}\n{original_text}"
-        admin_email = self.migrator.workspace_admin
+        admin_email = self.workspace_admin
 
         log_with_context(
             logging.WARNING,
             f"Sending message from unmapped user {user_id} via workspace admin {admin_email}",
             user_id=user_id,
-            channel=getattr(self.migrator.state, "current_channel", "unknown"),
+            channel=self.state.current_channel or "unknown",
             attribution=attribution,
         )
 
@@ -197,8 +239,8 @@ class UserResolver:
         Returns:
             False to indicate the reaction should be skipped
         """
-        current_channel = getattr(self.migrator.state, "current_channel", "unknown")
-        self.migrator.unmapped_user_tracker.add_unmapped_user(
+        current_channel = self.state.current_channel or "unknown"
+        self.unmapped_user_tracker.add_unmapped_user(
             user_id, f"reaction:{current_channel}"
         )
 
@@ -211,12 +253,12 @@ class UserResolver:
             channel=current_channel,
         )
 
-        self.migrator.state.skipped_reactions.append(
+        self.state.skipped_reactions.append(
             {
                 "user_id": user_id,
                 "reaction": reaction,
                 "message_ts": message_ts,
-                "channel": getattr(self.migrator.state, "current_channel", "unknown"),
+                "channel": self.state.current_channel or "unknown",
             }
         )
 
@@ -231,12 +273,8 @@ class UserResolver:
         Returns:
             True if the user is external, False otherwise
         """
-        if (
-            not email
-            or not isinstance(email, str)
-            or not self.migrator.workspace_domain
-        ):
+        if not email or not isinstance(email, str) or not self.workspace_domain:
             return False
 
         domain = email.split("@")[-1]
-        return domain.lower() != self.migrator.workspace_domain.lower()
+        return domain.lower() != self.workspace_domain.lower()
