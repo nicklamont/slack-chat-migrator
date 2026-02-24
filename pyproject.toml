@@ -128,4 +128,4 @@ source = ["slack_migrator"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 55
+fail_under = 70

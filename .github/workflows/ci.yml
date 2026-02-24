@@ -42,7 +42,7 @@ jobs:
       - run: pytest tests/ -v --tb=short
       - name: Run coverage
         if: matrix.python-version == '3.12'
-        run: pytest tests/ --cov=slack_migrator --cov-report=xml --cov-fail-under=55
+        run: pytest tests/ --cov=slack_migrator --cov-report=xml --cov-fail-under=70
       - name: Upload coverage artifact
         if: matrix.python-version == '3.12'
         uses: actions/upload-artifact@v6
