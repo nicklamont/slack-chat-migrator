@@ -13,7 +13,7 @@ from slack_migrator.utils.logging import log_with_context
 class MessageAttachmentProcessor:
     """Handles file attachments during message creation."""
 
-    def __init__(self, file_handler, dry_run: bool = False) -> None:
+    def __init__(self, file_handler: Any, dry_run: bool = False) -> None:
         """Initialize the attachment processor.
 
         Args:

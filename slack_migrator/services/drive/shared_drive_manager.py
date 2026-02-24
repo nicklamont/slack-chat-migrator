@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
 from googleapiclient.errors import HttpError
 
@@ -19,7 +20,7 @@ class SharedDriveManager:
     """Manages Google Drive shared drives for the migration process."""
 
     def __init__(
-        self, drive_service, config: MigrationConfig, dry_run: bool = False
+        self, drive_service: Any, config: MigrationConfig, dry_run: bool = False
     ) -> None:
         """Initialize the SharedDriveManager.
 

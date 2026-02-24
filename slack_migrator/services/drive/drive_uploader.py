@@ -24,7 +24,7 @@ class DriveFileUploader:
 
     def __init__(
         self,
-        drive_service,
+        drive_service: Any,
         workspace_domain: str | None = None,
         dry_run: bool = False,
         service_account_email: str | None = None,

@@ -5,6 +5,7 @@ Folder management for Google Drive integration.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from googleapiclient.errors import HttpError
 
@@ -18,7 +19,7 @@ class FolderManager:
 
     def __init__(
         self,
-        drive_service,
+        drive_service: Any,
         workspace_domain: str | None = None,
         dry_run: bool = False,
     ) -> None:
