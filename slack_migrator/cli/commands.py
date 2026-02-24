@@ -20,7 +20,12 @@ if TYPE_CHECKING:
 
 import slack_migrator
 from slack_migrator.core.migrator import SlackToChatMigrator, cleanup_import_mode_spaces
-from slack_migrator.exceptions import MigratorError
+from slack_migrator.exceptions import (
+    ConfigError,
+    MigrationAbortedError,
+    MigratorError,
+    PermissionCheckError,
+)
 from slack_migrator.utils.logging import log_with_context, setup_logger
 from slack_migrator.utils.permissions import (
     check_permissions_standalone,
@@ -369,14 +374,10 @@ class MigrationOrchestrator:
         # Check credentials file
         creds_path = Path(self.args.creds_path)
         if not creds_path.exists():
-            log_with_context(
-                logging.ERROR, f"Credentials file not found: {self.args.creds_path}"
+            raise ConfigError(
+                f"Credentials file not found: {self.args.creds_path}. "
+                "Make sure your service account JSON key file exists and has the correct path."
             )
-            log_with_context(
-                logging.INFO,
-                "Make sure your service account JSON key file exists and has the correct path.",
-            )
-            sys.exit(1)
 
         # Initialize main migrator
         self.migrator = self.create_migrator()
@@ -399,12 +400,10 @@ class MigrationOrchestrator:
                     )
 
             except Exception as e:
-                log_with_context(logging.ERROR, f"Permission checks failed: {e}")
-                log_with_context(
-                    logging.ERROR,
-                    "Fix the issues or run with --skip_permission_check if you're sure.",
-                )
-                sys.exit(1)
+                raise PermissionCheckError(
+                    f"Permission checks failed: {e}. "
+                    "Fix the issues or run with --skip_permission_check if you're sure."
+                ) from e
         else:
             log_with_context(
                 logging.WARNING,
@@ -529,13 +528,12 @@ class MigrationOrchestrator:
 
         try:
             self.dry_run_migrator.migrate()
-        except Exception as e:
-            log_with_context(logging.ERROR, f"Validation (dry run) failed: {e}")
+        except Exception:
             log_with_context(
                 logging.ERROR,
                 "Please fix the issues identified during validation before proceeding.",
             )
-            sys.exit(1)
+            raise
 
         # Check validation results
         if self.check_unmapped_users(self.dry_run_migrator):
@@ -560,44 +558,28 @@ class MigrationOrchestrator:
         """Execute the main migration logic."""
         if self.args.dry_run:
             # Explicit dry run mode
-            try:
-                assert self.migrator is not None
-                self.migrator.migrate()
+            assert self.migrator is not None
+            self.migrator.migrate()
 
-                if self.check_unmapped_users(self.migrator):
-                    if self.report_validation_issues(
-                        self.migrator, is_explicit_dry_run=True
-                    ):
-                        # User should not be able to proceed in explicit dry run mode
-                        log_with_context(
-                            logging.INFO,
-                            "Use normal migration mode to proceed with unmapped users.",
-                        )
-                        sys.exit(1)
-                    else:
-                        sys.exit(1)
-                else:
-                    self.report_validation_success(is_explicit_dry_run=True)
-
-            except Exception as e:
-                log_with_context(logging.ERROR, f"Validation failed: {e}")
-                sys.exit(1)
+            if self.check_unmapped_users(self.migrator):
+                self.report_validation_issues(self.migrator, is_explicit_dry_run=True)
+                raise MigrationAbortedError(
+                    "Dry run completed with unmapped users. "
+                    "Use normal migration mode to proceed."
+                )
+            else:
+                self.report_validation_success(is_explicit_dry_run=True)
         else:
             # Full migration with automatic validation
             if self.run_validation():
                 self.report_validation_success()
 
                 if self.get_user_confirmation():
-                    try:
-                        assert self.migrator is not None
-                        self.migrator.migrate()
-
-                    except Exception as e:
-                        log_with_context(logging.ERROR, f"Migration failed: {e}")
-                        raise
+                    assert self.migrator is not None
+                    self.migrator.migrate()
                 else:
                     log_with_context(logging.INFO, "Migration cancelled by user.")
-                    sys.exit(0)
+                    return
 
     def cleanup(self) -> None:
         """Perform cleanup operations."""
