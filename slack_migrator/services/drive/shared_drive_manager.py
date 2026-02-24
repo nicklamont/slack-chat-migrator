@@ -8,6 +8,7 @@ from typing import Optional
 
 from googleapiclient.errors import HttpError
 
+from slack_migrator.core.config import MigrationConfig
 from slack_migrator.utils.logging import (
     log_with_context,
 )
@@ -16,12 +17,12 @@ from slack_migrator.utils.logging import (
 class SharedDriveManager:
     """Manages Google Drive shared drives for the migration process."""
 
-    def __init__(self, drive_service, config: dict, dry_run: bool = False):
+    def __init__(self, drive_service, config: MigrationConfig, dry_run: bool = False):
         """Initialize the SharedDriveManager.
 
         Args:
             drive_service: Google Drive API service instance
-            config: Configuration dictionary
+            config: Migration configuration
             dry_run: Whether to run in dry run mode
         """
         self.drive_service = drive_service
@@ -60,9 +61,8 @@ class SharedDriveManager:
 
         try:
             # Get shared drive configuration
-            shared_drive_config = self.config.get("shared_drive", {})
-            shared_drive_name = shared_drive_config.get("name")
-            shared_drive_id = shared_drive_config.get("id")
+            shared_drive_name = self.config.shared_drive.name
+            shared_drive_id = self.config.shared_drive.id
 
             # If no shared drive specified, use default name
             if not shared_drive_name and not shared_drive_id:

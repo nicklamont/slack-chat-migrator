@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from slack_migrator.core.config import MigrationConfig
+from slack_migrator.exceptions import ExportError, UserMappingError
 from slack_migrator.services.user import generate_user_map
 
 
@@ -33,7 +35,7 @@ class TestGenerateUserMap:
         ]
         _write_users_json(tmp_path, users)
 
-        user_map, without_email = generate_user_map(tmp_path, {})
+        user_map, without_email = generate_user_map(tmp_path, MigrationConfig())
 
         assert user_map["U001"] == "alice@example.com"
         assert user_map["U002"] == "bob@example.com"
@@ -48,7 +50,7 @@ class TestGenerateUserMap:
             },
         ]
         _write_users_json(tmp_path, users)
-        config = {"email_domain_override": "new.com"}
+        config = MigrationConfig(email_domain_override="new.com")
 
         user_map, _ = generate_user_map(tmp_path, config)
 
@@ -63,7 +65,9 @@ class TestGenerateUserMap:
             },
         ]
         _write_users_json(tmp_path, users)
-        config = {"user_mapping_overrides": {"U001": "override@example.com"}}
+        config = MigrationConfig(
+            user_mapping_overrides={"U001": "override@example.com"}
+        )
 
         user_map, _ = generate_user_map(tmp_path, config)
 
@@ -78,7 +82,7 @@ class TestGenerateUserMap:
             },
         ]
         _write_users_json(tmp_path, users)
-        config = {"user_mapping_overrides": {"U999": "external@other.com"}}
+        config = MigrationConfig(user_mapping_overrides={"U999": "external@other.com"})
 
         user_map, _ = generate_user_map(tmp_path, config)
 
@@ -91,7 +95,8 @@ class TestGenerateUserMap:
         _write_users_json(tmp_path, users)
 
         user_map, _without_email = generate_user_map(
-            tmp_path, {"user_mapping_overrides": {"U001": "fallback@co.com"}}
+            tmp_path,
+            MigrationConfig(user_mapping_overrides={"U001": "fallback@co.com"}),
         )
 
         # Override takes precedence, so user IS in user_map
@@ -108,7 +113,7 @@ class TestGenerateUserMap:
         ]
         _write_users_json(tmp_path, users)
 
-        user_map, without_email = generate_user_map(tmp_path, {})
+        user_map, without_email = generate_user_map(tmp_path, MigrationConfig())
 
         assert "U002" not in user_map
         assert len(without_email) == 1
@@ -129,7 +134,7 @@ class TestGenerateUserMap:
             },
         ]
         _write_users_json(tmp_path, users)
-        config = {"ignore_bots": True}
+        config = MigrationConfig(ignore_bots=True)
 
         user_map, _ = generate_user_map(tmp_path, config)
 
@@ -147,13 +152,23 @@ class TestGenerateUserMap:
         ]
         _write_users_json(tmp_path, users)
 
-        user_map, _ = generate_user_map(tmp_path, {})
+        user_map, _ = generate_user_map(tmp_path, MigrationConfig())
 
         assert "B001" in user_map
 
-    def test_missing_users_json_exits(self, tmp_path):
-        with pytest.raises(SystemExit):
-            generate_user_map(tmp_path, {})
+    def test_missing_users_json_raises(self, tmp_path):
+        with pytest.raises(ExportError, match=r"users\.json not found"):
+            generate_user_map(tmp_path, MigrationConfig())
+
+    def test_invalid_json_raises(self, tmp_path):
+        (tmp_path / "users.json").write_text("{invalid json")
+        with pytest.raises(ExportError, match=r"Failed to parse users\.json"):
+            generate_user_map(tmp_path, MigrationConfig())
+
+    def test_no_valid_users_raises(self, tmp_path):
+        _write_users_json(tmp_path, [{"id": "U001", "name": "noemail", "profile": {}}])
+        with pytest.raises(UserMappingError, match="No valid users found"):
+            generate_user_map(tmp_path, MigrationConfig())
 
     def test_user_without_id_skipped(self, tmp_path):
         users = [
@@ -166,7 +181,7 @@ class TestGenerateUserMap:
         ]
         _write_users_json(tmp_path, users)
 
-        user_map, _ = generate_user_map(tmp_path, {})
+        user_map, _ = generate_user_map(tmp_path, MigrationConfig())
 
         assert len(user_map) == 1
         assert "U001" in user_map

@@ -2,18 +2,25 @@
 Report generation functionality for Slack to Google Chat migration
 """
 
+from __future__ import annotations
+
 import datetime
 import json
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from slack_migrator.utils.logging import log_with_context
 
+if TYPE_CHECKING:
+    from slack_migrator.core.migrator import SlackToChatMigrator
 
-def print_dry_run_summary(migrator, report_file=None):
+
+def print_dry_run_summary(
+    migrator: SlackToChatMigrator, report_file: str | None = None
+) -> None:
     """Print a summary of the dry run to the console."""
     print("\n" + "=" * 80)
     print("DRY RUN SUMMARY")
@@ -69,7 +76,7 @@ def print_dry_run_summary(migrator, report_file=None):
     # Get the report file path
     if report_file is None:
         # Get the output directory
-        output_dir = migrator.output_dir if hasattr(migrator, "output_dir") else "."
+        output_dir = migrator.output_dir or "."
         report_file = os.path.join(output_dir, "migration_report.yaml")
 
     print(f"\nDetailed report saved to {report_file}")
@@ -78,10 +85,10 @@ def print_dry_run_summary(migrator, report_file=None):
     print("=" * 80)
 
 
-def generate_report(migrator):  # noqa: C901
+def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
     """Generate a detailed migration report."""
     # Get the output directory
-    output_dir = migrator.output_dir if hasattr(migrator, "output_dir") else "."
+    output_dir = migrator.output_dir or "."
 
     # Set the output file path in the run directory
     report_path = os.path.join(output_dir, "migration_report.yaml")
@@ -109,7 +116,7 @@ def generate_report(migrator):  # noqa: C901
             )
 
             # Write detailed failure info to channel log
-            if hasattr(migrator, "output_dir"):
+            if migrator.output_dir:
                 logs_dir = os.path.join(migrator.output_dir, "channel_logs")
                 os.makedirs(logs_dir, exist_ok=True)
                 log_file = os.path.join(logs_dir, f"{channel}_migration.log")
@@ -196,7 +203,7 @@ def generate_report(migrator):  # noqa: C901
 
         # Add recommendation for high failure rate channels
         if migrator.high_failure_rate_channels:
-            max_failure_percentage = migrator.config.get("max_failure_percentage", 10)
+            max_failure_percentage = migrator.config.max_failure_percentage
             report["recommendations"].append(
                 {
                     "type": "high_failure_rate",

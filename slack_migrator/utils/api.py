@@ -2,16 +2,19 @@
 API utilities for the Slack to Google Chat migration tool
 """
 
+from __future__ import annotations
+
 import functools
 import json
 import logging
 import time
-from typing import Any, Optional
+from typing import Any
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from slack_migrator.core.config import MigrationConfig
 from slack_migrator.utils.logging import log_with_context
 
 REQUIRED_SCOPES = [
@@ -30,10 +33,15 @@ _service_cache: dict[str, Any] = {}
 class RetryWrapper:
     """Wrapper that adds retry logic to any object's methods."""
 
-    def __init__(self, wrapped_obj, channel_context_getter=None, retry_config=None):
+    def __init__(
+        self,
+        wrapped_obj,
+        channel_context_getter=None,
+        retry_config: MigrationConfig | None = None,
+    ):
         self._wrapped_obj = wrapped_obj
         self._channel_context_getter = channel_context_getter
-        self._retry_config = retry_config or {}
+        self._retry_config = retry_config
 
     def __getattr__(self, name):
         attr = getattr(self._wrapped_obj, name)
@@ -68,8 +76,8 @@ class RetryWrapper:
         @functools.wraps(execute_method)
         def wrapper(*args, **kwargs):  # noqa: C901
             # Get retry config from configuration or use defaults
-            max_retries = self._retry_config.get("max_retries", 3)
-            initial_delay = self._retry_config.get("retry_delay", 1)
+            max_retries = self._retry_config.max_retries if self._retry_config else 3
+            initial_delay = self._retry_config.retry_delay if self._retry_config else 1
             max_delay = 60
             backoff_factor = 2.0
 
@@ -403,8 +411,8 @@ def get_gcp_service(
     user_email: str,
     api: str,
     version: str,
-    channel: Optional[str] = None,
-    retry_config: Optional[dict[str, Any]] = None,
+    channel: str | None = None,
+    retry_config: MigrationConfig | None = None,
 ) -> Any:
     """Get a Google API client service using service account impersonation."""
     cache_key = f"{creds_path}:{user_email}:{api}:{version}"

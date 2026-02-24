@@ -4,21 +4,24 @@ Simple unmapped user tracking integrated into existing user mapping logic.
 
 import logging
 from collections import defaultdict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from slack_migrator.utils.logging import log_with_context
+
+if TYPE_CHECKING:
+    from slack_migrator.core.migrator import SlackToChatMigrator
 
 
 class UnmappedUserTracker:
     """Simple tracker for unmapped users detected during migration."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.unmapped_users: set[str] = set()  # Just track the user IDs
         self.user_contexts: dict[str, set[str]] = defaultdict(
             set
         )  # Track where they were encountered
 
-    def add_unmapped_user(self, user_id: str, context: str = ""):
+    def add_unmapped_user(self, user_id: str, context: str = "") -> None:
         """Add an unmapped user to the tracker.
 
         Args:
@@ -31,7 +34,7 @@ class UnmappedUserTracker:
 
     def track_unmapped_mention(
         self, user_id: str, channel: str = "", message_ts: str = "", text: str = ""
-    ):
+    ) -> None:
         """Track an unmapped user mention with detailed context.
 
         Args:
@@ -50,7 +53,7 @@ class UnmappedUserTracker:
         context = ", ".join(context_parts)
         self.add_unmapped_user(user_id, context)
 
-    def track_unmapped_channel_member(self, user_id: str, channel: str):
+    def track_unmapped_channel_member(self, user_id: str, channel: str) -> None:
         """Track an unmapped user found in channel membership.
 
         Args:
@@ -68,12 +71,12 @@ class UnmappedUserTracker:
         """Get the count of unmapped users."""
         return len(self.unmapped_users)
 
-    def get_unmapped_users_list(self) -> list:
+    def get_unmapped_users_list(self) -> list[str]:
         """Get a sorted list of unmapped user IDs."""
         return sorted(self.unmapped_users)
 
 
-def log_unmapped_user_summary_for_dry_run(migrator) -> None:
+def log_unmapped_user_summary_for_dry_run(migrator: "SlackToChatMigrator") -> None:
     """Log a simple summary of unmapped users during dry run.
 
     Args:
@@ -214,7 +217,7 @@ def log_unmapped_user_summary_for_dry_run(migrator) -> None:
 
 
 def analyze_unmapped_users(
-    migrator, unmapped_user_ids: list
+    migrator: "SlackToChatMigrator", unmapped_user_ids: list[str]
 ) -> dict[str, dict[str, Any]]:
     """Analyze unmapped users to determine their types and provide better guidance.
 
@@ -327,7 +330,9 @@ def categorize_user_analysis(
     return categories
 
 
-def initialize_unmapped_user_tracking(migrator):
+def initialize_unmapped_user_tracking(
+    migrator: "SlackToChatMigrator",
+) -> UnmappedUserTracker:
     """Initialize simple unmapped user tracking for the migrator.
 
     Args:
@@ -342,7 +347,7 @@ def initialize_unmapped_user_tracking(migrator):
     return migrator.unmapped_user_tracker
 
 
-def scan_channel_members_for_unmapped_users(migrator) -> None:
+def scan_channel_members_for_unmapped_users(migrator: "SlackToChatMigrator") -> None:
     """Scan channels.json for users listed as members but not in user_map.
 
     This is crucial because Google Chat will try to add all channel members
@@ -374,15 +379,15 @@ def scan_channel_members_for_unmapped_users(migrator) -> None:
         channels_to_check = []
 
         # Determine which channels to check based on include/exclude settings
-        if migrator.config.get("include_channels"):
+        if migrator.config.include_channels:
             # Only check included channels
-            include_set = set(migrator.config["include_channels"])
+            include_set = set(migrator.config.include_channels)
             channels_to_check = [
                 ch for ch in channels_data if ch.get("name") in include_set
             ]
         else:
             # Check all channels except excluded ones
-            exclude_set = set(migrator.config.get("exclude_channels", []))
+            exclude_set = set(migrator.config.exclude_channels)
             channels_to_check = [
                 ch for ch in channels_data if ch.get("name") not in exclude_set
             ]
@@ -392,7 +397,7 @@ def scan_channel_members_for_unmapped_users(migrator) -> None:
 
         # Load user data once if ignore_bots is enabled
         user_lookup = {}
-        ignore_bots = migrator.config.get("ignore_bots", False)
+        ignore_bots = migrator.config.ignore_bots
         if ignore_bots:
             try:
                 users_file = Path(migrator.export_root) / "users.json"

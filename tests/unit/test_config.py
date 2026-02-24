@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 
 from slack_migrator.core.config import (
+    MigrationConfig,
     create_default_config,
     load_config,
     should_process_channel,
@@ -18,20 +19,20 @@ def test_load_config_with_empty_file():
         config = load_config(Path(temp_file.name))
 
         # Check default values
-        assert "exclude_channels" in config
-        assert "include_channels" in config
-        assert "user_mapping_overrides" in config
-        assert config["email_domain_override"] == ""
+        assert config.exclude_channels == []
+        assert config.include_channels == []
+        assert config.user_mapping_overrides == {}
+        assert config.email_domain_override == ""
 
         # Check error handling defaults
-        assert config["abort_on_error"] is False
-        assert config["max_failure_percentage"] == 10
-        assert config["import_completion_strategy"] == "skip_on_error"
-        assert config["cleanup_on_error"] is False
+        assert config.abort_on_error is False
+        assert config.max_failure_percentage == 10
+        assert config.import_completion_strategy == "skip_on_error"
+        assert config.cleanup_on_error is False
 
         # Check retry defaults
-        assert config["max_retries"] == 3
-        assert config["retry_delay"] == 2
+        assert config.max_retries == 3
+        assert config.retry_delay == 2
 
 
 def test_load_config_with_values():
@@ -53,31 +54,31 @@ def test_load_config_with_values():
         config = load_config(Path(temp_file.name))
 
         # Check values
-        assert config["shared_drive"]["name"] == "Custom Drive"
-        assert config["email_domain_override"] == "example.com"
-        assert "random" in config["exclude_channels"]
-        assert "general" in config["exclude_channels"]
-        assert "important" in config["include_channels"]
-        assert config["user_mapping_overrides"]["U123"] == "user@example.com"
+        assert config.shared_drive.name == "Custom Drive"
+        assert config.email_domain_override == "example.com"
+        assert "random" in config.exclude_channels
+        assert "general" in config.exclude_channels
+        assert "important" in config.include_channels
+        assert config.user_mapping_overrides["U123"] == "user@example.com"
 
 
 def test_should_process_channel():
     """Test channel processing logic."""
     # Test with include list
-    config = {"include_channels": ["channel1", "channel2"]}
+    config = MigrationConfig(include_channels=["channel1", "channel2"])
     assert should_process_channel("channel1", config) is True
     assert should_process_channel("channel3", config) is False
 
     # Test with exclude list
-    config = {"exclude_channels": ["channel1", "channel2"]}
+    config = MigrationConfig(exclude_channels=["channel1", "channel2"])
     assert should_process_channel("channel1", config) is False
     assert should_process_channel("channel3", config) is True
 
     # Test with both include and exclude (include takes precedence)
-    config = {
-        "include_channels": ["channel1", "channel2"],
-        "exclude_channels": ["channel1", "channel3"],
-    }
+    config = MigrationConfig(
+        include_channels=["channel1", "channel2"],
+        exclude_channels=["channel1", "channel3"],
+    )
     assert should_process_channel("channel1", config) is True  # In include list
     assert should_process_channel("channel2", config) is True  # In include list
     assert should_process_channel("channel3", config) is False  # Not in include list
@@ -116,13 +117,13 @@ def test_create_default_config_no_overwrite(tmp_path):
 
 def test_should_process_channel_empty_lists():
     """Test should_process_channel with empty include/exclude lists."""
-    config = {"include_channels": [], "exclude_channels": []}
+    config = MigrationConfig()
     assert should_process_channel("anything", config) is True
 
 
 def test_should_process_channel_no_lists():
-    """Test should_process_channel with no include/exclude keys."""
-    config = {}
+    """Test should_process_channel with default MigrationConfig."""
+    config = MigrationConfig()
     assert should_process_channel("anything", config) is True
 
 
@@ -130,9 +131,9 @@ def test_load_config_nonexistent_path():
     """Test loading config from a nonexistent path returns defaults."""
     config = load_config(Path("/nonexistent/path/config.yaml"))
 
-    assert config["max_retries"] == 3
-    assert config["exclude_channels"] == []
-    assert config["email_domain_override"] == ""
+    assert config.max_retries == 3
+    assert config.exclude_channels == []
+    assert config.email_domain_override == ""
 
 
 def test_load_config_invalid_yaml(tmp_path):
@@ -143,5 +144,5 @@ def test_load_config_invalid_yaml(tmp_path):
     config = load_config(bad_file)
 
     # Should fall back to defaults
-    assert config["max_retries"] == 3
-    assert config["exclude_channels"] == []
+    assert config.max_retries == 3
+    assert config.exclude_channels == []

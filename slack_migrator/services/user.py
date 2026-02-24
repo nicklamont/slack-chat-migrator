@@ -4,10 +4,11 @@ User mapping functionality for Slack to Google Chat migration
 
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 
+from slack_migrator.core.config import MigrationConfig
+from slack_migrator.exceptions import ExportError, UserMappingError
 from slack_migrator.utils.logging import log_with_context
 
 # Create logger instance
@@ -15,7 +16,7 @@ logger = logging.getLogger("slack_migrator")
 
 
 def generate_user_map(  # noqa: C901
-    export_root: Path, config: dict
+    export_root: Path, config: MigrationConfig
 ) -> tuple[dict[str, str], list[dict[str, Any]]]:
     """Generate user mapping from users.json file.
 
@@ -33,27 +34,24 @@ def generate_user_map(  # noqa: C901
     users_file = export_root / "users.json"
 
     if not users_file.exists():
-        log_with_context(logging.ERROR, "users.json not found in export directory")
-        sys.exit(1)
+        raise ExportError("users.json not found in export directory")
 
     try:
         with users_file.open() as f:
             users = json.load(f)
-    except json.JSONDecodeError:
-        log_with_context(logging.ERROR, "Failed to parse users.json")
-        sys.exit(1)
+    except json.JSONDecodeError as e:
+        raise ExportError("Failed to parse users.json") from e
     except OSError as e:
-        log_with_context(logging.ERROR, f"Failed to read users.json: {e}")
-        sys.exit(1)
+        raise ExportError(f"Failed to read users.json: {e}") from e
 
     # Get email domain override from config
-    email_domain_override = config.get("email_domain_override", "")
+    email_domain_override = config.email_domain_override
 
     # Get user mapping overrides from config
-    user_mapping_overrides = config.get("user_mapping_overrides") or {}
+    user_mapping_overrides = config.user_mapping_overrides
 
     # Get bot ignoring setting from config
-    ignore_bots = config.get("ignore_bots", False)
+    ignore_bots = config.ignore_bots
     ignored_bots_count = 0
 
     for user in users:
@@ -140,8 +138,7 @@ def generate_user_map(  # noqa: C901
             )
 
     if not user_map:
-        log_with_context(logging.ERROR, "No valid users found in users.json")
-        sys.exit(1)
+        raise UserMappingError("No valid users found in users.json")
 
     log_with_context(logging.INFO, f"Generated user mapping for {len(user_map)} users")
     if ignored_bots_count > 0:

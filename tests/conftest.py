@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from slack_migrator.core.config import MigrationConfig
+
 
 @pytest.fixture()
 def sample_users():
@@ -59,19 +61,8 @@ def sample_channels():
 
 @pytest.fixture()
 def mock_config():
-    """Return a config dict with all defaults populated."""
-    return {
-        "exclude_channels": [],
-        "include_channels": [],
-        "user_mapping_overrides": {},
-        "email_domain_override": "",
-        "abort_on_error": False,
-        "max_failure_percentage": 10,
-        "import_completion_strategy": "skip_on_error",
-        "cleanup_on_error": False,
-        "max_retries": 3,
-        "retry_delay": 2,
-    }
+    """Return a MigrationConfig with all defaults populated."""
+    return MigrationConfig()
 
 
 @pytest.fixture()

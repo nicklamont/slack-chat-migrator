@@ -73,7 +73,7 @@ def process_reactions_batch(  # noqa: C901
 
             for uid in emoji_users:
                 # Check if this reaction is from a bot and bots should be ignored
-                if migrator.config.get("ignore_bots", False):
+                if migrator.config.ignore_bots:
                     user_data = migrator._get_user_data(uid)
                     if user_data and user_data.get("is_bot", False):
                         log_with_context(
@@ -324,7 +324,7 @@ def send_message(migrator, space: str, message: dict) -> Optional[str]:  # noqa:
     channel = migrator.current_channel
 
     # Check if this message is from a bot and bots should be ignored
-    if migrator.config.get("ignore_bots", False):
+    if migrator.config.ignore_bots:
         # Check for bot messages by subtype (covers system bots like USLACKBOT that aren't in users.json)
         if message.get("subtype") in ["bot_message", "app_message"]:
             bot_name = message.get("username", user_id or "Unknown Bot")
@@ -915,7 +915,7 @@ def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
     user_id = m.get("user", "")
 
     # Check if this message is from a bot and bots should be ignored
-    if migrator.config.get("ignore_bots", False):
+    if migrator.config.ignore_bots:
         # Check for bot messages by subtype (covers system bots like USLACKBOT that aren't in users.json)
         if m.get("subtype") in ["bot_message", "app_message"]:
             bot_name = m.get("username", user_id or "Unknown Bot")
@@ -989,7 +989,7 @@ def track_message_stats(migrator, m: dict[str, Any]) -> None:  # noqa: C901
         for reaction in m["reactions"]:
             for user_id in reaction.get("users", []):
                 # Skip bot reactions if ignore_bots is enabled
-                if migrator.config.get("ignore_bots", False):
+                if migrator.config.ignore_bots:
                     user_data = migrator._get_user_data(user_id)
                     if user_data and user_data.get("is_bot", False):
                         continue
@@ -1169,28 +1169,27 @@ def load_space_mappings(migrator) -> dict[str, str]:
             )
 
         # Look for space_mapping overrides in config
-        if "space_mapping" in migrator.config:
-            space_mapping = migrator.config["space_mapping"]
-            if space_mapping:  # Only proceed if space_mapping is not None or empty
-                log_with_context(
-                    logging.INFO,
-                    f"Found {len(space_mapping)} space mapping overrides in config",
-                )
+        space_mapping = migrator.config.space_mapping
+        if space_mapping:
+            log_with_context(
+                logging.INFO,
+                f"Found {len(space_mapping)} space mapping overrides in config",
+            )
 
-                # Apply space mappings from config (overriding API discovery)
-                for channel_name, space_id in space_mapping.items():
-                    channel_id = migrator.channel_name_to_id.get(channel_name, "")
-                    if channel_id:
-                        # Override any discovered mapping with the config value
-                        migrator.channel_id_to_space_id[channel_id] = space_id
+            # Apply space mappings from config (overriding API discovery)
+            for channel_name, space_id in space_mapping.items():
+                channel_id = migrator.channel_name_to_id.get(channel_name, "")
+                if channel_id:
+                    # Override any discovered mapping with the config value
+                    migrator.channel_id_to_space_id[channel_id] = space_id
 
-                        # Also update the name-based mapping for backward compatibility
-                        discovered_spaces[channel_name] = f"spaces/{space_id}"
-                    else:
-                        log_with_context(
-                            logging.WARNING,
-                            f"Channel '{channel_name}' in space_mapping config not found in workspace",
-                        )
+                    # Also update the name-based mapping for backward compatibility
+                    discovered_spaces[channel_name] = f"spaces/{space_id}"
+                else:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Channel '{channel_name}' in space_mapping config not found in workspace",
+                    )
 
         return discovered_spaces if discovered_spaces else {}
 

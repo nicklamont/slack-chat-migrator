@@ -80,8 +80,8 @@ known-first-party = ["slack_migrator"]
 python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
 check_untyped_defs = true
 disallow_untyped_decorators = false
 no_implicit_optional = true
@@ -90,6 +90,19 @@ strict_optional = true
 [[tool.mypy.overrides]]
 module = ["emoji.*", "slackblocks.*", "tqdm.*", "googleapiclient.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "slack_migrator.core.migrator",
+    "slack_migrator.services.*",
+    "slack_migrator.services.drive.*",
+    "slack_migrator.services.chat.*",
+    "slack_migrator.utils.api",
+    "slack_migrator.utils.logging",
+    "slack_migrator.utils.permissions",
+]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

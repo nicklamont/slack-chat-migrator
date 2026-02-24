@@ -497,7 +497,7 @@ class SlackToChatMigrator:
             )
 
             # Check config for abort_on_error setting
-            should_abort = self.config.get("abort_on_error", False)
+            should_abort = self.config.abort_on_error
 
             if should_abort:
                 log_with_context(
@@ -517,7 +517,7 @@ class SlackToChatMigrator:
 
     def _delete_space_if_errors(self, space_name, channel):
         """Delete a space if it had errors and cleanup is enabled."""
-        if not self.config.get("cleanup_on_error", False):
+        if not self.config.cleanup_on_error:
             log_with_context(
                 logging.INFO,
                 f"Not deleting space {space_name} despite errors (cleanup_on_error is disabled in config)",
@@ -567,7 +567,7 @@ class SlackToChatMigrator:
             The internal email to use for this user, or None if user should be ignored
         """
         # Check if this user is a bot and bots are being ignored FIRST
-        if self.config.get("ignore_bots", False):
+        if self.config.ignore_bots:
             # Check if this is a bot user
             user_data = self._get_user_data(user_id)
             if user_data and user_data.get("is_bot", False):
@@ -668,7 +668,7 @@ class SlackToChatMigrator:
 
         # Create attribution prefix
         # First check if we have a mapping override (this takes precedence)
-        override_email = self.config.get("user_mapping_overrides", {}).get(user_id)
+        override_email = self.config.user_mapping_overrides.get(user_id)
         if override_email:
             attribution = f"*[From: {override_email}]*"
         elif user_info:
@@ -1098,7 +1098,7 @@ class SlackToChatMigrator:
                 failed_count = 0
 
                 # Get failure threshold configuration
-                max_failure_percentage = self.config.get("max_failure_percentage", 10)
+                max_failure_percentage = self.config.max_failure_percentage
 
                 # Track failures for this channel
                 channel_failures = []
@@ -1190,9 +1190,7 @@ class SlackToChatMigrator:
                     )
 
                     # Get the completion strategy from config
-                    completion_strategy = self.config.get(
-                        "import_completion_strategy", "skip_on_error"
-                    )
+                    completion_strategy = self.config.import_completion_strategy
 
                     # Only complete import if there were no errors or we're using force_complete strategy
                     if (
@@ -1780,7 +1778,7 @@ class SlackToChatMigrator:
             # Check if we have any spaces with duplicate names that need disambiguation
             if duplicate_spaces:
                 # Check config for space_mapping to disambiguate
-                space_mapping = self.config.get("space_mapping") or {}
+                space_mapping = self.config.space_mapping
 
                 log_with_context(
                     logging.WARNING,

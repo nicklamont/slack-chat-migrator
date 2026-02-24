@@ -11,12 +11,21 @@ import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar, Optional
+from typing import TYPE_CHECKING, Callable, ClassVar, Optional
 
 import click
 
+if TYPE_CHECKING:
+    from googleapiclient.errors import HttpError
+
 import slack_migrator
 from slack_migrator.core.migrator import SlackToChatMigrator, cleanup_import_mode_spaces
+from slack_migrator.exceptions import (
+    ConfigError,
+    MigrationAbortedError,
+    MigratorError,
+    PermissionCheckError,
+)
 from slack_migrator.utils.logging import log_with_context, setup_logger
 from slack_migrator.utils.permissions import (
     check_permissions_standalone,
@@ -43,7 +52,7 @@ class DefaultGroup(click.Group):
     # ``migrate`` default.
     _GROUP_FLAGS: ClassVar[set[str]] = {"--help", "--version", "-h"}
 
-    def parse_args(self, ctx, args):
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         # If no args at all, let click show help as usual.
         if args and args[0].startswith("-") and args[0] not in self._GROUP_FLAGS:
             args = ["migrate", *args]
@@ -55,7 +64,7 @@ class DefaultGroup(click.Group):
 # ---------------------------------------------------------------------------
 
 
-def common_options(f):
+def common_options(f: Callable[..., None]) -> Callable[..., None]:
     """Decorator that adds options shared across multiple subcommands."""
     f = click.option(
         "--creds_path",
@@ -101,7 +110,7 @@ def common_options(f):
 )
 @click.version_option(version=slack_migrator.__version__, prog_name="slack-migrator")
 @click.pass_context
-def cli(ctx):
+def cli(ctx: click.Context) -> None:
     """Slack to Google Chat migration tool."""
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
@@ -138,16 +147,16 @@ def cli(ctx):
     help="Skip permission checks (not recommended)",
 )
 def migrate(
-    creds_path,
-    export_path,
-    workspace_admin,
-    config,
-    verbose,
-    debug_api,
-    dry_run,
-    update_mode,
-    skip_permission_check,
-):
+    creds_path: str,
+    export_path: str,
+    workspace_admin: str,
+    config: str,
+    verbose: bool,
+    debug_api: bool,
+    dry_run: bool,
+    update_mode: bool,
+    skip_permission_check: bool,
+) -> None:
     """Run the full Slack-to-Google-Chat migration."""
     args = SimpleNamespace(
         creds_path=creds_path,
@@ -179,6 +188,7 @@ def migrate(
         orchestrator.run_migration()
     except Exception as e:
         handle_exception(e)
+        sys.exit(1)
     finally:
         orchestrator.cleanup()
         show_security_warning()
@@ -191,7 +201,9 @@ def migrate(
 
 @cli.command("check-permissions")
 @common_options
-def check_permissions(creds_path, workspace_admin, config, verbose, debug_api):
+def check_permissions(
+    creds_path: str, workspace_admin: str, config: str, verbose: bool, debug_api: bool
+) -> None:
     """Validate API permissions without running a migration.
 
     Tests that the service account has all required scopes for the Chat and
@@ -230,8 +242,14 @@ def check_permissions(creds_path, workspace_admin, config, verbose, debug_api):
     help="(ignored — validate always runs in dry-run mode)",
 )
 def validate(
-    creds_path, export_path, workspace_admin, config, verbose, debug_api, dry_run
-):
+    creds_path: str,
+    export_path: str,
+    workspace_admin: str,
+    config: str,
+    verbose: bool,
+    debug_api: bool,
+    dry_run: bool,
+) -> None:
     """Dry-run validation of export data, user mappings, and channels.
 
     Equivalent to ``migrate --dry_run`` but expressed as an explicit command.
@@ -268,6 +286,7 @@ def validate(
         orchestrator.run_migration()
     except Exception as e:
         handle_exception(e)
+        sys.exit(1)
     finally:
         orchestrator.cleanup()
         show_security_warning()
@@ -281,7 +300,14 @@ def validate(
 @cli.command()
 @common_options
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
-def cleanup(creds_path, workspace_admin, config, verbose, debug_api, yes):
+def cleanup(
+    creds_path: str,
+    workspace_admin: str,
+    config: str,
+    verbose: bool,
+    debug_api: bool,
+    yes: bool,
+) -> None:
     """Complete import mode on spaces that are stuck.
 
     Lists all spaces visible to the service account and calls completeImport()
@@ -318,10 +344,10 @@ def cleanup(creds_path, workspace_admin, config, verbose, debug_api, yes):
 class MigrationOrchestrator:
     """Orchestrates the migration process with validation and error handling."""
 
-    def __init__(self, args):
+    def __init__(self, args: SimpleNamespace) -> None:
         self.args = args
-        self.migrator = None
-        self.dry_run_migrator = None
+        self.migrator: Optional[SlackToChatMigrator] = None
+        self.dry_run_migrator: Optional[SlackToChatMigrator] = None
         self.output_dir: Optional[str] = None
 
     def create_migrator(self, force_dry_run: bool = False) -> SlackToChatMigrator:
@@ -343,19 +369,15 @@ class MigrationOrchestrator:
 
         return migrator
 
-    def validate_prerequisites(self):
+    def validate_prerequisites(self) -> None:
         """Validate all prerequisites before migration."""
         # Check credentials file
         creds_path = Path(self.args.creds_path)
         if not creds_path.exists():
-            log_with_context(
-                logging.ERROR, f"Credentials file not found: {self.args.creds_path}"
+            raise ConfigError(
+                f"Credentials file not found: {self.args.creds_path}. "
+                "Make sure your service account JSON key file exists and has the correct path."
             )
-            log_with_context(
-                logging.INFO,
-                "Make sure your service account JSON key file exists and has the correct path.",
-            )
-            sys.exit(1)
 
         # Initialize main migrator
         self.migrator = self.create_migrator()
@@ -378,12 +400,10 @@ class MigrationOrchestrator:
                     )
 
             except Exception as e:
-                log_with_context(logging.ERROR, f"Permission checks failed: {e}")
-                log_with_context(
-                    logging.ERROR,
-                    "Fix the issues or run with --skip_permission_check if you're sure.",
-                )
-                sys.exit(1)
+                raise PermissionCheckError(
+                    f"Permission checks failed: {e}. "
+                    "Fix the issues or run with --skip_permission_check if you're sure."
+                ) from e
         else:
             log_with_context(
                 logging.WARNING,
@@ -466,7 +486,7 @@ class MigrationOrchestrator:
                 log_with_context(logging.INFO, "\nMigration cancelled by user.")
                 return False
 
-    def report_validation_success(self, is_explicit_dry_run: bool = False):
+    def report_validation_success(self, is_explicit_dry_run: bool = False) -> None:
         """Report successful validation."""
         log_with_context(logging.INFO, "")
         log_with_context(logging.INFO, "✅ Validation completed successfully!")
@@ -508,13 +528,12 @@ class MigrationOrchestrator:
 
         try:
             self.dry_run_migrator.migrate()
-        except Exception as e:
-            log_with_context(logging.ERROR, f"Validation (dry run) failed: {e}")
+        except Exception:
             log_with_context(
                 logging.ERROR,
                 "Please fix the issues identified during validation before proceeding.",
             )
-            sys.exit(1)
+            raise
 
         # Check validation results
         if self.check_unmapped_users(self.dry_run_migrator):
@@ -535,50 +554,34 @@ class MigrationOrchestrator:
             log_with_context(logging.INFO, "\nMigration cancelled by user.")
             return False
 
-    def run_migration(self):
+    def run_migration(self) -> None:
         """Execute the main migration logic."""
         if self.args.dry_run:
             # Explicit dry run mode
-            try:
-                assert self.migrator is not None
-                self.migrator.migrate()
+            assert self.migrator is not None
+            self.migrator.migrate()
 
-                if self.check_unmapped_users(self.migrator):
-                    if self.report_validation_issues(
-                        self.migrator, is_explicit_dry_run=True
-                    ):
-                        # User should not be able to proceed in explicit dry run mode
-                        log_with_context(
-                            logging.INFO,
-                            "Use normal migration mode to proceed with unmapped users.",
-                        )
-                        sys.exit(1)
-                    else:
-                        sys.exit(1)
-                else:
-                    self.report_validation_success(is_explicit_dry_run=True)
-
-            except Exception as e:
-                log_with_context(logging.ERROR, f"Validation failed: {e}")
-                sys.exit(1)
+            if self.check_unmapped_users(self.migrator):
+                self.report_validation_issues(self.migrator, is_explicit_dry_run=True)
+                raise MigrationAbortedError(
+                    "Dry run completed with unmapped users. "
+                    "Use normal migration mode to proceed."
+                )
+            else:
+                self.report_validation_success(is_explicit_dry_run=True)
         else:
             # Full migration with automatic validation
             if self.run_validation():
                 self.report_validation_success()
 
                 if self.get_user_confirmation():
-                    try:
-                        assert self.migrator is not None
-                        self.migrator.migrate()
-
-                    except Exception as e:
-                        log_with_context(logging.ERROR, f"Migration failed: {e}")
-                        raise
+                    assert self.migrator is not None
+                    self.migrator.migrate()
                 else:
                     log_with_context(logging.INFO, "Migration cancelled by user.")
-                    sys.exit(0)
+                    return
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Perform cleanup operations."""
         if self.migrator:
             try:
@@ -630,7 +633,7 @@ class MigrationOrchestrator:
 # ---------------------------------------------------------------------------
 
 
-def log_startup_info(args):
+def log_startup_info(args: SimpleNamespace) -> None:
     """Log startup information."""
     config_path = Path(args.config)
     if not config_path.is_absolute():
@@ -646,7 +649,7 @@ def log_startup_info(args):
     log_with_context(logging.INFO, f"- Debug API calls: {args.debug_api}")
 
 
-def handle_http_error(e):
+def handle_http_error(e: "HttpError") -> None:
     """Handle HTTP errors with specific messages."""
 
     if e.resp.status == 403 and "PERMISSION_DENIED" in str(e):
@@ -688,11 +691,13 @@ def handle_http_error(e):
         log_with_context(logging.ERROR, f"API error during migration: {e}")
 
 
-def handle_exception(e):
+def handle_exception(e: Exception) -> None:
     """Handle different types of exceptions."""
     from googleapiclient.errors import HttpError
 
-    if isinstance(e, HttpError):
+    if isinstance(e, MigratorError):
+        log_with_context(logging.ERROR, str(e))
+    elif isinstance(e, HttpError):
         handle_http_error(e)
     elif isinstance(e, FileNotFoundError):
         log_with_context(logging.ERROR, f"File not found: {e}")
@@ -716,7 +721,7 @@ def handle_exception(e):
         log_with_context(logging.ERROR, f"Migration failed: {e}", exc_info=True)
 
 
-def show_security_warning():
+def show_security_warning() -> None:
     """Show security warning about tokens in export files."""
     log_with_context(
         logging.WARNING,
@@ -732,7 +737,7 @@ def show_security_warning():
     )
 
 
-def create_migration_output_directory():
+def create_migration_output_directory() -> str:
     """Create output directory for migration with timestamp."""
     import datetime
     import os
@@ -752,7 +757,7 @@ def create_migration_output_directory():
 # ---------------------------------------------------------------------------
 
 
-def main():
+def main() -> None:
     """Entry point for the slack-migrator command."""
     cli()
 
