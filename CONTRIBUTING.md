@@ -28,6 +28,9 @@ pytest tests/ -v
 
 # Tests with coverage
 pytest tests/ --cov=slack_migrator
+
+# Integration tests (require GCP credentials)
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json pytest tests/integration/ -v
 ```
 
 ## Commit Messages
