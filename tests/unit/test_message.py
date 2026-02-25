@@ -528,7 +528,7 @@ class TestSendMessage:
         migrator.state.last_processed_timestamps = {"general": 1700000010.0}
 
         with patch(
-            "slack_migrator.services.discovery.should_process_message",
+            "slack_migrator.services.message.should_process_message",
             return_value=False,
         ):
             msg = {"ts": "1700000000.000001", "user": "U001", "text": "Old message"}

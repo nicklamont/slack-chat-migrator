@@ -276,11 +276,11 @@ class TestSetupChannelLogging:
 
         processor = ChannelProcessor(migrator)
         with patch(
-            "slack_migrator.utils.logging.setup_channel_logger",
+            "slack_migrator.core.channel_processor.setup_channel_logger",
             return_value=MagicMock(),
         ) as mock_setup:
             with patch(
-                "slack_migrator.utils.logging.is_debug_api_enabled",
+                "slack_migrator.core.channel_processor.is_debug_api_enabled",
                 return_value=False,
             ):
                 processor._setup_channel_logging("general")
@@ -753,7 +753,7 @@ class TestDiscoverChannelResources:
     """Tests for ChannelProcessor._discover_channel_resources()."""
 
     @patch(
-        "slack_migrator.services.discovery.get_last_message_timestamp",
+        "slack_migrator.core.channel_processor.get_last_message_timestamp",
         return_value=12345.0,
     )
     def test_found_last_timestamp(self, mock_get_ts):
@@ -779,7 +779,8 @@ class TestDiscoverChannelResources:
         assert "general" not in migrator.state.last_processed_timestamps
 
     @patch(
-        "slack_migrator.services.discovery.get_last_message_timestamp", return_value=0
+        "slack_migrator.core.channel_processor.get_last_message_timestamp",
+        return_value=0,
     )
     def test_no_messages_found_timestamp_zero(self, mock_get_ts):
         """When no messages found (timestamp=0), does not store a timestamp."""
@@ -792,7 +793,7 @@ class TestDiscoverChannelResources:
         assert "general" not in migrator.state.last_processed_timestamps
 
     @patch(
-        "slack_migrator.services.discovery.get_last_message_timestamp",
+        "slack_migrator.core.channel_processor.get_last_message_timestamp",
         return_value=999.0,
     )
     def test_initializes_thread_map_when_missing(self, mock_get_ts):

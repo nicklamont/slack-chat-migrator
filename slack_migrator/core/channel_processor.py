@@ -17,13 +17,18 @@ from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
 from slack_migrator.core.config import should_process_channel
+from slack_migrator.services.discovery import get_last_message_timestamp
 from slack_migrator.services.membership_manager import (
     add_regular_members,
     add_users_to_space,
 )
 from slack_migrator.services.message import send_message, track_message_stats
 from slack_migrator.services.space_creator import create_space
-from slack_migrator.utils.logging import log_with_context
+from slack_migrator.utils.logging import (
+    is_debug_api_enabled,
+    log_with_context,
+    setup_channel_logger,
+)
 
 
 class ChannelProcessor:
@@ -171,11 +176,6 @@ class ChannelProcessor:
 
     def _setup_channel_logging(self, channel: str) -> None:
         """Set up channel-specific log handler."""
-        from slack_migrator.utils.logging import (
-            is_debug_api_enabled,
-            setup_channel_logger,
-        )
-
         migrator = self.migrator
         assert migrator.state.output_dir is not None
         channel_handler = setup_channel_logger(
@@ -598,9 +598,6 @@ class ChannelProcessor:
                 channel=channel,
             )
             return
-
-        # Import discovery functions
-        from slack_migrator.services.discovery import get_last_message_timestamp
 
         # Get the timestamp of the last message in the space
         last_timestamp = get_last_message_timestamp(migrator, channel, space_name)

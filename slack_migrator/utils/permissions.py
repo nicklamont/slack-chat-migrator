@@ -17,6 +17,7 @@ from typing import Any
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
+from slack_migrator.core.config import load_config
 from slack_migrator.exceptions import PermissionCheckError
 from slack_migrator.utils.api import REQUIRED_SCOPES, get_gcp_service
 from slack_migrator.utils.logging import log_with_context
@@ -442,8 +443,6 @@ def check_permissions_standalone(
     Raises:
         Exception: If critical permissions are missing.
     """
-    from slack_migrator.core.config import load_config
-
     log_with_context(logging.INFO, "Running standalone permission check...")
 
     config = load_config(Path(config_path))

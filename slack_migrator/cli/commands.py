@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 import slack_migrator
 from slack_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
+from slack_migrator.core.config import load_config
 from slack_migrator.core.migrator import SlackToChatMigrator
 from slack_migrator.exceptions import (
     ConfigError,
@@ -30,6 +31,7 @@ from slack_migrator.exceptions import (
     PermissionCheckError,
 )
 from slack_migrator.services.space_creator import cleanup_import_mode_spaces
+from slack_migrator.utils.api import get_gcp_service
 from slack_migrator.utils.logging import log_with_context, setup_logger
 from slack_migrator.utils.permissions import (
     check_permissions_standalone,
@@ -374,9 +376,6 @@ def cleanup(
         debug_api: Enable detailed API request/response logging.
         yes: Skip confirmation prompt.
     """
-    from slack_migrator.core.config import load_config
-    from slack_migrator.utils.api import get_gcp_service
-
     setup_logger(verbose, debug_api)
 
     if not yes:

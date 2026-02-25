@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
+from slack_migrator.services.discovery import should_process_message
 from slack_migrator.services.reaction_processor import process_reactions_batch
 from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.formatting import convert_formatting, parse_slack_blocks
@@ -93,9 +94,6 @@ def send_message(  # noqa: C901
     if is_update_mode and hasattr(migrator.state, "last_processed_timestamps"):
         last_timestamp = migrator.state.last_processed_timestamps.get(channel, 0)  # type: ignore[arg-type]
         if last_timestamp > 0:
-            # Import the function to check if we should process this message
-            from slack_migrator.services.discovery import should_process_message
-
             if not should_process_message(last_timestamp, ts):
                 log_with_context(
                     logging.INFO,
