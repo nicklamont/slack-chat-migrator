@@ -10,6 +10,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from slack_migrator.types import FailedMessage, MigrationSummary, SkippedReaction
+
+
+def _default_migration_summary() -> MigrationSummary:
+    """Return a fresh MigrationSummary with zeroed counters."""
+    return MigrationSummary(
+        channels_processed=[],
+        spaces_created=0,
+        messages_created=0,
+        reactions_created=0,
+        files_created=0,
+    )
+
 
 @dataclass
 class MigrationState:
@@ -37,7 +50,7 @@ class MigrationState:
     thread_map: dict[str, str] = field(default_factory=dict)
     sent_messages: set[str] = field(default_factory=set)
     message_id_map: dict[str, str] = field(default_factory=dict)
-    failed_messages: list[dict[str, Any]] = field(default_factory=list)
+    failed_messages: list[FailedMessage] = field(default_factory=list)
     failed_messages_by_channel: dict[str, list[str]] = field(default_factory=dict)
 
     # --- File and drive caching ---
@@ -47,10 +60,12 @@ class MigrationState:
     chat_delegates: dict[str, Any] = field(default_factory=dict)
     valid_users: dict[str, bool] = field(default_factory=dict)
     external_users: set[str] = field(default_factory=set)
-    skipped_reactions: list[dict[str, str]] = field(default_factory=list)
+    skipped_reactions: list[SkippedReaction] = field(default_factory=list)
 
     # --- Migration progress and statistics ---
-    migration_summary: dict[str, Any] = field(default_factory=dict)
+    migration_summary: MigrationSummary = field(
+        default_factory=_default_migration_summary
+    )
     last_processed_timestamps: dict[str, float] = field(default_factory=dict)
     channel_stats: dict[str, dict[str, int]] = field(default_factory=dict)
     spaces_with_external_users: dict[str, bool] = field(default_factory=dict)
@@ -135,13 +150,7 @@ class MigrationState:
         """
         self.channel_handlers = {}
         self.thread_map = {}
-        self.migration_summary = {
-            "channels_processed": [],
-            "spaces_created": 0,
-            "messages_created": 0,
-            "reactions_created": 0,
-            "files_created": 0,
-        }
+        self.migration_summary = _default_migration_summary()
         self.migration_errors = []
         self.channels_with_errors = []
         self.channel_error_count = 0
@@ -155,7 +164,7 @@ class MigrationState:
     @property
     def total_messages_attempted(self) -> int:
         """Return total messages attempted (created + failed)."""
-        created: int = self.migration_summary.get("messages_created", 0)
+        created: int = self.migration_summary["messages_created"]
         failed = len(self.failed_messages)
         return created + failed
 
@@ -168,5 +177,5 @@ class MigrationState:
         total = self.total_messages_attempted
         if total == 0:
             return 100.0
-        created: int = self.migration_summary.get("messages_created", 0)
+        created: int = self.migration_summary["messages_created"]
         return (created / total) * 100.0

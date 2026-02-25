@@ -6,7 +6,7 @@ from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 from slack_migrator.core.config import MigrationConfig
-from slack_migrator.core.state import MigrationState
+from slack_migrator.core.state import MigrationState, _default_migration_summary
 from slack_migrator.services.discovery import log_space_mapping_conflicts
 from slack_migrator.services.message import (
     MessageResult,
@@ -24,13 +24,7 @@ def _make_migrator(dry_run=False, channel="general", ignore_bots=False):
     migrator.state = MigrationState()
     migrator.state.current_channel = channel
     migrator.config = MigrationConfig(ignore_bots=ignore_bots)
-    migrator.state.migration_summary = {
-        "messages_created": 0,
-        "reactions_created": 0,
-        "files_created": 0,
-        "channels_processed": [],
-        "spaces_created": 0,
-    }
+    migrator.state.migration_summary = _default_migration_summary()
     migrator.update_mode = False
 
     # Set up attachment processor

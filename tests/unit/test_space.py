@@ -7,7 +7,7 @@ from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 from slack_migrator.core.config import MigrationConfig
-from slack_migrator.core.state import MigrationState
+from slack_migrator.core.state import MigrationState, _default_migration_summary
 from slack_migrator.services.membership_manager import (
     DEFAULT_FALLBACK_JOIN_TIME,
     EARLIEST_MESSAGE_OFFSET_MINUTES,
@@ -40,7 +40,7 @@ def _make_migrator(
     migrator.users_without_email = []
     migrator.dry_run = dry_run
     migrator.workspace_admin = workspace_admin
-    migrator.state.migration_summary = {"spaces_created": 0}
+    migrator.state.migration_summary = _default_migration_summary()
     migrator.state.created_spaces = {}
     migrator.state.external_users = set()
     migrator.config = MigrationConfig()

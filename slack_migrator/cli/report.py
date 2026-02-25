@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from slack_migrator.types import FailedMessage
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
@@ -108,7 +109,7 @@ def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
     report_path = os.path.join(output_dir, "migration_report.yaml")
 
     # Group failed messages by channel
-    failed_by_channel: dict[str, list[dict[str, Any]]] = {}
+    failed_by_channel: dict[str, list[FailedMessage]] = {}
     if hasattr(migrator.state, "failed_messages") and migrator.state.failed_messages:
         for failed_msg in migrator.state.failed_messages:
             channel = failed_msg.get("channel", "unknown")

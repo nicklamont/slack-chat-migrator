@@ -17,6 +17,7 @@ from googleapiclient.errors import HttpError
 from slack_migrator.constants import BOT_SUBTYPES, SYSTEM_SUBTYPES
 from slack_migrator.services.discovery import should_process_message
 from slack_migrator.services.reaction_processor import process_reactions_batch
+from slack_migrator.types import FailedMessage
 from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.formatting import convert_formatting, parse_slack_blocks
 from slack_migrator.utils.logging import (
@@ -640,13 +641,13 @@ def send_message(  # noqa: C901
         )
 
         # Add to failed messages list for reporting
-        failed_msg = {
-            "channel": channel,
-            "ts": ts,
-            "error": f"{error_message} (Code: {error_code})",
-            "error_details": error_details,
-            "payload": message,
-        }
+        failed_msg = FailedMessage(
+            channel=channel or "unknown",
+            ts=ts,
+            error=f"{error_message} (Code: {error_code})",
+            error_details=error_details,
+            payload=message,
+        )
         migrator.state.failed_messages.append(failed_msg)
 
         return None

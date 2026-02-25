@@ -2,7 +2,27 @@
 
 import pytest
 
-from slack_migrator.core.state import MigrationState
+from slack_migrator.core.state import MigrationState, _default_migration_summary
+from slack_migrator.types import FailedMessage, MigrationSummary
+
+
+def _make_summary(**overrides: object) -> MigrationSummary:
+    """Return a MigrationSummary with defaults, applying any overrides."""
+    summary = _default_migration_summary()
+    summary.update(overrides)  # type: ignore[typeddict-item]
+    return summary
+
+
+def _make_failed(ts: str = "1", channel: str = "general") -> FailedMessage:
+    """Return a minimal FailedMessage for testing."""
+    return FailedMessage(
+        channel=channel,
+        ts=ts,
+        error="test error",
+        error_details="details",
+        payload={},
+    )
+
 
 # ---------------------------------------------------------------------------
 # __post_init__ validation
@@ -111,22 +131,16 @@ class TestResetForRun:
 
     def test_resets_migration_summary_to_initial_structure(self):
         state = MigrationState(
-            migration_summary={
-                "channels_processed": ["a", "b"],
-                "spaces_created": 5,
-                "messages_created": 100,
-                "reactions_created": 20,
-                "files_created": 10,
-            }
+            migration_summary=_make_summary(
+                channels_processed=["a", "b"],
+                spaces_created=5,
+                messages_created=100,
+                reactions_created=20,
+                files_created=10,
+            )
         )
         state.reset_for_run()
-        assert state.migration_summary == {
-            "channels_processed": [],
-            "spaces_created": 0,
-            "messages_created": 0,
-            "reactions_created": 0,
-            "files_created": 0,
-        }
+        assert state.migration_summary == _default_migration_summary()
 
     def test_resets_migration_errors(self):
         state = MigrationState(migration_errors=["error1"])
@@ -165,7 +179,7 @@ class TestResetForRun:
         state = MigrationState(
             channel_handlers={"h": "v"},
             thread_map={"t": "v"},
-            migration_summary={"channels_processed": ["x"], "spaces_created": 1},
+            migration_summary=_make_summary(channels_processed=["x"], spaces_created=1),
             migration_errors=["err"],
             channels_with_errors=["ch"],
             channel_error_count=2,
@@ -228,38 +242,41 @@ class TestSuccessRate:
 
     def test_all_messages_successful(self):
         state = MigrationState(
-            migration_summary={"messages_created": 10},
+            migration_summary=_make_summary(messages_created=10),
             failed_messages=[],
         )
         assert state.success_rate == 100.0
 
     def test_all_messages_failed(self):
         state = MigrationState(
-            migration_summary={"messages_created": 0},
-            failed_messages=[{"ts": "1"}, {"ts": "2"}],
+            migration_summary=_make_summary(messages_created=0),
+            failed_messages=[_make_failed("1"), _make_failed("2")],
         )
         assert state.success_rate == 0.0
 
     def test_partial_failure(self):
         state = MigrationState(
-            migration_summary={"messages_created": 7},
-            failed_messages=[{"ts": "1"}, {"ts": "2"}, {"ts": "3"}],
+            migration_summary=_make_summary(messages_created=7),
+            failed_messages=[
+                _make_failed("1"),
+                _make_failed("2"),
+                _make_failed("3"),
+            ],
         )
         # 7 / 10 = 70%
         assert state.success_rate == pytest.approx(70.0)
 
     def test_one_success_one_failure(self):
         state = MigrationState(
-            migration_summary={"messages_created": 1},
-            failed_messages=[{"ts": "x"}],
+            migration_summary=_make_summary(messages_created=1),
+            failed_messages=[_make_failed("x")],
         )
         assert state.success_rate == pytest.approx(50.0)
 
-    def test_missing_messages_created_key(self):
-        """If messages_created is not in the summary, it defaults to 0."""
+    def test_default_summary_zero_messages(self):
+        """Default MigrationSummary has messages_created=0."""
         state = MigrationState(
-            migration_summary={},
-            failed_messages=[{"ts": "1"}],
+            failed_messages=[_make_failed("1")],
         )
         assert state.success_rate == 0.0
 
@@ -277,22 +294,23 @@ class TestTotalMessagesAttempted:
         assert state.total_messages_attempted == 0
 
     def test_only_created(self):
-        state = MigrationState(migration_summary={"messages_created": 5})
+        state = MigrationState(migration_summary=_make_summary(messages_created=5))
         assert state.total_messages_attempted == 5
 
     def test_only_failed(self):
         state = MigrationState(
-            failed_messages=[{"ts": "1"}, {"ts": "2"}],
+            failed_messages=[_make_failed("1"), _make_failed("2")],
         )
         assert state.total_messages_attempted == 2
 
     def test_created_plus_failed(self):
         state = MigrationState(
-            migration_summary={"messages_created": 8},
-            failed_messages=[{"ts": "1"}, {"ts": "2"}],
+            migration_summary=_make_summary(messages_created=8),
+            failed_messages=[_make_failed("1"), _make_failed("2")],
         )
         assert state.total_messages_attempted == 10
 
-    def test_missing_messages_created_key(self):
-        state = MigrationState(migration_summary={})
+    def test_default_summary_zero_created(self):
+        """Default MigrationSummary has messages_created=0."""
+        state = MigrationState()
         assert state.total_messages_attempted == 0

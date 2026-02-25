@@ -11,6 +11,7 @@ from slack_migrator.core.migration_logging import (
     log_migration_success,
 )
 from slack_migrator.core.state import MigrationState
+from slack_migrator.types import MigrationSummary
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -34,13 +35,13 @@ def _make_mock_migrator(
     migrator.dry_run = dry_run
 
     state = MigrationState()
-    state.migration_summary = {
-        "channels_processed": channels_processed or [],
-        "spaces_created": spaces_created,
-        "messages_created": messages_created,
-        "reactions_created": reactions_created,
-        "files_created": files_created,
-    }
+    state.migration_summary = MigrationSummary(
+        channels_processed=channels_processed or [],
+        spaces_created=spaces_created,
+        messages_created=messages_created,
+        reactions_created=reactions_created,
+        files_created=files_created,
+    )
     state.channels_with_errors = channels_with_errors or []
     state.incomplete_import_spaces = incomplete_import_spaces or []
     migrator.state = state

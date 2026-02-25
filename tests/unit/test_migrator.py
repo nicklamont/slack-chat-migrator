@@ -15,10 +15,19 @@ from slack_migrator.core.migration_logging import (
     log_migration_success,
 )
 from slack_migrator.core.migrator import SlackToChatMigrator
+from slack_migrator.core.state import _default_migration_summary
 from slack_migrator.services.space_creator import (
     _list_all_spaces,
     cleanup_import_mode_spaces,
 )
+from slack_migrator.types import MigrationSummary
+
+
+def _make_summary(**overrides: object) -> MigrationSummary:
+    """Return a MigrationSummary with defaults, applying any overrides."""
+    summary = _default_migration_summary()
+    summary.update(overrides)  # type: ignore[typeddict-item]
+    return summary
 
 
 def _setup_export(tmp_path, users=None, channels=None):
@@ -211,9 +220,9 @@ class TestInitCaches:
         m = _make_migrator(tmp_path)
         assert m.state.current_space is None
 
-    def test_migration_summary_empty(self, tmp_path):
+    def test_migration_summary_default(self, tmp_path):
         m = _make_migrator(tmp_path)
-        assert m.state.migration_summary == {}
+        assert m.state.migration_summary == _default_migration_summary()
 
     def test_api_services_not_initialized(self, tmp_path):
         m = _make_migrator(tmp_path)
@@ -574,7 +583,7 @@ class TestDeleteSpaceIfErrors:
         m.config = MigrationConfig(cleanup_on_error=True)
         m.chat = MagicMock()
         m.state.created_spaces = {"general": "spaces/abc123"}
-        m.state.migration_summary = {"spaces_created": 1}
+        m.state.migration_summary = _make_summary(spaces_created=1)
         ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
         m.chat.spaces().delete.assert_called_once_with(name="spaces/abc123")
         assert "general" not in m.state.created_spaces
@@ -588,7 +597,7 @@ class TestDeleteSpaceIfErrors:
         m.chat = MagicMock()
         m.chat.spaces().delete().execute.side_effect = RefreshError("API error")
         m.state.created_spaces = {"general": "spaces/abc123"}
-        m.state.migration_summary = {"spaces_created": 1}
+        m.state.migration_summary = _make_summary(spaces_created=1)
         # Should not raise
         ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
 
@@ -600,7 +609,7 @@ class TestDeleteSpaceIfErrors:
         m.chat = MagicMock()
         m.chat.spaces().delete().execute.side_effect = TransportError("network down")
         m.state.created_spaces = {"general": "spaces/abc123"}
-        m.state.migration_summary = {"spaces_created": 1}
+        m.state.migration_summary = _make_summary(spaces_created=1)
         # Should not raise — TransportError is a recoverable network issue
         ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
 
@@ -616,7 +625,7 @@ class TestDeleteSpaceIfErrors:
             resp=resp, content=b"Server Error"
         )
         m.state.created_spaces = {"general": "spaces/abc123"}
-        m.state.migration_summary = {"spaces_created": 1}
+        m.state.migration_summary = _make_summary(spaces_created=1)
         # Should not raise — HttpError is caught and logged
         ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
         # Space should NOT be removed from created_spaces (delete failed)
@@ -628,7 +637,7 @@ class TestDeleteSpaceIfErrors:
         m.chat = MagicMock()
         m.chat.spaces().delete().execute.side_effect = RuntimeError("truly unexpected")
         m.state.created_spaces = {"general": "spaces/abc123"}
-        m.state.migration_summary = {"spaces_created": 1}
+        m.state.migration_summary = _make_summary(spaces_created=1)
         # Should raise — RuntimeError is not a known API/transport error
         with pytest.raises(RuntimeError):
             ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
@@ -909,13 +918,10 @@ class TestLogMigrationSuccess:
 
     def test_logs_success_dry_run(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=True)
-        m.state.migration_summary = {
-            "channels_processed": ["general"],
-            "spaces_created": 0,
-            "messages_created": 10,
-            "reactions_created": 0,
-            "files_created": 0,
-        }
+        m.state.migration_summary = _make_summary(
+            channels_processed=["general"],
+            messages_created=10,
+        )
         with caplog.at_level(logging.INFO, logger="slack_migrator"):
             log_migration_success(m, 60.0)
         messages = " ".join(r.message for r in caplog.records)
@@ -924,13 +930,13 @@ class TestLogMigrationSuccess:
 
     def test_logs_success_real_run(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.state.migration_summary = {
-            "channels_processed": ["general", "random"],
-            "spaces_created": 2,
-            "messages_created": 50,
-            "reactions_created": 10,
-            "files_created": 5,
-        }
+        m.state.migration_summary = _make_summary(
+            channels_processed=["general", "random"],
+            spaces_created=2,
+            messages_created=50,
+            reactions_created=10,
+            files_created=5,
+        )
         with caplog.at_level(logging.INFO, logger="slack_migrator"):
             log_migration_success(m, 120.0)
         messages = " ".join(r.message for r in caplog.records)
@@ -940,13 +946,11 @@ class TestLogMigrationSuccess:
 
     def test_logs_issues_when_present(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.state.migration_summary = {
-            "channels_processed": ["general"],
-            "spaces_created": 1,
-            "messages_created": 10,
-            "reactions_created": 0,
-            "files_created": 0,
-        }
+        m.state.migration_summary = _make_summary(
+            channels_processed=["general"],
+            spaces_created=1,
+            messages_created=10,
+        )
         m.state.channels_with_errors = ["general"]
         m.state.incomplete_import_spaces = [("spaces/abc", "general")]
         with caplog.at_level(logging.WARNING, logger="slack_migrator"):
@@ -957,13 +961,7 @@ class TestLogMigrationSuccess:
 
     def test_logs_no_work_done(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.state.migration_summary = {
-            "channels_processed": [],
-            "spaces_created": 0,
-            "messages_created": 0,
-            "reactions_created": 0,
-            "files_created": 0,
-        }
+        m.state.migration_summary = _default_migration_summary()
         with caplog.at_level(logging.WARNING, logger="slack_migrator"):
             log_migration_success(m, 5.0)
         messages = " ".join(r.message for r in caplog.records)
@@ -980,11 +978,11 @@ class TestLogMigrationFailure:
 
     def test_logs_generic_exception(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.state.migration_summary = {
-            "channels_processed": ["general"],
-            "spaces_created": 1,
-            "messages_created": 5,
-        }
+        m.state.migration_summary = _make_summary(
+            channels_processed=["general"],
+            spaces_created=1,
+            messages_created=5,
+        )
         exc = RuntimeError("something broke")
         with caplog.at_level(logging.ERROR, logger="slack_migrator"):
             log_migration_failure(m, exc, 30.0)
@@ -995,11 +993,11 @@ class TestLogMigrationFailure:
 
     def test_logs_keyboard_interrupt(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.state.migration_summary = {
-            "channels_processed": ["general"],
-            "spaces_created": 1,
-            "messages_created": 5,
-        }
+        m.state.migration_summary = _make_summary(
+            channels_processed=["general"],
+            spaces_created=1,
+            messages_created=5,
+        )
         exc = KeyboardInterrupt()
         with caplog.at_level(logging.WARNING, logger="slack_migrator"):
             log_migration_failure(m, exc, 10.0)
@@ -1009,11 +1007,7 @@ class TestLogMigrationFailure:
 
     def test_logs_dry_run_failure(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=True)
-        m.state.migration_summary = {
-            "channels_processed": [],
-            "spaces_created": 0,
-            "messages_created": 0,
-        }
+        m.state.migration_summary = _default_migration_summary()
         exc = ValueError("bad config")
         with caplog.at_level(logging.ERROR, logger="slack_migrator"):
             log_migration_failure(m, exc, 2.0)
@@ -1022,11 +1016,11 @@ class TestLogMigrationFailure:
 
     def test_logs_progress_before_failure(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
-        m.state.migration_summary = {
-            "channels_processed": ["general", "random"],
-            "spaces_created": 2,
-            "messages_created": 100,
-        }
+        m.state.migration_summary = _make_summary(
+            channels_processed=["general", "random"],
+            spaces_created=2,
+            messages_created=100,
+        )
         exc = Exception("api error")
         with caplog.at_level(logging.ERROR, logger="slack_migrator"):
             log_migration_failure(m, exc, 60.0)
