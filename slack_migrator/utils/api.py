@@ -14,6 +14,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from slack_migrator.constants import HTTP_RATE_LIMIT
 from slack_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_migrator")
@@ -155,7 +156,7 @@ class RetryWrapper:
                         )
 
                     # Don't retry client errors (4xx) except rate limits (429)
-                    if e.resp.status // 100 == 4 and e.resp.status != 429:
+                    if e.resp.status // 100 == 4 and e.resp.status != HTTP_RATE_LIMIT:
                         log_with_context(
                             logging.WARNING,
                             f"Client error ({e.resp.status}) not retried: {e}",

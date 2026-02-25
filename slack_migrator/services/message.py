@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
+from slack_migrator.constants import BOT_SUBTYPES, SYSTEM_SUBTYPES
 from slack_migrator.services.discovery import should_process_message
 from slack_migrator.services.reaction_processor import process_reactions_batch
 from slack_migrator.utils.api import slack_ts_to_rfc3339
@@ -65,7 +66,7 @@ def send_message(  # noqa: C901
     # Check if this message is from a bot and bots should be ignored
     if migrator.config.ignore_bots:
         # Check for bot messages by subtype (covers system bots like USLACKBOT that aren't in users.json)
-        if message.get("subtype") in ["bot_message", "app_message"]:
+        if message.get("subtype") in BOT_SUBTYPES:
             bot_name = message.get("username", user_id or "Unknown Bot")
             log_with_context(
                 logging.DEBUG,
@@ -153,7 +154,7 @@ def send_message(  # noqa: C901
         return None
 
     # Skip messages with no text content (like channel join/leave messages)
-    if message.get("subtype") in ["channel_join", "channel_leave"]:
+    if message.get("subtype") in SYSTEM_SUBTYPES:
         log_with_context(
             logging.DEBUG,
             f"Skipping {message.get('subtype')} message from {user_id}",
@@ -666,7 +667,7 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
     # Check if this message is from a bot and bots should be ignored
     if migrator.config.ignore_bots:
         # Check for bot messages by subtype (covers system bots like USLACKBOT that aren't in users.json)
-        if m.get("subtype") in ["bot_message", "app_message"]:
+        if m.get("subtype") in BOT_SUBTYPES:
             bot_name = m.get("username", user_id or "Unknown Bot")
             log_with_context(
                 logging.DEBUG,

@@ -19,17 +19,23 @@ from typing import TYPE_CHECKING, Any
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
+from slack_migrator.constants import (
+    CHANNEL_JOIN_SUBTYPE,
+    CHANNEL_LEAVE_SUBTYPE,
+    DEFAULT_FALLBACK_JOIN_TIME,
+    EARLIEST_MESSAGE_OFFSET_MINUTES,
+    FIRST_MESSAGE_OFFSET_MINUTES,
+    HISTORICAL_DELETE_TIME_OFFSET_SECONDS,
+    HTTP_BAD_REQUEST,
+    HTTP_CONFLICT,
+    HTTP_FORBIDDEN,
+    HTTP_NOT_FOUND,
+)
 from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
-
-# Named constants for magic numbers used in membership time calculations
-DEFAULT_FALLBACK_JOIN_TIME = "2020-01-01T00:00:00Z"
-HISTORICAL_DELETE_TIME_OFFSET_SECONDS = 5
-EARLIEST_MESSAGE_OFFSET_MINUTES = 2
-FIRST_MESSAGE_OFFSET_MINUTES = 1
 
 
 def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) -> None:  # noqa: C901
@@ -82,7 +88,7 @@ def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) 
                 # Check for join/leave messages
                 if (
                     m.get("type") == "message"
-                    and m.get("subtype") == "channel_join"
+                    and m.get("subtype") == CHANNEL_JOIN_SUBTYPE
                     and "user" in m
                 ):
                     user_id = m["user"]
@@ -107,7 +113,7 @@ def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) 
 
                 elif (
                     m.get("type") == "message"
-                    and m.get("subtype") == "channel_leave"
+                    and m.get("subtype") == CHANNEL_LEAVE_SUBTYPE
                     and "user" in m
                 ):
                     user_id = m["user"]
@@ -357,7 +363,7 @@ def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) 
             )
         except HttpError as e:
             # If we get a 409 conflict, the user might already be in the space
-            if e.resp.status == 409:
+            if e.resp.status == HTTP_CONFLICT:
                 log_with_context(
                     logging.WARNING,
                     f"User {internal_email} might already be in space {space}: {e}",
@@ -599,7 +605,7 @@ def add_regular_members(  # noqa: C901
             )
         except HttpError as e:
             # If we get a 409 conflict, the user might already be in the space
-            if e.resp.status == 409:
+            if e.resp.status == HTTP_CONFLICT:
                 log_with_context(
                     logging.WARNING,
                     f"User {internal_email} might already be in space {space}: {e}",
@@ -607,7 +613,7 @@ def add_regular_members(  # noqa: C901
                     channel=channel,
                 )
                 added_count += 1
-            elif e.resp.status == 400:
+            elif e.resp.status == HTTP_BAD_REQUEST:
                 # Bad request means there's an issue with the format according to API requirements
                 log_with_context(
                     logging.ERROR,
@@ -628,7 +634,7 @@ def add_regular_members(  # noqa: C901
                 failed_count += 1
 
                 # If we get a 403 or 404, log additional details to help troubleshoot
-                if e.resp.status in [403, 404]:
+                if e.resp.status in (HTTP_FORBIDDEN, HTTP_NOT_FOUND):
                     log_with_context(
                         logging.ERROR,
                         f"Permission denied or resource not found when adding {internal_email}. "

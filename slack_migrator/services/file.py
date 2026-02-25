@@ -13,6 +13,11 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import requests
 
+from slack_migrator.constants import (
+    HTTP_FORBIDDEN,
+    HTTP_OK,
+    HTTP_UNAUTHORIZED,
+)
 from slack_migrator.services.chat import ChatFileUploader
 from slack_migrator.services.drive import (
     DriveFileUploader,
@@ -1132,7 +1137,7 @@ class FileHandler:
                 url_private, headers=headers, stream=True, timeout=60
             )
 
-            if response.status_code != 200:
+            if response.status_code != HTTP_OK:
                 log_with_context(
                     logging.WARNING,
                     f"Failed to download file {name}: HTTP {response.status_code}",
@@ -1169,7 +1174,7 @@ class FileHandler:
             if (
                 hasattr(e, "response")
                 and e.response
-                and e.response.status_code in (401, 403)
+                and e.response.status_code in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN)
             ):
                 log_with_context(
                     logging.WARNING,

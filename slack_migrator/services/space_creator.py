@@ -14,17 +14,20 @@ from typing import TYPE_CHECKING, Any
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 
+from slack_migrator.constants import (
+    HTTP_FORBIDDEN,
+    IMPORT_MODE_DAYS_LIMIT,
+    PERMISSION_DENIED_ERROR,
+    SPACE_NAME_PREFIX,
+    SPACE_THREADING_STATE,
+    SPACE_TYPE,
+    SPACES_PAGE_SIZE,
+)
 from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
-
-# Named constants
-IMPORT_MODE_DAYS_LIMIT = 90
-SPACE_TYPE = "SPACE"
-SPACE_THREADING_STATE = "THREADED_MESSAGES"
-SPACES_PAGE_SIZE = 100
 
 
 def channel_has_external_users(migrator: SlackToChatMigrator, channel: str) -> bool:
@@ -112,7 +115,7 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
     """
     # Get channel metadata
     meta = migrator.channels_meta.get(channel, {})
-    display_name = f"Slack #{channel}"
+    display_name = f"{SPACE_NAME_PREFIX}{channel}"
 
     # Check if this is the general/default channel
     is_general = meta.get("is_general", False)
@@ -234,7 +237,7 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
                             channel=channel,
                         )
         except HttpError as e:
-            if e.resp.status == 403 and "PERMISSION_DENIED" in str(e):
+            if e.resp.status == HTTP_FORBIDDEN and PERMISSION_DENIED_ERROR in str(e):
                 # Log the error but don't raise an exception
                 log_with_context(
                     logging.WARNING, f"Error setting up channel {channel}: {e}"

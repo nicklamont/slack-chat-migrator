@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
-from slack_migrator.services.space_creator import SPACES_PAGE_SIZE
+from slack_migrator.constants import SPACE_NAME_PREFIX, SPACES_PAGE_SIZE
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
@@ -54,7 +54,7 @@ def discover_existing_spaces(  # noqa: C901
         migrator.state.channel_id_to_space_id = {}
 
     spaces_found = 0
-    prefix = "Slack #"  # The prefix we use for migrated spaces
+    prefix = SPACE_NAME_PREFIX
 
     try:
         # Paginate through all spaces accessible to the service account

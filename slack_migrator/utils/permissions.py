@@ -17,9 +17,9 @@ from typing import Any
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
+from slack_migrator.constants import HTTP_CONFLICT, SPACE_TYPE
 from slack_migrator.core.config import load_config
 from slack_migrator.exceptions import PermissionCheckError
-from slack_migrator.services.space_creator import SPACE_TYPE
 from slack_migrator.utils.api import REQUIRED_SCOPES, get_gcp_service
 from slack_migrator.utils.logging import log_with_context
 
@@ -240,7 +240,7 @@ class PermissionValidator:
                 logging.INFO, "    ✓ Member creation: PASSED (historical membership)"
             )
         except HttpError as e:
-            if e.resp.status == 409:  # Already a member
+            if e.resp.status == HTTP_CONFLICT:  # Already a member
                 log_with_context(
                     logging.INFO, "    ✓ Member creation: PASSED (already member)"
                 )

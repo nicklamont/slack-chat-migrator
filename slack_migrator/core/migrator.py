@@ -13,10 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from slack_migrator.cli.report import (
-    generate_report,
-    print_dry_run_summary,
-)
+from slack_migrator.constants import SPACE_NAME_PREFIX
 from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.cleanup import cleanup_channel_handlers
 from slack_migrator.core.config import load_config
@@ -258,7 +255,7 @@ class SlackToChatMigrator:
 
     def _get_space_name(self, channel: str) -> str:
         """Get a consistent display name for a Google Chat space based on channel name."""
-        return f"Slack #{channel}"
+        return f"{SPACE_NAME_PREFIX}{channel}"
 
     def _get_all_channel_names(self) -> list[str]:
         """Get a list of all channel names from the export directory."""
@@ -387,13 +384,6 @@ class SlackToChatMigrator:
             if self.dry_run and hasattr(self, "unmapped_user_tracker"):
                 log_unmapped_user_summary_for_dry_run(self)
 
-            # Generate report
-            report_file = generate_report(self)
-
-            # Print summary
-            if self.dry_run:
-                print_dry_run_summary(self, report_file)
-
             # Calculate migration duration
             migration_duration = time.time() - migration_start_time
 
@@ -411,32 +401,6 @@ class SlackToChatMigrator:
 
             # Log final failure status
             log_migration_failure(self, e, migration_duration)
-
-            # Generate report even on failure to show progress made
-            try:
-                report_file = generate_report(self)
-
-                # Log the report location for user reference
-                if isinstance(e, KeyboardInterrupt):
-                    log_with_context(
-                        logging.INFO,
-                        f"📋 Partial migration report available at: {report_file}",
-                    )
-                    log_with_context(
-                        logging.INFO,
-                        "📋 This report shows progress made before interruption.",
-                    )
-                else:
-                    log_with_context(
-                        logging.INFO,
-                        f"📋 Migration report (with partial results) available at: {report_file}",
-                    )
-            except Exception as report_error:
-                # Don't let report generation failure mask the original failure
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to generate migration report after failure: {report_error}",
-                )
 
             # Re-raise the exception to maintain existing error handling behavior
             raise
