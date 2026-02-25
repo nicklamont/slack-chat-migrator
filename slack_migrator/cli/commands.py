@@ -7,7 +7,9 @@ handling argument parsing, configuration loading, and executing the
 migration process with appropriate error handling.
 """
 
+import datetime
 import logging
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -853,9 +855,6 @@ def create_migration_output_directory() -> str:
     Returns:
         The path to the newly created output directory.
     """
-    import datetime
-    import os
-
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = f"migration_logs/run_{timestamp}"
 

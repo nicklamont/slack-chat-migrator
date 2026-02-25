@@ -371,8 +371,6 @@ class RetryWrapper:
             if request_details.get("body"):
                 try:
                     # Try to parse body as JSON if it's a string
-                    import json
-
                     if isinstance(request_details["body"], str):
                         request_data = json.loads(request_details["body"])
                     elif isinstance(request_details["body"], dict):

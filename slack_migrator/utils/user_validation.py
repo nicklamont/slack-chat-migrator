@@ -2,8 +2,10 @@
 Simple unmapped user tracking integrated into existing user mapping logic.
 """
 
+import json
 import logging
 from collections import defaultdict
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from slack_migrator.utils.logging import log_with_context
@@ -240,9 +242,6 @@ def analyze_unmapped_users(
     Returns:
         Dict mapping user_id to analysis info (type, name, details, etc.)
     """
-    import json
-    from pathlib import Path
-
     analysis: dict[str, dict[str, Any]] = {}
 
     try:
@@ -368,9 +367,6 @@ def scan_channel_members_for_unmapped_users(migrator: "SlackToChatMigrator") -> 
     Args:
         migrator: The SlackToChatMigrator instance
     """
-    import json
-    from pathlib import Path
-
     if not hasattr(migrator, "unmapped_user_tracker"):
         initialize_unmapped_user_tracking(migrator)
 

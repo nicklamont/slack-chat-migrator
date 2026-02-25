@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 # Module-level flag to track if API debug logging is enabled
@@ -234,8 +235,6 @@ class EnhancedFormatter(logging.Formatter):
                 msg = record.getMessage()
                 # Redact authorization tokens in request logs
                 if "authorization: Bearer" in msg:
-                    import re
-
                     msg = re.sub(
                         r"authorization: Bearer [^\r\n]+",
                         "authorization: Bearer [REDACTED]",
@@ -314,7 +313,6 @@ def _enable_http_client_debug() -> None:
     This is only used when debug_api=True.
     """
     import http.client
-    import re
 
     _orig_putheader = http.client.HTTPConnection.putheader
 

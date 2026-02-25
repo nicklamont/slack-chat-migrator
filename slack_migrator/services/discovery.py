@@ -4,6 +4,7 @@ Functions for discovering existing Google Chat resources for migration resumptio
 
 from __future__ import annotations
 
+import datetime
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -257,8 +258,6 @@ def get_last_message_timestamp(
 
             if create_time:
                 # Convert RFC3339 time to Unix timestamp
-                import datetime
-
                 if "Z" in create_time:
                     dt = datetime.datetime.fromisoformat(
                         create_time.replace("Z", "+00:00")
