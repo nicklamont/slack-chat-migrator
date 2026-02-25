@@ -8,6 +8,7 @@ import datetime
 import hashlib
 import logging
 import time
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
@@ -358,9 +359,6 @@ def send_message(  # noqa: C901
 
         # Generate a message ID that's unique for each attempt
         # This avoids conflicts when retrying
-        import time
-        import uuid
-
         # Create a truly unique ID by combining:
         # 1. A prefix to identify the source
         # 2. The timestamp from Slack (cleaned)

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from googleapiclient.errors import HttpError
 
 import slack_migrator
+from slack_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
 from slack_migrator.core.migrator import SlackToChatMigrator
 from slack_migrator.exceptions import (
     ConfigError,
@@ -686,20 +687,19 @@ class MigrationOrchestrator:
                 log_with_context(logging.INFO, "Performing cleanup operations...")
 
                 # Always clean up channel handlers, regardless of dry run mode
-                if hasattr(self.migrator, "_cleanup_channel_handlers"):
-                    try:
-                        self.migrator._cleanup_channel_handlers()
-                    except Exception as handler_cleanup_e:
-                        log_with_context(
-                            logging.ERROR,
-                            f"Failed to clean up channel handlers: {handler_cleanup_e}",
-                            exc_info=True,
-                        )
+                try:
+                    cleanup_channel_handlers(self.migrator)
+                except Exception as handler_cleanup_e:
+                    log_with_context(
+                        logging.ERROR,
+                        f"Failed to clean up channel handlers: {handler_cleanup_e}",
+                        exc_info=True,
+                    )
 
                 # Only perform space cleanup if not in dry run mode
                 if not self.args.dry_run:
                     try:
-                        self.migrator.cleanup()
+                        run_cleanup(self.migrator)
                     except Exception as space_cleanup_e:
                         log_with_context(
                             logging.ERROR,

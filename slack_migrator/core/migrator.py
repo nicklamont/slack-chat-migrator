@@ -2,27 +2,43 @@
 Main migrator class for the Slack to Google Chat migration tool
 """
 
+import datetime
 import json
 import logging
+import os
 import signal
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
-
-if TYPE_CHECKING:
-    from slack_migrator.core.channel_processor import ChannelProcessor
-
+from typing import Any, Optional
 
 from slack_migrator.cli.report import (
     generate_report,
     print_dry_run_summary,
 )
+from slack_migrator.core.channel_processor import ChannelProcessor
+from slack_migrator.core.cleanup import cleanup_channel_handlers
+from slack_migrator.core.config import load_config
+from slack_migrator.core.migration_logging import (
+    log_migration_failure,
+    log_migration_success,
+)
 from slack_migrator.core.state import MigrationState
+from slack_migrator.services.discovery import (
+    load_existing_space_mappings,
+    load_space_mappings,
+    log_space_mapping_conflicts,
+)
 from slack_migrator.services.file import FileHandler
+from slack_migrator.services.message_attachments import MessageAttachmentProcessor
 from slack_migrator.services.user import generate_user_map
 from slack_migrator.services.user_resolver import UserResolver
 from slack_migrator.utils.api import get_gcp_service
 from slack_migrator.utils.logging import log_with_context
+from slack_migrator.utils.user_validation import (
+    initialize_unmapped_user_tracking,
+    log_unmapped_user_summary_for_dry_run,
+    scan_channel_members_for_unmapped_users,
+)
 
 
 class SlackToChatMigrator:
@@ -85,8 +101,6 @@ class SlackToChatMigrator:
         self._validate_export_format()
 
         # Load config using the shared load_config function
-        from slack_migrator.core.config import load_config
-
         self.config = load_config(self.config_path)
 
         # Generate user mapping from users.json
@@ -95,11 +109,6 @@ class SlackToChatMigrator:
         )
 
         # Initialize simple unmapped user tracking
-        from slack_migrator.utils.user_validation import (
-            initialize_unmapped_user_tracking,
-            scan_channel_members_for_unmapped_users,
-        )
-
         self.unmapped_user_tracker = initialize_unmapped_user_tracking(self)
 
         # Scan channel members to ensure all channel members have user mappings
@@ -111,7 +120,7 @@ class SlackToChatMigrator:
         self.drive: Optional[Any] = None
         self._api_services_initialized = False
 
-        # User resolver is needed before API services (e.g. for _is_external_user)
+        # User resolver is needed before API services (e.g. for is_external_user)
         self.user_resolver = UserResolver.from_migrator(self)
 
         # Load channel metadata from channels.json
@@ -171,10 +180,6 @@ class SlackToChatMigrator:
         # FileHandler now handles its own drive folder initialization automatically
 
         # Initialize message attachment processor
-        from slack_migrator.services.message_attachments import (
-            MessageAttachmentProcessor,
-        )
-
         self.attachment_processor = MessageAttachmentProcessor(
             self.file_handler, dry_run=self.dry_run
         )
@@ -192,8 +197,6 @@ class SlackToChatMigrator:
             )
 
         # Load existing space mappings for update mode or file attachments
-        from slack_migrator.services.discovery import load_existing_space_mappings
-
         load_existing_space_mappings(self)
 
     def _validate_export_format(self):
@@ -239,69 +242,17 @@ class SlackToChatMigrator:
                 - name_to_data: Dict mapping channel names to their metadata
                 - id_to_name: Dict mapping channel IDs to channel names
         """
-        f = self.export_root / "channels.json"
+        channels_file = self.export_root / "channels.json"
         name_to_data = {}
         id_to_name = {}
 
-        if f.exists():
-            with open(f) as f_in:
+        if channels_file.exists():
+            with open(channels_file) as f_in:
                 channels = json.load(f_in)
                 name_to_data = {ch["name"]: ch for ch in channels}
                 id_to_name = {ch["id"]: ch["name"] for ch in channels}
 
         return name_to_data, id_to_name
-
-    def _get_delegate(self, email: str):
-        """Get a Google Chat API service with user impersonation."""
-        return self.user_resolver.get_delegate(email)
-
-    def _discover_channel_resources(self, channel: str):
-        """Find the last message timestamp in a space to determine where to resume."""
-        self._get_channel_processor()._discover_channel_resources(channel)
-
-    def _should_abort_import(
-        self, channel: str, processed_count: int, failed_count: int
-    ) -> bool:
-        """Determine if we should abort the import after errors in a channel."""
-        return self._get_channel_processor()._should_abort_import(
-            channel, processed_count, failed_count
-        )
-
-    def _delete_space_if_errors(self, space_name, channel):
-        """Delete a space if it had errors and cleanup is enabled."""
-        self._get_channel_processor()._delete_space_if_errors(space_name, channel)
-
-    def _get_channel_processor(self) -> "ChannelProcessor":
-        """Get or create the ChannelProcessor instance."""
-        if not hasattr(self, "channel_processor"):
-            from slack_migrator.core.channel_processor import ChannelProcessor
-
-            self.channel_processor = ChannelProcessor(self)
-        return self.channel_processor
-
-    def _get_internal_email(
-        self, user_id: str, user_email: Optional[str] = None
-    ) -> Optional[str]:
-        """Get internal email for a user, handling external users and tracking unmapped users."""
-        return self.user_resolver.get_internal_email(user_id, user_email)
-
-    def _get_user_data(self, user_id: str) -> Optional[dict]:
-        """Get user data from the users.json export file."""
-        return self.user_resolver.get_user_data(user_id)
-
-    def _handle_unmapped_user_message(
-        self, user_id: str, original_text: str
-    ) -> tuple[str, str]:
-        """Handle messages from unmapped users by using workspace admin with attribution."""
-        return self.user_resolver.handle_unmapped_user_message(user_id, original_text)
-
-    def _handle_unmapped_user_reaction(
-        self, user_id: str, reaction: str, message_ts: str
-    ) -> bool:
-        """Handle reactions from unmapped users by logging and skipping."""
-        return self.user_resolver.handle_unmapped_user_reaction(
-            user_id, reaction, message_ts
-        )
 
     def _get_space_name(self, channel: str) -> str:
         """Get a consistent display name for a Google Chat space based on channel name."""
@@ -311,10 +262,6 @@ class SlackToChatMigrator:
         """Get a list of all channel names from the export directory."""
         return [d.name for d in self.export_root.iterdir() if d.is_dir()]
 
-    def _is_external_user(self, email: Optional[str]) -> bool:
-        """Check if a user is external based on their email domain."""
-        return self.user_resolver.is_external_user(email)
-
     def migrate(self):
         """Main migration function that orchestrates the entire process.
 
@@ -323,8 +270,6 @@ class SlackToChatMigrator:
         """
         migration_start_time = time.time()
         log_with_context(logging.INFO, "Starting migration process")
-
-        # Import report generation function for use in both success and failure paths
 
         # Set up signal handler to ensure we log migration status on interrupt
         def signal_handler(signum, frame):
@@ -336,9 +281,11 @@ class SlackToChatMigrator:
             """
             migration_duration = time.time() - migration_start_time
             log_with_context(logging.WARNING, "")
-            log_with_context(logging.WARNING, "🚨 MIGRATION INTERRUPTED BY SIGNAL")
-            self._log_migration_failure(
-                KeyboardInterrupt("Migration interrupted by signal"), migration_duration
+            log_with_context(logging.WARNING, "MIGRATION INTERRUPTED BY SIGNAL")
+            log_migration_failure(
+                self,
+                KeyboardInterrupt("Migration interrupted by signal"),
+                migration_duration,
             )
             # Exit with standard interrupted code
             exit(130)
@@ -353,8 +300,6 @@ class SlackToChatMigrator:
             # Output directory should already be set up by CLI, but provide a sensible default
             if not self.state.output_dir:
                 # Create default output directory with timestamp
-                import datetime
-
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 self.state.output_dir = f"migration_logs/run_{timestamp}"
                 log_with_context(
@@ -362,8 +307,6 @@ class SlackToChatMigrator:
                     f"Using default output directory: {self.state.output_dir}",
                 )
                 # Create the directory
-                import os
-
                 os.makedirs(self.state.output_dir, exist_ok=True)
 
             # Reset per-run state
@@ -396,8 +339,6 @@ class SlackToChatMigrator:
 
             # In update mode, discover existing spaces via API
             if self.update_mode:
-                from slack_migrator.services.discovery import load_space_mappings
-
                 discovered_spaces = load_space_mappings(self)
                 if discovered_spaces:
                     log_with_context(
@@ -423,8 +364,6 @@ class SlackToChatMigrator:
             self.state.first_channel_processed = False
 
             # Process each channel
-            from slack_migrator.core.channel_processor import ChannelProcessor
-
             self.channel_processor = ChannelProcessor(self)
             for ch in all_channel_dirs:
                 should_abort = self.channel_processor.process_channel(ch)
@@ -432,8 +371,6 @@ class SlackToChatMigrator:
                     break
 
             # Log any space mapping conflicts that should be added to config
-            from slack_migrator.services.discovery import log_space_mapping_conflicts
-
             log_space_mapping_conflicts(self)
 
             # Generate final unmapped user report
@@ -460,10 +397,6 @@ class SlackToChatMigrator:
 
             # If this was a dry run, provide specific unmapped user guidance
             if self.dry_run and hasattr(self, "unmapped_user_tracker"):
-                from slack_migrator.utils.user_validation import (
-                    log_unmapped_user_summary_for_dry_run,
-                )
-
                 log_unmapped_user_summary_for_dry_run(self)
 
             # Generate report
@@ -477,10 +410,10 @@ class SlackToChatMigrator:
             migration_duration = time.time() - migration_start_time
 
             # Log final success status
-            self._log_migration_success(migration_duration)
+            log_migration_success(self, migration_duration)
 
             # Clean up channel handlers in success case (finally block will also run)
-            self._cleanup_channel_handlers()
+            cleanup_channel_handlers(self)
 
             return True
 
@@ -489,7 +422,7 @@ class SlackToChatMigrator:
             migration_duration = time.time() - migration_start_time
 
             # Log final failure status
-            self._log_migration_failure(e, migration_duration)
+            log_migration_failure(self, e, migration_duration)
 
             # Generate report even on failure to show progress made
             try:
@@ -523,37 +456,4 @@ class SlackToChatMigrator:
             # Restore the original signal handler
             signal.signal(signal.SIGINT, old_signal_handler)
             # Always ensure proper cleanup of channel log handlers
-            self._cleanup_channel_handlers()
-
-    def _cleanup_channel_handlers(self):
-        """Clean up and close all channel-specific log handlers."""
-        from slack_migrator.core.cleanup import cleanup_channel_handlers
-
-        cleanup_channel_handlers(self)
-
-    def cleanup(self):
-        """Clean up resources and complete import mode on spaces."""
-        from slack_migrator.core.cleanup import run_cleanup
-
-        run_cleanup(self)
-
-    def _log_migration_success(self, duration: float) -> None:
-        """Log final migration success status with comprehensive summary.
-
-        Args:
-            duration: Migration duration in seconds.
-        """
-        from slack_migrator.core.migration_logging import log_migration_success
-
-        log_migration_success(self, duration)
-
-    def _log_migration_failure(self, exception: BaseException, duration: float) -> None:
-        """Log final migration failure status with error details.
-
-        Args:
-            exception: The exception that caused the failure.
-            duration: Migration duration in seconds before failure.
-        """
-        from slack_migrator.core.migration_logging import log_migration_failure
-
-        log_migration_failure(self, exception, duration)
+            cleanup_channel_handlers(self)
