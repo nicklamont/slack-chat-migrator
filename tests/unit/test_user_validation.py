@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.utils.user_validation import (
     UnmappedUserTracker,
+    UserType,
     analyze_unmapped_users,
     categorize_user_analysis,
     initialize_unmapped_user_tracking,
@@ -225,49 +226,49 @@ class TestCategorizeUserAnalysis:
         assert result["Other"] == 0
 
     def test_bot_category(self):
-        analysis = {"U001": {"type": "bot"}}
+        analysis = {"U001": {"type": UserType.BOT}}
         result = categorize_user_analysis(analysis)
         assert result["Bots and workflow automations"] == 1
 
     def test_workflow_bot_category(self):
-        analysis = {"U001": {"type": "workflow_bot"}}
+        analysis = {"U001": {"type": UserType.WORKFLOW_BOT}}
         result = categorize_user_analysis(analysis)
         assert result["Bots and workflow automations"] == 1
 
     def test_deleted_user_category(self):
-        analysis = {"U001": {"type": "deleted_user"}}
+        analysis = {"U001": {"type": UserType.DELETED_USER}}
         result = categorize_user_analysis(analysis)
         assert result["Deleted users"] == 1
 
     def test_no_email_category(self):
-        analysis = {"U001": {"type": "no_email"}}
+        analysis = {"U001": {"type": UserType.NO_EMAIL}}
         result = categorize_user_analysis(analysis)
         assert result["Users without email addresses"] == 1
 
     def test_restricted_user_category(self):
-        analysis = {"U001": {"type": "restricted_user"}}
+        analysis = {"U001": {"type": UserType.RESTRICTED_USER}}
         result = categorize_user_analysis(analysis)
         assert result["Restricted/guest users"] == 1
 
     def test_missing_from_export_category(self):
-        analysis = {"U001": {"type": "missing_from_export"}}
+        analysis = {"U001": {"type": UserType.MISSING_FROM_EXPORT}}
         result = categorize_user_analysis(analysis)
         assert result["Missing from export"] == 1
 
     def test_unknown_type_falls_to_other(self):
-        analysis = {"U001": {"type": "regular_user"}}
+        analysis = {"U001": {"type": UserType.REGULAR_USER}}
         result = categorize_user_analysis(analysis)
         assert result["Other"] == 1
 
     def test_mixed_categories(self):
         analysis = {
-            "U001": {"type": "bot"},
-            "U002": {"type": "deleted_user"},
-            "U003": {"type": "no_email"},
-            "U004": {"type": "workflow_bot"},
-            "U005": {"type": "restricted_user"},
-            "U006": {"type": "missing_from_export"},
-            "U007": {"type": "regular_user"},
+            "U001": {"type": UserType.BOT},
+            "U002": {"type": UserType.DELETED_USER},
+            "U003": {"type": UserType.NO_EMAIL},
+            "U004": {"type": UserType.WORKFLOW_BOT},
+            "U005": {"type": UserType.RESTRICTED_USER},
+            "U006": {"type": UserType.MISSING_FROM_EXPORT},
+            "U007": {"type": UserType.REGULAR_USER},
         }
         result = categorize_user_analysis(analysis)
         assert result["Bots and workflow automations"] == 2
@@ -312,7 +313,7 @@ class TestAnalyzeUnmappedUsers:
 
         result = analyze_unmapped_users(migrator, ["U001"])
 
-        assert result["U001"]["type"] == "regular_user"
+        assert result["U001"]["type"] == UserType.REGULAR_USER
         assert result["U001"]["name"] == "Alice A."
 
     def test_bot_user(self, tmp_path):
@@ -330,7 +331,7 @@ class TestAnalyzeUnmappedUsers:
 
         result = analyze_unmapped_users(migrator, ["B001"])
 
-        assert result["B001"]["type"] == "bot"
+        assert result["B001"]["type"] == UserType.BOT
         assert "Bot/app integration" in result["B001"]["details"]
 
     def test_workflow_bot(self, tmp_path):
@@ -349,7 +350,7 @@ class TestAnalyzeUnmappedUsers:
 
         result = analyze_unmapped_users(migrator, ["W001"])
 
-        assert result["W001"]["type"] == "workflow_bot"
+        assert result["W001"]["type"] == UserType.WORKFLOW_BOT
         assert "Slack workflow automation" in result["W001"]["details"]
 
     def test_deleted_user(self, tmp_path):
@@ -367,7 +368,7 @@ class TestAnalyzeUnmappedUsers:
 
         result = analyze_unmapped_users(migrator, ["U002"])
 
-        assert result["U002"]["type"] == "deleted_user"
+        assert result["U002"]["type"] == UserType.DELETED_USER
 
     def test_restricted_user(self, tmp_path):
         users = [
@@ -384,7 +385,7 @@ class TestAnalyzeUnmappedUsers:
 
         result = analyze_unmapped_users(migrator, ["U003"])
 
-        assert result["U003"]["type"] == "restricted_user"
+        assert result["U003"]["type"] == UserType.RESTRICTED_USER
 
     def test_user_without_email(self, tmp_path):
         users = [
@@ -395,7 +396,7 @@ class TestAnalyzeUnmappedUsers:
 
         result = analyze_unmapped_users(migrator, ["U004"])
 
-        assert result["U004"]["type"] == "no_email"
+        assert result["U004"]["type"] == UserType.NO_EMAIL
 
     def test_user_missing_from_export(self, tmp_path):
         users = [
@@ -410,7 +411,7 @@ class TestAnalyzeUnmappedUsers:
 
         result = analyze_unmapped_users(migrator, ["U999"])
 
-        assert result["U999"]["type"] == "missing_from_export"
+        assert result["U999"]["type"] == UserType.MISSING_FROM_EXPORT
         assert result["U999"]["name"] == "Unknown"
 
     def test_multiple_unmapped_users(self, tmp_path):
@@ -442,9 +443,9 @@ class TestAnalyzeUnmappedUsers:
         result = analyze_unmapped_users(migrator, ["U001", "B001", "U002"])
 
         assert len(result) == 3
-        assert result["U001"]["type"] == "regular_user"
-        assert result["B001"]["type"] == "bot"
-        assert result["U002"]["type"] == "deleted_user"
+        assert result["U001"]["type"] == UserType.REGULAR_USER
+        assert result["B001"]["type"] == UserType.BOT
+        assert result["U002"]["type"] == UserType.DELETED_USER
 
     def test_fallback_name_uses_name_field(self, tmp_path):
         users = [{"id": "U001", "name": "fallback_name", "profile": {}}]
@@ -524,7 +525,7 @@ class TestLogUnmappedUserSummaryForDryRun:
         migrator.unmapped_user_tracker.add_unmapped_user("U001", "mention")
 
         mock_analyze.return_value = {
-            "U001": {"type": "regular_user", "name": "Alice"},
+            "U001": {"type": UserType.REGULAR_USER, "name": "Alice"},
         }
 
         log_unmapped_user_summary_for_dry_run(migrator)
@@ -542,7 +543,7 @@ class TestLogUnmappedUserSummaryForDryRun:
         migrator.unmapped_user_tracker.add_unmapped_user("B001")
 
         mock_analyze.return_value = {
-            "B001": {"type": "bot", "name": "TestBot"},
+            "B001": {"type": UserType.BOT, "name": "TestBot"},
         }
 
         log_unmapped_user_summary_for_dry_run(migrator)
@@ -558,7 +559,7 @@ class TestLogUnmappedUserSummaryForDryRun:
         migrator.unmapped_user_tracker.add_unmapped_user("U001")
 
         mock_analyze.return_value = {
-            "U001": {"type": "deleted_user", "name": "GoneUser"},
+            "U001": {"type": UserType.DELETED_USER, "name": "GoneUser"},
         }
 
         log_unmapped_user_summary_for_dry_run(migrator)
@@ -573,7 +574,7 @@ class TestLogUnmappedUserSummaryForDryRun:
         migrator.unmapped_user_tracker.add_unmapped_user("U001")
 
         mock_analyze.return_value = {
-            "U001": {"type": "regular_user", "name": "Alice"},
+            "U001": {"type": UserType.REGULAR_USER, "name": "Alice"},
         }
 
         log_unmapped_user_summary_for_dry_run(migrator)
@@ -592,7 +593,7 @@ class TestLogUnmappedUserSummaryForDryRun:
         )
 
         mock_analyze.return_value = {
-            "U001": {"type": "regular_user", "name": "Alice"},
+            "U001": {"type": UserType.REGULAR_USER, "name": "Alice"},
         }
 
         log_unmapped_user_summary_for_dry_run(migrator)
