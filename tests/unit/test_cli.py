@@ -89,7 +89,9 @@ class TestCheckPermissionsCommand:
         assert result.exit_code != 0
 
     @patch("slack_migrator.cli.commands.check_permissions_standalone")
-    def test_invokes_standalone_function(self, mock_check):
+    @patch("slack_migrator.cli.commands.load_config")
+    def test_invokes_standalone_function(self, mock_load_config, mock_check):
+        mock_load_config.return_value = MigrationConfig()
         runner = CliRunner()
         result = runner.invoke(
             cli,
@@ -105,7 +107,8 @@ class TestCheckPermissionsCommand:
         mock_check.assert_called_once_with(
             creds_path="fake.json",
             workspace_admin="a@b.com",
-            config_path="config.yaml",
+            max_retries=3,
+            retry_delay=2,
         )
 
 
