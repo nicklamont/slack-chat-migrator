@@ -1,5 +1,6 @@
 """Unit tests for the logging module."""
 
+import http.client
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import pytest
 import slack_migrator.utils.logging as log_module
 from slack_migrator.utils.logging import (
     EnhancedFormatter,
+    ImmediateFlushHandler,
     JsonFormatter,
     _extract_api_operation,
     ensure_channel_log_created,
@@ -23,6 +25,9 @@ from slack_migrator.utils.logging import (
     setup_logger,
     setup_main_log_file,
 )
+
+# Capture the stdlib putheader before any test has a chance to patch it.
+_STDLIB_PUTHEADER = http.client.HTTPConnection.putheader
 
 
 @pytest.fixture(autouse=True)
@@ -267,7 +272,7 @@ class TestSetupLogger:
     def test_output_dir_creates_file_handler(self, tmp_path):
         result = setup_logger(output_dir=str(tmp_path))
         file_handlers = [
-            h for h in result.handlers if isinstance(h, logging.FileHandler)
+            h for h in result.handlers if isinstance(h, ImmediateFlushHandler)
         ]
         assert len(file_handlers) == 1
         assert os.path.exists(os.path.join(str(tmp_path), "migration.log"))
@@ -629,9 +634,9 @@ class TestSetupMainLogFile:
         log_file = tmp_path / "migration.log"
         assert log_file.exists()
 
-    def test_returns_file_handler(self, tmp_path):
+    def test_returns_immediate_flush_handler(self, tmp_path):
         result = setup_main_log_file(str(tmp_path))
-        assert isinstance(result, logging.FileHandler)
+        assert isinstance(result, ImmediateFlushHandler)
 
     def test_handler_level_is_debug(self, tmp_path):
         result = setup_main_log_file(str(tmp_path))
@@ -730,9 +735,9 @@ class TestSetupChannelLogger:
         log_file = tmp_path / "channel_logs" / "general_migration.log"
         assert log_file.exists()
 
-    def test_returns_file_handler(self, tmp_path):
+    def test_returns_immediate_flush_handler(self, tmp_path):
         result = setup_channel_logger(str(tmp_path), "general")
-        assert isinstance(result, logging.FileHandler)
+        assert isinstance(result, ImmediateFlushHandler)
 
     def test_handler_level_is_debug(self, tmp_path):
         result = setup_channel_logger(str(tmp_path), "general")
@@ -871,14 +876,28 @@ class TestEnsureChannelLogCreated:
 class TestEnableHttpClientDebug:
     """Tests for _enable_http_client_debug()."""
 
-    def test_patches_putheader(self):
-        import http.client
+    @pytest.fixture(autouse=True)
+    def _restore_putheader(self):
+        """Restore the stdlib putheader before and after each test."""
+        http.client.HTTPConnection.putheader = _STDLIB_PUTHEADER  # type: ignore[assignment]
+        yield
+        http.client.HTTPConnection.putheader = _STDLIB_PUTHEADER  # type: ignore[assignment]
 
+    def test_patches_putheader(self):
         original = http.client.HTTPConnection.putheader
-        try:
-            setup_logger(debug_api=True)
-            # putheader should be patched
-            assert http.client.HTTPConnection.putheader is not original
-        finally:
-            # Restore original to avoid side effects
-            http.client.HTTPConnection.putheader = original
+        assert not getattr(original, "_patched_for_debug", False)
+
+        setup_logger(debug_api=True)
+        patched = http.client.HTTPConnection.putheader
+        # putheader should be patched
+        assert patched is not original
+        assert getattr(patched, "_patched_for_debug", False) is True
+
+    def test_double_patch_guard_prevents_stacking(self):
+        setup_logger(debug_api=True)
+        first_patch = http.client.HTTPConnection.putheader
+        # Call setup_logger again with debug_api=True
+        setup_logger(debug_api=True)
+        second_patch = http.client.HTTPConnection.putheader
+        # The patched function should be the same object (not re-wrapped)
+        assert first_patch is second_patch
