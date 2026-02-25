@@ -31,6 +31,15 @@ REQUIRED_SCOPES = [
 _service_cache: dict[str, Any] = {}
 
 
+def clear_service_cache() -> None:
+    """Clear the cached GCP service instances.
+
+    Call this after authentication failures (401/403) to force
+    re-creation of service objects on next use.
+    """
+    _service_cache.clear()
+
+
 class RetryWrapper:
     """Wrapper that adds retry logic to any object's methods."""
 

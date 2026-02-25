@@ -4,14 +4,17 @@ Logging module for the Slack to Google Chat migration tool
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
 import re
 from typing import Any
 
-# Module-level flag to track if API debug logging is enabled
-_DEBUG_API_ENABLED = False
+# Module-level flag to track if API debug logging is enabled (thread-safe)
+_DEBUG_API_ENABLED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_DEBUG_API_ENABLED", default=False
+)
 
 RESPONSE_MAX_LENGTH = 2000
 RESPONSE_FALLBACK_LENGTH = 1000
@@ -262,8 +265,7 @@ def setup_logger(
     Returns:
         Configured logger instance
     """
-    global _DEBUG_API_ENABLED
-    _DEBUG_API_ENABLED = debug_api
+    _DEBUG_API_ENABLED.set(debug_api)
 
     logger = logging.getLogger("slack_migrator")
 
@@ -698,7 +700,7 @@ def is_debug_api_enabled() -> bool:
     Returns:
         True if the ``--debug_api`` flag was set at startup.
     """
-    return _DEBUG_API_ENABLED
+    return _DEBUG_API_ENABLED.get()
 
 
 def get_logger() -> logging.Logger:

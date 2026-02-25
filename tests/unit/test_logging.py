@@ -35,7 +35,7 @@ def _clean_logger():
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
     # Reset the module-level debug flag
-    log_module._DEBUG_API_ENABLED = False
+    log_module._DEBUG_API_ENABLED.set(False)
 
 
 # --- JsonFormatter tests ---
@@ -255,9 +255,9 @@ class TestSetupLogger:
         assert len(logger.handlers) == 1
 
     def test_debug_api_sets_module_flag(self):
-        assert log_module._DEBUG_API_ENABLED is False
+        assert log_module._DEBUG_API_ENABLED.get() is False
         setup_logger(debug_api=True)
-        assert log_module._DEBUG_API_ENABLED is True
+        assert log_module._DEBUG_API_ENABLED.get() is True
 
     def test_debug_api_enables_http_client_logger(self):
         setup_logger(debug_api=True)
@@ -406,7 +406,7 @@ class TestIsDebugApiEnabled:
     """Tests for is_debug_api_enabled()."""
 
     def test_default_is_false(self):
-        log_module._DEBUG_API_ENABLED = False
+        log_module._DEBUG_API_ENABLED.set(False)
         assert is_debug_api_enabled() is False
 
     def test_true_after_setup_with_debug_api(self):
