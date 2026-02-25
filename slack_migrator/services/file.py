@@ -132,7 +132,11 @@ class FileHandler:
 
     @property
     def folder_id(self) -> str | None:
-        """Backward compatibility property for the root folder ID."""
+        """Backward compatibility property for the root folder ID.
+
+        Returns:
+            The root Google Drive folder ID, or None if not yet initialised.
+        """
         # Ensure drive is initialized when accessing folder_id
         self.ensure_drive_initialized()
         return self._root_folder_id

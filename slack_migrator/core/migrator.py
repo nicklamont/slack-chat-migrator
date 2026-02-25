@@ -439,7 +439,12 @@ class SlackToChatMigrator:
 
         # Set up signal handler to ensure we log migration status on interrupt
         def signal_handler(signum, frame):
-            """Handle SIGINT (Ctrl+C) by logging migration status and exiting gracefully."""
+            """Handle SIGINT (Ctrl+C) gracefully.
+
+            Args:
+                signum: Signal number received.
+                frame: Current stack frame (unused).
+            """
             migration_duration = time.time() - migration_start_time
             log_with_context(logging.WARNING, "")
             log_with_context(logging.WARNING, "🚨 MIGRATION INTERRUPTED BY SIGNAL")

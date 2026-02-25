@@ -55,6 +55,7 @@ class RetryWrapper:
             else:
                 # For other methods, return a new wrapper that maintains the chain
                 def wrapped_method(*args: Any, **kwargs: Any) -> Any:
+                    """Invoke the method and re-wrap chainable results."""
                     result = attr(*args, **kwargs)
                     # If the result has methods that might need retry, wrap it too
                     if (
@@ -79,6 +80,7 @@ class RetryWrapper:
 
         @functools.wraps(execute_method)
         def wrapper(*args: Any, **kwargs: Any) -> Any:  # noqa: C901
+            """Execute the API call with exponential-backoff retry."""
             max_retries = self._max_retries
             initial_delay = self._retry_delay
             max_delay = 60
@@ -426,7 +428,24 @@ def get_gcp_service(
     max_retries: int = 3,
     retry_delay: float = 1.0,
 ) -> Any:
-    """Get a Google API client service using service account impersonation."""
+    """Get a Google API client service using service account impersonation.
+
+    Args:
+        creds_path: Path to the service account JSON key file.
+        user_email: Email of the user to impersonate via domain-wide delegation.
+        api: Google API name (e.g. ``"chat"``, ``"drive"``).
+        version: API version string (e.g. ``"v1"``).
+        channel: Optional channel name for contextual log messages.
+        max_retries: Maximum retry attempts for transient errors.
+        retry_delay: Initial delay in seconds between retries.
+
+    Returns:
+        A RetryWrapper-wrapped Google API service object.
+
+    Raises:
+        FileNotFoundError: If *creds_path* does not exist.
+        ValueError: If the credentials file has an invalid format.
+    """
     cache_key = f"{creds_path}:{user_email}:{api}:{version}"
     if cache_key in _service_cache:
         log_with_context(
@@ -465,6 +484,7 @@ def get_gcp_service(
         # Wrap the service with retry logic
         # Use the explicitly passed channel parameter for context
         def get_channel_context() -> str | None:
+            """Return the channel name bound at service-creation time."""
             return channel
 
         wrapped_service = RetryWrapper(

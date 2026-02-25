@@ -35,7 +35,14 @@ class ChannelProcessor:
     def process_channel(self, ch_dir: Path) -> bool:
         """Process a single channel directory.
 
-        Returns True if the migration should abort (break the outer loop).
+        Creates or reuses a space, imports messages, completes import mode,
+        and adds members.
+
+        Args:
+            ch_dir: Path to the channel's export directory.
+
+        Returns:
+            True if the migration should abort (break the outer loop).
         """
         migrator = self.migrator
         channel = ch_dir.name

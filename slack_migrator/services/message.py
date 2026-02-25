@@ -640,7 +640,12 @@ def send_message(  # noqa: C901
 
 
 def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> None:  # noqa: C901
-    """Handle tracking message stats in both dry run and normal mode."""
+    """Handle tracking message stats in both dry run and normal mode.
+
+    Args:
+        migrator: The migrator instance whose counters are updated.
+        m: A single Slack message dictionary.
+    """
     # Get the current channel being processed
     channel = migrator.state.current_channel
     ts = m.get("ts", "")
@@ -763,7 +768,13 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
 
 
 def send_intro(migrator: SlackToChatMigrator, space: str, channel: str) -> None:
-    """Send an intro message with channel metadata."""
+    """Send an intro message with channel metadata.
+
+    Args:
+        migrator: The migrator instance providing API services.
+        space: Google Chat space resource name to send into.
+        channel: Slack channel name for metadata lookup.
+    """
     # Check if we're in update mode - if so, don't send intro message again
     is_update_mode = getattr(migrator, "update_mode", False)
     if is_update_mode:

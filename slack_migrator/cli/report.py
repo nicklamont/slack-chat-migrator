@@ -21,7 +21,12 @@ if TYPE_CHECKING:
 def print_dry_run_summary(
     migrator: SlackToChatMigrator, report_file: str | None = None
 ) -> None:
-    """Print a summary of the dry run to the console."""
+    """Print a summary of the dry run to the console.
+
+    Args:
+        migrator: The migrator whose state is summarised.
+        report_file: Optional override path for the report file location.
+    """
     print("\n" + "=" * 80)
     print("DRY RUN SUMMARY")
     print("=" * 80)

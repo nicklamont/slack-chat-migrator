@@ -425,6 +425,7 @@ def convert_formatting(
     text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
     def replace_user_mention(match: re.Match) -> str:
+        """Replace a Slack ``<@UID>`` mention with the Google Chat equivalent."""
         slack_user_id = match.group(1)
         gchat_user_id = user_map.get(slack_user_id)
 
