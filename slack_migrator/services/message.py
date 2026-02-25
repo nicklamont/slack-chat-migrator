@@ -9,10 +9,12 @@ import hashlib
 import logging
 import time
 import uuid
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
+from slack_migrator.services.discovery import should_process_message
 from slack_migrator.services.reaction_processor import process_reactions_batch
 from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.formatting import convert_formatting, parse_slack_blocks
@@ -22,6 +24,19 @@ from slack_migrator.utils.logging import (
 
 if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
+
+
+MESSAGE_ID_MAX_LENGTH = 63
+CLIENT_MESSAGE_PREFIX = "client-slack-"
+CLIENT_EDIT_PREFIX = "client-slack-edit-"
+
+
+class MessageResult(str, Enum):
+    """Sentinel return values from send_message() for non-API outcomes."""
+
+    IGNORED_BOT = "IGNORED_BOT"
+    ALREADY_SENT = "ALREADY_SENT"
+    SKIPPED = "SKIPPED"
 
 
 def send_message(  # noqa: C901
@@ -60,7 +75,7 @@ def send_message(  # noqa: C901
                 user_id=user_id,
                 bot_name=bot_name,
             )
-            return "IGNORED_BOT"
+            return MessageResult.IGNORED_BOT
 
         # Also check for user-based bots (bots that are in users.json)
         if user_id:
@@ -73,7 +88,7 @@ def send_message(  # noqa: C901
                     ts=ts,
                     user_id=user_id,
                 )
-                return "IGNORED_BOT"
+                return MessageResult.IGNORED_BOT
 
     # Check for edited messages
     edited = message.get("edited", {})
@@ -93,9 +108,6 @@ def send_message(  # noqa: C901
     if is_update_mode and hasattr(migrator.state, "last_processed_timestamps"):
         last_timestamp = migrator.state.last_processed_timestamps.get(channel, 0)  # type: ignore[arg-type]
         if last_timestamp > 0:
-            # Import the function to check if we should process this message
-            from slack_migrator.services.discovery import should_process_message
-
             if not should_process_message(last_timestamp, ts):
                 log_with_context(
                     logging.INFO,
@@ -106,7 +118,7 @@ def send_message(  # noqa: C901
                     last_timestamp=last_timestamp,
                 )
                 # Return a placeholder to indicate success
-                return "ALREADY_SENT"
+                return MessageResult.ALREADY_SENT
 
     # Also check the sent_messages set for additional protection
     if is_update_mode and message_key in migrator.state.sent_messages:
@@ -118,7 +130,7 @@ def send_message(  # noqa: C901
             user_id=user_id,
         )
         # Return a placeholder to indicate success
-        return "ALREADY_SENT"
+        return MessageResult.ALREADY_SENT
 
     # Only increment the message count in non-dry run mode
     # In dry run mode, this is handled in the migrate method
@@ -149,7 +161,7 @@ def send_message(  # noqa: C901
             ts=ts,
             user_id=user_id,
         )
-        return "SKIPPED"
+        return MessageResult.SKIPPED
 
     # Extract text from Slack blocks (rich formatting) or fallback to plain text
     text = parse_slack_blocks(message)
@@ -372,12 +384,12 @@ def send_message(  # noqa: C901
         if is_edited:
             # Use a different format for edited messages to avoid conflicts
             # Include both timestamps to ensure uniqueness
-            message_id = f"client-slack-edit-{clean_ts}-{current_ms}-{unique_id}"
+            message_id = f"{CLIENT_EDIT_PREFIX}{clean_ts}-{current_ms}-{unique_id}"
         else:
-            message_id = f"client-slack-{clean_ts}-{current_ms}-{unique_id}"
+            message_id = f"{CLIENT_MESSAGE_PREFIX}{clean_ts}-{current_ms}-{unique_id}"
 
-        # Ensure the ID is within the 63-character limit
-        if len(message_id) > 63:
+        # Ensure the ID is within the Google Chat character limit
+        if len(message_id) > MESSAGE_ID_MAX_LENGTH:
             # Hash the timestamps and use a shorter ID format
             hash_input = ts
             if is_edited:
@@ -389,10 +401,12 @@ def send_message(  # noqa: C901
             # Create a shorter ID that still maintains uniqueness
             if is_edited:
                 message_id = (
-                    f"client-slack-edit-{hash_digest}-{current_ms}-{unique_id[:4]}"
+                    f"{CLIENT_EDIT_PREFIX}{hash_digest}-{current_ms}-{unique_id[:4]}"
                 )
             else:
-                message_id = f"client-slack-{hash_digest}-{current_ms}-{unique_id[:4]}"
+                message_id = (
+                    f"{CLIENT_MESSAGE_PREFIX}{hash_digest}-{current_ms}-{unique_id[:4]}"
+                )
 
         result = None
 

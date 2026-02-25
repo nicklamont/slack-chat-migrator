@@ -4,12 +4,14 @@ Functions for discovering existing Google Chat resources for migration resumptio
 
 from __future__ import annotations
 
+import datetime
 import logging
 import time
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
+from slack_migrator.services.space_creator import SPACES_PAGE_SIZE
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
@@ -58,7 +60,9 @@ def discover_existing_spaces(  # noqa: C901
         # Paginate through all spaces accessible to the service account
         page_token = None
         while True:
-            request = migrator.chat.spaces().list(pageSize=100, pageToken=page_token)  # type: ignore[union-attr]
+            request = migrator.chat.spaces().list(  # type: ignore[union-attr]
+                pageSize=SPACES_PAGE_SIZE, pageToken=page_token
+            )
             response = request.execute()
 
             # Process each space
@@ -257,8 +261,6 @@ def get_last_message_timestamp(
 
             if create_time:
                 # Convert RFC3339 time to Unix timestamp
-                import datetime
-
                 if "Z" in create_time:
                     dt = datetime.datetime.fromisoformat(
                         create_time.replace("Z", "+00:00")

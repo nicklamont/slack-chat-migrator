@@ -536,7 +536,7 @@ class TestCheckPermissionsStandalone:
     """Tests for check_permissions_standalone."""
 
     @patch("slack_migrator.utils.permissions.get_gcp_service")
-    @patch("slack_migrator.core.config.load_config")
+    @patch("slack_migrator.utils.permissions.load_config")
     def test_happy_path(self, mock_load_config, mock_get_service, tmp_path):
         """Happy path with mocked services."""
         mock_config = MagicMock()
@@ -573,7 +573,7 @@ class TestCheckPermissionsStandalone:
         assert mock_get_service.call_count == 2
 
     @patch("slack_migrator.utils.permissions.get_gcp_service")
-    @patch("slack_migrator.core.config.load_config")
+    @patch("slack_migrator.utils.permissions.load_config")
     def test_config_not_found(self, mock_load_config, mock_get_service):
         """Config file not found raises error."""
         mock_load_config.side_effect = FileNotFoundError("config.yaml not found")
@@ -584,7 +584,7 @@ class TestCheckPermissionsStandalone:
             )
 
     @patch("slack_migrator.utils.permissions.get_gcp_service")
-    @patch("slack_migrator.core.config.load_config")
+    @patch("slack_migrator.utils.permissions.load_config")
     def test_api_service_creation_fails(self, mock_load_config, mock_get_service):
         """API service creation failure propagates."""
         mock_config = MagicMock()

@@ -16,14 +16,23 @@ from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
-from slack_migrator.core.config import should_process_channel
+from slack_migrator.core.config import ImportCompletionStrategy, should_process_channel
+from slack_migrator.services.discovery import get_last_message_timestamp
 from slack_migrator.services.membership_manager import (
     add_regular_members,
     add_users_to_space,
 )
-from slack_migrator.services.message import send_message, track_message_stats
+from slack_migrator.services.message import (
+    MessageResult,
+    send_message,
+    track_message_stats,
+)
 from slack_migrator.services.space_creator import create_space
-from slack_migrator.utils.logging import log_with_context
+from slack_migrator.utils.logging import (
+    is_debug_api_enabled,
+    log_with_context,
+    setup_channel_logger,
+)
 
 
 class ChannelProcessor:
@@ -171,13 +180,9 @@ class ChannelProcessor:
 
     def _setup_channel_logging(self, channel: str) -> None:
         """Set up channel-specific log handler."""
-        from slack_migrator.utils.logging import (
-            is_debug_api_enabled,
-            setup_channel_logger,
-        )
-
         migrator = self.migrator
-        assert migrator.state.output_dir is not None
+        if migrator.state.output_dir is None:
+            raise RuntimeError("Output directory not set")
         channel_handler = setup_channel_logger(
             migrator.state.output_dir, channel, migrator.verbose, is_debug_api_enabled()
         )
@@ -342,7 +347,7 @@ class ChannelProcessor:
             result = send_message(migrator, space, m)
 
             if result:
-                if result != "SKIPPED":
+                if result != MessageResult.SKIPPED:
                     # Message was sent successfully
                     processed_ts.append(ts)
                     processed_count += 1
@@ -403,7 +408,8 @@ class ChannelProcessor:
 
         # Only complete import if there were no errors or we're using force_complete strategy
         if (
-            not channel_had_errors or completion_strategy == "force_complete"
+            not channel_had_errors
+            or completion_strategy == ImportCompletionStrategy.FORCE_COMPLETE
         ) and not migrator.dry_run:
             try:
                 log_with_context(
@@ -412,7 +418,8 @@ class ChannelProcessor:
                     channel=channel,
                 )
 
-                assert migrator.chat is not None
+                if migrator.chat is None:
+                    raise RuntimeError("Chat API service not initialized")
                 migrator.chat.spaces().completeImport(name=space).execute()
 
                 log_with_context(
@@ -562,7 +569,8 @@ class ChannelProcessor:
                 f"Deleting space {space_name} due to errors",
                 space_name=space_name,
             )
-            assert migrator.chat is not None
+            if migrator.chat is None:
+                raise RuntimeError("Chat API service not initialized")
             migrator.chat.spaces().delete(name=space_name).execute()
             log_with_context(
                 logging.INFO,
@@ -598,9 +606,6 @@ class ChannelProcessor:
                 channel=channel,
             )
             return
-
-        # Import discovery functions
-        from slack_migrator.services.discovery import get_last_message_timestamp
 
         # Get the timestamp of the last message in the space
         last_timestamp = get_last_message_timestamp(migrator, channel, space_name)

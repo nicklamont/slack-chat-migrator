@@ -171,8 +171,8 @@ class TestCleanupCommand:
         assert result.exit_code != 0
 
     @patch("slack_migrator.cli.commands.cleanup_import_mode_spaces")
-    @patch("slack_migrator.utils.api.get_gcp_service")
-    @patch("slack_migrator.core.config.load_config")
+    @patch("slack_migrator.cli.commands.get_gcp_service")
+    @patch("slack_migrator.cli.commands.load_config")
     def test_invokes_standalone_cleanup(self, mock_config, mock_svc, mock_cleanup):
         mock_config.return_value = MigrationConfig()
         mock_chat = MagicMock()
@@ -194,8 +194,8 @@ class TestCleanupCommand:
         mock_cleanup.assert_called_once_with(mock_chat)
 
     @patch("slack_migrator.cli.commands.cleanup_import_mode_spaces")
-    @patch("slack_migrator.utils.api.get_gcp_service")
-    @patch("slack_migrator.core.config.load_config")
+    @patch("slack_migrator.cli.commands.get_gcp_service")
+    @patch("slack_migrator.cli.commands.load_config")
     def test_prompts_for_confirmation_without_yes(
         self, mock_config, mock_svc, mock_cleanup
     ):

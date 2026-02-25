@@ -77,7 +77,8 @@ def run_cleanup(migrator: SlackToChatMigrator) -> None:  # noqa: C901
             logging.DEBUG, "Listing all spaces to check for import mode..."
         )
         try:
-            assert migrator.chat is not None
+            if migrator.chat is None:
+                raise RuntimeError("Chat API service not initialized")
             spaces = migrator.chat.spaces().list().execute().get("spaces", [])
         except HttpError as http_e:
             log_with_context(
@@ -108,7 +109,8 @@ def run_cleanup(migrator: SlackToChatMigrator) -> None:  # noqa: C901
                 continue
 
             try:
-                assert migrator.chat is not None
+                if migrator.chat is None:
+                    raise RuntimeError("Chat API service not initialized")
                 space_info = migrator.chat.spaces().get(name=space_name).execute()
                 if space_info.get("importMode"):
                     import_mode_spaces.append((space_name, space_info))
@@ -265,7 +267,8 @@ def _complete_single_space(
 
     # --- Complete import mode ---------------------------------------------
     try:
-        assert migrator.chat is not None
+        if migrator.chat is None:
+            raise RuntimeError("Chat API service not initialized")
         migrator.chat.spaces().completeImport(name=space_name).execute()
         log_with_context(
             logging.DEBUG,
@@ -298,7 +301,8 @@ def _complete_single_space(
     # --- Preserve external user access ------------------------------------
     if external_users_allowed:
         try:
-            assert migrator.chat is not None
+            if migrator.chat is None:
+                raise RuntimeError("Chat API service not initialized")
             migrator.chat.spaces().patch(
                 name=space_name,
                 updateMask="externalUserAllowed",

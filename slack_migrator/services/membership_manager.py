@@ -12,6 +12,8 @@ import datetime
 import json
 import logging
 import time
+import traceback
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
@@ -430,8 +432,6 @@ def add_regular_members(  # noqa: C901
 
         try:
             # Try to load channel members from the channel data
-            from pathlib import Path
-
             export_root = Path(migrator.export_root)
             channels_file = export_root / "channels.json"
 
@@ -646,8 +646,6 @@ def add_regular_members(  # noqa: C901
             failed_count += 1
 
             # Log the full exception for debugging
-            import traceback
-
             log_with_context(
                 logging.DEBUG,
                 f"Exception traceback: {traceback.format_exc()}",

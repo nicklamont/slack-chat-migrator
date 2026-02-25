@@ -347,7 +347,9 @@ class RetryWrapper:
                     return 200  # OK
 
         except (ValueError, TypeError, AttributeError):
-            pass
+            logging.debug(
+                "Could not extract status code from response, defaulting to 200"
+            )
 
         # Final fallback - assume 200 OK for successful responses
         return 200
@@ -371,8 +373,6 @@ class RetryWrapper:
             if request_details.get("body"):
                 try:
                     # Try to parse body as JSON if it's a string
-                    import json
-
                     if isinstance(request_details["body"], str):
                         request_data = json.loads(request_details["body"])
                     elif isinstance(request_details["body"], dict):

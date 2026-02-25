@@ -20,8 +20,11 @@ from slack_migrator.utils.logging import log_with_context
 if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
 
-# Named constant for import mode time limit
+# Named constants
 IMPORT_MODE_DAYS_LIMIT = 90
+SPACE_TYPE = "SPACE"
+SPACE_THREADING_STATE = "THREADED_MESSAGES"
+SPACES_PAGE_SIZE = 100
 
 
 def channel_has_external_users(migrator: SlackToChatMigrator, channel: str) -> bool:
@@ -132,9 +135,9 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
     # https://developers.google.com/workspace/chat/import-data
     body = {
         "displayName": display_name,
-        "spaceType": "SPACE",
+        "spaceType": SPACE_TYPE,
         "importMode": True,
-        "spaceThreadingState": "THREADED_MESSAGES",
+        "spaceThreadingState": SPACE_THREADING_STATE,
     }
 
     log_with_context(
@@ -266,7 +269,9 @@ def _list_all_spaces(chat_service: Any) -> list[dict[str, Any]]:
     while True:
         try:
             response = (
-                chat_service.spaces().list(pageSize=100, pageToken=page_token).execute()
+                chat_service.spaces()
+                .list(pageSize=SPACES_PAGE_SIZE, pageToken=page_token)
+                .execute()
             )
             spaces.extend(response.get("spaces", []))
             page_token = response.get("nextPageToken")

@@ -7,10 +7,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 # Module-level flag to track if API debug logging is enabled
 _DEBUG_API_ENABLED = False
+
+RESPONSE_MAX_LENGTH = 2000
+RESPONSE_FALLBACK_LENGTH = 1000
 
 
 class JsonFormatter(logging.Formatter):
@@ -234,8 +238,6 @@ class EnhancedFormatter(logging.Formatter):
                 msg = record.getMessage()
                 # Redact authorization tokens in request logs
                 if "authorization: Bearer" in msg:
-                    import re
-
                     msg = re.sub(
                         r"authorization: Bearer [^\r\n]+",
                         "authorization: Bearer [REDACTED]",
@@ -314,7 +316,6 @@ def _enable_http_client_debug() -> None:
     This is only used when debug_api=True.
     """
     import http.client
-    import re
 
     _orig_putheader = http.client.HTTPConnection.putheader
 
@@ -639,13 +640,17 @@ def log_api_response(
                 # For dict/list, convert to formatted JSON string
                 response_str = json.dumps(response_data, indent=2)
                 # Truncate if too long
-                if len(response_str) > 2000:
-                    response_str = response_str[:2000] + "... [truncated]"
+                if len(response_str) > RESPONSE_MAX_LENGTH:
+                    response_str = (
+                        response_str[:RESPONSE_MAX_LENGTH] + "... [truncated]"
+                    )
             else:
                 # For other types, use string representation
                 response_str = str(response_data)
-                if len(response_str) > 1000:
-                    response_str = response_str[:1000] + "... [truncated]"
+                if len(response_str) > RESPONSE_FALLBACK_LENGTH:
+                    response_str = (
+                        response_str[:RESPONSE_FALLBACK_LENGTH] + "... [truncated]"
+                    )
 
             # Add response data to the log context
             log_context["response"] = response_str

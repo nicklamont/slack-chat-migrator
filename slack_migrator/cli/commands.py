@@ -7,7 +7,9 @@ handling argument parsing, configuration loading, and executing the
 migration process with appropriate error handling.
 """
 
+import datetime
 import logging
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +22,7 @@ if TYPE_CHECKING:
 
 import slack_migrator
 from slack_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
+from slack_migrator.core.config import load_config
 from slack_migrator.core.migrator import SlackToChatMigrator
 from slack_migrator.exceptions import (
     ConfigError,
@@ -28,6 +31,7 @@ from slack_migrator.exceptions import (
     PermissionCheckError,
 )
 from slack_migrator.services.space_creator import cleanup_import_mode_spaces
+from slack_migrator.utils.api import get_gcp_service
 from slack_migrator.utils.logging import log_with_context, setup_logger
 from slack_migrator.utils.permissions import (
     check_permissions_standalone,
@@ -372,9 +376,6 @@ def cleanup(
         debug_api: Enable detailed API request/response logging.
         yes: Skip confirmation prompt.
     """
-    from slack_migrator.core.config import load_config
-    from slack_migrator.utils.api import get_gcp_service
-
     setup_logger(verbose, debug_api)
 
     if not yes:
@@ -657,7 +658,8 @@ class MigrationOrchestrator:
         """Execute the main migration logic."""
         if self.args.dry_run:
             # Explicit dry run mode
-            assert self.migrator is not None
+            if self.migrator is None:
+                raise RuntimeError("Migrator not initialized")
             self.migrator.migrate()
 
             if self.check_unmapped_users(self.migrator):
@@ -674,7 +676,8 @@ class MigrationOrchestrator:
                 self.report_validation_success()
 
                 if self.get_user_confirmation():
-                    assert self.migrator is not None
+                    if self.migrator is None:
+                        raise RuntimeError("Migrator not initialized")
                     self.migrator.migrate()
                 else:
                     log_with_context(logging.INFO, "Migration cancelled by user.")
@@ -853,9 +856,6 @@ def create_migration_output_directory() -> str:
     Returns:
         The path to the newly created output directory.
     """
-    import datetime
-    import os
-
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = f"migration_logs/run_{timestamp}"
 

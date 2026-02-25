@@ -8,6 +8,7 @@ from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.state import MigrationState
 from slack_migrator.services.discovery import log_space_mapping_conflicts
 from slack_migrator.services.message import (
+    MessageResult,
     send_intro,
     send_message,
     track_message_stats,
@@ -264,7 +265,7 @@ class TestSendMessage:
 
         result = send_message(migrator, "spaces/SPACE1", msg)
 
-        assert result == "IGNORED_BOT"
+        assert result == MessageResult.IGNORED_BOT
 
     def test_skips_app_message_subtype_when_ignore_bots(self):
         """Messages with app_message subtype are skipped when ignore_bots is True."""
@@ -279,7 +280,7 @@ class TestSendMessage:
 
         result = send_message(migrator, "spaces/SPACE1", msg)
 
-        assert result == "IGNORED_BOT"
+        assert result == MessageResult.IGNORED_BOT
 
     def test_skips_bot_user_when_ignore_bots(self):
         """Messages from a bot user (is_bot flag) are skipped when ignore_bots is True."""
@@ -292,7 +293,7 @@ class TestSendMessage:
 
         result = send_message(migrator, "spaces/SPACE1", msg)
 
-        assert result == "IGNORED_BOT"
+        assert result == MessageResult.IGNORED_BOT
 
     def test_skips_channel_join_leave(self):
         """Channel join/leave system messages return SKIPPED."""
@@ -307,7 +308,7 @@ class TestSendMessage:
 
             result = send_message(migrator, "spaces/SPACE1", msg)
 
-            assert result == "SKIPPED"
+            assert result == MessageResult.SKIPPED
 
     def test_skips_empty_message(self):
         """Messages with no text and no files return None."""
@@ -519,7 +520,7 @@ class TestSendMessage:
 
         result = send_message(migrator, "spaces/SPACE1", msg)
 
-        assert result == "ALREADY_SENT"
+        assert result == MessageResult.ALREADY_SENT
 
     def test_update_mode_skips_old_messages_via_timestamp(self):
         """Update mode skips messages older than last_processed_timestamps."""
@@ -528,14 +529,14 @@ class TestSendMessage:
         migrator.state.last_processed_timestamps = {"general": 1700000010.0}
 
         with patch(
-            "slack_migrator.services.discovery.should_process_message",
+            "slack_migrator.services.message.should_process_message",
             return_value=False,
         ):
             msg = {"ts": "1700000000.000001", "user": "U001", "text": "Old message"}
 
             result = send_message(migrator, "spaces/SPACE1", msg)
 
-        assert result == "ALREADY_SENT"
+        assert result == MessageResult.ALREADY_SENT
 
     def test_marks_sent_message_in_sent_messages_set(self):
         """Successfully sent messages are tracked in sent_messages."""

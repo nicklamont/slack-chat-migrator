@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 
 from slack_migrator.core.config import (
+    ImportCompletionStrategy,
     MigrationConfig,
     create_default_config,
     load_config,
@@ -27,7 +28,9 @@ def test_load_config_with_empty_file():
         # Check error handling defaults
         assert config.abort_on_error is False
         assert config.max_failure_percentage == 10
-        assert config.import_completion_strategy == "skip_on_error"
+        assert (
+            config.import_completion_strategy == ImportCompletionStrategy.SKIP_ON_ERROR
+        )
         assert config.cleanup_on_error is False
 
         # Check retry defaults
@@ -60,6 +63,33 @@ def test_load_config_with_values():
         assert "general" in config.exclude_channels
         assert "important" in config.include_channels
         assert config.user_mapping_overrides["U123"] == "user@example.com"
+
+
+def test_invalid_import_completion_strategy_raises():
+    """Invalid import_completion_strategy in YAML raises ValueError at load time."""
+    import pytest
+
+    with tempfile.NamedTemporaryFile(suffix=".yaml") as temp_file:
+        config_data = {"import_completion_strategy": "skip_on_eror"}  # typo
+        with open(temp_file.name, "w") as f:
+            yaml.dump(config_data, f)
+
+        with pytest.raises(ValueError, match="Invalid import_completion_strategy"):
+            load_config(Path(temp_file.name))
+
+
+def test_valid_import_completion_strategies():
+    """Both valid strategy values load correctly from YAML."""
+    for strategy in ("skip_on_error", "force_complete"):
+        with tempfile.NamedTemporaryFile(suffix=".yaml") as temp_file:
+            config_data = {"import_completion_strategy": strategy}
+            with open(temp_file.name, "w") as f:
+                yaml.dump(config_data, f)
+
+            config = load_config(Path(temp_file.name))
+            assert config.import_completion_strategy == ImportCompletionStrategy(
+                strategy
+            )
 
 
 def test_should_process_channel():

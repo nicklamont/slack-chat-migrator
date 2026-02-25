@@ -2,14 +2,29 @@
 Simple unmapped user tracking integrated into existing user mapping logic.
 """
 
+import json
 import logging
 from collections import defaultdict
+from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
+
+
+class UserType(str, Enum):
+    """Classification of Slack users for migration handling."""
+
+    REGULAR_USER = "regular_user"
+    WORKFLOW_BOT = "workflow_bot"
+    BOT = "bot"
+    DELETED_USER = "deleted_user"
+    RESTRICTED_USER = "restricted_user"
+    NO_EMAIL = "no_email"
+    MISSING_FROM_EXPORT = "missing_from_export"
 
 
 class UnmappedUserTracker:
@@ -179,7 +194,7 @@ def log_unmapped_user_summary_for_dry_run(migrator: "SlackToChatMigrator") -> No
 
     # Check if we have bots and suggest the ignore_bots option
     has_bots = any(
-        user_analysis.get(uid, {}).get("type") in ["bot", "workflow_bot"]
+        user_analysis.get(uid, {}).get("type") in [UserType.BOT, UserType.WORKFLOW_BOT]
         for uid in unmapped_users
     )
     if has_bots:
@@ -197,12 +212,12 @@ def log_unmapped_user_summary_for_dry_run(migrator: "SlackToChatMigrator") -> No
         user_type = user_info.get("type", "unknown")
         user_name = user_info.get("name", "Unknown")
 
-        if user_type in ["bot", "workflow_bot"]:
+        if user_type in [UserType.BOT, UserType.WORKFLOW_BOT]:
             log_with_context(
                 logging.ERROR,
                 f'  "{user_id}": "bot-archive@yourdomain.com"  # {user_name} (bot)',
             )
-        elif user_type == "deleted_user":
+        elif user_type == UserType.DELETED_USER:
             log_with_context(
                 logging.ERROR,
                 f'  "{user_id}": "deleted-user@yourdomain.com"  # {user_name} (deleted)',
@@ -240,9 +255,6 @@ def analyze_unmapped_users(
     Returns:
         Dict mapping user_id to analysis info (type, name, details, etc.)
     """
-    import json
-    from pathlib import Path
-
     analysis: dict[str, dict[str, Any]] = {}
 
     try:
@@ -264,28 +276,31 @@ def analyze_unmapped_users(
             user_data = user_lookup.get(user_id, {})
 
             if not user_data:
-                analysis[user_id] = {"type": "missing_from_export", "name": "Unknown"}
+                analysis[user_id] = {
+                    "type": UserType.MISSING_FROM_EXPORT,
+                    "name": "Unknown",
+                }
                 continue
 
             # Determine user type based on available data
-            user_type = "regular_user"
+            user_type: UserType = UserType.REGULAR_USER
             details = []
 
             if user_data.get("is_bot", False):
                 if user_data.get("is_workflow_bot", False):
-                    user_type = "workflow_bot"
+                    user_type = UserType.WORKFLOW_BOT
                     details.append("Slack workflow automation")
                 else:
-                    user_type = "bot"
+                    user_type = UserType.BOT
                     details.append("Bot/app integration")
             elif user_data.get("deleted", False):
-                user_type = "deleted_user"
+                user_type = UserType.DELETED_USER
                 details.append("Deleted from Slack")
             elif user_data.get("is_restricted", False):
-                user_type = "restricted_user"
+                user_type = UserType.RESTRICTED_USER
                 details.append("Restricted/guest user")
             elif not user_data.get("profile", {}).get("email"):
-                user_type = "no_email"
+                user_type = UserType.NO_EMAIL
                 details.append("No email address")
 
             real_name = user_data.get("real_name", user_data.get("name", "Unknown"))
@@ -326,15 +341,15 @@ def categorize_user_analysis(
     for user_info in user_analysis.values():
         user_type = user_info.get("type", "unknown")
 
-        if user_type in ["bot", "workflow_bot"]:
+        if user_type in [UserType.BOT, UserType.WORKFLOW_BOT]:
             categories["Bots and workflow automations"] += 1
-        elif user_type == "deleted_user":
+        elif user_type == UserType.DELETED_USER:
             categories["Deleted users"] += 1
-        elif user_type == "no_email":
+        elif user_type == UserType.NO_EMAIL:
             categories["Users without email addresses"] += 1
-        elif user_type == "restricted_user":
+        elif user_type == UserType.RESTRICTED_USER:
             categories["Restricted/guest users"] += 1
-        elif user_type == "missing_from_export":
+        elif user_type == UserType.MISSING_FROM_EXPORT:
             categories["Missing from export"] += 1
         else:
             categories["Other"] += 1
@@ -368,9 +383,6 @@ def scan_channel_members_for_unmapped_users(migrator: "SlackToChatMigrator") -> 
     Args:
         migrator: The SlackToChatMigrator instance
     """
-    import json
-    from pathlib import Path
-
     if not hasattr(migrator, "unmapped_user_tracker"):
         initialize_unmapped_user_tracking(migrator)
 

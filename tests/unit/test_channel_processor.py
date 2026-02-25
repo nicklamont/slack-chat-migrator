@@ -8,7 +8,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
 from slack_migrator.core.channel_processor import ChannelProcessor
-from slack_migrator.core.config import MigrationConfig
+from slack_migrator.core.config import ImportCompletionStrategy, MigrationConfig
 from slack_migrator.core.state import MigrationState
 
 
@@ -17,7 +17,7 @@ def _make_migrator(
     update_mode=False,
     abort_on_error=False,
     cleanup_on_error=False,
-    import_completion_strategy="skip_on_error",
+    import_completion_strategy=ImportCompletionStrategy.SKIP_ON_ERROR,
     max_failure_percentage=10,
 ):
     """Create a mock migrator for channel processor testing."""
@@ -276,11 +276,11 @@ class TestSetupChannelLogging:
 
         processor = ChannelProcessor(migrator)
         with patch(
-            "slack_migrator.utils.logging.setup_channel_logger",
+            "slack_migrator.core.channel_processor.setup_channel_logger",
             return_value=MagicMock(),
         ) as mock_setup:
             with patch(
-                "slack_migrator.utils.logging.is_debug_api_enabled",
+                "slack_migrator.core.channel_processor.is_debug_api_enabled",
                 return_value=False,
             ):
                 processor._setup_channel_logging("general")
@@ -547,7 +547,9 @@ class TestCompleteImportMode:
 
     def test_skip_on_error_strategy(self):
         """With skip_on_error strategy and errors, skips completion."""
-        migrator = _make_migrator(import_completion_strategy="skip_on_error")
+        migrator = _make_migrator(
+            import_completion_strategy=ImportCompletionStrategy.SKIP_ON_ERROR,
+        )
 
         processor = ChannelProcessor(migrator)
         result = processor._complete_import_mode("spaces/S1", "general", True)
@@ -559,7 +561,9 @@ class TestCompleteImportMode:
 
     def test_force_complete_despite_errors(self):
         """With force_complete strategy, completes even when there are errors."""
-        migrator = _make_migrator(import_completion_strategy="force_complete")
+        migrator = _make_migrator(
+            import_completion_strategy=ImportCompletionStrategy.FORCE_COMPLETE,
+        )
         (
             migrator.chat.spaces.return_value.completeImport.return_value.execute.return_value
         ) = {}
@@ -753,7 +757,7 @@ class TestDiscoverChannelResources:
     """Tests for ChannelProcessor._discover_channel_resources()."""
 
     @patch(
-        "slack_migrator.services.discovery.get_last_message_timestamp",
+        "slack_migrator.core.channel_processor.get_last_message_timestamp",
         return_value=12345.0,
     )
     def test_found_last_timestamp(self, mock_get_ts):
@@ -779,7 +783,8 @@ class TestDiscoverChannelResources:
         assert "general" not in migrator.state.last_processed_timestamps
 
     @patch(
-        "slack_migrator.services.discovery.get_last_message_timestamp", return_value=0
+        "slack_migrator.core.channel_processor.get_last_message_timestamp",
+        return_value=0,
     )
     def test_no_messages_found_timestamp_zero(self, mock_get_ts):
         """When no messages found (timestamp=0), does not store a timestamp."""
@@ -792,7 +797,7 @@ class TestDiscoverChannelResources:
         assert "general" not in migrator.state.last_processed_timestamps
 
     @patch(
-        "slack_migrator.services.discovery.get_last_message_timestamp",
+        "slack_migrator.core.channel_processor.get_last_message_timestamp",
         return_value=999.0,
     )
     def test_initializes_thread_map_when_missing(self, mock_get_ts):
