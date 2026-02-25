@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.migration_logging import (
@@ -284,36 +285,36 @@ class TestInitUnmappedUserTracker:
 
 
 # ---------------------------------------------------------------------------
-# _is_external_user tests
+# user_resolver.is_external_user tests
 # ---------------------------------------------------------------------------
 
 
 class TestIsExternalUser:
-    """Tests for _is_external_user()."""
+    """Tests for user_resolver.is_external_user()."""
 
     def test_internal_user(self, tmp_path):
         m = _make_migrator(tmp_path, "example.com")
-        assert m._is_external_user("user@example.com") is False
+        assert m.user_resolver.is_external_user("user@example.com") is False
 
     def test_external_user(self, tmp_path):
         m = _make_migrator(tmp_path, "example.com")
-        assert m._is_external_user("user@other.com") is True
+        assert m.user_resolver.is_external_user("user@other.com") is True
 
     def test_case_insensitive(self, tmp_path):
         m = _make_migrator(tmp_path, "example.com")
-        assert m._is_external_user("user@EXAMPLE.COM") is False
+        assert m.user_resolver.is_external_user("user@EXAMPLE.COM") is False
 
     def test_none_email(self, tmp_path):
         m = _make_migrator(tmp_path, "example.com")
-        assert m._is_external_user(None) is False
+        assert m.user_resolver.is_external_user(None) is False
 
     def test_empty_email(self, tmp_path):
         m = _make_migrator(tmp_path, "example.com")
-        assert m._is_external_user("") is False
+        assert m.user_resolver.is_external_user("") is False
 
     def test_subdomain_is_external(self, tmp_path):
         m = _make_migrator(tmp_path, "example.com")
-        assert m._is_external_user("user@sub.example.com") is True
+        assert m.user_resolver.is_external_user("user@sub.example.com") is True
 
 
 # ---------------------------------------------------------------------------
@@ -519,53 +520,53 @@ class TestSpaceNameHelpers:
 
 
 # ---------------------------------------------------------------------------
-# _should_abort_import tests
+# ChannelProcessor._should_abort_import tests
 # ---------------------------------------------------------------------------
 
 
 class TestShouldAbortImport:
-    """Tests for _should_abort_import()."""
+    """Tests for ChannelProcessor._should_abort_import()."""
 
     def test_no_abort_in_dry_run(self, tmp_path):
         m = _make_migrator(tmp_path, dry_run=True)
         m.config = MigrationConfig(abort_on_error=True)
-        assert m._should_abort_import("general", 10, 5) is False
+        assert ChannelProcessor(m)._should_abort_import("general", 10, 5) is False
 
     def test_no_abort_when_no_failures(self, tmp_path):
         m = _make_migrator(tmp_path, dry_run=False)
         m.config = MigrationConfig(abort_on_error=True)
-        assert m._should_abort_import("general", 10, 0) is False
+        assert ChannelProcessor(m)._should_abort_import("general", 10, 0) is False
 
     def test_abort_when_failures_and_abort_enabled(self, tmp_path):
         m = _make_migrator(tmp_path, dry_run=False)
         m.config = MigrationConfig(abort_on_error=True)
-        assert m._should_abort_import("general", 10, 1) is True
+        assert ChannelProcessor(m)._should_abort_import("general", 10, 1) is True
 
     def test_no_abort_when_failures_but_abort_disabled(self, tmp_path):
         m = _make_migrator(tmp_path, dry_run=False)
         m.config = MigrationConfig(abort_on_error=False)
-        assert m._should_abort_import("general", 10, 3) is False
+        assert ChannelProcessor(m)._should_abort_import("general", 10, 3) is False
 
     def test_abort_with_zero_processed(self, tmp_path):
         """Failures with zero processed should still trigger abort if enabled."""
         m = _make_migrator(tmp_path, dry_run=False)
         m.config = MigrationConfig(abort_on_error=True)
-        assert m._should_abort_import("general", 0, 1) is True
+        assert ChannelProcessor(m)._should_abort_import("general", 0, 1) is True
 
 
 # ---------------------------------------------------------------------------
-# _delete_space_if_errors tests
+# ChannelProcessor._delete_space_if_errors tests
 # ---------------------------------------------------------------------------
 
 
 class TestDeleteSpaceIfErrors:
-    """Tests for _delete_space_if_errors()."""
+    """Tests for ChannelProcessor._delete_space_if_errors()."""
 
     def test_no_delete_when_cleanup_disabled(self, tmp_path):
         m = _make_migrator(tmp_path)
         m.config = MigrationConfig(cleanup_on_error=False)
         m.chat = MagicMock()
-        m._delete_space_if_errors("spaces/abc123", "general")
+        ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
         m.chat.spaces().delete.assert_not_called()
 
     def test_delete_when_cleanup_enabled(self, tmp_path):
@@ -574,7 +575,7 @@ class TestDeleteSpaceIfErrors:
         m.chat = MagicMock()
         m.state.created_spaces = {"general": "spaces/abc123"}
         m.state.migration_summary = {"spaces_created": 1}
-        m._delete_space_if_errors("spaces/abc123", "general")
+        ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
         m.chat.spaces().delete.assert_called_once_with(name="spaces/abc123")
         assert "general" not in m.state.created_spaces
         assert m.state.migration_summary["spaces_created"] == 0
@@ -589,7 +590,7 @@ class TestDeleteSpaceIfErrors:
         m.state.created_spaces = {"general": "spaces/abc123"}
         m.state.migration_summary = {"spaces_created": 1}
         # Should not raise
-        m._delete_space_if_errors("spaces/abc123", "general")
+        ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
 
     def test_delete_handles_transport_error(self, tmp_path):
         from google.auth.exceptions import TransportError
@@ -601,7 +602,7 @@ class TestDeleteSpaceIfErrors:
         m.state.created_spaces = {"general": "spaces/abc123"}
         m.state.migration_summary = {"spaces_created": 1}
         # Should not raise — TransportError is a recoverable network issue
-        m._delete_space_if_errors("spaces/abc123", "general")
+        ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
 
     def test_delete_handles_http_error(self, tmp_path):
         from googleapiclient.errors import HttpError
@@ -617,7 +618,7 @@ class TestDeleteSpaceIfErrors:
         m.state.created_spaces = {"general": "spaces/abc123"}
         m.state.migration_summary = {"spaces_created": 1}
         # Should not raise — HttpError is caught and logged
-        m._delete_space_if_errors("spaces/abc123", "general")
+        ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
         # Space should NOT be removed from created_spaces (delete failed)
         assert "general" in m.state.created_spaces
 
@@ -630,7 +631,7 @@ class TestDeleteSpaceIfErrors:
         m.state.migration_summary = {"spaces_created": 1}
         # Should raise — RuntimeError is not a known API/transport error
         with pytest.raises(RuntimeError):
-            m._delete_space_if_errors("spaces/abc123", "general")
+            ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
 
 
 # ---------------------------------------------------------------------------
@@ -716,26 +717,26 @@ class TestCleanupChannelHandlers:
 
 
 # ---------------------------------------------------------------------------
-# _get_internal_email tests
+# user_resolver.get_internal_email tests
 # ---------------------------------------------------------------------------
 
 
 class TestGetInternalEmail:
-    """Tests for _get_internal_email()."""
+    """Tests for user_resolver.get_internal_email()."""
 
     def test_mapped_user(self, tmp_path):
         m = _make_migrator(tmp_path)
-        result = m._get_internal_email("U001")
+        result = m.user_resolver.get_internal_email("U001")
         assert result == "alice@example.com"
 
     def test_unmapped_user_returns_none(self, tmp_path):
         m = _make_migrator(tmp_path)
-        result = m._get_internal_email("U_UNKNOWN")
+        result = m.user_resolver.get_internal_email("U_UNKNOWN")
         assert result is None
 
     def test_explicit_email_arg(self, tmp_path):
         m = _make_migrator(tmp_path)
-        result = m._get_internal_email("U001", "override@example.com")
+        result = m.user_resolver.get_internal_email("U001", "override@example.com")
         assert result == "override@example.com"
 
     def test_bot_user_ignored_when_config_enabled(self, tmp_path):
@@ -751,7 +752,7 @@ class TestGetInternalEmail:
         channels = [{"id": "C001", "name": "general", "members": ["U001"]}]
         m = _make_migrator(tmp_path, users=users, channels=channels)
         m.config.ignore_bots = True
-        result = m._get_internal_email("B001")
+        result = m.user_resolver.get_internal_email("B001")
         assert result is None
 
     def test_bot_user_not_ignored_when_config_disabled(self, tmp_path):
@@ -769,17 +770,17 @@ class TestGetInternalEmail:
         m.config.ignore_bots = False
         # Bot has email mapping
         m.user_map["B001"] = "bot@example.com"
-        result = m._get_internal_email("B001")
+        result = m.user_resolver.get_internal_email("B001")
         assert result == "bot@example.com"
 
 
 # ---------------------------------------------------------------------------
-# _get_user_data tests
+# user_resolver.get_user_data tests
 # ---------------------------------------------------------------------------
 
 
 class TestGetUserData:
-    """Tests for _get_user_data()."""
+    """Tests for user_resolver.get_user_data()."""
 
     def test_existing_user(self, tmp_path):
         users = [
@@ -791,35 +792,37 @@ class TestGetUserData:
             },
         ]
         m = _make_migrator(tmp_path, users=users)
-        data = m._get_user_data("U001")
+        data = m.user_resolver.get_user_data("U001")
         assert data is not None
         assert data["name"] == "alice"
 
     def test_nonexistent_user(self, tmp_path):
         m = _make_migrator(tmp_path)
-        data = m._get_user_data("U_NONEXISTENT")
+        data = m.user_resolver.get_user_data("U_NONEXISTENT")
         assert data is None
 
     def test_caches_after_first_call(self, tmp_path):
         m = _make_migrator(tmp_path)
-        m._get_user_data("U001")
+        m.user_resolver.get_user_data("U001")
         assert m.user_resolver._users_data is not None
         # Second call should use cache
-        m._get_user_data("U001")
+        m.user_resolver.get_user_data("U001")
 
 
 # ---------------------------------------------------------------------------
-# _handle_unmapped_user_message tests
+# user_resolver.handle_unmapped_user_message tests
 # ---------------------------------------------------------------------------
 
 
 class TestHandleUnmappedUserMessage:
-    """Tests for _handle_unmapped_user_message()."""
+    """Tests for user_resolver.handle_unmapped_user_message()."""
 
     def test_returns_admin_email_and_attributed_text(self, tmp_path):
         m = _make_migrator(tmp_path)
         m.state.current_channel = "general"
-        email, text = m._handle_unmapped_user_message("U999", "Hello world")
+        email, text = m.user_resolver.handle_unmapped_user_message(
+            "U999", "Hello world"
+        )
         assert email == "admin@example.com"
         assert "Hello world" in text
         assert "*[From:" in text
@@ -840,54 +843,56 @@ class TestHandleUnmappedUserMessage:
         channels = [{"id": "C001", "name": "general", "members": ["U001"]}]
         m = _make_migrator(tmp_path, users=users, channels=channels)
         m.state.current_channel = "general"
-        _email, text = m._handle_unmapped_user_message("U002", "Hi")
+        _email, text = m.user_resolver.handle_unmapped_user_message("U002", "Hi")
         assert "Bob Jones" in text
         assert "bob@other.com" in text
 
     def test_attribution_with_user_id_only(self, tmp_path):
         m = _make_migrator(tmp_path)
         m.state.current_channel = "general"
-        _email, text = m._handle_unmapped_user_message("U_UNKNOWN", "Hi")
+        _email, text = m.user_resolver.handle_unmapped_user_message("U_UNKNOWN", "Hi")
         assert "U_UNKNOWN" in text
 
     def test_attribution_with_user_mapping_override(self, tmp_path):
         m = _make_migrator(tmp_path)
         m.config.user_mapping_overrides = {"U999": "mapped@example.com"}
         m.state.current_channel = "general"
-        _email, text = m._handle_unmapped_user_message("U999", "Hi")
+        _email, text = m.user_resolver.handle_unmapped_user_message("U999", "Hi")
         assert "mapped@example.com" in text
 
     def test_tracks_unmapped_user(self, tmp_path):
         m = _make_migrator(tmp_path)
         m.state.current_channel = "general"
-        m._handle_unmapped_user_message("U999", "text")
+        m.user_resolver.handle_unmapped_user_message("U999", "text")
         assert "U999" in m.unmapped_user_tracker.unmapped_users
 
 
 # ---------------------------------------------------------------------------
-# _handle_unmapped_user_reaction tests
+# user_resolver.handle_unmapped_user_reaction tests
 # ---------------------------------------------------------------------------
 
 
 class TestHandleUnmappedUserReaction:
-    """Tests for _handle_unmapped_user_reaction()."""
+    """Tests for user_resolver.handle_unmapped_user_reaction()."""
 
     def test_returns_false(self, tmp_path):
         m = _make_migrator(tmp_path)
         m.state.current_channel = "general"
-        result = m._handle_unmapped_user_reaction("U999", "thumbsup", "123.456")
+        result = m.user_resolver.handle_unmapped_user_reaction(
+            "U999", "thumbsup", "123.456"
+        )
         assert result is False
 
     def test_tracks_unmapped_user(self, tmp_path):
         m = _make_migrator(tmp_path)
         m.state.current_channel = "general"
-        m._handle_unmapped_user_reaction("U999", "thumbsup", "123.456")
+        m.user_resolver.handle_unmapped_user_reaction("U999", "thumbsup", "123.456")
         assert "U999" in m.unmapped_user_tracker.unmapped_users
 
     def test_records_skipped_reaction(self, tmp_path):
         m = _make_migrator(tmp_path)
         m.state.current_channel = "general"
-        m._handle_unmapped_user_reaction("U999", "heart", "123.456")
+        m.user_resolver.handle_unmapped_user_reaction("U999", "heart", "123.456")
         assert hasattr(m.state, "skipped_reactions")
         assert len(m.state.skipped_reactions) == 1
         assert m.state.skipped_reactions[0]["reaction"] == "heart"

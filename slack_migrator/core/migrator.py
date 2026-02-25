@@ -120,7 +120,7 @@ class SlackToChatMigrator:
         self.drive: Optional[Any] = None
         self._api_services_initialized = False
 
-        # User resolver is needed before API services (e.g. for _is_external_user)
+        # User resolver is needed before API services (e.g. for is_external_user)
         self.user_resolver = UserResolver.from_migrator(self)
 
         # Load channel metadata from channels.json
@@ -254,56 +254,6 @@ class SlackToChatMigrator:
 
         return name_to_data, id_to_name
 
-    def _get_delegate(self, email: str):
-        """Get a Google Chat API service with user impersonation."""
-        return self.user_resolver.get_delegate(email)
-
-    def _discover_channel_resources(self, channel: str):
-        """Find the last message timestamp in a space to determine where to resume."""
-        self._get_channel_processor()._discover_channel_resources(channel)
-
-    def _should_abort_import(
-        self, channel: str, processed_count: int, failed_count: int
-    ) -> bool:
-        """Determine if we should abort the import after errors in a channel."""
-        return self._get_channel_processor()._should_abort_import(
-            channel, processed_count, failed_count
-        )
-
-    def _delete_space_if_errors(self, space_name, channel):
-        """Delete a space if it had errors and cleanup is enabled."""
-        self._get_channel_processor()._delete_space_if_errors(space_name, channel)
-
-    def _get_channel_processor(self) -> ChannelProcessor:
-        """Get or create the ChannelProcessor instance."""
-        if not hasattr(self, "channel_processor"):
-            self.channel_processor = ChannelProcessor(self)
-        return self.channel_processor
-
-    def _get_internal_email(
-        self, user_id: str, user_email: Optional[str] = None
-    ) -> Optional[str]:
-        """Get internal email for a user, handling external users and tracking unmapped users."""
-        return self.user_resolver.get_internal_email(user_id, user_email)
-
-    def _get_user_data(self, user_id: str) -> Optional[dict]:
-        """Get user data from the users.json export file."""
-        return self.user_resolver.get_user_data(user_id)
-
-    def _handle_unmapped_user_message(
-        self, user_id: str, original_text: str
-    ) -> tuple[str, str]:
-        """Handle messages from unmapped users by using workspace admin with attribution."""
-        return self.user_resolver.handle_unmapped_user_message(user_id, original_text)
-
-    def _handle_unmapped_user_reaction(
-        self, user_id: str, reaction: str, message_ts: str
-    ) -> bool:
-        """Handle reactions from unmapped users by logging and skipping."""
-        return self.user_resolver.handle_unmapped_user_reaction(
-            user_id, reaction, message_ts
-        )
-
     def _get_space_name(self, channel: str) -> str:
         """Get a consistent display name for a Google Chat space based on channel name."""
         return f"Slack #{channel}"
@@ -311,10 +261,6 @@ class SlackToChatMigrator:
     def _get_all_channel_names(self) -> list[str]:
         """Get a list of all channel names from the export directory."""
         return [d.name for d in self.export_root.iterdir() if d.is_dir()]
-
-    def _is_external_user(self, email: Optional[str]) -> bool:
-        """Check if a user is external based on their email domain."""
-        return self.user_resolver.is_external_user(email)
 
     def migrate(self):
         """Main migration function that orchestrates the entire process.
