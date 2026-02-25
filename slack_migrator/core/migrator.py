@@ -2,6 +2,8 @@
 Main migrator class for the Slack to Google Chat migration tool
 """
 
+from __future__ import annotations
+
 import datetime
 import json
 import logging
@@ -9,7 +11,7 @@ import os
 import signal
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from slack_migrator.cli.report import (
     generate_report,
@@ -116,8 +118,8 @@ class SlackToChatMigrator:
         scan_channel_members_for_unmapped_users(self)
 
         # API services will be initialized later after permission checks
-        self.chat: Optional[Any] = None
-        self.drive: Optional[Any] = None
+        self.chat: Any | None = None
+        self.drive: Any | None = None
         self._api_services_initialized = False
 
         # User resolver is needed before API services (e.g. for is_external_user)
@@ -310,17 +312,7 @@ class SlackToChatMigrator:
                 os.makedirs(self.state.output_dir, exist_ok=True)
 
             # Reset per-run state
-            self.state.channel_handlers = {}
-            self.state.thread_map = {}
-            self.state.migration_summary = {
-                "channels_processed": [],
-                "spaces_created": 0,
-                "messages_created": 0,
-                "reactions_created": 0,
-                "files_created": 0,
-            }
-            self.state.migration_errors = []
-            self.state.channels_with_errors = []
+            self.state.reset_for_run()
 
             # Report unmapped user issues before starting migration (if any detected during initialization)
             if (
@@ -358,10 +350,6 @@ class SlackToChatMigrator:
                 logging.INFO,
                 f"Found {len(all_channel_dirs)} channel directories in export",
             )
-
-            # Add ability to abort after first channel error
-            self.state.channel_error_count = 0
-            self.state.first_channel_processed = False
 
             # Process each channel
             self.channel_processor = ChannelProcessor(self)

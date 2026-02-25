@@ -7,13 +7,15 @@ handling argument parsing, configuration loading, and executing the
 migration process with appropriate error handling.
 """
 
+from __future__ import annotations
+
 import datetime
 import logging
 import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Callable, ClassVar, Optional
+from typing import TYPE_CHECKING, Callable, ClassVar
 
 import click
 
@@ -412,9 +414,9 @@ class MigrationOrchestrator:
 
     def __init__(self, args: SimpleNamespace) -> None:
         self.args = args
-        self.migrator: Optional[SlackToChatMigrator] = None
-        self.dry_run_migrator: Optional[SlackToChatMigrator] = None
-        self.output_dir: Optional[str] = None
+        self.migrator: SlackToChatMigrator | None = None
+        self.dry_run_migrator: SlackToChatMigrator | None = None
+        self.output_dir: str | None = None
 
     def create_migrator(self, force_dry_run: bool = False) -> SlackToChatMigrator:
         """Create a migrator instance with the given parameters.
@@ -754,7 +756,7 @@ def log_startup_info(args: SimpleNamespace) -> None:
     log_with_context(logging.INFO, f"- Debug API calls: {args.debug_api}")
 
 
-def handle_http_error(e: "HttpError") -> None:
+def handle_http_error(e: HttpError) -> None:
     """Handle HTTP errors with specific messages.
 
     Args:
