@@ -131,7 +131,7 @@ class SlackToChatMigrator:
             name: id for id, name in self.channel_id_to_name.items()
         }
 
-    def _initialize_api_services(self):
+    def _initialize_api_services(self) -> None:
         """Initialize Google API services after permission validation."""
         if self._api_services_initialized:
             return
@@ -171,7 +171,7 @@ class SlackToChatMigrator:
         # Initialize dependent services
         self._initialize_dependent_services()
 
-    def _initialize_dependent_services(self):
+    def _initialize_dependent_services(self) -> None:
         """Initialize services that depend on API clients."""
         # Initialize file handler
         self.file_handler = FileHandler(
@@ -199,7 +199,7 @@ class SlackToChatMigrator:
         # Load existing space mappings for update mode or file attachments
         load_existing_space_mappings(self)
 
-    def _validate_export_format(self):
+    def _validate_export_format(self) -> None:
         """Validate that the export directory has the expected structure."""
         # Check that the export root is a valid directory before inspecting contents
         if not self.export_root.is_dir():
@@ -233,7 +233,7 @@ class SlackToChatMigrator:
                     f"No JSON files found in channel directory {ch_dir.name}",
                 )
 
-    def _load_channels_meta(self):
+    def _load_channels_meta(self) -> tuple[dict[str, Any], dict[str, str]]:
         """
         Load channel metadata from channels.json file.
 
@@ -262,7 +262,7 @@ class SlackToChatMigrator:
         """Get a list of all channel names from the export directory."""
         return [d.name for d in self.export_root.iterdir() if d.is_dir()]
 
-    def migrate(self):
+    def migrate(self) -> bool:
         """Main migration function that orchestrates the entire process.
 
         Returns:
@@ -272,7 +272,7 @@ class SlackToChatMigrator:
         log_with_context(logging.INFO, "Starting migration process")
 
         # Set up signal handler to ensure we log migration status on interrupt
-        def signal_handler(signum, frame):
+        def signal_handler(signum: int, frame: Any) -> None:
             """Handle SIGINT (Ctrl+C) gracefully.
 
             Args:
