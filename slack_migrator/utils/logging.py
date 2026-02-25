@@ -13,6 +13,9 @@ from typing import Any
 # Module-level flag to track if API debug logging is enabled
 _DEBUG_API_ENABLED = False
 
+RESPONSE_MAX_LENGTH = 2000
+RESPONSE_FALLBACK_LENGTH = 1000
+
 
 class JsonFormatter(logging.Formatter):
     """Logging formatter that outputs records as single-line JSON objects."""
@@ -637,13 +640,17 @@ def log_api_response(
                 # For dict/list, convert to formatted JSON string
                 response_str = json.dumps(response_data, indent=2)
                 # Truncate if too long
-                if len(response_str) > 2000:
-                    response_str = response_str[:2000] + "... [truncated]"
+                if len(response_str) > RESPONSE_MAX_LENGTH:
+                    response_str = (
+                        response_str[:RESPONSE_MAX_LENGTH] + "... [truncated]"
+                    )
             else:
                 # For other types, use string representation
                 response_str = str(response_data)
-                if len(response_str) > 1000:
-                    response_str = response_str[:1000] + "... [truncated]"
+                if len(response_str) > RESPONSE_FALLBACK_LENGTH:
+                    response_str = (
+                        response_str[:RESPONSE_FALLBACK_LENGTH] + "... [truncated]"
+                    )
 
             # Add response data to the log context
             log_context["response"] = response_str

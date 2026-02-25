@@ -26,6 +26,11 @@ if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
 
 
+MESSAGE_ID_MAX_LENGTH = 63
+CLIENT_MESSAGE_PREFIX = "client-slack-"
+CLIENT_EDIT_PREFIX = "client-slack-edit-"
+
+
 class MessageResult(str, Enum):
     """Sentinel return values from send_message() for non-API outcomes."""
 
@@ -379,12 +384,12 @@ def send_message(  # noqa: C901
         if is_edited:
             # Use a different format for edited messages to avoid conflicts
             # Include both timestamps to ensure uniqueness
-            message_id = f"client-slack-edit-{clean_ts}-{current_ms}-{unique_id}"
+            message_id = f"{CLIENT_EDIT_PREFIX}{clean_ts}-{current_ms}-{unique_id}"
         else:
-            message_id = f"client-slack-{clean_ts}-{current_ms}-{unique_id}"
+            message_id = f"{CLIENT_MESSAGE_PREFIX}{clean_ts}-{current_ms}-{unique_id}"
 
-        # Ensure the ID is within the 63-character limit
-        if len(message_id) > 63:
+        # Ensure the ID is within the Google Chat character limit
+        if len(message_id) > MESSAGE_ID_MAX_LENGTH:
             # Hash the timestamps and use a shorter ID format
             hash_input = ts
             if is_edited:
@@ -396,10 +401,12 @@ def send_message(  # noqa: C901
             # Create a shorter ID that still maintains uniqueness
             if is_edited:
                 message_id = (
-                    f"client-slack-edit-{hash_digest}-{current_ms}-{unique_id[:4]}"
+                    f"{CLIENT_EDIT_PREFIX}{hash_digest}-{current_ms}-{unique_id[:4]}"
                 )
             else:
-                message_id = f"client-slack-{hash_digest}-{current_ms}-{unique_id[:4]}"
+                message_id = (
+                    f"{CLIENT_MESSAGE_PREFIX}{hash_digest}-{current_ms}-{unique_id[:4]}"
+                )
 
         result = None
 
