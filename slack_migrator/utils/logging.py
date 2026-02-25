@@ -92,7 +92,11 @@ def setup_main_log_file(
         old_emit = file_handler.emit
 
         def immediate_flush_emit(record: logging.LogRecord) -> None:
-            """Emit the record and flush the stream immediately for data safety."""
+            """Emit the record and flush immediately.
+
+            Args:
+                record: The log record to emit.
+            """
             old_emit(record)
             file_handler.flush()
 
@@ -112,7 +116,14 @@ def setup_main_log_file(
         """Filter that routes records to the main migration log file."""
 
         def filter(self, record: logging.LogRecord) -> bool:
-            """Return True if *record* belongs in the main (non-channel) log."""
+            """Return True if *record* belongs in the main log.
+
+            Args:
+                record: The log record to evaluate.
+
+            Returns:
+                True if the record should appear in the main log.
+            """
             # Check if the record has a channel attribute
             record_channel = getattr(record, "channel", None)
 
@@ -353,7 +364,11 @@ def setup_channel_logger(
         old_emit = file_handler.emit
 
         def immediate_flush_emit(record: logging.LogRecord) -> None:
-            """Emit the record and flush the stream immediately for data safety."""
+            """Emit the record and flush immediately.
+
+            Args:
+                record: The log record to emit.
+            """
             old_emit(record)
             file_handler.flush()
 
@@ -368,7 +383,14 @@ def setup_channel_logger(
         """Filter that only passes records matching a specific channel."""
 
         def filter(self, record: logging.LogRecord) -> bool:
-            """Return True if *record* belongs to this handler's channel."""
+            """Return True if *record* belongs to this channel.
+
+            Args:
+                record: The log record to evaluate.
+
+            Returns:
+                True if the record matches this channel.
+            """
             # Always include logs that have a channel attribute matching this channel
             record_channel = getattr(record, "channel", None)
             if record_channel == channel:
@@ -666,12 +688,20 @@ def log_failed_message(channel: str, failed_msg: dict[str, Any]) -> None:
 
 
 def is_debug_api_enabled() -> bool:
-    """Check if API debug logging is enabled."""
+    """Check if API debug logging is enabled.
+
+    Returns:
+        True if the ``--debug_api`` flag was set at startup.
+    """
     return _DEBUG_API_ENABLED
 
 
 def get_logger() -> logging.Logger:
-    """Get the slack_migrator logger, creating it with defaults if needed."""
+    """Get the slack_migrator logger, creating it with defaults if needed.
+
+    Returns:
+        The ``slack_migrator`` logger instance.
+    """
     slack_logger = logging.getLogger("slack_migrator")
     if not slack_logger.handlers:
         # If no handlers, set up a basic logger

@@ -431,7 +431,11 @@ class SlackToChatMigrator:
         return self.user_resolver.is_external_user(email)
 
     def migrate(self):
-        """Main migration function that orchestrates the entire process."""
+        """Main migration function that orchestrates the entire process.
+
+        Returns:
+            True on successful completion.
+        """
         migration_start_time = time.time()
         log_with_context(logging.INFO, "Starting migration process")
 

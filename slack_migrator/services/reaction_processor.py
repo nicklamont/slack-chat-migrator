@@ -38,7 +38,13 @@ def process_reactions_batch(  # noqa: C901
     def reaction_callback(
         request_id: str, response: dict[str, Any] | None, exception: HttpError | None
     ) -> None:
-        """Handle the result of a single batched reaction API call."""
+        """Handle the result of a single batched reaction API call.
+
+        Args:
+            request_id: Identifier assigned by the batch request.
+            response: API response dict on success, or None on failure.
+            exception: The HTTP error if the call failed, or None.
+        """
         if exception:
             log_with_context(
                 logging.WARNING,

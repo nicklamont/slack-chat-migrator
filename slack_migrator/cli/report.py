@@ -93,7 +93,14 @@ def print_dry_run_summary(
 
 
 def generate_report(migrator: SlackToChatMigrator) -> str:  # noqa: C901
-    """Generate a detailed migration report."""
+    """Generate a detailed migration report.
+
+    Args:
+        migrator: The migrator whose state is written to the report.
+
+    Returns:
+        Path to the generated YAML report file.
+    """
     # Get the output directory
     output_dir = migrator.state.output_dir or "."
 

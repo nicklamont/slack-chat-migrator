@@ -74,7 +74,14 @@ class DefaultGroup(click.Group):
 
 
 def common_options(f: Callable[..., None]) -> Callable[..., None]:
-    """Decorator that adds options shared across multiple subcommands."""
+    """Decorator that adds options shared across multiple subcommands.
+
+    Args:
+        f: The Click command function to decorate.
+
+    Returns:
+        The decorated function with common options attached.
+    """
     f = click.option(
         "--creds_path",
         required=True,
@@ -120,7 +127,11 @@ def common_options(f: Callable[..., None]) -> Callable[..., None]:
 @click.version_option(version=slack_migrator.__version__, prog_name="slack-migrator")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """Slack to Google Chat migration tool."""
+    """Slack to Google Chat migration tool.
+
+    Args:
+        ctx: The Click context (injected by ``@click.pass_context``).
+    """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -583,7 +594,11 @@ class MigrationOrchestrator:
         log_with_context(logging.INFO, "")
 
     def run_validation(self) -> bool:
-        """Run comprehensive validation. Returns True if validation passes."""
+        """Run comprehensive validation.
+
+        Returns:
+            True if validation passes and the user elects to proceed.
+        """
         log_with_context(logging.INFO, "")
         log_with_context(
             logging.INFO, "🔍 STEP 1: Running comprehensive validation (dry run)..."
@@ -620,7 +635,11 @@ class MigrationOrchestrator:
         return True
 
     def get_user_confirmation(self) -> bool:
-        """Get user confirmation to proceed with migration."""
+        """Get user confirmation to proceed with migration.
+
+        Returns:
+            True if the user confirms, False otherwise.
+        """
         log_with_context(
             logging.INFO, "🚀 STEP 2: Ready to proceed with actual migration"
         )
@@ -712,7 +731,11 @@ class MigrationOrchestrator:
 
 
 def log_startup_info(args: SimpleNamespace) -> None:
-    """Log startup information."""
+    """Log startup information.
+
+    Args:
+        args: Parsed CLI arguments containing migration parameters.
+    """
     config_path = Path(args.config)
     if not config_path.is_absolute():
         config_path = Path.cwd() / args.config
@@ -728,7 +751,11 @@ def log_startup_info(args: SimpleNamespace) -> None:
 
 
 def handle_http_error(e: "HttpError") -> None:
-    """Handle HTTP errors with specific messages."""
+    """Handle HTTP errors with specific messages.
+
+    Args:
+        e: The Google API HTTP error to handle.
+    """
 
     if e.resp.status == 403 and "PERMISSION_DENIED" in str(e):
         log_with_context(logging.ERROR, f"Permission denied error: {e}")
@@ -770,7 +797,11 @@ def handle_http_error(e: "HttpError") -> None:
 
 
 def handle_exception(e: Exception) -> None:
-    """Handle different types of exceptions."""
+    """Handle different types of exceptions.
+
+    Args:
+        e: The exception to handle.
+    """
     from googleapiclient.errors import HttpError
 
     if isinstance(e, MigratorError):
@@ -816,7 +847,11 @@ def show_security_warning() -> None:
 
 
 def create_migration_output_directory() -> str:
-    """Create output directory for migration with timestamp."""
+    """Create output directory for migration with timestamp.
+
+    Returns:
+        The path to the newly created output directory.
+    """
     import datetime
     import os
 

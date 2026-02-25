@@ -143,7 +143,11 @@ class FileHandler:
 
     @folder_id.setter
     def folder_id(self, value: str | None) -> None:
-        """Backward compatibility setter for the root folder ID."""
+        """Backward compatibility setter for the root folder ID.
+
+        Args:
+            value: The Drive folder ID to set, or None to clear.
+        """
         self._root_folder_id = value
 
     def _get_current_channel(self) -> str | None:

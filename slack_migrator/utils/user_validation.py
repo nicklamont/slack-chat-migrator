@@ -64,15 +64,27 @@ class UnmappedUserTracker:
         self.add_unmapped_user(user_id, context)
 
     def has_unmapped_users(self) -> bool:
-        """Check if any unmapped users were found."""
+        """Check if any unmapped users were found.
+
+        Returns:
+            True if at least one unmapped user has been recorded.
+        """
         return len(self.unmapped_users) > 0
 
     def get_unmapped_count(self) -> int:
-        """Get the count of unmapped users."""
+        """Get the count of unmapped users.
+
+        Returns:
+            Number of distinct unmapped user IDs.
+        """
         return len(self.unmapped_users)
 
     def get_unmapped_users_list(self) -> list[str]:
-        """Get a sorted list of unmapped user IDs."""
+        """Get a sorted list of unmapped user IDs.
+
+        Returns:
+            Alphabetically sorted list of unmapped Slack user IDs.
+        """
         return sorted(self.unmapped_users)
 
 

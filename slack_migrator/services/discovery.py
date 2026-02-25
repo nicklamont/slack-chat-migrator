@@ -318,8 +318,10 @@ def should_process_message(last_timestamp: float, message_ts: str) -> bool:
 
 
 def log_space_mapping_conflicts(migrator: SlackToChatMigrator) -> None:
-    """
-    Log information about space mapping conflicts that need to be resolved.
+    """Log information about space mapping conflicts that need to be resolved.
+
+    Args:
+        migrator: The migrator instance whose state contains conflicts.
     """
     if migrator.dry_run:
         log_with_context(logging.INFO, "[DRY RUN] Checking for space mapping conflicts")
@@ -351,8 +353,11 @@ def load_space_mappings(migrator: SlackToChatMigrator) -> dict[str, str]:
     This uses the Google Chat API for discovery and the config file for overrides.
     No persisted mapping files are used anymore.
 
+    Args:
+        migrator: The migrator instance providing config and API services.
+
     Returns:
-        dict: Mapping from channel names to space IDs, or empty dict if not found
+        Mapping from channel names to space IDs, or empty dict if not found.
     """
     try:
         # Initialize the channel_id_to_space_id mapping if not present
