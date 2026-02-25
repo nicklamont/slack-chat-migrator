@@ -60,9 +60,9 @@ def discover_existing_spaces(  # noqa: C901
         # Paginate through all spaces accessible to the service account
         page_token = None
         while True:
-            request = migrator.chat.spaces().list(
+            request = migrator.chat.spaces().list(  # type: ignore[union-attr]
                 pageSize=SPACES_PAGE_SIZE, pageToken=page_token
-            )  # type: ignore[union-attr]
+            )
             response = request.execute()
 
             # Process each space

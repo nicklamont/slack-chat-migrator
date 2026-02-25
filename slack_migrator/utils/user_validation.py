@@ -283,7 +283,7 @@ def analyze_unmapped_users(
                 continue
 
             # Determine user type based on available data
-            user_type: str = UserType.REGULAR_USER
+            user_type: UserType = UserType.REGULAR_USER
             details = []
 
             if user_data.get("is_bot", False):
