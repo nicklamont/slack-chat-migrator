@@ -96,7 +96,16 @@ def channel_has_external_users(migrator: SlackToChatMigrator, channel: str) -> b
 
 
 def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
-    """Create a Google Chat space for a Slack channel in import mode."""
+    """Create a Google Chat space for a Slack channel in import mode.
+
+    Args:
+        migrator: The migrator instance providing API services and config.
+        channel: Slack channel name to create a space for.
+
+    Returns:
+        The Google Chat space resource name (e.g. ``spaces/AAAA``),
+        or an ``ERROR_NO_PERMISSION_`` sentinel on 403 errors.
+    """
     # Get channel metadata
     meta = migrator.channels_meta.get(channel, {})
     display_name = f"Slack #{channel}"

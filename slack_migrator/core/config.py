@@ -27,6 +27,14 @@ class SharedDriveConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> SharedDriveConfig:
+        """Create a SharedDriveConfig from a raw config dictionary.
+
+        Args:
+            data: Dictionary with optional ``name`` and ``id`` keys, or None.
+
+        Returns:
+            A SharedDriveConfig instance with values from *data* or defaults.
+        """
         if not data:
             return cls()
         return cls(
@@ -69,7 +77,14 @@ class MigrationConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MigrationConfig:
-        """Create a MigrationConfig from a raw config dictionary."""
+        """Create a MigrationConfig from a raw config dictionary.
+
+        Args:
+            data: Dictionary loaded from the YAML config file.
+
+        Returns:
+            A fully populated MigrationConfig with defaults for missing keys.
+        """
         shared_drive = SharedDriveConfig.from_dict(data.get("shared_drive"))
         return cls(
             exclude_channels=data.get("exclude_channels", []),

@@ -67,7 +67,14 @@ class UserResolver:
 
     @classmethod
     def from_migrator(cls, migrator: SlackToChatMigrator) -> UserResolver:
-        """Create a UserResolver from a SlackToChatMigrator instance."""
+        """Create a UserResolver from a SlackToChatMigrator instance.
+
+        Args:
+            migrator: The migrator instance to extract dependencies from.
+
+        Returns:
+            A fully initialised UserResolver.
+        """
         return cls(
             config=migrator.config,
             state=migrator.state,
@@ -81,7 +88,14 @@ class UserResolver:
         )
 
     def get_delegate(self, email: str) -> Any:
-        """Get a Google Chat API service with user impersonation."""
+        """Get a Google Chat API service with user impersonation.
+
+        Args:
+            email: The Google Workspace email to impersonate.
+
+        Returns:
+            An impersonated Chat API service, or the admin service on failure.
+        """
         if not email:
             return self.chat
 

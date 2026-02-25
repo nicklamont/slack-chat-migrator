@@ -53,6 +53,15 @@ class DefaultGroup(click.Group):
     _GROUP_FLAGS: ClassVar[set[str]] = {"--help", "--version", "-h"}
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        """Prepend ``migrate`` when the first token is a flag (backwards compat).
+
+        Args:
+            ctx: The current Click context.
+            args: Raw CLI argument list.
+
+        Returns:
+            The (possibly modified) argument list for further parsing.
+        """
         # If no args at all, let click show help as usual.
         if args and args[0].startswith("-") and args[0] not in self._GROUP_FLAGS:
             args = ["migrate", *args]
@@ -65,7 +74,14 @@ class DefaultGroup(click.Group):
 
 
 def common_options(f: Callable[..., None]) -> Callable[..., None]:
-    """Decorator that adds options shared across multiple subcommands."""
+    """Decorator that adds options shared across multiple subcommands.
+
+    Args:
+        f: The Click command function to decorate.
+
+    Returns:
+        The decorated function with common options attached.
+    """
     f = click.option(
         "--creds_path",
         required=True,
@@ -111,7 +127,11 @@ def common_options(f: Callable[..., None]) -> Callable[..., None]:
 @click.version_option(version=slack_migrator.__version__, prog_name="slack-migrator")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """Slack to Google Chat migration tool."""
+    """Slack to Google Chat migration tool.
+
+    Args:
+        ctx: The Click context (injected by ``@click.pass_context``).
+    """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -157,7 +177,19 @@ def migrate(
     update_mode: bool,
     skip_permission_check: bool,
 ) -> None:
-    """Run the full Slack-to-Google-Chat migration."""
+    """Run the full Slack-to-Google-Chat migration.
+
+    Args:
+        creds_path: Path to service account credentials JSON.
+        export_path: Path to Slack export directory.
+        workspace_admin: Email of workspace admin to impersonate.
+        config: Path to config YAML.
+        verbose: Enable verbose console logging.
+        debug_api: Enable detailed API request/response logging.
+        dry_run: Validation-only mode.
+        update_mode: Update existing spaces instead of creating new ones.
+        skip_permission_check: Skip permission checks before migration.
+    """
     args = SimpleNamespace(
         creds_path=creds_path,
         export_path=export_path,
@@ -208,6 +240,13 @@ def check_permissions(
 
     Tests that the service account has all required scopes for the Chat and
     Drive APIs.  Does not require a Slack export directory.
+
+    Args:
+        creds_path: Path to service account credentials JSON.
+        workspace_admin: Email of workspace admin to impersonate.
+        config: Path to config YAML.
+        verbose: Enable verbose console logging.
+        debug_api: Enable detailed API request/response logging.
     """
     setup_logger(verbose, debug_api)
 
@@ -253,6 +292,15 @@ def validate(
     """Dry-run validation of export data, user mappings, and channels.
 
     Equivalent to ``migrate --dry_run`` but expressed as an explicit command.
+
+    Args:
+        creds_path: Path to service account credentials JSON.
+        export_path: Path to Slack export directory.
+        workspace_admin: Email of workspace admin to impersonate.
+        config: Path to config YAML.
+        verbose: Enable verbose console logging.
+        debug_api: Enable detailed API request/response logging.
+        dry_run: Ignored — validate always runs in dry-run mode.
     """
     if dry_run:
         log_with_context(
@@ -313,6 +361,14 @@ def cleanup(
     Lists all spaces visible to the service account and calls completeImport()
     on any that are still in import mode.  Does not add members — use
     ``migrate --update_mode`` for that.
+
+    Args:
+        creds_path: Path to service account credentials JSON.
+        workspace_admin: Email of workspace admin to impersonate.
+        config: Path to config YAML.
+        verbose: Enable verbose console logging.
+        debug_api: Enable detailed API request/response logging.
+        yes: Skip confirmation prompt.
     """
     from slack_migrator.core.config import load_config
     from slack_migrator.utils.api import get_gcp_service
@@ -358,7 +414,14 @@ class MigrationOrchestrator:
         self.output_dir: Optional[str] = None
 
     def create_migrator(self, force_dry_run: bool = False) -> SlackToChatMigrator:
-        """Create a migrator instance with the given parameters."""
+        """Create a migrator instance with the given parameters.
+
+        Args:
+            force_dry_run: If True, override the CLI dry_run flag to True.
+
+        Returns:
+            A configured SlackToChatMigrator ready to run.
+        """
         migrator = SlackToChatMigrator(
             self.args.creds_path,
             self.args.export_path,
@@ -424,7 +487,14 @@ class MigrationOrchestrator:
                 )
 
     def check_unmapped_users(self, migrator_instance: SlackToChatMigrator) -> bool:
-        """Check for unmapped users and return True if any found."""
+        """Check for unmapped users and return True if any found.
+
+        Args:
+            migrator_instance: The migrator to inspect.
+
+        Returns:
+            True if unmapped users were detected, False otherwise.
+        """
         return (
             hasattr(migrator_instance, "unmapped_user_tracker")
             and migrator_instance.unmapped_user_tracker.has_unmapped_users()
@@ -433,7 +503,15 @@ class MigrationOrchestrator:
     def report_validation_issues(
         self, migrator_instance: SlackToChatMigrator, is_explicit_dry_run: bool = False
     ) -> bool:
-        """Report validation issues and ask user if they want to proceed anyway."""
+        """Report validation issues and ask user if they want to proceed anyway.
+
+        Args:
+            migrator_instance: The migrator whose results are reported.
+            is_explicit_dry_run: If True, skip the interactive confirmation prompt.
+
+        Returns:
+            True if the user chose to proceed despite issues, False otherwise.
+        """
         log_with_context(logging.INFO, "")
         log_with_context(logging.INFO, "🚨 VALIDATION ISSUES DETECTED!")
         log_with_context(
@@ -494,7 +572,11 @@ class MigrationOrchestrator:
                 return False
 
     def report_validation_success(self, is_explicit_dry_run: bool = False) -> None:
-        """Report successful validation."""
+        """Report successful validation.
+
+        Args:
+            is_explicit_dry_run: If True, include a hint to re-run without dry_run.
+        """
         log_with_context(logging.INFO, "")
         log_with_context(logging.INFO, "✅ Validation completed successfully!")
         log_with_context(logging.INFO, "   • All users mapped correctly")
@@ -512,7 +594,11 @@ class MigrationOrchestrator:
         log_with_context(logging.INFO, "")
 
     def run_validation(self) -> bool:
-        """Run comprehensive validation. Returns True if validation passes."""
+        """Run comprehensive validation.
+
+        Returns:
+            True if validation passes and the user elects to proceed.
+        """
         log_with_context(logging.INFO, "")
         log_with_context(
             logging.INFO, "🔍 STEP 1: Running comprehensive validation (dry run)..."
@@ -549,7 +635,11 @@ class MigrationOrchestrator:
         return True
 
     def get_user_confirmation(self) -> bool:
-        """Get user confirmation to proceed with migration."""
+        """Get user confirmation to proceed with migration.
+
+        Returns:
+            True if the user confirms, False otherwise.
+        """
         log_with_context(
             logging.INFO, "🚀 STEP 2: Ready to proceed with actual migration"
         )
@@ -641,7 +731,11 @@ class MigrationOrchestrator:
 
 
 def log_startup_info(args: SimpleNamespace) -> None:
-    """Log startup information."""
+    """Log startup information.
+
+    Args:
+        args: Parsed CLI arguments containing migration parameters.
+    """
     config_path = Path(args.config)
     if not config_path.is_absolute():
         config_path = Path.cwd() / args.config
@@ -657,7 +751,11 @@ def log_startup_info(args: SimpleNamespace) -> None:
 
 
 def handle_http_error(e: "HttpError") -> None:
-    """Handle HTTP errors with specific messages."""
+    """Handle HTTP errors with specific messages.
+
+    Args:
+        e: The Google API HTTP error to handle.
+    """
 
     if e.resp.status == 403 and "PERMISSION_DENIED" in str(e):
         log_with_context(logging.ERROR, f"Permission denied error: {e}")
@@ -699,7 +797,11 @@ def handle_http_error(e: "HttpError") -> None:
 
 
 def handle_exception(e: Exception) -> None:
-    """Handle different types of exceptions."""
+    """Handle different types of exceptions.
+
+    Args:
+        e: The exception to handle.
+    """
     from googleapiclient.errors import HttpError
 
     if isinstance(e, MigratorError):
@@ -745,7 +847,11 @@ def show_security_warning() -> None:
 
 
 def create_migration_output_directory() -> str:
-    """Create output directory for migration with timestamp."""
+    """Create output directory for migration with timestamp.
+
+    Returns:
+        The path to the newly created output directory.
+    """
     import datetime
     import os
 

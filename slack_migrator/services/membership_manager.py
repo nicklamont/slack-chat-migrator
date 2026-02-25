@@ -31,7 +31,13 @@ FIRST_MESSAGE_OFFSET_MINUTES = 1
 
 
 def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) -> None:  # noqa: C901
-    """Add users to a space as historical members."""
+    """Add users to a space as historical members.
+
+    Args:
+        migrator: The migrator instance providing API services and user maps.
+        space: Google Chat space resource name (e.g. ``spaces/AAAA``).
+        channel: Slack channel name used for log context and data lookup.
+    """
     log_with_context(
         logging.DEBUG,
         f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding historical memberships for channel {channel}",
@@ -404,6 +410,11 @@ def add_regular_members(  # noqa: C901
 
     This method also updates any channel folder permissions to ensure only
     active members have access to shared files.
+
+    Args:
+        migrator: The migrator instance providing API services and user maps.
+        space: Google Chat space resource name (e.g. ``spaces/AAAA``).
+        channel: Slack channel name used for log context and data lookup.
     """
     # Initialize the active_users_by_channel attribute if it doesn't exist
     if not hasattr(migrator.state, "active_users_by_channel"):

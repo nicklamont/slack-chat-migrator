@@ -14,7 +14,17 @@ _DEBUG_API_ENABLED = False
 
 
 class JsonFormatter(logging.Formatter):
+    """Logging formatter that outputs records as single-line JSON objects."""
+
     def format(self, record: logging.LogRecord) -> str:
+        """Format a log record as a JSON string.
+
+        Args:
+            record: The log record to format.
+
+        Returns:
+            A JSON-encoded string containing the log data.
+        """
         data = {
             "time": self.formatTime(record, self.datefmt),
             "level": record.levelname,
@@ -82,6 +92,11 @@ def setup_main_log_file(
         old_emit = file_handler.emit
 
         def immediate_flush_emit(record: logging.LogRecord) -> None:
+            """Emit the record and flush immediately.
+
+            Args:
+                record: The log record to emit.
+            """
             old_emit(record)
             file_handler.flush()
 
@@ -98,7 +113,17 @@ def setup_main_log_file(
     # 2. All logs without a channel attribute (migration-level events)
     # 3. API logs when debug_api is enabled AND they have no channel context
     class MainLogFilter(logging.Filter):
+        """Filter that routes records to the main migration log file."""
+
         def filter(self, record: logging.LogRecord) -> bool:
+            """Return True if *record* belongs in the main log.
+
+            Args:
+                record: The log record to evaluate.
+
+            Returns:
+                True if the record should appear in the main log.
+            """
             # Check if the record has a channel attribute
             record_channel = getattr(record, "channel", None)
 
@@ -171,6 +196,14 @@ class EnhancedFormatter(logging.Formatter):
         self.include_api_details = include_api_details
 
     def format(self, record: logging.LogRecord) -> str:
+        """Format a log record, optionally appending API request/response data.
+
+        Args:
+            record: The log record to format.
+
+        Returns:
+            The formatted log string.
+        """
         # First apply the base format
         result = super().format(record)
 
@@ -331,6 +364,11 @@ def setup_channel_logger(
         old_emit = file_handler.emit
 
         def immediate_flush_emit(record: logging.LogRecord) -> None:
+            """Emit the record and flush immediately.
+
+            Args:
+                record: The log record to emit.
+            """
             old_emit(record)
             file_handler.flush()
 
@@ -342,7 +380,17 @@ def setup_channel_logger(
 
     # Create a filter to only include logs for this specific channel and related API calls
     class ChannelFilter(logging.Filter):
+        """Filter that only passes records matching a specific channel."""
+
         def filter(self, record: logging.LogRecord) -> bool:
+            """Return True if *record* belongs to this channel.
+
+            Args:
+                record: The log record to evaluate.
+
+            Returns:
+                True if the record matches this channel.
+            """
             # Always include logs that have a channel attribute matching this channel
             record_channel = getattr(record, "channel", None)
             if record_channel == channel:
@@ -640,12 +688,20 @@ def log_failed_message(channel: str, failed_msg: dict[str, Any]) -> None:
 
 
 def is_debug_api_enabled() -> bool:
-    """Check if API debug logging is enabled."""
+    """Check if API debug logging is enabled.
+
+    Returns:
+        True if the ``--debug_api`` flag was set at startup.
+    """
     return _DEBUG_API_ENABLED
 
 
 def get_logger() -> logging.Logger:
-    """Get the slack_migrator logger, creating it with defaults if needed."""
+    """Get the slack_migrator logger, creating it with defaults if needed.
+
+    Returns:
+        The ``slack_migrator`` logger instance.
+    """
     slack_logger = logging.getLogger("slack_migrator")
     if not slack_logger.handlers:
         # If no handlers, set up a basic logger

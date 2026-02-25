@@ -26,11 +26,25 @@ def process_reactions_batch(  # noqa: C901
     reactions: list[dict[str, Any]],
     message_id: str,
 ) -> None:
-    """Process reactions for a message in import mode."""
+    """Process reactions for a message in import mode.
+
+    Args:
+        migrator: The migrator instance providing API services and config.
+        message_name: Google Chat resource name of the parent message.
+        reactions: List of Slack reaction dicts (each with ``name`` and ``users``).
+        message_id: Short message identifier for logging.
+    """
 
     def reaction_callback(
         request_id: str, response: dict[str, Any] | None, exception: HttpError | None
     ) -> None:
+        """Handle the result of a single batched reaction API call.
+
+        Args:
+            request_id: Identifier assigned by the batch request.
+            response: API response dict on success, or None on failure.
+            exception: The HTTP error if the call failed, or None.
+        """
         if exception:
             log_with_context(
                 logging.WARNING,
