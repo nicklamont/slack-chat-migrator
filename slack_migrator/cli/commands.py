@@ -658,7 +658,8 @@ class MigrationOrchestrator:
         """Execute the main migration logic."""
         if self.args.dry_run:
             # Explicit dry run mode
-            assert self.migrator is not None
+            if self.migrator is None:
+                raise RuntimeError("Migrator not initialized")
             self.migrator.migrate()
 
             if self.check_unmapped_users(self.migrator):
@@ -675,7 +676,8 @@ class MigrationOrchestrator:
                 self.report_validation_success()
 
                 if self.get_user_confirmation():
-                    assert self.migrator is not None
+                    if self.migrator is None:
+                        raise RuntimeError("Migrator not initialized")
                     self.migrator.migrate()
                 else:
                     log_with_context(logging.INFO, "Migration cancelled by user.")

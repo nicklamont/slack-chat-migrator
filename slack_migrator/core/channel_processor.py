@@ -177,7 +177,8 @@ class ChannelProcessor:
     def _setup_channel_logging(self, channel: str) -> None:
         """Set up channel-specific log handler."""
         migrator = self.migrator
-        assert migrator.state.output_dir is not None
+        if migrator.state.output_dir is None:
+            raise RuntimeError("Output directory not set")
         channel_handler = setup_channel_logger(
             migrator.state.output_dir, channel, migrator.verbose, is_debug_api_enabled()
         )
@@ -412,7 +413,8 @@ class ChannelProcessor:
                     channel=channel,
                 )
 
-                assert migrator.chat is not None
+                if migrator.chat is None:
+                    raise RuntimeError("Chat API service not initialized")
                 migrator.chat.spaces().completeImport(name=space).execute()
 
                 log_with_context(
@@ -562,7 +564,8 @@ class ChannelProcessor:
                 f"Deleting space {space_name} due to errors",
                 space_name=space_name,
             )
-            assert migrator.chat is not None
+            if migrator.chat is None:
+                raise RuntimeError("Chat API service not initialized")
             migrator.chat.spaces().delete(name=space_name).execute()
             log_with_context(
                 logging.INFO,
