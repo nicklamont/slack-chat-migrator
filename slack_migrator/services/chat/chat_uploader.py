@@ -10,6 +10,7 @@ import mimetypes
 import os
 from typing import Any
 
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from slack_migrator.utils.logging import (
@@ -145,7 +146,7 @@ class ChatFileUploader:
             # The documentation states: "Set attachment as the response from calling the upload method"
             return (response, attachment_metadata)
 
-        except Exception as e:
+        except (HttpError, OSError) as e:
             # Get detailed error information for better debugging
             error_info = {
                 "error_type": type(e).__name__,

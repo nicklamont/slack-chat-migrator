@@ -57,7 +57,7 @@ def channel_has_external_users(migrator: SlackToChatMigrator, channel: str) -> b
                 for m in msgs:
                     if m.get("type") == "message" and "user" in m and m["user"]:
                         user_ids.add(m["user"])
-            except Exception as e:
+            except (OSError, json.JSONDecodeError) as e:
                 log_with_context(
                     logging.WARNING,
                     f"Failed to process {jf} when checking for external users: {e}",

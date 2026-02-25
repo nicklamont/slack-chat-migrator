@@ -4,6 +4,8 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_migrator.core.state import MigrationState
 from slack_migrator.services.chat.chat_uploader import (
@@ -171,7 +173,9 @@ class TestUploadFileToChat:
 
         media_mock = MagicMock()
         upload_mock = MagicMock()
-        upload_mock.execute.side_effect = Exception("API error")
+        upload_mock.execute.side_effect = HttpError(
+            Response({"status": "500"}), b"API error"
+        )
         media_mock.upload.return_value = upload_mock
         uploader.chat_service.media.return_value = media_mock
 

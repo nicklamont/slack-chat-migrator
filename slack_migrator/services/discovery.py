@@ -159,7 +159,7 @@ def discover_existing_spaces(  # noqa: C901
                                 space_info["member_count"] = (
                                     str(space_info["member_count"]) + "+"
                                 )
-                    except Exception as e:
+                    except HttpError as e:
                         # Just log the error and continue
                         log_with_context(
                             logging.DEBUG,
@@ -353,7 +353,7 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
     """Load existing space mappings from Google Chat API into migrator state.
 
     In update mode, discovers spaces via the API and resolves duplicate-space
-    conflicts using ``config.space_mapping`` overrides.  In regular import mode
+    conflicts using ``state.space_mapping`` overrides.  In regular import mode
     this is a no-op because we create new spaces rather than reusing existing ones.
 
     Args:
@@ -375,7 +375,7 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
 
         # --- Resolve duplicate-space conflicts --------------------------------
         if duplicate_spaces:
-            space_mapping = migrator.config.space_mapping
+            space_mapping = migrator.state.space_mapping
 
             log_with_context(
                 logging.WARNING,
@@ -510,7 +510,7 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
         else:
             log_with_context(logging.INFO, "No existing spaces found in Google Chat")
 
-    except Exception as e:
+    except HttpError as e:
         log_with_context(logging.ERROR, f"Failed to load existing space mappings: {e}")
         if not migrator.dry_run:
             raise
@@ -543,8 +543,8 @@ def load_space_mappings(migrator: SlackToChatMigrator) -> dict[str, str]:
                 f"Discovered {len(discovered_spaces)} existing spaces via API",
             )
 
-        # Look for space_mapping overrides in config
-        space_mapping = migrator.config.space_mapping
+        # Look for space_mapping overrides in state
+        space_mapping = migrator.state.space_mapping
         if space_mapping:
             log_with_context(
                 logging.INFO,
@@ -568,7 +568,7 @@ def load_space_mappings(migrator: SlackToChatMigrator) -> dict[str, str]:
 
         return discovered_spaces if discovered_spaces else {}
 
-    except Exception as e:
+    except HttpError as e:
         log_with_context(
             logging.WARNING, f"Failed to load space mappings: {e}", error=str(e)
         )

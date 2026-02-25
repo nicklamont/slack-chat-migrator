@@ -444,7 +444,7 @@ def ensure_channel_log_created(
                 # Ensure content is written to disk immediately
                 f.flush()
                 os.fsync(f.fileno())
-        except Exception as e:
+        except OSError as e:
             # Use print instead of logging to avoid potential recursion issues
             print(f"Warning: Failed to create channel log file for {channel}: {e}")
             return
@@ -640,7 +640,7 @@ def log_api_response(
 
             # Add response data to the log context
             log_context["response"] = response_str
-        except Exception as e:
+        except (TypeError, ValueError) as e:
             # If there's an error formatting the response, include that info
             log_context["response"] = f"Error formatting response: {e}"
 
@@ -671,7 +671,7 @@ def log_failed_message(channel: str, failed_msg: dict[str, Any]) -> None:
         logger.debug(
             f"Failed message payload: {payload_str}", extra={"channel": channel}
         )
-    except Exception:
+    except (TypeError, ValueError):
         logger.debug(
             f"Failed message payload (not JSON serializable): {failed_msg.get('payload', {})!r}",
             extra={"channel": channel},

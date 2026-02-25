@@ -4,6 +4,7 @@ import hashlib
 from unittest.mock import MagicMock, patch
 
 from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_migrator.core.state import MigrationState
 from slack_migrator.services.drive.drive_uploader import (
@@ -794,7 +795,9 @@ class TestFindFileByHashCacheMiss:
 
         # Verification fails (file deleted)
         mock_get = MagicMock()
-        mock_get.execute.side_effect = Exception("File not found")
+        mock_get.execute.side_effect = HttpError(
+            Response({"status": "404"}), b"File not found"
+        )
         uploader.drive_service.files().get.return_value = mock_get
 
         # API search finds the file with new ID

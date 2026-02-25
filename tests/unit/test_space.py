@@ -4,6 +4,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.state import MigrationState
@@ -1048,7 +1049,7 @@ class TestAddRegularMembers:
 
         # Make the list call fail
         migrator.chat.spaces().members().list.return_value.execute.side_effect = (
-            RuntimeError("cannot list")
+            HttpError(Response({"status": "500"}), b"cannot list")
         )
 
         # Should not raise

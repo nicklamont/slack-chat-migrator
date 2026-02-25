@@ -216,7 +216,7 @@ class DriveFileUploader:
 
                     file = self.drive_service.files().get(**params).execute()
                     return cached_id, file.get("webViewLink")
-                except Exception:
+                except HttpError:
                     logger.debug(
                         "Cached file %s may have been deleted", cached_id, exc_info=True
                     )

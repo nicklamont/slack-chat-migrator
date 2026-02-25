@@ -460,7 +460,7 @@ class FolderManager:
 
                 success_count += 1
 
-            except Exception as e:
+            except HttpError as e:
                 log_with_context(
                     logging.WARNING,
                     f"Failed to grant access to {email} for channel folder {channel}: {e}",

@@ -860,7 +860,7 @@ def send_intro(migrator: SlackToChatMigrator, space: str, channel: str) -> None:
         log_with_context(
             logging.INFO, f"Sent intro message to space {space}", channel=channel
         )
-    except Exception as e:
+    except HttpError as e:
         log_with_context(
             logging.WARNING,
             f"Failed to send intro message to space {space}: {e}",

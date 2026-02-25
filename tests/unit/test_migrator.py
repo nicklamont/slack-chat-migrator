@@ -697,7 +697,7 @@ class TestCleanupChannelHandlers:
     def test_cleanup_handles_handler_error(self, tmp_path):
         m = _make_migrator(tmp_path)
         handler = MagicMock()
-        handler.flush.side_effect = Exception("flush failed")
+        handler.flush.side_effect = OSError("flush failed")
         m.state.channel_handlers = {"general": handler}
         # Should not raise despite handler error
         cleanup_channel_handlers(m)

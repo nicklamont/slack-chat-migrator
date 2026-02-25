@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_migrator.core.state import MigrationState
@@ -435,7 +437,9 @@ class TestUploadStrategy:
 
     def test_exception_in_upload_attachment_increments_failed(self):
         handler = self._make_ready_handler()
-        handler._download_file = MagicMock(side_effect=RuntimeError("boom"))
+        handler._download_file = MagicMock(
+            side_effect=requests.RequestException("boom")
+        )
 
         file_obj = {"id": "F1", "name": "crash.bin"}
         result = handler.upload_attachment(file_obj, channel="general")
@@ -526,7 +530,7 @@ class TestUploadFile:
     def test_exception_returns_none(self):
         handler = _make_handler(folder_id="root")
         handler._drive_initialized = True
-        handler.upload_attachment = MagicMock(side_effect=RuntimeError("oops"))
+        handler.upload_attachment = MagicMock(side_effect=OSError("oops"))
 
         result = handler.upload_file({"id": "F1", "name": "test.txt"})
         assert result is None
@@ -738,8 +742,8 @@ class TestTransferFileOwnership:
 
     def test_failed_transfer(self):
         handler = _make_handler()
-        handler.drive_service.permissions().create().execute.side_effect = Exception(
-            "forbidden"
+        handler.drive_service.permissions().create().execute.side_effect = HttpError(
+            Response({"status": "403"}), b"forbidden"
         )
 
         result = handler._transfer_file_ownership("file1", "alice@example.com")

@@ -47,7 +47,7 @@ def cleanup_channel_handlers(migrator: SlackToChatMigrator) -> None:
             log_with_context(
                 logging.DEBUG, f"Cleaned up log handler for channel: {channel_name}"
             )
-        except Exception as e:
+        except OSError as e:
             # Use print to avoid potential logging issues during cleanup
             print(
                 f"Warning: Failed to clean up log handler"

@@ -250,7 +250,7 @@ def process_reactions_batch(  # noqa: C901
                         .create(parent=message_name, body=reaction_body)
                         .execute()
                     )
-                except Exception as inner_e:
+                except HttpError as inner_e:
                     log_with_context(
                         logging.WARNING,
                         f"Failed to add reaction in fallback mode: {inner_e}",

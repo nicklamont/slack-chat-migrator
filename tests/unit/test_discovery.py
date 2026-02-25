@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_migrator.core.state import MigrationState
 from slack_migrator.services.discovery import (
@@ -254,7 +255,9 @@ class TestDiscoverExistingSpaces:
         migrator = _make_migrator(channel_name_to_id={"general": "C001"})
 
         members_mock = MagicMock()
-        members_mock.execute.side_effect = Exception("API error")
+        members_mock.execute.side_effect = HttpError(
+            Response({"status": "500"}), b"API error"
+        )
         migrator.chat.spaces.return_value.members.return_value.list.return_value = (
             members_mock
         )

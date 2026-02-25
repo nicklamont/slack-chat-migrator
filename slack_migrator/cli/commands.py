@@ -266,10 +266,12 @@ def check_permissions(
     setup_logger(verbose, debug_api)
 
     try:
+        cfg = load_config(Path(config))
         check_permissions_standalone(
             creds_path=creds_path,
             workspace_admin=workspace_admin,
-            config_path=config,
+            max_retries=cfg.max_retries,
+            retry_delay=cfg.retry_delay,
         )
     except Exception as e:
         handle_exception(e)

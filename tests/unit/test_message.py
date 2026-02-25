@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.state import MigrationState
@@ -850,7 +851,7 @@ class TestSendIntro:
         migrator = self._make_intro_migrator()
         (
             migrator.chat.spaces.return_value.messages.return_value.create.return_value.execute.side_effect
-        ) = Exception("API Error")
+        ) = HttpError(Response({"status": "500"}), b"API Error")
 
         # Should not raise
         send_intro(migrator, "spaces/SPACE1", "general")

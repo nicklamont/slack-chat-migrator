@@ -128,7 +128,7 @@ def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) 
                             user_membership[user_id]["active"] = False
                             if user_id in active_users:
                                 active_users.remove(user_id)  # Remove from active users
-        except Exception as e:
+        except (OSError, json.JSONDecodeError) as e:
             log_with_context(
                 logging.WARNING,
                 f"Failed to process file {jf} when collecting user membership data: {e}",
@@ -456,7 +456,7 @@ def add_regular_members(  # noqa: C901
                         )
                         migrator.state.active_users_by_channel[channel] = members
                         break
-        except Exception as e:
+        except (OSError, json.JSONDecodeError) as e:
             log_with_context(
                 logging.ERROR,
                 f"Failed to load channel members from channels.json: {e}",
@@ -524,7 +524,7 @@ def add_regular_members(  # noqa: C901
                         f"Successfully enabled external user access for space {space}",
                         channel=channel,
                     )
-            except Exception as e:
+            except HttpError as e:
                 log_with_context(
                     logging.WARNING,
                     f"Failed to enable external user access for space {space}: {e}",
@@ -771,7 +771,7 @@ def add_regular_members(  # noqa: C901
                         f"Successfully removed workspace admin from space {space}",
                         channel=channel,
                     )
-                except Exception as e:
+                except HttpError as e:
                     log_with_context(
                         logging.WARNING,
                         f"Failed to remove workspace admin from space {space}: {e}",
@@ -790,7 +790,7 @@ def add_regular_members(  # noqa: C901
                     f"Members in space {space}: {[member.get('member', {}).get('name', '') for member in members]}",
                     channel=channel,
                 )
-    except Exception as e:
+    except HttpError as e:
         log_with_context(
             logging.WARNING,
             f"Failed to verify members in space {space}: {e}",
@@ -829,7 +829,7 @@ def add_regular_members(  # noqa: C901
                         active_user_emails,
                         migrator.file_handler._shared_drive_id,
                     )
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.WARNING,
                 f"Error updating channel folder permissions: {e}",
