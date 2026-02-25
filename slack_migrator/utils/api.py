@@ -347,7 +347,9 @@ class RetryWrapper:
                     return 200  # OK
 
         except (ValueError, TypeError, AttributeError):
-            pass
+            logging.debug(
+                "Could not extract status code from response, defaulting to 200"
+            )
 
         # Final fallback - assume 200 OK for successful responses
         return 200
