@@ -8,7 +8,7 @@ from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
 from slack_migrator.core.channel_processor import ChannelProcessor
-from slack_migrator.core.config import MigrationConfig
+from slack_migrator.core.config import ImportCompletionStrategy, MigrationConfig
 from slack_migrator.core.state import MigrationState
 
 
@@ -17,7 +17,7 @@ def _make_migrator(
     update_mode=False,
     abort_on_error=False,
     cleanup_on_error=False,
-    import_completion_strategy="skip_on_error",
+    import_completion_strategy=ImportCompletionStrategy.SKIP_ON_ERROR,
     max_failure_percentage=10,
 ):
     """Create a mock migrator for channel processor testing."""
@@ -547,7 +547,9 @@ class TestCompleteImportMode:
 
     def test_skip_on_error_strategy(self):
         """With skip_on_error strategy and errors, skips completion."""
-        migrator = _make_migrator(import_completion_strategy="skip_on_error")
+        migrator = _make_migrator(
+            import_completion_strategy=ImportCompletionStrategy.SKIP_ON_ERROR,
+        )
 
         processor = ChannelProcessor(migrator)
         result = processor._complete_import_mode("spaces/S1", "general", True)
@@ -559,7 +561,9 @@ class TestCompleteImportMode:
 
     def test_force_complete_despite_errors(self):
         """With force_complete strategy, completes even when there are errors."""
-        migrator = _make_migrator(import_completion_strategy="force_complete")
+        migrator = _make_migrator(
+            import_completion_strategy=ImportCompletionStrategy.FORCE_COMPLETE,
+        )
         (
             migrator.chat.spaces.return_value.completeImport.return_value.execute.return_value
         ) = {}

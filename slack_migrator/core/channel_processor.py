@@ -16,7 +16,7 @@ from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
-from slack_migrator.core.config import should_process_channel
+from slack_migrator.core.config import ImportCompletionStrategy, should_process_channel
 from slack_migrator.services.discovery import get_last_message_timestamp
 from slack_migrator.services.membership_manager import (
     add_regular_members,
@@ -404,7 +404,8 @@ class ChannelProcessor:
 
         # Only complete import if there were no errors or we're using force_complete strategy
         if (
-            not channel_had_errors or completion_strategy == "force_complete"
+            not channel_had_errors
+            or completion_strategy == ImportCompletionStrategy.FORCE_COMPLETE
         ) and not migrator.dry_run:
             try:
                 log_with_context(

@@ -10,12 +10,20 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from slack_migrator.utils.logging import log_with_context
+
+
+class ImportCompletionStrategy(str, Enum):
+    """Strategy for completing import mode when errors occur."""
+
+    SKIP_ON_ERROR = "skip_on_error"
+    FORCE_COMPLETE = "force_complete"
 
 
 @dataclass
@@ -62,7 +70,9 @@ class MigrationConfig:
     # Error handling
     abort_on_error: bool = False
     max_failure_percentage: int = 10
-    import_completion_strategy: str = "skip_on_error"
+    import_completion_strategy: ImportCompletionStrategy = (
+        ImportCompletionStrategy.SKIP_ON_ERROR
+    )
     cleanup_on_error: bool = False
 
     # Retry
@@ -94,8 +104,8 @@ class MigrationConfig:
             ignore_bots=data.get("ignore_bots", False),
             abort_on_error=data.get("abort_on_error", False),
             max_failure_percentage=data.get("max_failure_percentage", 10),
-            import_completion_strategy=data.get(
-                "import_completion_strategy", "skip_on_error"
+            import_completion_strategy=_parse_completion_strategy(
+                data.get("import_completion_strategy", "skip_on_error")
             ),
             cleanup_on_error=data.get("cleanup_on_error", False),
             max_retries=data.get("max_retries", 3),
@@ -103,6 +113,27 @@ class MigrationConfig:
             shared_drive=shared_drive,
             space_mapping=data.get("space_mapping") or {},
         )
+
+
+def _parse_completion_strategy(value: str) -> ImportCompletionStrategy:
+    """Convert a raw string to an ImportCompletionStrategy enum member.
+
+    Args:
+        value: The string from YAML config.
+
+    Returns:
+        The matching enum member.
+
+    Raises:
+        ValueError: If the string doesn't match a known strategy.
+    """
+    try:
+        return ImportCompletionStrategy(value)
+    except ValueError:
+        valid = ", ".join(s.value for s in ImportCompletionStrategy)
+        raise ValueError(
+            f"Invalid import_completion_strategy: {value!r}. Must be one of: {valid}"
+        ) from None
 
 
 def load_config(config_path: Path) -> MigrationConfig:
@@ -178,7 +209,7 @@ def create_default_config(output_path: Path) -> bool:
         # Error handling options
         "abort_on_error": False,
         "max_failure_percentage": 10,
-        "import_completion_strategy": "skip_on_error",
+        "import_completion_strategy": ImportCompletionStrategy.SKIP_ON_ERROR.value,
         "cleanup_on_error": False,
         # Retry options
         "max_retries": 3,

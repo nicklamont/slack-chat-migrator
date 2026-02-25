@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 
 from slack_migrator.core.config import (
+    ImportCompletionStrategy,
     MigrationConfig,
     create_default_config,
     load_config,
@@ -27,7 +28,9 @@ def test_load_config_with_empty_file():
         # Check error handling defaults
         assert config.abort_on_error is False
         assert config.max_failure_percentage == 10
-        assert config.import_completion_strategy == "skip_on_error"
+        assert (
+            config.import_completion_strategy == ImportCompletionStrategy.SKIP_ON_ERROR
+        )
         assert config.cleanup_on_error is False
 
         # Check retry defaults
