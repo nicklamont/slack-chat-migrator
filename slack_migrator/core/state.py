@@ -26,6 +26,7 @@ class MigrationState:
     """
 
     # --- Space/channel mapping ---
+    space_mapping: dict[str, str] = field(default_factory=dict)
     space_cache: dict[str, str] = field(default_factory=dict)
     created_spaces: dict[str, str] = field(default_factory=dict)
     channel_to_space: dict[str, str] = field(default_factory=dict)
@@ -83,6 +84,7 @@ class MigrationState:
 
         # Validate collection fields are the correct types
         dict_fields = [
+            "space_mapping",
             "space_cache",
             "created_spaces",
             "channel_to_space",

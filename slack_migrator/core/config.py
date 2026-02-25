@@ -82,9 +82,6 @@ class MigrationConfig:
     # Shared drive
     shared_drive: SharedDriveConfig = field(default_factory=SharedDriveConfig)
 
-    # Runtime state (set during migration, not from YAML)
-    space_mapping: dict[str, str] = field(default_factory=dict)
-
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MigrationConfig:
         """Create a MigrationConfig from a raw config dictionary.
@@ -111,7 +108,6 @@ class MigrationConfig:
             max_retries=data.get("max_retries", 3),
             retry_delay=data.get("retry_delay", 2),
             shared_drive=shared_drive,
-            space_mapping=data.get("space_mapping") or {},
         )
 
 
@@ -173,6 +169,33 @@ def load_config(config_path: Path) -> MigrationConfig:
     return MigrationConfig.from_dict(raw)
 
 
+def load_space_mapping(config_path: Path) -> dict[str, str]:
+    """Load space_mapping overrides from a YAML config file.
+
+    ``space_mapping`` is runtime state used to resolve duplicate-space
+    conflicts during migration.  It is stored on
+    :class:`~slack_migrator.core.state.MigrationState`, not on
+    :class:`MigrationConfig`, but is still authored by users in their
+    config YAML.
+
+    Args:
+        config_path: Path to the config YAML file.
+
+    Returns:
+        A dict mapping channel names to space IDs, or an empty dict.
+    """
+    if not config_path.exists():
+        return {}
+    try:
+        with open(config_path) as f:
+            raw = yaml.safe_load(f)
+        if raw and isinstance(raw, dict):
+            return raw.get("space_mapping") or {}
+    except (yaml.YAMLError, OSError):
+        pass
+    return {}
+
+
 def create_default_config(output_path: Path) -> bool:
     """
     Create a default configuration file with recommended settings.
@@ -221,7 +244,7 @@ def create_default_config(output_path: Path) -> bool:
             yaml.safe_dump(default_config, f, default_flow_style=False)
         log_with_context(logging.INFO, f"Created default config file at {output_path}")
         return True
-    except Exception as e:
+    except OSError as e:
         log_with_context(logging.ERROR, f"Failed to create default config file: {e}")
         return False
 

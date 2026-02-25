@@ -16,7 +16,7 @@ from typing import Any
 from slack_migrator.constants import SPACE_NAME_PREFIX
 from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.cleanup import cleanup_channel_handlers
-from slack_migrator.core.config import load_config
+from slack_migrator.core.config import load_config, load_space_mapping
 from slack_migrator.core.migration_logging import (
     log_migration_failure,
     log_migration_success,
@@ -101,6 +101,9 @@ class SlackToChatMigrator:
 
         # Load config using the shared load_config function
         self.config = load_config(self.config_path)
+
+        # Load space_mapping overrides from config YAML into state
+        self.state.space_mapping = load_space_mapping(self.config_path)
 
         # Generate user mapping from users.json
         self.user_map, self.users_without_email = generate_user_map(
