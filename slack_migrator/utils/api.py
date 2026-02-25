@@ -16,6 +16,8 @@ from googleapiclient.errors import HttpError
 
 from slack_migrator.utils.logging import log_with_context
 
+logger = logging.getLogger("slack_migrator")
+
 REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/chat.import",
     "https://www.googleapis.com/auth/chat.spaces",
@@ -100,7 +102,7 @@ class RetryWrapper:
                 try:
                     channel_context = self._channel_context_getter()
                 except Exception:
-                    pass
+                    logger.debug("Failed to get channel context", exc_info=True)
 
             log_kwargs = {"component": "http"}
             if channel_context and isinstance(channel_context, str):
@@ -283,6 +285,7 @@ class RetryWrapper:
                 "body": body,
             }
         except Exception:
+            logger.debug("Failed to extract API request details", exc_info=True)
             # If extraction fails, return minimal info
             return {
                 "method": "UNKNOWN",  # Don't assume POST

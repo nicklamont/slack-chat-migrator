@@ -21,6 +21,8 @@ from slack_migrator.services.drive import (
 )
 from slack_migrator.utils.logging import log_with_context
 
+logger = logging.getLogger("slack_migrator")
+
 if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
 
@@ -976,7 +978,9 @@ class FileHandler:
                 try:
                     os.unlink(temp_file_path)
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Failed to clean up temp file %s", temp_file_path, exc_info=True
+                    )
 
         except Exception as e:
             log_with_context(
@@ -1339,7 +1343,7 @@ class FileHandler:
                         )
                         return True
                 except Exception:
-                    # If we can't get folder info, continue checking other parents
+                    logger.debug("Failed to get folder info, continuing", exc_info=True)
                     continue
 
             # If we're here, the file is not in a channel folder, so we need to set individual permissions
