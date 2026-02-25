@@ -17,6 +17,11 @@ from slack_migrator.cli.report import (
     generate_report,
     print_dry_run_summary,
 )
+from slack_migrator.core.cleanup import cleanup_channel_handlers
+from slack_migrator.core.migration_logging import (
+    log_migration_failure,
+    log_migration_success,
+)
 from slack_migrator.core.state import MigrationState
 from slack_migrator.services.file import FileHandler
 from slack_migrator.services.user import generate_user_map
@@ -336,9 +341,11 @@ class SlackToChatMigrator:
             """
             migration_duration = time.time() - migration_start_time
             log_with_context(logging.WARNING, "")
-            log_with_context(logging.WARNING, "🚨 MIGRATION INTERRUPTED BY SIGNAL")
-            self._log_migration_failure(
-                KeyboardInterrupt("Migration interrupted by signal"), migration_duration
+            log_with_context(logging.WARNING, "MIGRATION INTERRUPTED BY SIGNAL")
+            log_migration_failure(
+                self,
+                KeyboardInterrupt("Migration interrupted by signal"),
+                migration_duration,
             )
             # Exit with standard interrupted code
             exit(130)
@@ -477,10 +484,10 @@ class SlackToChatMigrator:
             migration_duration = time.time() - migration_start_time
 
             # Log final success status
-            self._log_migration_success(migration_duration)
+            log_migration_success(self, migration_duration)
 
             # Clean up channel handlers in success case (finally block will also run)
-            self._cleanup_channel_handlers()
+            cleanup_channel_handlers(self)
 
             return True
 
@@ -489,7 +496,7 @@ class SlackToChatMigrator:
             migration_duration = time.time() - migration_start_time
 
             # Log final failure status
-            self._log_migration_failure(e, migration_duration)
+            log_migration_failure(self, e, migration_duration)
 
             # Generate report even on failure to show progress made
             try:
@@ -523,37 +530,4 @@ class SlackToChatMigrator:
             # Restore the original signal handler
             signal.signal(signal.SIGINT, old_signal_handler)
             # Always ensure proper cleanup of channel log handlers
-            self._cleanup_channel_handlers()
-
-    def _cleanup_channel_handlers(self):
-        """Clean up and close all channel-specific log handlers."""
-        from slack_migrator.core.cleanup import cleanup_channel_handlers
-
-        cleanup_channel_handlers(self)
-
-    def cleanup(self):
-        """Clean up resources and complete import mode on spaces."""
-        from slack_migrator.core.cleanup import run_cleanup
-
-        run_cleanup(self)
-
-    def _log_migration_success(self, duration: float) -> None:
-        """Log final migration success status with comprehensive summary.
-
-        Args:
-            duration: Migration duration in seconds.
-        """
-        from slack_migrator.core.migration_logging import log_migration_success
-
-        log_migration_success(self, duration)
-
-    def _log_migration_failure(self, exception: BaseException, duration: float) -> None:
-        """Log final migration failure status with error details.
-
-        Args:
-            exception: The exception that caused the failure.
-            duration: Migration duration in seconds before failure.
-        """
-        from slack_migrator.core.migration_logging import log_migration_failure
-
-        log_migration_failure(self, exception, duration)
+            cleanup_channel_handlers(self)
