@@ -11,7 +11,9 @@ slack_migrator/
 │   └── report.py   # Migration report formatting
 ├── core/           # Core logic
 │   ├── channel_processor.py # Per-channel migration processing
+│   ├── cleanup.py           # Post-migration cleanup (import mode completion, members)
 │   ├── config.py            # YAML config loading and validation
+│   ├── migration_logging.py # Migration success/failure logging
 │   ├── migrator.py          # Main migration orchestrator
 │   └── state.py             # MigrationState dataclass (mutable state)
 ├── services/       # External API integrations
@@ -23,7 +25,7 @@ slack_migrator/
 │   ├── message.py            # Message transformation (Slack → Chat format)
 │   ├── message_attachments.py
 │   ├── reaction_processor.py # Batch reaction processing
-│   ├── space_creator.py      # Space creation and import mode setup
+│   ├── space_creator.py      # Space creation, listing, and import mode cleanup
 │   ├── user.py               # User mapping (Slack → Google)
 │   └── user_resolver.py      # User identity resolution and impersonation
 └── utils/          # Shared utilities

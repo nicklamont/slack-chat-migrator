@@ -19,13 +19,14 @@ if TYPE_CHECKING:
     from googleapiclient.errors import HttpError
 
 import slack_migrator
-from slack_migrator.core.migrator import SlackToChatMigrator, cleanup_import_mode_spaces
+from slack_migrator.core.migrator import SlackToChatMigrator
 from slack_migrator.exceptions import (
     ConfigError,
     MigrationAbortedError,
     MigratorError,
     PermissionCheckError,
 )
+from slack_migrator.services.space_creator import cleanup_import_mode_spaces
 from slack_migrator.utils.logging import log_with_context, setup_logger
 from slack_migrator.utils.permissions import (
     check_permissions_standalone,
