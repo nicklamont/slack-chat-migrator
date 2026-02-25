@@ -242,12 +242,12 @@ class SlackToChatMigrator:
                 - name_to_data: Dict mapping channel names to their metadata
                 - id_to_name: Dict mapping channel IDs to channel names
         """
-        f = self.export_root / "channels.json"
+        channels_file = self.export_root / "channels.json"
         name_to_data = {}
         id_to_name = {}
 
-        if f.exists():
-            with open(f) as f_in:
+        if channels_file.exists():
+            with open(channels_file) as f_in:
                 channels = json.load(f_in)
                 name_to_data = {ch["name"]: ch for ch in channels}
                 id_to_name = {ch["id"]: ch["name"] for ch in channels}
@@ -270,8 +270,6 @@ class SlackToChatMigrator:
         """
         migration_start_time = time.time()
         log_with_context(logging.INFO, "Starting migration process")
-
-        # Import report generation function for use in both success and failure paths
 
         # Set up signal handler to ensure we log migration status on interrupt
         def signal_handler(signum, frame):
