@@ -22,7 +22,11 @@ from slack_migrator.services.membership_manager import (
     add_regular_members,
     add_users_to_space,
 )
-from slack_migrator.services.message import send_message, track_message_stats
+from slack_migrator.services.message import (
+    MessageResult,
+    send_message,
+    track_message_stats,
+)
 from slack_migrator.services.space_creator import create_space
 from slack_migrator.utils.logging import (
     is_debug_api_enabled,
@@ -343,7 +347,7 @@ class ChannelProcessor:
             result = send_message(migrator, space, m)
 
             if result:
-                if result != "SKIPPED":
+                if result != MessageResult.SKIPPED:
                     # Message was sent successfully
                     processed_ts.append(ts)
                     processed_count += 1

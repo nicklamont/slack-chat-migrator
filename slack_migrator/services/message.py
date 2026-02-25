@@ -9,6 +9,7 @@ import hashlib
 import logging
 import time
 import uuid
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
@@ -23,6 +24,14 @@ from slack_migrator.utils.logging import (
 
 if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
+
+
+class MessageResult(str, Enum):
+    """Sentinel return values from send_message() for non-API outcomes."""
+
+    IGNORED_BOT = "IGNORED_BOT"
+    ALREADY_SENT = "ALREADY_SENT"
+    SKIPPED = "SKIPPED"
 
 
 def send_message(  # noqa: C901
@@ -61,7 +70,7 @@ def send_message(  # noqa: C901
                 user_id=user_id,
                 bot_name=bot_name,
             )
-            return "IGNORED_BOT"
+            return MessageResult.IGNORED_BOT
 
         # Also check for user-based bots (bots that are in users.json)
         if user_id:
@@ -74,7 +83,7 @@ def send_message(  # noqa: C901
                     ts=ts,
                     user_id=user_id,
                 )
-                return "IGNORED_BOT"
+                return MessageResult.IGNORED_BOT
 
     # Check for edited messages
     edited = message.get("edited", {})
@@ -104,7 +113,7 @@ def send_message(  # noqa: C901
                     last_timestamp=last_timestamp,
                 )
                 # Return a placeholder to indicate success
-                return "ALREADY_SENT"
+                return MessageResult.ALREADY_SENT
 
     # Also check the sent_messages set for additional protection
     if is_update_mode and message_key in migrator.state.sent_messages:
@@ -116,7 +125,7 @@ def send_message(  # noqa: C901
             user_id=user_id,
         )
         # Return a placeholder to indicate success
-        return "ALREADY_SENT"
+        return MessageResult.ALREADY_SENT
 
     # Only increment the message count in non-dry run mode
     # In dry run mode, this is handled in the migrate method
@@ -147,7 +156,7 @@ def send_message(  # noqa: C901
             ts=ts,
             user_id=user_id,
         )
-        return "SKIPPED"
+        return MessageResult.SKIPPED
 
     # Extract text from Slack blocks (rich formatting) or fallback to plain text
     text = parse_slack_blocks(message)
