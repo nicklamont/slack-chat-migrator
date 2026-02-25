@@ -2,32 +2,43 @@
 Main migrator class for the Slack to Google Chat migration tool
 """
 
+import datetime
 import json
 import logging
+import os
 import signal
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
-
-if TYPE_CHECKING:
-    from slack_migrator.core.channel_processor import ChannelProcessor
-
+from typing import Any, Optional
 
 from slack_migrator.cli.report import (
     generate_report,
     print_dry_run_summary,
 )
+from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.cleanup import cleanup_channel_handlers
+from slack_migrator.core.config import load_config
 from slack_migrator.core.migration_logging import (
     log_migration_failure,
     log_migration_success,
 )
 from slack_migrator.core.state import MigrationState
+from slack_migrator.services.discovery import (
+    load_existing_space_mappings,
+    load_space_mappings,
+    log_space_mapping_conflicts,
+)
 from slack_migrator.services.file import FileHandler
+from slack_migrator.services.message_attachments import MessageAttachmentProcessor
 from slack_migrator.services.user import generate_user_map
 from slack_migrator.services.user_resolver import UserResolver
 from slack_migrator.utils.api import get_gcp_service
 from slack_migrator.utils.logging import log_with_context
+from slack_migrator.utils.user_validation import (
+    initialize_unmapped_user_tracking,
+    log_unmapped_user_summary_for_dry_run,
+    scan_channel_members_for_unmapped_users,
+)
 
 
 class SlackToChatMigrator:
@@ -90,8 +101,6 @@ class SlackToChatMigrator:
         self._validate_export_format()
 
         # Load config using the shared load_config function
-        from slack_migrator.core.config import load_config
-
         self.config = load_config(self.config_path)
 
         # Generate user mapping from users.json
@@ -100,11 +109,6 @@ class SlackToChatMigrator:
         )
 
         # Initialize simple unmapped user tracking
-        from slack_migrator.utils.user_validation import (
-            initialize_unmapped_user_tracking,
-            scan_channel_members_for_unmapped_users,
-        )
-
         self.unmapped_user_tracker = initialize_unmapped_user_tracking(self)
 
         # Scan channel members to ensure all channel members have user mappings
@@ -176,10 +180,6 @@ class SlackToChatMigrator:
         # FileHandler now handles its own drive folder initialization automatically
 
         # Initialize message attachment processor
-        from slack_migrator.services.message_attachments import (
-            MessageAttachmentProcessor,
-        )
-
         self.attachment_processor = MessageAttachmentProcessor(
             self.file_handler, dry_run=self.dry_run
         )
@@ -197,8 +197,6 @@ class SlackToChatMigrator:
             )
 
         # Load existing space mappings for update mode or file attachments
-        from slack_migrator.services.discovery import load_existing_space_mappings
-
         load_existing_space_mappings(self)
 
     def _validate_export_format(self):
@@ -276,11 +274,9 @@ class SlackToChatMigrator:
         """Delete a space if it had errors and cleanup is enabled."""
         self._get_channel_processor()._delete_space_if_errors(space_name, channel)
 
-    def _get_channel_processor(self) -> "ChannelProcessor":
+    def _get_channel_processor(self) -> ChannelProcessor:
         """Get or create the ChannelProcessor instance."""
         if not hasattr(self, "channel_processor"):
-            from slack_migrator.core.channel_processor import ChannelProcessor
-
             self.channel_processor = ChannelProcessor(self)
         return self.channel_processor
 
@@ -360,8 +356,6 @@ class SlackToChatMigrator:
             # Output directory should already be set up by CLI, but provide a sensible default
             if not self.state.output_dir:
                 # Create default output directory with timestamp
-                import datetime
-
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 self.state.output_dir = f"migration_logs/run_{timestamp}"
                 log_with_context(
@@ -369,8 +363,6 @@ class SlackToChatMigrator:
                     f"Using default output directory: {self.state.output_dir}",
                 )
                 # Create the directory
-                import os
-
                 os.makedirs(self.state.output_dir, exist_ok=True)
 
             # Reset per-run state
@@ -403,8 +395,6 @@ class SlackToChatMigrator:
 
             # In update mode, discover existing spaces via API
             if self.update_mode:
-                from slack_migrator.services.discovery import load_space_mappings
-
                 discovered_spaces = load_space_mappings(self)
                 if discovered_spaces:
                     log_with_context(
@@ -430,8 +420,6 @@ class SlackToChatMigrator:
             self.state.first_channel_processed = False
 
             # Process each channel
-            from slack_migrator.core.channel_processor import ChannelProcessor
-
             self.channel_processor = ChannelProcessor(self)
             for ch in all_channel_dirs:
                 should_abort = self.channel_processor.process_channel(ch)
@@ -439,8 +427,6 @@ class SlackToChatMigrator:
                     break
 
             # Log any space mapping conflicts that should be added to config
-            from slack_migrator.services.discovery import log_space_mapping_conflicts
-
             log_space_mapping_conflicts(self)
 
             # Generate final unmapped user report
@@ -467,10 +453,6 @@ class SlackToChatMigrator:
 
             # If this was a dry run, provide specific unmapped user guidance
             if self.dry_run and hasattr(self, "unmapped_user_tracker"):
-                from slack_migrator.utils.user_validation import (
-                    log_unmapped_user_summary_for_dry_run,
-                )
-
                 log_unmapped_user_summary_for_dry_run(self)
 
             # Generate report
