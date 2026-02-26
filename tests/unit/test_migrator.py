@@ -20,6 +20,7 @@ from slack_migrator.services.space_creator import (
     _list_all_spaces,
     cleanup_import_mode_spaces,
 )
+from slack_migrator.services.user_resolver import UserResolver
 from slack_migrator.types import MigrationSummary
 
 
@@ -47,9 +48,13 @@ def _setup_export(tmp_path, users=None, channels=None):
 
 
 def _make_migrator(tmp_path, domain="example.com", users=None, channels=None, **kwargs):
-    """Create a migrator instance with a minimal export directory."""
+    """Create a migrator instance with a minimal export directory.
+
+    Also creates a UserResolver (normally done in _initialize_api_services)
+    so tests can exercise user_resolver methods without needing real API creds.
+    """
     _setup_export(tmp_path, users=users, channels=channels)
-    return SlackToChatMigrator(
+    m = SlackToChatMigrator(
         creds_path="fake_creds.json",
         export_path=str(tmp_path),
         workspace_admin=f"admin@{domain}",
@@ -59,6 +64,20 @@ def _make_migrator(tmp_path, domain="example.com", users=None, channels=None, **
         update_mode=kwargs.get("update_mode", False),
         debug_api=kwargs.get("debug_api", False),
     )
+    # Create UserResolver eagerly (mirrors _initialize_api_services but
+    # with chat=None — tests here don't exercise impersonation/API calls).
+    m.user_resolver = UserResolver(
+        config=m.config,
+        state=m.state,
+        chat=None,
+        creds_path=m.creds_path,
+        user_map=m.user_map,
+        unmapped_user_tracker=m.unmapped_user_tracker,
+        export_root=m.export_root,
+        workspace_admin=m.workspace_admin,
+        workspace_domain=m.workspace_domain,
+    )
+    return m
 
 
 # ---------------------------------------------------------------------------

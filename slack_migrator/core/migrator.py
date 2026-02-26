@@ -126,8 +126,12 @@ class SlackToChatMigrator:
         self.drive: Any = None
         self._api_services_initialized = False
 
-        # User resolver is needed before API services (e.g. for is_external_user)
-        self.user_resolver = UserResolver.from_migrator(self)
+        # UserResolver is created in _initialize_api_services() after chat
+        # is available, avoiding the two-phase init pattern (create with
+        # chat=None, then mutate chat later).  Typed as Any so callers
+        # don't need union-attr ignores — all code paths guarantee
+        # initialization before first use (same pattern as chat/drive).
+        self.user_resolver: Any = None
 
         # Load channel metadata from channels.json
         self.channels_meta, self.channel_id_to_name = self._load_channels_meta()
@@ -185,9 +189,18 @@ class SlackToChatMigrator:
             retry_delay=self.config.retry_delay,
         )
 
-        # Update the user resolver's chat reference — it was None at construction
-        # time because API services are initialized after the resolver.
-        self.user_resolver.chat = self.chat
+        # Create UserResolver now that chat is available — no two-phase init
+        self.user_resolver = UserResolver(
+            config=self.config,
+            state=self.state,
+            chat=self.chat,
+            creds_path=self.creds_path,
+            user_map=self.user_map,
+            unmapped_user_tracker=self.unmapped_user_tracker,
+            export_root=self.export_root,
+            workspace_admin=self.workspace_admin,
+            workspace_domain=self.workspace_domain,
+        )
 
         self._api_services_initialized = True
         log_with_context(
