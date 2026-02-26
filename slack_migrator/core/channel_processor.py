@@ -132,7 +132,14 @@ class ChannelProcessor:
                 f"{'[DRY RUN] ' if migrator.dry_run else ''}Step 2/6: Adding historical memberships for {channel}",
                 channel=channel,
             )
-            add_users_to_space(migrator, space, channel)
+            add_users_to_space(
+                migrator.ctx,
+                migrator.state,
+                migrator.chat,
+                migrator.user_resolver,
+                space,
+                channel,
+            )
         else:
             log_with_context(
                 logging.INFO,
@@ -492,7 +499,15 @@ class ChannelProcessor:
             # For existing spaces, we always try to update members even if there were message errors
             # For new spaces, only add members if import completed successfully
             try:
-                add_regular_members(migrator, space, channel)
+                add_regular_members(
+                    migrator.ctx,
+                    migrator.state,
+                    migrator.chat,
+                    migrator.user_resolver,
+                    getattr(migrator, "file_handler", None),
+                    space,
+                    channel,
+                )
                 log_with_context(
                     logging.DEBUG,
                     f"Successfully updated current members for space {space} and channel {channel}",

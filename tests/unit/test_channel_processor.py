@@ -604,7 +604,15 @@ class TestAddMembers:
         result = processor._add_members("spaces/S1", "general", True, False)
 
         assert result is False
-        mock_add.assert_called_once_with(migrator, "spaces/S1", "general")
+        mock_add.assert_called_once_with(
+            migrator.ctx,
+            migrator.state,
+            migrator.chat,
+            migrator.user_resolver,
+            migrator.file_handler,
+            "spaces/S1",
+            "general",
+        )
 
     @patch("slack_migrator.core.channel_processor.add_regular_members")
     def test_success_for_existing_space(self, mock_add):
@@ -615,7 +623,15 @@ class TestAddMembers:
         result = processor._add_members("spaces/S1", "general", False, False)
 
         assert result is False
-        mock_add.assert_called_once_with(migrator, "spaces/S1", "general")
+        mock_add.assert_called_once_with(
+            migrator.ctx,
+            migrator.state,
+            migrator.chat,
+            migrator.user_resolver,
+            migrator.file_handler,
+            "spaces/S1",
+            "general",
+        )
 
     @patch("slack_migrator.core.channel_processor.add_regular_members")
     def test_existing_space_adds_members_even_with_errors(self, mock_add):

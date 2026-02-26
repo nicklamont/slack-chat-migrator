@@ -347,7 +347,15 @@ def _complete_single_space(
             f"Step 5/6: Adding regular members to space for channel: {channel_name}",
         )
         try:
-            add_regular_members(migrator, space_name, channel_name)
+            add_regular_members(
+                migrator.ctx,
+                migrator.state,
+                migrator.chat,
+                migrator.user_resolver,
+                getattr(migrator, "file_handler", None),
+                space_name,
+                channel_name,
+            )
             log_with_context(
                 logging.DEBUG,
                 f"Successfully added regular members to space"
