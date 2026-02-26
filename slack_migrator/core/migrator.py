@@ -17,6 +17,7 @@ from slack_migrator.constants import SPACE_NAME_PREFIX
 from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.cleanup import cleanup_channel_handlers
 from slack_migrator.core.config import load_config, load_space_mapping
+from slack_migrator.core.context import MigrationContext
 from slack_migrator.core.migration_logging import (
     log_migration_failure,
     log_migration_success,
@@ -135,6 +136,26 @@ class SlackToChatMigrator:
         self.channel_name_to_id = {
             name: id for id, name in self.channel_id_to_name.items()
         }
+
+        # Build immutable context from the now-populated attributes.
+        # During Phase 1 of DI refactoring, both self.ctx.X and self.X
+        # coexist; later phases migrate callers to use ctx directly.
+        self.ctx = MigrationContext(
+            export_root=self.export_root,
+            creds_path=self.creds_path,
+            workspace_admin=self.workspace_admin,
+            workspace_domain=self.workspace_domain,
+            dry_run=self.dry_run,
+            update_mode=self.update_mode,
+            verbose=self.verbose,
+            debug_api=self.debug_api,
+            config=self.config,
+            user_map=self.user_map,
+            users_without_email=self.users_without_email,
+            channels_meta=self.channels_meta,
+            channel_id_to_name=self.channel_id_to_name,
+            channel_name_to_id=self.channel_name_to_id,
+        )
 
     def _initialize_api_services(self) -> None:
         """Initialize Google API services after permission validation."""

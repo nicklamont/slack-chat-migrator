@@ -4,6 +4,7 @@ __all__ = [
     "channel_processor",
     "cleanup",
     "config",
+    "context",
     "migration_logging",
     "migrator",
     "state",
