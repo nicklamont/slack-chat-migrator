@@ -4,17 +4,30 @@ Logging module for the Slack to Google Chat migration tool
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
 import re
 from typing import Any
 
-# Module-level flag to track if API debug logging is enabled
-_DEBUG_API_ENABLED = False
+from slack_migrator.constants import (
+    RESPONSE_FALLBACK_LENGTH,
+    RESPONSE_MAX_LENGTH,
+)
 
-RESPONSE_MAX_LENGTH = 2000
-RESPONSE_FALLBACK_LENGTH = 1000
+# Module-level flag to track if API debug logging is enabled (thread-safe)
+_DEBUG_API_ENABLED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_DEBUG_API_ENABLED", default=False
+)
+
+
+class ImmediateFlushHandler(logging.FileHandler):
+    """FileHandler that flushes after every emit for real-time log visibility."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.flush()
 
 
 class JsonFormatter(logging.Formatter):
@@ -68,7 +81,7 @@ class JsonFormatter(logging.Formatter):
 
 def setup_main_log_file(
     output_dir: str, debug_api: bool = False
-) -> logging.FileHandler:
+) -> ImmediateFlushHandler:
     """
     Set up a file handler for the main log file that contains non-channel-specific logs.
 
@@ -85,26 +98,10 @@ def setup_main_log_file(
     # Create the log file path
     log_file = os.path.join(output_dir, "migration.log")
 
-    # Create file handler
-    file_handler = logging.FileHandler(log_file, mode="w")
+    # Create file handler with immediate flushing for real-time log visibility.
+    # This is important in case the migration fails and we want to preserve logs.
+    file_handler = ImmediateFlushHandler(log_file, mode="w")
     file_handler.setLevel(logging.DEBUG)  # Always use DEBUG level for file handlers
-
-    # Enable immediate flushing to ensure logs are written to disk promptly
-    # This is important in case the migration fails and we want to preserve logs
-    if hasattr(file_handler, "flush"):
-        # Ensure the file handler flushes immediately on each log write
-        old_emit = file_handler.emit
-
-        def immediate_flush_emit(record: logging.LogRecord) -> None:
-            """Emit the record and flush immediately.
-
-            Args:
-                record: The log record to emit.
-            """
-            old_emit(record)
-            file_handler.flush()
-
-        file_handler.emit = immediate_flush_emit  # type: ignore[method-assign]
 
     # Create formatter - always use EnhancedFormatter but conditionally include API details
     formatter = EnhancedFormatter(
@@ -262,8 +259,7 @@ def setup_logger(
     Returns:
         Configured logger instance
     """
-    global _DEBUG_API_ENABLED
-    _DEBUG_API_ENABLED = debug_api
+    _DEBUG_API_ENABLED.set(debug_api)
 
     logger = logging.getLogger("slack_migrator")
 
@@ -308,14 +304,20 @@ def setup_logger(
 
 
 def _enable_http_client_debug() -> None:
-    """
-    Enable http.client debug logging by routing debug output through the
-    logging module with auth token redaction.
+    """Enable http.client debug logging by routing debug output through logging.
 
-    Only patches the `putheader` method to intercept headers (for redaction).
-    This is only used when debug_api=True.
+    Patches ``HTTPConnection.putheader`` to intercept outgoing HTTP headers so
+    that authorisation tokens can be redacted before they reach the log.  The
+    patch is guarded against double-application: calling this function multiple
+    times (e.g. when ``setup_logger`` is invoked more than once with
+    ``debug_api=True``) is safe and will not stack wrappers.
+
+    This function is only called when ``debug_api=True``.
     """
     import http.client
+
+    if getattr(http.client.HTTPConnection.putheader, "_patched_for_debug", False):
+        return
 
     _orig_putheader = http.client.HTTPConnection.putheader
 
@@ -329,12 +331,13 @@ def _enable_http_client_debug() -> None:
             http_logger.debug("Header: %s: %s", header, header_value)
         return _orig_putheader(self, header, *values)
 
+    _debug_putheader._patched_for_debug = True  # type: ignore[attr-defined]
     http.client.HTTPConnection.putheader = _debug_putheader  # type: ignore[assignment]
 
 
 def setup_channel_logger(
     output_dir: str, channel: str, verbose: bool = False, debug_api: bool = False
-) -> logging.FileHandler:
+) -> ImmediateFlushHandler:
     """
     Set up a file handler for channel-specific logging.
 
@@ -353,27 +356,10 @@ def setup_channel_logger(
     # Create the log file path
     log_file = os.path.join(logs_dir, f"{channel}_migration.log")
 
-    # Create file handler
-    file_handler = logging.FileHandler(log_file, mode="w")
+    # Create file handler with immediate flushing for real-time log visibility.
+    # This is important in case the migration fails and we want to preserve logs.
+    file_handler = ImmediateFlushHandler(log_file, mode="w")
     file_handler.setLevel(logging.DEBUG)  # Always use DEBUG level for file handlers
-
-    # Enable immediate flushing to ensure logs are written to disk promptly
-    # This is important in case the migration fails and we want to preserve logs
-    if hasattr(file_handler, "flush"):
-        # Ensure the file handler flushes immediately on each log write
-        # This sacrifices some performance for data safety
-        old_emit = file_handler.emit
-
-        def immediate_flush_emit(record: logging.LogRecord) -> None:
-            """Emit the record and flush immediately.
-
-            Args:
-                record: The log record to emit.
-            """
-            old_emit(record)
-            file_handler.flush()
-
-        file_handler.emit = immediate_flush_emit  # type: ignore[method-assign]
 
     # Create formatter - use EnhancedFormatter with appropriate settings
     formatter = EnhancedFormatter(verbose=verbose, include_api_details=debug_api)
@@ -458,7 +444,7 @@ def ensure_channel_log_created(
                 # Ensure content is written to disk immediately
                 f.flush()
                 os.fsync(f.fileno())
-        except Exception as e:
+        except OSError as e:
             # Use print instead of logging to avoid potential recursion issues
             print(f"Warning: Failed to create channel log file for {channel}: {e}")
             return
@@ -654,7 +640,7 @@ def log_api_response(
 
             # Add response data to the log context
             log_context["response"] = response_str
-        except Exception as e:
+        except (TypeError, ValueError) as e:
             # If there's an error formatting the response, include that info
             log_context["response"] = f"Error formatting response: {e}"
 
@@ -685,7 +671,7 @@ def log_failed_message(channel: str, failed_msg: dict[str, Any]) -> None:
         logger.debug(
             f"Failed message payload: {payload_str}", extra={"channel": channel}
         )
-    except Exception:
+    except (TypeError, ValueError):
         logger.debug(
             f"Failed message payload (not JSON serializable): {failed_msg.get('payload', {})!r}",
             extra={"channel": channel},
@@ -698,7 +684,7 @@ def is_debug_api_enabled() -> bool:
     Returns:
         True if the ``--debug_api`` flag was set at startup.
     """
-    return _DEBUG_API_ENABLED
+    return _DEBUG_API_ENABLED.get()
 
 
 def get_logger() -> logging.Logger:

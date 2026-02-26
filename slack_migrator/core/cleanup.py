@@ -16,6 +16,11 @@ from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
+from slack_migrator.constants import (
+    HTTP_FORBIDDEN,
+    HTTP_RATE_LIMIT,
+    HTTP_SERVER_ERROR_MIN,
+)
 from slack_migrator.services.membership_manager import add_regular_members
 from slack_migrator.utils.logging import log_with_context
 
@@ -42,7 +47,7 @@ def cleanup_channel_handlers(migrator: SlackToChatMigrator) -> None:
             log_with_context(
                 logging.DEBUG, f"Cleaned up log handler for channel: {channel_name}"
             )
-        except Exception as e:
+        except OSError as e:
             # Use print to avoid potential logging issues during cleanup
             print(
                 f"Warning: Failed to clean up log handler"
@@ -87,7 +92,7 @@ def run_cleanup(migrator: SlackToChatMigrator) -> None:  # noqa: C901
                 f" (Status: {http_e.resp.status})",
                 error_code=http_e.resp.status,
             )
-            if http_e.resp.status >= 500:
+            if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
                 log_with_context(
                     logging.WARNING,
                     "Server error listing spaces"
@@ -122,7 +127,7 @@ def run_cleanup(migrator: SlackToChatMigrator) -> None:  # noqa: C901
                     space_name=space_name,
                     error_code=http_e.resp.status,
                 )
-                if http_e.resp.status >= 500:
+                if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
                     log_with_context(
                         logging.WARNING,
                         "Server error checking space - this might be a temporary issue",
@@ -149,19 +154,19 @@ def run_cleanup(migrator: SlackToChatMigrator) -> None:  # noqa: C901
             f" (Status: {http_e.resp.status})",
             error_code=http_e.resp.status,
         )
-        if http_e.resp.status >= 500:
+        if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
             log_with_context(
                 logging.WARNING,
                 "Server error during cleanup"
                 " - Google's servers may be experiencing issues",
             )
-        elif http_e.resp.status == 403:
+        elif http_e.resp.status == HTTP_FORBIDDEN:
             log_with_context(
                 logging.WARNING,
                 "Permission error during cleanup"
                 " - service account may lack required permissions",
             )
-        elif http_e.resp.status == 429:
+        elif http_e.resp.status == HTTP_RATE_LIMIT:
             log_with_context(
                 logging.WARNING,
                 "Rate limit exceeded during cleanup - too many API requests",
@@ -221,7 +226,7 @@ def _complete_import_mode_spaces(
                 space_name=space_name,
                 error_code=http_e.resp.status,
             )
-            if http_e.resp.status >= 500:
+            if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
                 log_with_context(
                     logging.WARNING,
                     "Server error during cleanup - this might be a temporary issue",
@@ -283,7 +288,7 @@ def _complete_single_space(
             space_name=space_name,
             error_code=http_e.resp.status,
         )
-        if http_e.resp.status >= 500:
+        if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
             log_with_context(
                 logging.WARNING,
                 "Server error completing import - this might be a temporary issue",
@@ -320,7 +325,7 @@ def _complete_single_space(
                 space_name=space_name,
                 error_code=http_e.resp.status,
             )
-            if http_e.resp.status >= 500:
+            if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
                 log_with_context(
                     logging.WARNING,
                     "Server error updating space - this might be a temporary issue",

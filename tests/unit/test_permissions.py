@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_migrator.exceptions import PermissionCheckError
 from slack_migrator.utils.permissions import (
@@ -364,7 +365,9 @@ class TestCleanup:
             "space": "spaces/test123",
         }
 
-        ctx.drive.files().delete().execute.side_effect = Exception("drive error")
+        ctx.drive.files().delete().execute.side_effect = HttpError(
+            Response({"status": "500"}), b"drive error"
+        )
 
         # Should not raise — space cleanup still attempted
         validator._cleanup_test_resources()
@@ -536,14 +539,8 @@ class TestCheckPermissionsStandalone:
     """Tests for check_permissions_standalone."""
 
     @patch("slack_migrator.utils.permissions.get_gcp_service")
-    @patch("slack_migrator.utils.permissions.load_config")
-    def test_happy_path(self, mock_load_config, mock_get_service, tmp_path):
+    def test_happy_path(self, mock_get_service):
         """Happy path with mocked services."""
-        mock_config = MagicMock()
-        mock_config.max_retries = 3
-        mock_config.retry_delay = 1
-        mock_load_config.return_value = mock_config
-
         chat_service = MagicMock()
         drive_service = MagicMock()
 
@@ -566,38 +563,47 @@ class TestCheckPermissionsStandalone:
         drive_service.permissions().create().execute.return_value = {"id": "p1"}
 
         result = check_permissions_standalone(
-            "/fake/creds.json", "admin@example.com", "config.yaml"
+            "/fake/creds.json", "admin@example.com", max_retries=3, retry_delay=1
         )
 
         assert result is True
         assert mock_get_service.call_count == 2
 
     @patch("slack_migrator.utils.permissions.get_gcp_service")
-    @patch("slack_migrator.utils.permissions.load_config")
-    def test_config_not_found(self, mock_load_config, mock_get_service):
-        """Config file not found raises error."""
-        mock_load_config.side_effect = FileNotFoundError("config.yaml not found")
+    def test_uses_default_retry_params(self, mock_get_service):
+        """Default retry parameters are passed to get_gcp_service."""
+        chat_service = MagicMock()
+        drive_service = MagicMock()
+        mock_get_service.side_effect = [chat_service, drive_service]
 
-        with pytest.raises(FileNotFoundError):
-            check_permissions_standalone(
-                "/fake/creds.json", "admin@example.com", "missing.yaml"
-            )
+        _setup_space_creation(chat_service)
+        chat_service.spaces().list().execute.return_value = {"spaces": []}
+        chat_service.spaces().members().list().execute.return_value = {
+            "memberships": []
+        }
+        chat_service.spaces().members().create().execute.return_value = {
+            "name": "spaces/t/members/m"
+        }
+        chat_service.spaces().messages().create().execute.return_value = {
+            "name": "spaces/t/messages/m"
+        }
+        drive_service.files().create().execute.return_value = {"id": "f1"}
+        drive_service.permissions().create().execute.return_value = {"id": "p1"}
+
+        check_permissions_standalone("/fake/creds.json", "admin@example.com")
+
+        # Verify defaults (max_retries=3, retry_delay=2) are forwarded
+        calls = mock_get_service.call_args_list
+        assert calls[0].kwargs["max_retries"] == 3
+        assert calls[0].kwargs["retry_delay"] == 2
 
     @patch("slack_migrator.utils.permissions.get_gcp_service")
-    @patch("slack_migrator.utils.permissions.load_config")
-    def test_api_service_creation_fails(self, mock_load_config, mock_get_service):
+    def test_api_service_creation_fails(self, mock_get_service):
         """API service creation failure propagates."""
-        mock_config = MagicMock()
-        mock_config.max_retries = 3
-        mock_config.retry_delay = 1
-        mock_load_config.return_value = mock_config
-
         mock_get_service.side_effect = ValueError("Invalid credentials")
 
         with pytest.raises(ValueError, match="Invalid credentials"):
-            check_permissions_standalone(
-                "/bad/creds.json", "admin@example.com", "config.yaml"
-            )
+            check_permissions_standalone("/bad/creds.json", "admin@example.com")
 
 
 # -------------------------------------------------------------------

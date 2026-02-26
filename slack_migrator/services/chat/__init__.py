@@ -1,6 +1,4 @@
-"""
-Chat service utilities.
-"""
+"""Google Chat API file upload service."""
 
 from .chat_uploader import ChatFileUploader
 

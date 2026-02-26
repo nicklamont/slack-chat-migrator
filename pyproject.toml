@@ -91,13 +91,6 @@ strict_optional = true
 module = ["emoji.*", "slackblocks.*", "tqdm.*", "googleapiclient.*"]
 ignore_missing_imports = true
 
-[[tool.mypy.overrides]]
-module = [
-    "slack_migrator.core.migrator",
-]
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
-
 [tool.bandit]
 exclude_dirs = ["tests"]
 # B101: assert used for type narrowing

@@ -2,6 +2,8 @@
 Main migrator class for the Slack to Google Chat migration tool
 """
 
+from __future__ import annotations
+
 import datetime
 import json
 import logging
@@ -9,15 +11,12 @@ import os
 import signal
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from slack_migrator.cli.report import (
-    generate_report,
-    print_dry_run_summary,
-)
+from slack_migrator.constants import SPACE_NAME_PREFIX
 from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.cleanup import cleanup_channel_handlers
-from slack_migrator.core.config import load_config
+from slack_migrator.core.config import load_config, load_space_mapping
 from slack_migrator.core.migration_logging import (
     log_migration_failure,
     log_migration_success,
@@ -103,6 +102,9 @@ class SlackToChatMigrator:
         # Load config using the shared load_config function
         self.config = load_config(self.config_path)
 
+        # Load space_mapping overrides from config YAML into state
+        self.state.space_mapping = load_space_mapping(self.config_path)
+
         # Generate user mapping from users.json
         self.user_map, self.users_without_email = generate_user_map(
             self.export_root, self.config
@@ -116,8 +118,8 @@ class SlackToChatMigrator:
         scan_channel_members_for_unmapped_users(self)
 
         # API services will be initialized later after permission checks
-        self.chat: Optional[Any] = None
-        self.drive: Optional[Any] = None
+        self.chat: Any | None = None
+        self.drive: Any | None = None
         self._api_services_initialized = False
 
         # User resolver is needed before API services (e.g. for is_external_user)
@@ -131,7 +133,7 @@ class SlackToChatMigrator:
             name: id for id, name in self.channel_id_to_name.items()
         }
 
-    def _initialize_api_services(self):
+    def _initialize_api_services(self) -> None:
         """Initialize Google API services after permission validation."""
         if self._api_services_initialized:
             return
@@ -171,7 +173,7 @@ class SlackToChatMigrator:
         # Initialize dependent services
         self._initialize_dependent_services()
 
-    def _initialize_dependent_services(self):
+    def _initialize_dependent_services(self) -> None:
         """Initialize services that depend on API clients."""
         # Initialize file handler
         self.file_handler = FileHandler(
@@ -199,7 +201,7 @@ class SlackToChatMigrator:
         # Load existing space mappings for update mode or file attachments
         load_existing_space_mappings(self)
 
-    def _validate_export_format(self):
+    def _validate_export_format(self) -> None:
         """Validate that the export directory has the expected structure."""
         # Check that the export root is a valid directory before inspecting contents
         if not self.export_root.is_dir():
@@ -233,7 +235,7 @@ class SlackToChatMigrator:
                     f"No JSON files found in channel directory {ch_dir.name}",
                 )
 
-    def _load_channels_meta(self):
+    def _load_channels_meta(self) -> tuple[dict[str, Any], dict[str, str]]:
         """
         Load channel metadata from channels.json file.
 
@@ -256,13 +258,13 @@ class SlackToChatMigrator:
 
     def _get_space_name(self, channel: str) -> str:
         """Get a consistent display name for a Google Chat space based on channel name."""
-        return f"Slack #{channel}"
+        return f"{SPACE_NAME_PREFIX}{channel}"
 
     def _get_all_channel_names(self) -> list[str]:
         """Get a list of all channel names from the export directory."""
         return [d.name for d in self.export_root.iterdir() if d.is_dir()]
 
-    def migrate(self):
+    def migrate(self) -> bool:
         """Main migration function that orchestrates the entire process.
 
         Returns:
@@ -272,7 +274,7 @@ class SlackToChatMigrator:
         log_with_context(logging.INFO, "Starting migration process")
 
         # Set up signal handler to ensure we log migration status on interrupt
-        def signal_handler(signum, frame):
+        def signal_handler(signum: int, frame: Any) -> None:
             """Handle SIGINT (Ctrl+C) gracefully.
 
             Args:
@@ -310,17 +312,7 @@ class SlackToChatMigrator:
                 os.makedirs(self.state.output_dir, exist_ok=True)
 
             # Reset per-run state
-            self.state.channel_handlers = {}
-            self.state.thread_map = {}
-            self.state.migration_summary = {
-                "channels_processed": [],
-                "spaces_created": 0,
-                "messages_created": 0,
-                "reactions_created": 0,
-                "files_created": 0,
-            }
-            self.state.migration_errors = []
-            self.state.channels_with_errors = []
+            self.state.reset_for_run()
 
             # Report unmapped user issues before starting migration (if any detected during initialization)
             if (
@@ -359,10 +351,6 @@ class SlackToChatMigrator:
                 f"Found {len(all_channel_dirs)} channel directories in export",
             )
 
-            # Add ability to abort after first channel error
-            self.state.channel_error_count = 0
-            self.state.first_channel_processed = False
-
             # Process each channel
             self.channel_processor = ChannelProcessor(self)
             for ch in all_channel_dirs:
@@ -399,13 +387,6 @@ class SlackToChatMigrator:
             if self.dry_run and hasattr(self, "unmapped_user_tracker"):
                 log_unmapped_user_summary_for_dry_run(self)
 
-            # Generate report
-            report_file = generate_report(self)
-
-            # Print summary
-            if self.dry_run:
-                print_dry_run_summary(self, report_file)
-
             # Calculate migration duration
             migration_duration = time.time() - migration_start_time
 
@@ -423,32 +404,6 @@ class SlackToChatMigrator:
 
             # Log final failure status
             log_migration_failure(self, e, migration_duration)
-
-            # Generate report even on failure to show progress made
-            try:
-                report_file = generate_report(self)
-
-                # Log the report location for user reference
-                if isinstance(e, KeyboardInterrupt):
-                    log_with_context(
-                        logging.INFO,
-                        f"📋 Partial migration report available at: {report_file}",
-                    )
-                    log_with_context(
-                        logging.INFO,
-                        "📋 This report shows progress made before interruption.",
-                    )
-                else:
-                    log_with_context(
-                        logging.INFO,
-                        f"📋 Migration report (with partial results) available at: {report_file}",
-                    )
-            except Exception as report_error:
-                # Don't let report generation failure mask the original failure
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to generate migration report after failure: {report_error}",
-                )
 
             # Re-raise the exception to maintain existing error handling behavior
             raise

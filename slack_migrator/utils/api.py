@@ -14,7 +14,10 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from slack_migrator.constants import HTTP_RATE_LIMIT
 from slack_migrator.utils.logging import log_with_context
+
+logger = logging.getLogger("slack_migrator")
 
 REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/chat.import",
@@ -27,6 +30,15 @@ REQUIRED_SCOPES = [
 
 # Cache for service instances
 _service_cache: dict[str, Any] = {}
+
+
+def clear_service_cache() -> None:
+    """Clear the cached GCP service instances.
+
+    Call this after authentication failures (401/403) to force
+    re-creation of service objects on next use.
+    """
+    _service_cache.clear()
 
 
 class RetryWrapper:
@@ -100,7 +112,7 @@ class RetryWrapper:
                 try:
                     channel_context = self._channel_context_getter()
                 except Exception:
-                    pass
+                    logger.debug("Failed to get channel context", exc_info=True)
 
             log_kwargs = {"component": "http"}
             if channel_context and isinstance(channel_context, str):
@@ -144,7 +156,7 @@ class RetryWrapper:
                         )
 
                     # Don't retry client errors (4xx) except rate limits (429)
-                    if e.resp.status // 100 == 4 and e.resp.status != 429:
+                    if e.resp.status // 100 == 4 and e.resp.status != HTTP_RATE_LIMIT:
                         log_with_context(
                             logging.WARNING,
                             f"Client error ({e.resp.status}) not retried: {e}",
@@ -283,6 +295,7 @@ class RetryWrapper:
                 "body": body,
             }
         except Exception:
+            logger.debug("Failed to extract API request details", exc_info=True)
             # If extraction fails, return minimal info
             return {
                 "method": "UNKNOWN",  # Don't assume POST

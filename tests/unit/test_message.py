@@ -3,9 +3,10 @@
 from unittest.mock import MagicMock, patch
 
 from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_migrator.core.config import MigrationConfig
-from slack_migrator.core.state import MigrationState
+from slack_migrator.core.state import MigrationState, _default_migration_summary
 from slack_migrator.services.discovery import log_space_mapping_conflicts
 from slack_migrator.services.message import (
     MessageResult,
@@ -23,13 +24,7 @@ def _make_migrator(dry_run=False, channel="general", ignore_bots=False):
     migrator.state = MigrationState()
     migrator.state.current_channel = channel
     migrator.config = MigrationConfig(ignore_bots=ignore_bots)
-    migrator.state.migration_summary = {
-        "messages_created": 0,
-        "reactions_created": 0,
-        "files_created": 0,
-        "channels_processed": [],
-        "spaces_created": 0,
-    }
+    migrator.state.migration_summary = _default_migration_summary()
     migrator.update_mode = False
 
     # Set up attachment processor
@@ -850,7 +845,7 @@ class TestSendIntro:
         migrator = self._make_intro_migrator()
         (
             migrator.chat.spaces.return_value.messages.return_value.create.return_value.execute.side_effect
-        ) = Exception("API Error")
+        ) = HttpError(Response({"status": "500"}), b"API Error")
 
         # Should not raise
         send_intro(migrator, "spaces/SPACE1", "general")

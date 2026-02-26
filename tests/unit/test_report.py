@@ -1,5 +1,7 @@
 """Tests for slack_migrator.cli.report module."""
 
+from __future__ import annotations
+
 import os
 from unittest.mock import MagicMock, patch
 
@@ -7,20 +9,45 @@ import yaml
 
 from slack_migrator.cli.report import generate_report, print_dry_run_summary
 from slack_migrator.core.config import MigrationConfig
-from slack_migrator.core.state import MigrationState
+from slack_migrator.core.state import MigrationState, _default_migration_summary
+from slack_migrator.types import FailedMessage, MigrationSummary
+
+
+def _make_summary(**overrides: object) -> MigrationSummary:
+    """Return a MigrationSummary with defaults, applying any overrides."""
+    summary = _default_migration_summary()
+    summary.update(overrides)  # type: ignore[typeddict-item]
+    return summary
+
+
+def _make_failed(
+    channel: str = "general",
+    ts: str = "1234.56",
+    error: str = "test error",
+    error_details: str = "",
+    payload: dict[str, object] | None = None,
+) -> FailedMessage:
+    """Return a FailedMessage with sensible defaults."""
+    return FailedMessage(
+        channel=channel,
+        ts=ts,
+        error=error,
+        error_details=error_details,
+        payload=payload if payload is not None else {},
+    )
 
 
 def _make_migrator(**overrides):
     """Build a MagicMock that behaves like SlackToChatMigrator."""
     m = MagicMock()
     m.state = MigrationState()
-    m.state.migration_summary = {
-        "channels_processed": ["general", "random"],
-        "spaces_created": 2,
-        "messages_created": 50,
-        "reactions_created": 10,
-        "files_created": 5,
-    }
+    m.state.migration_summary = _make_summary(
+        channels_processed=["general", "random"],
+        spaces_created=2,
+        messages_created=50,
+        reactions_created=10,
+        files_created=5,
+    )
     m.user_map = {"U001": "alice@example.com", "U002": "bob@example.com"}
     m.user_resolver.is_external_user.return_value = False
     m.state.output_dir = None
@@ -75,13 +102,7 @@ class TestPrintDryRunSummary:
 
     def test_zero_stats(self, capsys):
         migrator = _make_migrator()
-        migrator.state.migration_summary = {
-            "channels_processed": [],
-            "spaces_created": 0,
-            "messages_created": 0,
-            "reactions_created": 0,
-            "files_created": 0,
-        }
+        migrator.state.migration_summary = _default_migration_summary()
         print_dry_run_summary(migrator)
         out = capsys.readouterr().out
 
@@ -284,9 +305,9 @@ class TestGenerateReport:
     def test_failed_messages_grouped_by_channel(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
         migrator.state.failed_messages = [
-            {"channel": "general", "ts": "1234.56", "error": "timeout"},
-            {"channel": "general", "ts": "1234.57", "error": "rate limit"},
-            {"channel": "random", "ts": "1234.58", "error": "unknown"},
+            _make_failed(channel="general", ts="1234.56", error="timeout"),
+            _make_failed(channel="general", ts="1234.57", error="rate limit"),
+            _make_failed(channel="random", ts="1234.58", error="unknown"),
         ]
         result = generate_report(migrator)
 
@@ -304,12 +325,12 @@ class TestGenerateReport:
     def test_failed_messages_writes_channel_logs(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
         migrator.state.failed_messages = [
-            {
-                "channel": "general",
-                "ts": "1234.56",
-                "error": "timeout",
-                "payload": {"text": "hello"},
-            },
+            _make_failed(
+                channel="general",
+                ts="1234.56",
+                error="timeout",
+                payload={"text": "hello"},
+            ),
         ]
         generate_report(migrator)
 
@@ -327,7 +348,7 @@ class TestGenerateReport:
     def test_failed_messages_with_no_payload(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
         migrator.state.failed_messages = [
-            {"channel": "general", "ts": "1234.56", "error": "timeout"},
+            _make_failed(channel="general", ts="1234.56", error="timeout"),
         ]
         generate_report(migrator)
 
@@ -337,21 +358,21 @@ class TestGenerateReport:
         with open(log_file) as f:
             content = f.read()
         assert "Timestamp: 1234.56" in content
-        # "Payload:" should not appear since payload is None
+        # "Payload:" should not appear since payload is empty dict
         assert "Payload:" not in content
 
     @patch("slack_migrator.cli.report.log_with_context")
-    def test_failed_messages_unknown_channel(self, mock_log, tmp_path):
+    def test_failed_messages_unlisted_channel(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
         migrator.state.failed_messages = [
-            {"ts": "1234.56", "error": "timeout"},  # no "channel" key
+            _make_failed(channel="unlisted", ts="1234.56", error="timeout"),
         ]
         generate_report(migrator)
 
         with open(os.path.join(str(tmp_path), "migration_report.yaml")) as f:
             report = yaml.safe_load(f)
 
-        assert "unknown" in report["failed_channels"]
+        assert "unlisted" in report["failed_channels"]
 
     @patch("slack_migrator.cli.report.log_with_context")
     def test_external_users_in_report(self, mock_log, tmp_path):
@@ -524,7 +545,12 @@ class TestGenerateReport:
     def test_skipped_reactions_recommendation(self, mock_log, tmp_path):
         migrator = _make_migrator(output_dir=str(tmp_path))
         migrator.state.skipped_reactions = [
-            {"user": "U999", "reaction": "thumbsup", "channel": "general"},
+            {
+                "user_id": "U999",
+                "reaction": "thumbsup",
+                "message_ts": "123.456",
+                "channel": "general",
+            },
         ]
 
         result = generate_report(migrator)
@@ -668,7 +694,7 @@ class TestGenerateReport:
         """When writing channel logs fails, it should log an error but not crash."""
         migrator = _make_migrator(output_dir=str(tmp_path))
         migrator.state.failed_messages = [
-            {"channel": "general", "ts": "1234.56", "error": "timeout"},
+            _make_failed(channel="general", ts="1234.56", error="timeout"),
         ]
 
         # Patch open to raise when writing channel logs
@@ -693,12 +719,13 @@ class TestGenerateReport:
                 return "<Unserializable>"
 
         migrator.state.failed_messages = [
-            {
-                "channel": "general",
-                "ts": "1234.56",
-                "error": "timeout",
-                "payload": Unserializable(),
-            },
+            FailedMessage(
+                channel="general",
+                ts="1234.56",
+                error="timeout",
+                error_details="",
+                payload=Unserializable(),  # type: ignore[typeddict-item]
+            ),
         ]
 
         generate_report(migrator)

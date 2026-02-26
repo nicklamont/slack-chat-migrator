@@ -9,7 +9,7 @@ from googleapiclient.errors import HttpError
 
 from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.config import ImportCompletionStrategy, MigrationConfig
-from slack_migrator.core.state import MigrationState
+from slack_migrator.core.state import MigrationState, _default_migration_summary
 
 
 def _make_migrator(
@@ -37,13 +37,7 @@ def _make_migrator(
     migrator.state = MigrationState()
     migrator.state.current_channel = "general"
     migrator.state.current_space = None
-    migrator.state.migration_summary = {
-        "messages_created": 0,
-        "reactions_created": 0,
-        "files_created": 0,
-        "channels_processed": [],
-        "spaces_created": 0,
-    }
+    migrator.state.migration_summary = _default_migration_summary()
     migrator.state.output_dir = Path("/tmp/test_output")
 
     return migrator

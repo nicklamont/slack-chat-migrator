@@ -7,13 +7,15 @@ handling argument parsing, configuration loading, and executing the
 migration process with appropriate error handling.
 """
 
+from __future__ import annotations
+
 import datetime
 import logging
 import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Callable, ClassVar, Optional
+from typing import TYPE_CHECKING, Callable, ClassVar
 
 import click
 
@@ -21,6 +23,13 @@ if TYPE_CHECKING:
     from googleapiclient.errors import HttpError
 
 import slack_migrator
+from slack_migrator.cli.report import generate_report, print_dry_run_summary
+from slack_migrator.constants import (
+    HTTP_FORBIDDEN,
+    HTTP_RATE_LIMIT,
+    HTTP_SERVER_ERROR_MIN,
+    PERMISSION_DENIED_ERROR,
+)
 from slack_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
 from slack_migrator.core.config import load_config
 from slack_migrator.core.migrator import SlackToChatMigrator
@@ -257,10 +266,12 @@ def check_permissions(
     setup_logger(verbose, debug_api)
 
     try:
+        cfg = load_config(Path(config))
         check_permissions_standalone(
             creds_path=creds_path,
             workspace_admin=workspace_admin,
-            config_path=config,
+            max_retries=cfg.max_retries,
+            retry_delay=cfg.retry_delay,
         )
     except Exception as e:
         handle_exception(e)
@@ -412,9 +423,9 @@ class MigrationOrchestrator:
 
     def __init__(self, args: SimpleNamespace) -> None:
         self.args = args
-        self.migrator: Optional[SlackToChatMigrator] = None
-        self.dry_run_migrator: Optional[SlackToChatMigrator] = None
-        self.output_dir: Optional[str] = None
+        self.migrator: SlackToChatMigrator | None = None
+        self.dry_run_migrator: SlackToChatMigrator | None = None
+        self.output_dir: str | None = None
 
     def create_migrator(self, force_dry_run: bool = False) -> SlackToChatMigrator:
         """Create a migrator instance with the given parameters.
@@ -624,12 +635,39 @@ class MigrationOrchestrator:
 
         try:
             self.dry_run_migrator.migrate()
-        except Exception:
+        except BaseException as e:
+            # Generate report even on failure to show progress made
+            try:
+                report_file = generate_report(self.dry_run_migrator)
+                if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                    log_with_context(
+                        logging.INFO,
+                        f"Partial migration report available at: {report_file}",
+                    )
+                    log_with_context(
+                        logging.INFO,
+                        "This report shows progress made before interruption.",
+                    )
+                else:
+                    log_with_context(
+                        logging.INFO,
+                        f"Migration report (with partial results) available at: {report_file}",
+                    )
+            except Exception as report_error:
+                log_with_context(
+                    logging.WARNING,
+                    f"Failed to generate migration report after failure: {report_error}",
+                )
             log_with_context(
                 logging.ERROR,
                 "Please fix the issues identified during validation before proceeding.",
             )
             raise
+
+        # Generate report after successful validation
+        report_file = generate_report(self.dry_run_migrator)
+        if self.dry_run_migrator.dry_run:
+            print_dry_run_summary(self.dry_run_migrator, report_file)
 
         # Check validation results
         if self.check_unmapped_users(self.dry_run_migrator):
@@ -660,7 +698,36 @@ class MigrationOrchestrator:
             # Explicit dry run mode
             if self.migrator is None:
                 raise RuntimeError("Migrator not initialized")
-            self.migrator.migrate()
+            try:
+                self.migrator.migrate()
+            except BaseException as e:
+                # Generate report even on failure to show progress made
+                try:
+                    report_file = generate_report(self.migrator)
+                    if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                        log_with_context(
+                            logging.INFO,
+                            f"Partial migration report available at: {report_file}",
+                        )
+                        log_with_context(
+                            logging.INFO,
+                            "This report shows progress made before interruption.",
+                        )
+                    else:
+                        log_with_context(
+                            logging.INFO,
+                            f"Migration report (with partial results) available at: {report_file}",
+                        )
+                except Exception as report_error:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Failed to generate migration report after failure: {report_error}",
+                    )
+                raise
+
+            # Generate report after dry run migration
+            report_file = generate_report(self.migrator)
+            print_dry_run_summary(self.migrator, report_file)
 
             if self.check_unmapped_users(self.migrator):
                 self.report_validation_issues(self.migrator, is_explicit_dry_run=True)
@@ -678,7 +745,34 @@ class MigrationOrchestrator:
                 if self.get_user_confirmation():
                     if self.migrator is None:
                         raise RuntimeError("Migrator not initialized")
-                    self.migrator.migrate()
+                    try:
+                        self.migrator.migrate()
+                    except BaseException as e:
+                        # Generate report even on failure to show progress made
+                        try:
+                            report_file = generate_report(self.migrator)
+                            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                                log_with_context(
+                                    logging.INFO,
+                                    f"Partial migration report available at: {report_file}",
+                                )
+                                log_with_context(
+                                    logging.INFO,
+                                    "This report shows progress made before interruption.",
+                                )
+                            else:
+                                log_with_context(
+                                    logging.INFO,
+                                    f"Migration report (with partial results) available at: {report_file}",
+                                )
+                        except Exception as report_error:
+                            log_with_context(
+                                logging.WARNING,
+                                f"Failed to generate migration report after failure: {report_error}",
+                            )
+                        raise
+                    # Generate report after successful migration
+                    generate_report(self.migrator)
                 else:
                     log_with_context(logging.INFO, "Migration cancelled by user.")
                     return
@@ -754,14 +848,14 @@ def log_startup_info(args: SimpleNamespace) -> None:
     log_with_context(logging.INFO, f"- Debug API calls: {args.debug_api}")
 
 
-def handle_http_error(e: "HttpError") -> None:
+def handle_http_error(e: HttpError) -> None:
     """Handle HTTP errors with specific messages.
 
     Args:
         e: The Google API HTTP error to handle.
     """
 
-    if e.resp.status == 403 and "PERMISSION_DENIED" in str(e):
+    if e.resp.status == HTTP_FORBIDDEN and PERMISSION_DENIED_ERROR in str(e):
         log_with_context(logging.ERROR, f"Permission denied error: {e}")
         log_with_context(
             logging.INFO,
@@ -785,13 +879,13 @@ def handle_http_error(e: "HttpError") -> None:
             logging.INFO, "   - https://www.googleapis.com/auth/chat.spaces"
         )
         log_with_context(logging.INFO, "   - https://www.googleapis.com/auth/drive")
-    elif e.resp.status == 429:
+    elif e.resp.status == HTTP_RATE_LIMIT:
         log_with_context(logging.ERROR, f"Rate limit exceeded: {e}")
         log_with_context(
             logging.INFO,
             "The migration hit API rate limits. Consider using --update_mode to resume.",
         )
-    elif e.resp.status >= 500:
+    elif e.resp.status >= HTTP_SERVER_ERROR_MIN:
         log_with_context(logging.ERROR, f"Server error from Google API: {e}")
         log_with_context(
             logging.INFO, "This is likely a temporary issue. Please try again later."

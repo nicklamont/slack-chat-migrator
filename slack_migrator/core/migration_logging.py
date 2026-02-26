@@ -39,16 +39,13 @@ def _collect_statistics(migrator: SlackToChatMigrator) -> dict[str, Any]:
     ):
         unmapped_users = migrator.unmapped_user_tracker.get_unmapped_count()
 
+    summary = migrator.state.migration_summary
     return {
-        "channels_processed": len(
-            migrator.state.migration_summary.get("channels_processed", [])
-        ),
-        "spaces_created": migrator.state.migration_summary.get("spaces_created", 0),
-        "messages_created": migrator.state.migration_summary.get("messages_created", 0),
-        "reactions_created": migrator.state.migration_summary.get(
-            "reactions_created", 0
-        ),
-        "files_created": migrator.state.migration_summary.get("files_created", 0),
+        "channels_processed": len(summary["channels_processed"]),
+        "spaces_created": summary["spaces_created"],
+        "messages_created": summary["messages_created"],
+        "reactions_created": summary["reactions_created"],
+        "files_created": summary["files_created"],
         "channels_with_errors": len(migrator.state.channels_with_errors),
         "incomplete_imports": len(migrator.state.incomplete_import_spaces),
         "unmapped_users": unmapped_users,
@@ -229,11 +226,10 @@ def log_migration_failure(
     is_interrupt = isinstance(exception, KeyboardInterrupt)
     is_dry_run = migrator.dry_run
 
-    channels_processed = len(
-        migrator.state.migration_summary.get("channels_processed", [])
-    )
-    spaces_created = migrator.state.migration_summary.get("spaces_created", 0)
-    messages_created = migrator.state.migration_summary.get("messages_created", 0)
+    summary = migrator.state.migration_summary
+    channels_processed = len(summary["channels_processed"])
+    spaces_created = summary["spaces_created"]
+    messages_created = summary["messages_created"]
 
     # --- Outcome header ---------------------------------------------------
     if is_interrupt:

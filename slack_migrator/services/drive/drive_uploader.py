@@ -18,6 +18,8 @@ from slack_migrator.utils.logging import (
     log_with_context,
 )
 
+logger = logging.getLogger("slack_migrator")
+
 
 class DriveFileUploader:
     """Handles file uploads to Google Drive."""
@@ -214,7 +216,10 @@ class DriveFileUploader:
 
                     file = self.drive_service.files().get(**params).execute()
                     return cached_id, file.get("webViewLink")
-                except Exception:
+                except HttpError:
+                    logger.debug(
+                        "Cached file %s may have been deleted", cached_id, exc_info=True
+                    )
                     # File might have been deleted, continue with search
                     self.file_hash_cache.pop(file_hash, None)
 

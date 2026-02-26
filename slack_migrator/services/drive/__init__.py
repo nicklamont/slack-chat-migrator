@@ -1,6 +1,4 @@
-"""
-Drive service utilities.
-"""
+"""Google Drive API file upload and shared drive management."""
 
 from .drive_uploader import DriveFileUploader
 from .folder_manager import FolderManager

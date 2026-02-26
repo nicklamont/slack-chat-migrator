@@ -12,7 +12,13 @@ import tempfile
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import requests
+from googleapiclient.errors import HttpError
 
+from slack_migrator.constants import (
+    HTTP_FORBIDDEN,
+    HTTP_OK,
+    HTTP_UNAUTHORIZED,
+)
 from slack_migrator.services.chat import ChatFileUploader
 from slack_migrator.services.drive import (
     DriveFileUploader,
@@ -20,6 +26,8 @@ from slack_migrator.services.drive import (
     SharedDriveManager,
 )
 from slack_migrator.utils.logging import log_with_context
+
+logger = logging.getLogger("slack_migrator")
 
 if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
@@ -200,7 +208,7 @@ class FileHandler:
                         logging.INFO,
                         f"Using configured shared drive ID: {shared_drive_id}",
                     )
-                except Exception as e:
+                except HttpError as e:
                     log_with_context(
                         logging.ERROR,
                         f"Configured shared drive ID {shared_drive_id} not accessible: {e}. Will create new one.",
@@ -238,7 +246,7 @@ class FileHandler:
                 # Pre-cache file hashes from root folder to improve deduplication
                 self._pre_cache_root_folder()
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.ERROR,
                 f"Failed to initialize shared drive and folder: {e}. Using fallback.",
@@ -319,14 +327,14 @@ class FileHandler:
                     f"Completed pre-caching {total_files_cached} files from {folders_processed} channel folders",
                 )
 
-            except Exception as e:
+            except HttpError as e:
                 # Don't fail the entire process if subfolder caching fails
                 log_with_context(
                     logging.WARNING,
                     f"Error pre-caching channel subfolders: {e}. Continuing with available cache.",
                 )
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.WARNING,
                 f"Failed to pre-cache file hashes from root folder: {e}. Continuing without pre-cache.",
@@ -555,7 +563,7 @@ class FileHandler:
                 self.file_stats["failed_uploads"] += 1
                 return None
 
-        except Exception as e:
+        except (HttpError, requests.RequestException, OSError) as e:
             self.file_stats["failed_uploads"] += 1
             log_with_context(
                 logging.ERROR,
@@ -587,7 +595,7 @@ class FileHandler:
                 return result.get("drive_id")
             return None
 
-        except Exception as e:
+        except (HttpError, requests.RequestException, OSError) as e:
             log_with_context(
                 logging.ERROR,
                 f"Error uploading file: {e!s}",
@@ -694,14 +702,14 @@ class FileHandler:
                 # Clean up the temporary file
                 try:
                     os.unlink(temp_file_path)
-                except Exception as cleanup_error:
+                except OSError as cleanup_error:
                     log_with_context(
                         logging.WARNING,
                         f"Failed to clean up temporary file: {cleanup_error}",
                         file_id=file_id,
                     )
 
-        except Exception as e:
+        except (HttpError, OSError) as e:
             log_with_context(
                 logging.ERROR,
                 f"Error in direct Chat upload for {file_obj.get('name', 'unknown')}: {e}",
@@ -924,7 +932,7 @@ class FileHandler:
                             file_id=file_id,
                             drive_file_id=drive_file_id,
                         )
-                    except Exception as e:
+                    except HttpError as e:
                         self.file_stats["ownership_transfer_failed"] += 1
                         log_with_context(
                             logging.WARNING,
@@ -975,10 +983,12 @@ class FileHandler:
                 # Clean up temporary file
                 try:
                     os.unlink(temp_file_path)
-                except Exception:
-                    pass
+                except OSError:
+                    logger.debug(
+                        "Failed to clean up temp file %s", temp_file_path, exc_info=True
+                    )
 
-        except Exception as e:
+        except (HttpError, OSError) as e:
             log_with_context(
                 logging.ERROR,
                 f"Error uploading file to Drive: {e}",
@@ -1044,7 +1054,7 @@ class FileHandler:
 
             return True
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(logging.WARNING, f"Failed to transfer file ownership: {e}")
             return False
 
@@ -1128,7 +1138,7 @@ class FileHandler:
                 url_private, headers=headers, stream=True, timeout=60
             )
 
-            if response.status_code != 200:
+            if response.status_code != HTTP_OK:
                 log_with_context(
                     logging.WARNING,
                     f"Failed to download file {name}: HTTP {response.status_code}",
@@ -1165,7 +1175,7 @@ class FileHandler:
             if (
                 hasattr(e, "response")
                 and e.response
-                and e.response.status_code in (401, 403)
+                and e.response.status_code in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN)
             ):
                 log_with_context(
                     logging.WARNING,
@@ -1338,8 +1348,8 @@ class FileHandler:
                             file_id=drive_file_id,
                         )
                         return True
-                except Exception:
-                    # If we can't get folder info, continue checking other parents
+                except HttpError:
+                    logger.debug("Failed to get folder info, continuing", exc_info=True)
                     continue
 
             # If we're here, the file is not in a channel folder, so we need to set individual permissions
@@ -1402,7 +1412,7 @@ class FileHandler:
                             sendNotificationEmail=False,
                         ).execute()
 
-                except Exception as e:
+                except HttpError as e:
                     log_with_context(
                         logging.WARNING,
                         f"Failed to share file with {email}: {e}",
@@ -1418,7 +1428,7 @@ class FileHandler:
             )
             return True
 
-        except Exception as e:
+        except HttpError as e:
             log_with_context(
                 logging.ERROR,
                 f"Failed to share Drive file: {e}",

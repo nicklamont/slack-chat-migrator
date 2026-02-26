@@ -11,15 +11,13 @@ import datetime
 import io
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
-from slack_migrator.core.config import load_config
+from slack_migrator.constants import HTTP_CONFLICT, SPACE_TYPE
 from slack_migrator.exceptions import PermissionCheckError
-from slack_migrator.services.space_creator import SPACE_TYPE
 from slack_migrator.utils.api import REQUIRED_SCOPES, get_gcp_service
 from slack_migrator.utils.logging import log_with_context
 
@@ -240,7 +238,7 @@ class PermissionValidator:
                 logging.INFO, "    ✓ Member creation: PASSED (historical membership)"
             )
         except HttpError as e:
-            if e.resp.status == 409:  # Already a member
+            if e.resp.status == HTTP_CONFLICT:  # Already a member
                 log_with_context(
                     logging.INFO, "    ✓ Member creation: PASSED (already member)"
                 )
@@ -319,7 +317,7 @@ class PermissionValidator:
 
             log_with_context(logging.INFO, "    ✓ Drive operations: PASSED")
 
-        except Exception as e:
+        except HttpError as e:
             self.permission_errors.append(f"Drive operations failed: {e}")
             log_with_context(logging.ERROR, f"    ✗ Drive operations: FAILED - {e}")
 
@@ -334,7 +332,7 @@ class PermissionValidator:
                     fileId=self.test_resources["drive_file"]
                 ).execute()
                 log_with_context(logging.DEBUG, "Cleaned up test Drive file")
-            except Exception as e:
+            except HttpError as e:
                 log_with_context(logging.WARNING, f"Failed to clean up Drive file: {e}")
 
         # Clean up test space - simple deletion without import completion
@@ -421,7 +419,8 @@ def validate_permissions(migrator: Any) -> bool:
 def check_permissions_standalone(
     creds_path: str,
     workspace_admin: str,
-    config_path: str = "config.yaml",
+    max_retries: int = 3,
+    retry_delay: int = 2,
 ) -> bool:
     """
     Run permission checks without creating a full SlackToChatMigrator.
@@ -436,7 +435,8 @@ def check_permissions_standalone(
     Args:
         creds_path: Path to service account credentials JSON.
         workspace_admin: Email of workspace admin to impersonate.
-        config_path: Path to config YAML (used for retry settings).
+        max_retries: Maximum API retry attempts (default 3).
+        retry_delay: Delay in seconds between retries (default 2).
 
     Returns:
         True if all permissions are valid.
@@ -446,23 +446,21 @@ def check_permissions_standalone(
     """
     log_with_context(logging.INFO, "Running standalone permission check...")
 
-    config = load_config(Path(config_path))
-
     chat = get_gcp_service(
         creds_path,
         workspace_admin,
         "chat",
         "v1",
-        max_retries=config.max_retries,
-        retry_delay=config.retry_delay,
+        max_retries=max_retries,
+        retry_delay=retry_delay,
     )
     drive = get_gcp_service(
         creds_path,
         workspace_admin,
         "drive",
         "v3",
-        max_retries=config.max_retries,
-        retry_delay=config.retry_delay,
+        max_retries=max_retries,
+        retry_delay=retry_delay,
     )
 
     ctx = PermissionCheckContext(
