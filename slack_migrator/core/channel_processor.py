@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
+    from slack_migrator.core.context import MigrationContext
+    from slack_migrator.core.state import MigrationState
 
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
@@ -38,8 +39,21 @@ from slack_migrator.utils.logging import (
 class ChannelProcessor:
     """Handles per-channel processing during migration."""
 
-    def __init__(self, migrator: SlackToChatMigrator) -> None:
-        self.migrator = migrator
+    def __init__(
+        self,
+        ctx: MigrationContext,
+        state: MigrationState,
+        chat: Any,
+        user_resolver: Any,
+        file_handler: Any | None,
+        attachment_processor: Any,
+    ) -> None:
+        self.ctx = ctx
+        self.state = state
+        self.chat = chat
+        self.user_resolver = user_resolver
+        self.file_handler = file_handler
+        self.attachment_processor = attachment_processor
 
     def process_channel(self, ch_dir: Path) -> bool:
         """Process a single channel directory.
@@ -53,27 +67,19 @@ class ChannelProcessor:
         Returns:
             True if the migration should abort (break the outer loop).
         """
-        migrator = self.migrator
         channel = ch_dir.name
 
-        migrator.state.current_channel = channel
-
-        # Determine mode prefix for logging
-        mode_prefix = "[DRY RUN] "
-        if migrator.update_mode:
-            mode_prefix = (
-                "[UPDATE MODE] " if not migrator.dry_run else "[DRY RUN] [UPDATE MODE] "
-            )
+        self.state.current_channel = channel
 
         log_with_context(
             logging.INFO,
-            f"{mode_prefix if migrator.dry_run or migrator.update_mode else ''}Processing channel: {channel}",
+            f"{self.ctx.log_prefix}Processing channel: {channel}",
             channel=channel,
         )
-        migrator.state.migration_summary["channels_processed"].append(channel)
+        self.state.migration_summary["channels_processed"].append(channel)
 
         # Check if channel should be processed
-        if not should_process_channel(channel, migrator.config):
+        if not should_process_channel(channel, self.ctx.config):
             log_with_context(
                 logging.WARNING,
                 f"Skipping channel {channel} based on configuration",
@@ -83,15 +89,15 @@ class ChannelProcessor:
 
         # Check for unresolved space conflicts
         if (
-            hasattr(migrator.state, "channel_conflicts")
-            and channel in migrator.state.channel_conflicts
+            hasattr(self.state, "channel_conflicts")
+            and channel in self.state.channel_conflicts
         ):
             log_with_context(
                 logging.ERROR,
                 f"Skipping channel {channel} due to unresolved duplicate space conflict",
                 channel=channel,
             )
-            migrator.state.migration_issues[channel] = (
+            self.state.migration_issues[channel] = (
                 "Skipped due to duplicate space conflict - requires disambiguation in config.yaml"
             )
             return False
@@ -115,9 +121,9 @@ class ChannelProcessor:
             return False
 
         # Set current space
-        migrator.state.current_space = space
-        migrator.state.channel_to_space[channel] = space
-        migrator.state.created_spaces[channel] = space
+        self.state.current_space = space
+        self.state.channel_to_space[channel] = space
+        self.state.created_spaces[channel] = space
 
         log_with_context(
             logging.DEBUG,
@@ -129,14 +135,14 @@ class ChannelProcessor:
         if is_newly_created:
             log_with_context(
                 logging.INFO,
-                f"{'[DRY RUN] ' if migrator.dry_run else ''}Step 2/6: Adding historical memberships for {channel}",
+                f"{self.ctx.log_prefix}Step 2/6: Adding historical memberships for {channel}",
                 channel=channel,
             )
             add_users_to_space(
-                migrator.ctx,
-                migrator.state,
-                migrator.chat,
-                migrator.user_resolver,
+                self.ctx,
+                self.state,
+                self.chat,
+                self.user_resolver,
                 space,
                 channel,
             )
@@ -180,58 +186,59 @@ class ChannelProcessor:
             return True  # Signal to break the loop
 
         # Delete space if errors
-        if channel_had_errors and not migrator.dry_run and not migrator.update_mode:
+        if channel_had_errors and not self.ctx.dry_run and not self.ctx.update_mode:
             self._delete_space_if_errors(space, channel)
 
         return False
 
     def _setup_channel_logging(self, channel: str) -> None:
         """Set up channel-specific log handler."""
-        migrator = self.migrator
-        if migrator.state.output_dir is None:
+        if self.state.output_dir is None:
             raise RuntimeError("Output directory not set")
         channel_handler = setup_channel_logger(
-            migrator.state.output_dir, channel, migrator.verbose, is_debug_api_enabled()
+            self.state.output_dir,
+            channel,
+            self.ctx.verbose,
+            is_debug_api_enabled(),
         )
-        migrator.state.channel_handlers[channel] = channel_handler
+        self.state.channel_handlers[channel] = channel_handler
 
     def _create_or_reuse_space(self, ch_dir: Path) -> tuple[str, bool]:
         """Create a new space or reuse an existing one.
 
         Returns (space_name, is_newly_created).
         """
-        migrator = self.migrator
         channel = ch_dir.name
 
-        if migrator.update_mode and channel in migrator.state.created_spaces:
-            space = migrator.state.created_spaces[channel]
+        if self.ctx.update_mode and channel in self.state.created_spaces:
+            space = self.state.created_spaces[channel]
             space_id = space.split("/")[-1] if space.startswith("spaces/") else space
             log_with_context(
                 logging.INFO,
                 f"[UPDATE MODE] Using existing space {space_id} for channel {channel}",
                 channel=channel,
             )
-            migrator.state.space_cache[channel] = space
+            self.state.space_cache[channel] = space
             return space, False
         else:
             action_desc = (
                 "Creating new import mode space"
-                if not migrator.update_mode
+                if not self.ctx.update_mode
                 else "Creating new space (none found in update mode)"
             )
             log_with_context(
                 logging.INFO,
-                f"{'[DRY RUN] ' if migrator.dry_run else ''}Step 1/6: {action_desc} for {channel}",
+                f"{self.ctx.log_prefix}Step 1/6: {action_desc} for {channel}",
                 channel=channel,
             )
-            space = migrator.state.space_cache.get(channel) or create_space(
-                migrator.ctx,
-                migrator.state,
-                migrator.chat,
-                migrator.user_resolver,
+            space = self.state.space_cache.get(channel) or create_space(
+                self.ctx,
+                self.state,
+                self.chat,
+                self.user_resolver,
                 channel,
             )
-            migrator.state.space_cache[channel] = space
+            self.state.space_cache[channel] = space
             return space, True
 
     def _process_messages(  # noqa: C901
@@ -241,24 +248,16 @@ class ChannelProcessor:
 
         Returns (processed_count, failed_count, channel_had_errors).
         """
-        migrator = self.migrator
         channel = ch_dir.name
-
-        # Determine mode prefix
-        mode_prefix = "[DRY RUN]"
-        if migrator.update_mode:
-            mode_prefix = (
-                "[UPDATE MODE]" if not migrator.dry_run else "[DRY RUN] [UPDATE MODE]"
-            )
 
         log_with_context(
             logging.INFO,
-            f"{mode_prefix if migrator.dry_run or migrator.update_mode else ''} Step 3/6: Processing messages for {channel}",
+            f"{self.ctx.log_prefix}Step 3/6: Processing messages for {channel}",
             channel=channel,
         )
 
         # Load messages from JSON files
-        msg_dir = migrator.export_root / channel
+        msg_dir = self.ctx.export_root / channel
         msgs: list[dict[str, Any]] = []
         for jf in sorted(msg_dir.glob("*.json")):
             try:
@@ -303,36 +302,36 @@ class ChannelProcessor:
         msgs = deduped_msgs
 
         # Count messages in dry run mode
-        if migrator.dry_run:
+        if self.ctx.dry_run:
             message_count = sum(1 for m in msgs if m.get("type") == "message")
             log_with_context(
                 logging.INFO,
-                f"{mode_prefix} Found {message_count} messages in channel {channel}",
+                f"{self.ctx.log_prefix}Found {message_count} messages in channel {channel}",
                 channel=channel,
             )
-            migrator.state.migration_summary["messages_created"] += message_count
+            self.state.migration_summary["messages_created"] += message_count
 
         # Load previously processed messages and thread mappings
         processed_ts: list[str] = []
 
         # Discover existing resources (find the last message timestamp) from Google Chat
-        if not migrator.dry_run or migrator.update_mode:
+        if not self.ctx.dry_run or self.ctx.update_mode:
             self._discover_channel_resources(channel)
 
         processed_count = 0
         failed_count = 0
 
         # Get failure threshold configuration
-        max_failure_percentage = migrator.config.max_failure_percentage
+        max_failure_percentage = self.ctx.config.max_failure_percentage
 
         # Track failures for this channel
         channel_failures: list[str] = []
 
         # Create progress bar
         progress_prefix = ""
-        if migrator.dry_run:
+        if self.ctx.dry_run:
             progress_prefix = "[DRY RUN] "
-        elif migrator.update_mode:
+        elif self.ctx.update_mode:
             progress_prefix = "[UPDATE] "
 
         progress_desc = f"{progress_prefix}Adding messages to {channel}"
@@ -344,29 +343,29 @@ class ChannelProcessor:
             ts = m["ts"]
 
             # Skip already processed messages (only in non-dry run mode)
-            if ts in processed_ts and not migrator.dry_run:
+            if ts in processed_ts and not self.ctx.dry_run:
                 processed_count += 1
                 continue
 
             # Track statistics for this message
             track_message_stats(
-                migrator.ctx,
-                migrator.state,
-                migrator.user_resolver,
-                migrator.attachment_processor,
+                self.ctx,
+                self.state,
+                self.user_resolver,
+                self.attachment_processor,
                 m,
             )
 
-            if migrator.dry_run:
+            if self.ctx.dry_run:
                 continue
 
             # Send message using the new method
             result = send_message(
-                migrator.ctx,
-                migrator.state,
-                migrator.chat,
-                migrator.user_resolver,
-                migrator.attachment_processor,
+                self.ctx,
+                self.state,
+                self.chat,
+                self.user_resolver,
+                self.attachment_processor,
                 space,
                 m,
             )
@@ -393,7 +392,7 @@ class ChannelProcessor:
                         )
                         # Flag the channel as having a high error rate
                         channel_had_errors = True
-                        migrator.state.high_failure_rate_channels[channel] = (
+                        self.state.high_failure_rate_channels[channel] = (
                             failure_percentage
                         )
 
@@ -402,7 +401,7 @@ class ChannelProcessor:
 
         # Record failures for reporting
         if channel_failures:
-            migrator.state.failed_messages_by_channel[channel] = channel_failures
+            self.state.failed_messages_by_channel[channel] = channel_failures
             channel_had_errors = True
 
         log_with_context(
@@ -420,22 +419,20 @@ class ChannelProcessor:
 
         Returns updated channel_had_errors.
         """
-        migrator = self.migrator
-
         log_with_context(
             logging.INFO,
-            f"{'[DRY RUN] ' if migrator.dry_run else ''}Step 4/6: Completing import mode for {channel}",
+            f"{self.ctx.log_prefix}Step 4/6: Completing import mode for {channel}",
             channel=channel,
         )
 
         # Get the completion strategy from config
-        completion_strategy = migrator.config.import_completion_strategy
+        completion_strategy = self.ctx.config.import_completion_strategy
 
         # Only complete import if there were no errors or we're using force_complete strategy
         if (
             not channel_had_errors
             or completion_strategy == ImportCompletionStrategy.FORCE_COMPLETE
-        ) and not migrator.dry_run:
+        ) and not self.ctx.dry_run:
             try:
                 log_with_context(
                     logging.DEBUG,
@@ -443,9 +440,9 @@ class ChannelProcessor:
                     channel=channel,
                 )
 
-                if migrator.chat is None:
+                if self.chat is None:
                     raise RuntimeError("Chat API service not initialized")
-                migrator.chat.spaces().completeImport(name=space).execute()
+                self.chat.spaces().completeImport(name=space).execute()
 
                 log_with_context(
                     logging.INFO,
@@ -460,14 +457,14 @@ class ChannelProcessor:
                     channel=channel,
                 )
                 channel_had_errors = True
-                migrator.state.incomplete_import_spaces.append((space, channel))
-        elif channel_had_errors and not migrator.dry_run:
+                self.state.incomplete_import_spaces.append((space, channel))
+        elif channel_had_errors and not self.ctx.dry_run:
             log_with_context(
                 logging.WARNING,
                 f"Skipping import completion for space {space} due to errors (strategy: {completion_strategy})",
                 channel=channel,
             )
-            migrator.state.incomplete_import_spaces.append((space, channel))
+            self.state.incomplete_import_spaces.append((space, channel))
 
         return channel_had_errors
 
@@ -482,8 +479,6 @@ class ChannelProcessor:
 
         Returns updated channel_had_errors.
         """
-        migrator = self.migrator
-
         step_desc = (
             "Adding current members to space"
             if is_newly_created
@@ -491,7 +486,7 @@ class ChannelProcessor:
         )
         log_with_context(
             logging.INFO,
-            f"{'[DRY RUN] ' if migrator.dry_run else ''}Step 5/6: {step_desc} for {channel}",
+            f"{self.ctx.log_prefix}Step 5/6: {step_desc} for {channel}",
             channel=channel,
         )
 
@@ -500,11 +495,11 @@ class ChannelProcessor:
             # For new spaces, only add members if import completed successfully
             try:
                 add_regular_members(
-                    migrator.ctx,
-                    migrator.state,
-                    migrator.chat,
-                    migrator.user_resolver,
-                    getattr(migrator, "file_handler", None),
+                    self.ctx,
+                    self.state,
+                    self.chat,
+                    self.user_resolver,
+                    self.file_handler,
                     space,
                     channel,
                 )
@@ -552,9 +547,7 @@ class ChannelProcessor:
         self, channel: str, processed_count: int, failed_count: int
     ) -> bool:
         """Determine if the migration should abort after errors in a channel."""
-        migrator = self.migrator
-
-        if migrator.dry_run:
+        if self.ctx.dry_run:
             return False
 
         # Only consider aborting if we had failures
@@ -566,7 +559,7 @@ class ChannelProcessor:
             )
 
             # Check config for abort_on_error setting
-            should_abort = migrator.config.abort_on_error
+            should_abort = self.ctx.config.abort_on_error
 
             if should_abort:
                 log_with_context(
@@ -586,9 +579,7 @@ class ChannelProcessor:
 
     def _delete_space_if_errors(self, space_name: str, channel: str) -> None:
         """Delete a space if it had errors and cleanup is enabled."""
-        migrator = self.migrator
-
-        if not migrator.config.cleanup_on_error:
+        if not self.ctx.config.cleanup_on_error:
             log_with_context(
                 logging.INFO,
                 f"Not deleting space {space_name} despite errors (cleanup_on_error is disabled in config)",
@@ -602,9 +593,9 @@ class ChannelProcessor:
                 f"Deleting space {space_name} due to errors",
                 space_name=space_name,
             )
-            if migrator.chat is None:
+            if self.chat is None:
                 raise RuntimeError("Chat API service not initialized")
-            migrator.chat.spaces().delete(name=space_name).execute()
+            self.chat.spaces().delete(name=space_name).execute()
             log_with_context(
                 logging.INFO,
                 f"Successfully deleted space {space_name}",
@@ -612,11 +603,11 @@ class ChannelProcessor:
             )
 
             # Remove from created_spaces
-            if channel in migrator.state.created_spaces:
-                del migrator.state.created_spaces[channel]
+            if channel in self.state.created_spaces:
+                del self.state.created_spaces[channel]
 
             # Decrement space count
-            migrator.state.migration_summary["spaces_created"] -= 1
+            self.state.migration_summary["spaces_created"] -= 1
         except (HttpError, RefreshError, TransportError) as e:
             log_with_context(
                 logging.ERROR,
@@ -628,10 +619,8 @@ class ChannelProcessor:
 
     def _discover_channel_resources(self, channel: str) -> None:
         """Find the last message timestamp in a space to determine where to resume."""
-        migrator = self.migrator
-
         # Check if we have a space for this channel
-        space_name = migrator.state.channel_to_space.get(channel)
+        space_name = self.state.channel_to_space.get(channel)
         if not space_name:
             log_with_context(
                 logging.WARNING,
@@ -641,7 +630,7 @@ class ChannelProcessor:
             return
 
         # Get the timestamp of the last message in the space
-        last_timestamp = get_last_message_timestamp(migrator.chat, channel, space_name)
+        last_timestamp = get_last_message_timestamp(self.chat, channel, space_name)
 
         if last_timestamp > 0:
             log_with_context(
@@ -651,14 +640,11 @@ class ChannelProcessor:
             )
 
             # Store the last timestamp for this channel
-            migrator.state.last_processed_timestamps[channel] = last_timestamp
+            self.state.last_processed_timestamps[channel] = last_timestamp
 
             # Initialize an empty thread_map so we don't try to load it again
-            if (
-                not hasattr(migrator.state, "thread_map")
-                or migrator.state.thread_map is None
-            ):
-                migrator.state.thread_map = {}
+            if not hasattr(self.state, "thread_map") or self.state.thread_map is None:
+                self.state.thread_map = {}
         else:
             # If no messages were found, log it but don't set a last timestamp
             # This will cause all messages to be imported

@@ -405,7 +405,14 @@ class SlackToChatMigrator:
             )
 
             # Process each channel
-            self.channel_processor = ChannelProcessor(self)
+            self.channel_processor = ChannelProcessor(
+                ctx=self.ctx,
+                state=self.state,
+                chat=self.chat,
+                user_resolver=self.user_resolver,
+                file_handler=getattr(self, "file_handler", None),
+                attachment_processor=self.attachment_processor,
+            )
             for ch in all_channel_dirs:
                 should_abort = self.channel_processor.process_channel(ch)
                 if should_abort:
