@@ -885,13 +885,17 @@ def _update_folder_permissions(
     ):
         return
 
+    root_folder_id = migrator.file_handler._root_folder_id
+    if root_folder_id is None:
+        return
+
     folder_id = None
 
     try:
         # Get the channel folder if it exists
         folder_id = migrator.file_handler.folder_manager.get_channel_folder_id(
             channel,
-            migrator.file_handler._root_folder_id,  # type: ignore[arg-type]
+            root_folder_id,
             migrator.file_handler._shared_drive_id,
         )
 

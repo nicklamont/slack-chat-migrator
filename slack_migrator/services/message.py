@@ -47,7 +47,7 @@ def _should_skip_message(  # noqa: C901
     ts: str,
     user_id: str,
     thread_ts: str | None,
-    channel: str | None,
+    channel: str,
     is_edited: bool,
     edited_ts: str,
     message_key: str,
@@ -96,7 +96,7 @@ def _should_skip_message(  # noqa: C901
     # --- Update-mode deduplication ---
     # First, check if this message is older than the last processed timestamp
     if is_update_mode and hasattr(migrator.state, "last_processed_timestamps"):
-        last_timestamp = migrator.state.last_processed_timestamps.get(channel, 0)  # type: ignore[arg-type]
+        last_timestamp = migrator.state.last_processed_timestamps.get(channel, 0)
         if last_timestamp > 0:
             if not should_process_message(last_timestamp, ts):
                 log_with_context(
@@ -186,7 +186,7 @@ def _build_message_payload(
     ts: str,
     user_id: str,
     thread_ts: str | None,
-    channel: str | None,
+    channel: str,
     is_edited: bool,
     edited_ts: str,
 ) -> tuple[dict[str, Any], str | None, bool, str | None]:
@@ -382,7 +382,7 @@ def _generate_message_id(ts: str, is_edited: bool, edited_ts: str) -> str:
 def _process_attachments(
     migrator: SlackToChatMigrator,
     message: dict[str, Any],
-    channel: str | None,
+    channel: str,
     space: str,
     user_id: str,
     user_email: str | None,
@@ -404,7 +404,7 @@ def _process_attachments(
     # Process file attachments with the sender's email to ensure proper permissions
     attachments = migrator.attachment_processor.process_message_attachments(
         message,
-        channel,  # type: ignore[arg-type]
+        channel,
         space,
         user_id,
         chat_service,
@@ -654,6 +654,13 @@ def send_message(
     user_id = message.get("user", "")
     thread_ts = message.get("thread_ts")
     channel = migrator.state.current_channel
+    if channel is None:
+        log_with_context(
+            logging.ERROR,
+            "send_message called without current_channel set",
+            ts=ts,
+        )
+        return None
 
     # Check for edited messages
     edited = message.get("edited", {})
@@ -799,6 +806,8 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
     """
     # Get the current channel being processed
     channel = migrator.state.current_channel
+    if channel is None:
+        return
     ts = m.get("ts", "")
     user_id = m.get("user", "")
 
@@ -838,7 +847,7 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
         migrator.state.channel_stats = {}
 
     if channel not in migrator.state.channel_stats:
-        migrator.state.channel_stats[channel] = {  # type: ignore[index]
+        migrator.state.channel_stats[channel] = {
             "message_count": 0,
             "reaction_count": 0,
             "file_count": 0,
@@ -864,7 +873,7 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
             return
 
     # Increment message count for this channel
-    migrator.state.channel_stats[channel]["message_count"] += 1  # type: ignore[index]
+    migrator.state.channel_stats[channel]["message_count"] += 1
 
     # Track reactions
     reaction_count = 0
@@ -879,7 +888,7 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
                         continue
                 reaction_count += 1
 
-        migrator.state.channel_stats[channel]["reaction_count"] += reaction_count  # type: ignore[index]
+        migrator.state.channel_stats[channel]["reaction_count"] += reaction_count
 
         # Also increment the global reaction count in dry run mode
         # (in normal mode this is done by process_reactions_batch)
@@ -910,7 +919,7 @@ def track_message_stats(migrator: SlackToChatMigrator, m: dict[str, Any]) -> Non
             channel=channel,
             ts=ts,
         )
-        migrator.state.channel_stats[channel]["file_count"] += file_count  # type: ignore[index]
+        migrator.state.channel_stats[channel]["file_count"] += file_count
 
         # Also increment the global file count
         migrator.state.migration_summary["files_created"] += file_count

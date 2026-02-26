@@ -5,15 +5,18 @@ Integrated file attachment service for message processing.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from slack_migrator.utils.logging import log_with_context
+
+if TYPE_CHECKING:
+    from slack_migrator.services.file import FileHandler
 
 
 class MessageAttachmentProcessor:
     """Handles file attachments during message creation."""
 
-    def __init__(self, file_handler: Any, dry_run: bool = False) -> None:
+    def __init__(self, file_handler: FileHandler, dry_run: bool = False) -> None:
         """Initialize the attachment processor.
 
         Args:
@@ -35,7 +38,7 @@ class MessageAttachmentProcessor:
             and hasattr(self.file_handler.migrator, "state")
             and hasattr(self.file_handler.migrator.state, "current_channel")
         ):
-            return self.file_handler.migrator.state.current_channel  # type: ignore[no-any-return]
+            return self.file_handler.migrator.state.current_channel
         return None
 
     def process_message_attachments(
