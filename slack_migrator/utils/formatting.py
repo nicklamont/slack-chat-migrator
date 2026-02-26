@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Any
 
 import emoji
 
@@ -18,9 +18,6 @@ import emoji
 # you can replace `from slack_migrator.utils.logging import logger`
 # with `import logging; logger = logging.getLogger(__name__)`
 from slack_migrator.utils.logging import log_with_context
-
-if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
 
 
 def _parse_rich_text_elements(elements: list[dict]) -> str:
@@ -392,7 +389,10 @@ def parse_slack_blocks(message: dict) -> str:
 
 
 def convert_formatting(
-    text: str, user_map: dict[str, str], migrator: SlackToChatMigrator | None = None
+    text: str,
+    user_map: dict[str, str],
+    state: Any = None,
+    unmapped_user_tracker: Any = None,
 ) -> str:
     """
     Convert Slack-specific markdown to Google Chat compatible format.
@@ -400,7 +400,8 @@ def convert_formatting(
     Args:
         text: The Slack message text to convert
         user_map: A dictionary mapping Slack user IDs to Google Chat user IDs/emails
-        migrator: Optional migrator instance for tracking unmapped users
+        state: Optional MigrationState for context (current_channel, current_message_ts)
+        unmapped_user_tracker: Optional tracker for unmapped user mentions
 
     Returns:
         The formatted text with Slack mentions converted to Google Chat format
@@ -426,12 +427,12 @@ def convert_formatting(
             return f"<users/{gchat_user_id}>"
 
         # Enhanced logging and tracking for unmapped user mentions
-        if migrator and hasattr(migrator, "unmapped_user_tracker"):
-            current_channel = getattr(migrator.state, "current_channel", "unknown")
-            current_ts = getattr(migrator.state, "current_message_ts", "unknown")
+        if unmapped_user_tracker:
+            current_channel = getattr(state, "current_channel", "unknown")
+            current_ts = getattr(state, "current_message_ts", "unknown")
 
             # Track this unmapped mention
-            migrator.unmapped_user_tracker.track_unmapped_mention(
+            unmapped_user_tracker.track_unmapped_mention(
                 slack_user_id, current_channel, current_ts, text
             )
 
@@ -443,7 +444,7 @@ def convert_formatting(
                 message_ts=current_ts,
             )
         else:
-            # Fallback to original logging if no migrator/tracker
+            # Fallback to original logging if no tracker
             log_with_context(
                 logging.WARNING, f"Could not map Slack user ID: {slack_user_id}"
             )

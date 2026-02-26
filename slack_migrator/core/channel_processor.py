@@ -342,13 +342,27 @@ class ChannelProcessor:
                 continue
 
             # Track statistics for this message
-            track_message_stats(migrator, m)
+            track_message_stats(
+                migrator.ctx,
+                migrator.state,
+                migrator.user_resolver,
+                migrator.attachment_processor,
+                m,
+            )
 
             if migrator.dry_run:
                 continue
 
             # Send message using the new method
-            result = send_message(migrator, space, m)
+            result = send_message(
+                migrator.ctx,
+                migrator.state,
+                migrator.chat,
+                migrator.user_resolver,
+                migrator.attachment_processor,
+                space,
+                m,
+            )
 
             if result:
                 if result != MessageResult.SKIPPED:

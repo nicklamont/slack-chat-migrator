@@ -17,11 +17,15 @@ from googleapiclient.http import BatchHttpRequest
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
+    from slack_migrator.core.context import MigrationContext
+    from slack_migrator.core.state import MigrationState
 
 
 def process_reactions_batch(  # noqa: C901
-    migrator: SlackToChatMigrator,
+    ctx: MigrationContext,
+    state: MigrationState,
+    chat: Any,
+    user_resolver: Any,
     message_name: str,
     reactions: list[dict[str, Any]],
     message_id: str,
@@ -29,7 +33,10 @@ def process_reactions_batch(  # noqa: C901
     """Process reactions for a message in import mode.
 
     Args:
-        migrator: The migrator instance providing API services and config.
+        ctx: Immutable migration context.
+        state: Mutable migration state.
+        chat: Google Chat API service (admin).
+        user_resolver: UserResolver for email lookups and impersonation.
         message_name: Google Chat resource name of the parent message.
         reactions: List of Slack reaction dicts (each with ``name`` and ``users``).
         message_id: Short message identifier for logging.
@@ -52,7 +59,7 @@ def process_reactions_batch(  # noqa: C901
                 error=str(exception),
                 message_id=message_id,
                 request_id=request_id,
-                channel=getattr(migrator.state, "current_channel", None),
+                channel=getattr(state, "current_channel", None),
             )
         else:
             log_with_context(
@@ -60,7 +67,7 @@ def process_reactions_batch(  # noqa: C901
                 "Successfully added reaction in batch",
                 message_id=message_id,
                 request_id=request_id,
-                channel=getattr(migrator.state, "current_channel", None),
+                channel=getattr(state, "current_channel", None),
             )
 
     # Group reactions by user for batch processing
@@ -71,7 +78,7 @@ def process_reactions_batch(  # noqa: C901
         logging.DEBUG,
         f"Processing {len(reactions)} reaction types for message {message_id}",
         message_id=message_id,
-        channel=getattr(migrator.state, "current_channel", None),
+        channel=getattr(state, "current_channel", None),
     )
 
     for react in reactions:
@@ -88,13 +95,13 @@ def process_reactions_batch(  # noqa: C901
                 f"Processing emoji :{emoji_name}: with {len(emoji_users)} users",
                 message_id=message_id,
                 emoji=emoji_name,
-                channel=getattr(migrator.state, "current_channel", None),
+                channel=getattr(state, "current_channel", None),
             )
 
             for uid in emoji_users:
                 # Check if this reaction is from a bot and bots should be ignored
-                if migrator.config.ignore_bots:
-                    user_data = migrator.user_resolver.get_user_data(uid)
+                if ctx.config.ignore_bots:
+                    user_data = user_resolver.get_user_data(uid)
                     if user_data and user_data.get("is_bot", False):
                         log_with_context(
                             logging.DEBUG,
@@ -102,16 +109,14 @@ def process_reactions_batch(  # noqa: C901
                             message_id=message_id,
                             emoji=emoji_name,
                             user_id=uid,
-                            channel=getattr(migrator.state, "current_channel", None),
+                            channel=getattr(state, "current_channel", None),
                         )
                         continue
 
-                email = migrator.user_map.get(uid)
+                email = ctx.user_map.get(uid)
                 if email:
                     # Get the internal email for this user (handles external users)
-                    internal_email = migrator.user_resolver.get_internal_email(
-                        uid, email
-                    )
+                    internal_email = user_resolver.get_internal_email(uid, email)
                     if internal_email:  # Only process if we get a valid internal email
                         requests_by_user[internal_email].append(emo)
                         reaction_count += 1  # Count every reaction we process
@@ -119,10 +124,8 @@ def process_reactions_batch(  # noqa: C901
                 else:
                     # Handle unmapped user reaction with new graceful approach
                     reaction_name = react.get("name", "unknown")
-                    message_ts = getattr(
-                        migrator.state, "current_message_ts", "unknown"
-                    )
-                    migrator.user_resolver.handle_unmapped_user_reaction(
+                    message_ts = getattr(state, "current_message_ts", "unknown")
+                    user_resolver.handle_unmapped_user_reaction(
                         uid, reaction_name, message_ts
                     )
                     continue
@@ -132,18 +135,18 @@ def process_reactions_batch(  # noqa: C901
                 f"Failed to process reaction {react.get('name')}: {e!s}",
                 message_id=message_id,
                 error=str(e),
-                channel=getattr(migrator.state, "current_channel", None),
+                channel=getattr(state, "current_channel", None),
             )
 
     # Always increment the reaction count, regardless of dry run mode
-    migrator.state.migration_summary["reactions_created"] += reaction_count
+    state.migration_summary["reactions_created"] += reaction_count
 
-    if migrator.dry_run:
+    if ctx.dry_run:
         log_with_context(
             logging.DEBUG,
             f"[DRY RUN] Would add {reaction_count} reactions from {len(requests_by_user)} users to message {message_id}",
             message_id=message_id,
-            channel=getattr(migrator.state, "current_channel", None),
+            channel=getattr(state, "current_channel", None),
         )
         return
 
@@ -151,43 +154,43 @@ def process_reactions_batch(  # noqa: C901
         logging.DEBUG,
         f"Adding {reaction_count} reactions from {len(requests_by_user)} users to message {message_id}",
         message_id=message_id,
-        channel=getattr(migrator.state, "current_channel", None),
+        channel=getattr(state, "current_channel", None),
     )
 
     user_batches: dict[str, BatchHttpRequest] = {}
 
     for email, emojis in requests_by_user.items():
         # Always skip external users' reactions to avoid false attribution to admin
-        if migrator.user_resolver.is_external_user(email):
+        if user_resolver.is_external_user(email):
             log_with_context(
                 logging.INFO,
                 f"Skipping {len(emojis)} reactions from external user {email} to avoid admin attribution",
                 message_id=message_id,
                 user=email,
-                channel=getattr(migrator.state, "current_channel", None),
+                channel=getattr(state, "current_channel", None),
             )
             continue
 
         # Process reactions normally for mapped internal users
         # We already skipped unmapped users earlier in the code
 
-        svc = migrator.user_resolver.get_delegate(email)
+        svc = user_resolver.get_delegate(email)
         # If impersonation failed, svc will be the admin service.
         # We process these synchronously as we can't batch across users.
-        if svc == migrator.chat:
+        if svc == chat:
             log_with_context(
                 logging.DEBUG,
                 f"Using admin account for user {email} (impersonation not available)",
                 message_id=message_id,
                 user=email,
-                channel=getattr(migrator.state, "current_channel", None),
+                channel=getattr(state, "current_channel", None),
             )
 
             for emo in emojis:
                 try:
                     reaction_body = {"emoji": {"unicode": emo}}
                     (
-                        migrator.chat.spaces()
+                        chat.spaces()
                         .messages()
                         .reactions()
                         .create(parent=message_name, body=reaction_body)
@@ -200,7 +203,7 @@ def process_reactions_batch(  # noqa: C901
                         error_code=e.resp.status,
                         user=email,
                         message_id=message_id,
-                        channel=getattr(migrator.state, "current_channel", None),
+                        channel=getattr(state, "current_channel", None),
                     )
             continue
 
@@ -210,7 +213,7 @@ def process_reactions_batch(  # noqa: C901
             f"Creating batch request for user {email} with {len(emojis)} reactions",
             message_id=message_id,
             user=email,
-            channel=getattr(migrator.state, "current_channel", None),
+            channel=getattr(state, "current_channel", None),
         )
 
         if email not in user_batches:
@@ -239,7 +242,7 @@ def process_reactions_batch(  # noqa: C901
                     message_id=message_id,
                     user=email,
                     emoji=emo,
-                    channel=getattr(migrator.state, "current_channel", None),
+                    channel=getattr(state, "current_channel", None),
                 )
                 # Fall back to direct API call
                 try:
@@ -266,7 +269,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Executing batch request for user {email}",
                 message_id=message_id,
                 user=email,
-                channel=getattr(migrator.state, "current_channel", None),
+                channel=getattr(state, "current_channel", None),
             )
             batch.execute()
         except HttpError as e:
@@ -275,6 +278,6 @@ def process_reactions_batch(  # noqa: C901
                 f"Reaction batch execution failed for user {email}: {e}",
                 message_id=message_id,
                 user=email,
-                channel=getattr(migrator.state, "current_channel", None),
+                channel=getattr(state, "current_channel", None),
                 error=str(e),
             )

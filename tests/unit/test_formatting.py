@@ -323,16 +323,16 @@ class TestConvertFormatting:
         assert "<users/alice@co.com>" in result
         assert "<users/bob@co.com>" in result
 
-    def test_unmapped_user_with_migrator_tracker(self):
-        """Covers lines 436-444: unmapped user with migrator.unmapped_user_tracker."""
-        migrator = MagicMock()
-        migrator.state = MigrationState()
-        migrator.state.current_channel = "general"
-        migrator.state.current_message_ts = "1234567890.000100"
+    def test_unmapped_user_with_tracker(self):
+        """Covers unmapped user with unmapped_user_tracker."""
+        state = MigrationState()
+        state.current_channel = "general"
+        state.current_message_ts = "1234567890.000100"
         tracker = MagicMock()
-        migrator.unmapped_user_tracker = tracker
 
-        result = convert_formatting("Hey <@UUNKNOWN>!", {}, migrator=migrator)
+        result = convert_formatting(
+            "Hey <@UUNKNOWN>!", {}, state=state, unmapped_user_tracker=tracker
+        )
 
         assert result == "Hey @UUNKNOWN!"
         tracker.track_unmapped_mention.assert_called_once_with(
