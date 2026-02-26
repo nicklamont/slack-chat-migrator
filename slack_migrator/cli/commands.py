@@ -638,7 +638,13 @@ class MigrationOrchestrator:
         except BaseException as e:
             # Generate report even on failure to show progress made
             try:
-                report_file = generate_report(self.dry_run_migrator)
+                m = self.dry_run_migrator
+                report_file = generate_report(
+                    m.ctx,
+                    m.state,
+                    m.user_resolver,
+                    getattr(m, "file_handler", None),
+                )
                 if isinstance(e, (KeyboardInterrupt, SystemExit)):
                     log_with_context(
                         logging.INFO,
@@ -665,9 +671,21 @@ class MigrationOrchestrator:
             raise
 
         # Generate report after successful validation
-        report_file = generate_report(self.dry_run_migrator)
-        if self.dry_run_migrator.dry_run:
-            print_dry_run_summary(self.dry_run_migrator, report_file)
+        m = self.dry_run_migrator
+        report_file = generate_report(
+            m.ctx,
+            m.state,
+            m.user_resolver,
+            getattr(m, "file_handler", None),
+        )
+        if m.dry_run:
+            print_dry_run_summary(
+                m.ctx,
+                m.state,
+                m.user_resolver,
+                getattr(m, "file_handler", None),
+                report_file,
+            )
 
         # Check validation results
         if self.check_unmapped_users(self.dry_run_migrator):
@@ -698,12 +716,18 @@ class MigrationOrchestrator:
             # Explicit dry run mode
             if self.migrator is None:
                 raise RuntimeError("Migrator not initialized")
+            m = self.migrator
             try:
-                self.migrator.migrate()
+                m.migrate()
             except BaseException as e:
                 # Generate report even on failure to show progress made
                 try:
-                    report_file = generate_report(self.migrator)
+                    report_file = generate_report(
+                        m.ctx,
+                        m.state,
+                        m.user_resolver,
+                        getattr(m, "file_handler", None),
+                    )
                     if isinstance(e, (KeyboardInterrupt, SystemExit)):
                         log_with_context(
                             logging.INFO,
@@ -726,8 +750,19 @@ class MigrationOrchestrator:
                 raise
 
             # Generate report after dry run migration
-            report_file = generate_report(self.migrator)
-            print_dry_run_summary(self.migrator, report_file)
+            report_file = generate_report(
+                m.ctx,
+                m.state,
+                m.user_resolver,
+                getattr(m, "file_handler", None),
+            )
+            print_dry_run_summary(
+                m.ctx,
+                m.state,
+                m.user_resolver,
+                getattr(m, "file_handler", None),
+                report_file,
+            )
 
             if self.check_unmapped_users(self.migrator):
                 self.report_validation_issues(self.migrator, is_explicit_dry_run=True)
@@ -745,12 +780,18 @@ class MigrationOrchestrator:
                 if self.get_user_confirmation():
                     if self.migrator is None:
                         raise RuntimeError("Migrator not initialized")
+                    m = self.migrator
                     try:
-                        self.migrator.migrate()
+                        m.migrate()
                     except BaseException as e:
                         # Generate report even on failure to show progress made
                         try:
-                            report_file = generate_report(self.migrator)
+                            report_file = generate_report(
+                                m.ctx,
+                                m.state,
+                                m.user_resolver,
+                                getattr(m, "file_handler", None),
+                            )
                             if isinstance(e, (KeyboardInterrupt, SystemExit)):
                                 log_with_context(
                                     logging.INFO,
@@ -772,7 +813,12 @@ class MigrationOrchestrator:
                             )
                         raise
                     # Generate report after successful migration
-                    generate_report(self.migrator)
+                    generate_report(
+                        m.ctx,
+                        m.state,
+                        m.user_resolver,
+                        getattr(m, "file_handler", None),
+                    )
                 else:
                     log_with_context(logging.INFO, "Migration cancelled by user.")
                     return
@@ -780,12 +826,13 @@ class MigrationOrchestrator:
     def cleanup(self) -> None:
         """Perform cleanup operations."""
         if self.migrator:
+            m = self.migrator
             try:
                 log_with_context(logging.INFO, "Performing cleanup operations...")
 
                 # Always clean up channel handlers, regardless of dry run mode
                 try:
-                    cleanup_channel_handlers(self.migrator)
+                    cleanup_channel_handlers(m.state)
                 except Exception as handler_cleanup_e:
                     log_with_context(
                         logging.ERROR,
@@ -796,7 +843,13 @@ class MigrationOrchestrator:
                 # Only perform space cleanup if not in dry run mode
                 if not self.args.dry_run:
                     try:
-                        run_cleanup(self.migrator)
+                        run_cleanup(
+                            m.ctx,
+                            m.state,
+                            m.chat,
+                            m.user_resolver,
+                            getattr(m, "file_handler", None),
+                        )
                     except Exception as space_cleanup_e:
                         log_with_context(
                             logging.ERROR,

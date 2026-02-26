@@ -705,7 +705,7 @@ class TestCleanupChannelHandlers:
         m = _make_migrator(tmp_path)
         handler = MagicMock()
         m.state.channel_handlers = {"general": handler}
-        cleanup_channel_handlers(m)
+        cleanup_channel_handlers(m.state)
         handler.flush.assert_called_once()
         handler.close.assert_called_once()
         assert m.state.channel_handlers == {}
@@ -714,13 +714,13 @@ class TestCleanupChannelHandlers:
         m = _make_migrator(tmp_path)
         m.state.channel_handlers = {}
         # Should not raise
-        cleanup_channel_handlers(m)
+        cleanup_channel_handlers(m.state)
 
     def test_cleanup_with_empty_handlers(self, tmp_path):
         m = _make_migrator(tmp_path)
         m.state.channel_handlers = {}
         # Should not raise — channel_handlers always exists on MigrationState
-        cleanup_channel_handlers(m)
+        cleanup_channel_handlers(m.state)
 
     def test_cleanup_handles_handler_error(self, tmp_path):
         m = _make_migrator(tmp_path)
@@ -728,7 +728,7 @@ class TestCleanupChannelHandlers:
         handler.flush.side_effect = OSError("flush failed")
         m.state.channel_handlers = {"general": handler}
         # Should not raise despite handler error
-        cleanup_channel_handlers(m)
+        cleanup_channel_handlers(m.state)
         assert m.state.channel_handlers == {}
 
     def test_cleanup_multiple_handlers(self, tmp_path):
@@ -736,7 +736,7 @@ class TestCleanupChannelHandlers:
         handler1 = MagicMock()
         handler2 = MagicMock()
         m.state.channel_handlers = {"general": handler1, "random": handler2}
-        cleanup_channel_handlers(m)
+        cleanup_channel_handlers(m.state)
         handler1.flush.assert_called_once()
         handler1.close.assert_called_once()
         handler2.flush.assert_called_once()
@@ -942,7 +942,7 @@ class TestLogMigrationSuccess:
             messages_created=10,
         )
         with caplog.at_level(logging.INFO, logger="slack_migrator"):
-            log_migration_success(m, 60.0)
+            log_migration_success(m.state, m.dry_run, 60.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "DRY RUN" in messages
         assert "1.0 minutes" in messages
@@ -957,7 +957,7 @@ class TestLogMigrationSuccess:
             files_created=5,
         )
         with caplog.at_level(logging.INFO, logger="slack_migrator"):
-            log_migration_success(m, 120.0)
+            log_migration_success(m.state, m.dry_run, 120.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "Channels processed: 2" in messages
         assert "Spaces created/updated: 2" in messages
@@ -973,7 +973,7 @@ class TestLogMigrationSuccess:
         m.state.channels_with_errors = ["general"]
         m.state.incomplete_import_spaces = [("spaces/abc", "general")]
         with caplog.at_level(logging.WARNING, logger="slack_migrator"):
-            log_migration_success(m, 30.0)
+            log_migration_success(m.state, m.dry_run, 30.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "Channels with errors: 1" in messages
         assert "Incomplete imports: 1" in messages
@@ -982,7 +982,7 @@ class TestLogMigrationSuccess:
         m = _make_migrator(tmp_path, dry_run=False)
         m.state.migration_summary = _default_migration_summary()
         with caplog.at_level(logging.WARNING, logger="slack_migrator"):
-            log_migration_success(m, 5.0)
+            log_migration_success(m.state, m.dry_run, 5.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "INTERRUPTED" in messages
 
@@ -1004,7 +1004,7 @@ class TestLogMigrationFailure:
         )
         exc = RuntimeError("something broke")
         with caplog.at_level(logging.ERROR, logger="slack_migrator"):
-            log_migration_failure(m, exc, 30.0)
+            log_migration_failure(m.state, m.dry_run, exc, 30.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "RuntimeError" in messages
         assert "something broke" in messages
@@ -1019,7 +1019,7 @@ class TestLogMigrationFailure:
         )
         exc = KeyboardInterrupt()
         with caplog.at_level(logging.WARNING, logger="slack_migrator"):
-            log_migration_failure(m, exc, 10.0)
+            log_migration_failure(m.state, m.dry_run, exc, 10.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "INTERRUPTED" in messages
         assert "User interruption" in messages
@@ -1029,7 +1029,7 @@ class TestLogMigrationFailure:
         m.state.migration_summary = _default_migration_summary()
         exc = ValueError("bad config")
         with caplog.at_level(logging.ERROR, logger="slack_migrator"):
-            log_migration_failure(m, exc, 2.0)
+            log_migration_failure(m.state, m.dry_run, exc, 2.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "DRY RUN VALIDATION FAILED" in messages
 
@@ -1042,7 +1042,7 @@ class TestLogMigrationFailure:
         )
         exc = Exception("api error")
         with caplog.at_level(logging.ERROR, logger="slack_migrator"):
-            log_migration_failure(m, exc, 60.0)
+            log_migration_failure(m.state, m.dry_run, exc, 60.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "Channels processed: 2" in messages
         assert "Spaces created: 2" in messages
@@ -1299,14 +1299,26 @@ class TestCleanup:
     def test_dry_run_skips_cleanup(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=True)
         with caplog.at_level(logging.INFO, logger="slack_migrator"):
-            run_cleanup(m)
+            run_cleanup(
+                m.ctx,
+                m.state,
+                m.chat,
+                m.user_resolver,
+                getattr(m, "file_handler", None),
+            )
         messages = " ".join(r.message for r in caplog.records)
         assert "DRY RUN" in messages
 
     def test_clears_current_channel(self, tmp_path):
         m = _make_migrator(tmp_path, dry_run=True)
         m.state.current_channel = "general"
-        run_cleanup(m)
+        run_cleanup(
+            m.ctx,
+            m.state,
+            m.chat,
+            m.user_resolver,
+            getattr(m, "file_handler", None),
+        )
         assert m.state.current_channel is None
 
 

@@ -2,8 +2,7 @@
 Migration success/failure logging for the Slack-to-Google-Chat migration tool.
 
 Extracted from ``migrator.py`` to keep the orchestrator focused on control flow.
-Each function takes a ``migrator`` instance as its first argument, following the
-same pattern used by ``space_creator.py`` and ``reaction_processor.py``.
+Each function receives only the specific dependencies it needs — no god object.
 """
 
 from __future__ import annotations
@@ -15,17 +14,22 @@ from typing import TYPE_CHECKING, Any
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
+    from slack_migrator.core.state import MigrationState
+    from slack_migrator.utils.user_validation import UnmappedUserTracker
 
 
-def _collect_statistics(migrator: SlackToChatMigrator) -> dict[str, Any]:
-    """Gather all migration statistics from migrator state into a flat dict.
+def _collect_statistics(
+    state: MigrationState,
+    unmapped_user_tracker: UnmappedUserTracker | None = None,
+) -> dict[str, Any]:
+    """Gather all migration statistics from state into a flat dict.
 
     The returned dict is used both for structured log kwargs and for
     driving the human-readable summary lines.
 
     Args:
-        migrator: The migrator instance whose state contains run statistics.
+        state: The migration state containing run statistics.
+        unmapped_user_tracker: Optional tracker for unmapped users.
 
     Returns:
         Dict with keys: channels_processed, spaces_created, messages_created,
@@ -33,26 +37,28 @@ def _collect_statistics(migrator: SlackToChatMigrator) -> dict[str, Any]:
         incomplete_imports, unmapped_users.
     """
     unmapped_users = 0
-    if (
-        hasattr(migrator, "unmapped_user_tracker")
-        and migrator.unmapped_user_tracker.has_unmapped_users()
-    ):
-        unmapped_users = migrator.unmapped_user_tracker.get_unmapped_count()
+    if unmapped_user_tracker is not None and unmapped_user_tracker.has_unmapped_users():
+        unmapped_users = unmapped_user_tracker.get_unmapped_count()
 
-    summary = migrator.state.migration_summary
+    summary = state.migration_summary
     return {
         "channels_processed": len(summary["channels_processed"]),
         "spaces_created": summary["spaces_created"],
         "messages_created": summary["messages_created"],
         "reactions_created": summary["reactions_created"],
         "files_created": summary["files_created"],
-        "channels_with_errors": len(migrator.state.channels_with_errors),
-        "incomplete_imports": len(migrator.state.incomplete_import_spaces),
+        "channels_with_errors": len(state.channels_with_errors),
+        "incomplete_imports": len(state.incomplete_import_spaces),
         "unmapped_users": unmapped_users,
     }
 
 
-def log_migration_success(migrator: SlackToChatMigrator, duration: float) -> None:
+def log_migration_success(
+    state: MigrationState,
+    dry_run: bool,
+    duration: float,
+    unmapped_user_tracker: UnmappedUserTracker | None = None,
+) -> None:
     """Log final migration success status with comprehensive summary.
 
     Logs are emitted as structured records: each call passes key statistics
@@ -60,12 +66,14 @@ def log_migration_success(migrator: SlackToChatMigrator, duration: float) -> Non
     remaining human-readable in the console formatter.
 
     Args:
-        migrator: The migrator instance whose state contains run statistics.
+        state: The migration state containing run statistics.
+        dry_run: Whether this was a dry-run migration.
         duration: Migration duration in seconds.
+        unmapped_user_tracker: Optional tracker for unmapped users.
     """
-    stats = _collect_statistics(migrator)
+    stats = _collect_statistics(state, unmapped_user_tracker)
     duration_minutes = duration / 60
-    is_dry_run = migrator.dry_run
+    is_dry_run = dry_run
 
     no_work_done = stats["spaces_created"] == 0 and stats["messages_created"] == 0
     interrupted_early = stats["channels_processed"] == 0
@@ -210,7 +218,10 @@ def log_migration_success(migrator: SlackToChatMigrator, duration: float) -> Non
 
 
 def log_migration_failure(
-    migrator: SlackToChatMigrator, exception: BaseException, duration: float
+    state: MigrationState,
+    dry_run: bool,
+    exception: BaseException,
+    duration: float,
 ) -> None:
     """Log final migration failure status with error details.
 
@@ -218,15 +229,16 @@ def log_migration_failure(
     statistics as extra kwargs for JSON log consumers.
 
     Args:
-        migrator: The migrator instance whose state contains run statistics.
+        state: The migration state containing run statistics.
+        dry_run: Whether this was a dry-run migration.
         exception: The exception that caused the failure.
         duration: Migration duration in seconds before failure.
     """
     duration_minutes = duration / 60
     is_interrupt = isinstance(exception, KeyboardInterrupt)
-    is_dry_run = migrator.dry_run
+    is_dry_run = dry_run
 
-    summary = migrator.state.migration_summary
+    summary = state.migration_summary
     channels_processed = len(summary["channels_processed"])
     spaces_created = summary["spaces_created"]
     messages_created = summary["messages_created"]

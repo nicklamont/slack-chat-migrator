@@ -112,11 +112,16 @@ class SlackToChatMigrator:
         )
 
         # Initialize simple unmapped user tracking
-        self.unmapped_user_tracker = initialize_unmapped_user_tracking(self)
+        self.unmapped_user_tracker = initialize_unmapped_user_tracking()
 
         # Scan channel members to ensure all channel members have user mappings
         # This is crucial because Google Chat needs to add all channel members to spaces
-        scan_channel_members_for_unmapped_users(self)
+        scan_channel_members_for_unmapped_users(
+            self.unmapped_user_tracker,
+            self.export_root,
+            self.config,
+            self.user_map,
+        )
 
         # API services are initialized lazily by _initialize_api_services(),
         # called from migrate() or validate_permissions(). Typed as Any so
@@ -330,7 +335,8 @@ class SlackToChatMigrator:
             log_with_context(logging.WARNING, "")
             log_with_context(logging.WARNING, "MIGRATION INTERRUPTED BY SIGNAL")
             log_migration_failure(
-                self,
+                self.state,
+                self.dry_run,
                 KeyboardInterrupt("Migration interrupted by signal"),
                 migration_duration,
             )
@@ -432,16 +438,23 @@ class SlackToChatMigrator:
 
             # If this was a dry run, provide specific unmapped user guidance
             if self.dry_run and hasattr(self, "unmapped_user_tracker"):
-                log_unmapped_user_summary_for_dry_run(self)
+                log_unmapped_user_summary_for_dry_run(
+                    self.unmapped_user_tracker, self.export_root
+                )
 
             # Calculate migration duration
             migration_duration = time.time() - migration_start_time
 
             # Log final success status
-            log_migration_success(self, migration_duration)
+            log_migration_success(
+                self.state,
+                self.dry_run,
+                migration_duration,
+                getattr(self, "unmapped_user_tracker", None),
+            )
 
             # Clean up channel handlers in success case (finally block will also run)
-            cleanup_channel_handlers(self)
+            cleanup_channel_handlers(self.state)
 
             return True
 
@@ -450,7 +463,7 @@ class SlackToChatMigrator:
             migration_duration = time.time() - migration_start_time
 
             # Log final failure status
-            log_migration_failure(self, e, migration_duration)
+            log_migration_failure(self.state, self.dry_run, e, migration_duration)
 
             # Re-raise the exception to maintain existing error handling behavior
             raise
@@ -458,4 +471,4 @@ class SlackToChatMigrator:
             # Restore the original signal handler
             signal.signal(signal.SIGINT, old_signal_handler)
             # Always ensure proper cleanup of channel log handlers
-            cleanup_channel_handlers(self)
+            cleanup_channel_handlers(self.state)

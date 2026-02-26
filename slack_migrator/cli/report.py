@@ -1,5 +1,5 @@
 """
-Report generation functionality for Slack to Google Chat migration
+Report generation functionality for Slack to Google Chat migration.
 """
 
 from __future__ import annotations
@@ -16,43 +16,44 @@ from slack_migrator.types import FailedMessage
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
+    from slack_migrator.core.config import MigrationConfig
+    from slack_migrator.core.context import MigrationContext
+    from slack_migrator.core.state import MigrationState
 
 
 def print_dry_run_summary(
-    migrator: SlackToChatMigrator, report_file: str | None = None
+    ctx: MigrationContext,
+    state: MigrationState,
+    user_resolver: Any,
+    file_handler: Any | None = None,
+    report_file: str | None = None,
 ) -> None:
     """Print a summary of the dry run to the console.
 
     Args:
-        migrator: The migrator whose state is summarised.
+        ctx: Immutable migration context.
+        state: Mutable migration state.
+        user_resolver: User identity resolver.
+        file_handler: Optional file handler with statistics.
         report_file: Optional override path for the report file location.
     """
     print("\n" + "=" * 80)
     print("DRY RUN SUMMARY")
     print("=" * 80)
+    print(f"Channels processed: {len(state.migration_summary['channels_processed'])}")
+    print(f"Spaces that would be created: {state.migration_summary['spaces_created']}")
     print(
-        f"Channels processed: {len(migrator.state.migration_summary['channels_processed'])}"
+        f"Messages that would be migrated: {state.migration_summary['messages_created']}"
     )
     print(
-        f"Spaces that would be created: {migrator.state.migration_summary['spaces_created']}"
+        f"Reactions that would be migrated: {state.migration_summary['reactions_created']}"
     )
-    print(
-        f"Messages that would be migrated: {migrator.state.migration_summary['messages_created']}"
-    )
-    print(
-        f"Reactions that would be migrated: {migrator.state.migration_summary['reactions_created']}"
-    )
-    print(
-        f"Files that would be migrated: {migrator.state.migration_summary['files_created']}"
-    )
+    print(f"Files that would be migrated: {state.migration_summary['files_created']}")
 
     # Show file upload details if available
-    if hasattr(migrator, "file_handler") and hasattr(
-        migrator.file_handler, "get_file_statistics"
-    ):
+    if file_handler is not None and hasattr(file_handler, "get_file_statistics"):
         try:
-            file_stats = migrator.file_handler.get_file_statistics()
+            file_stats = file_handler.get_file_statistics()
             if file_stats["total_files_processed"] > 0:
                 print("\nFile Upload Details:")
                 print(f"  Total files processed: {file_stats['total_files_processed']}")
@@ -67,15 +68,13 @@ def print_dry_run_summary(
             print(f"  (Could not retrieve detailed file statistics: {e})")
 
     # Show users without email
-    if hasattr(migrator, "users_without_email") and migrator.users_without_email:
-        print(f"\nUsers without email: {len(migrator.users_without_email)}")
+    if ctx.users_without_email:
+        print(f"\nUsers without email: {len(ctx.users_without_email)}")
         print("These users need to be mapped in config.yaml")
 
     # Count external users
     external_users = sum(
-        1
-        for _, email in migrator.user_map.items()
-        if migrator.user_resolver.is_external_user(email)
+        1 for _, email in ctx.user_map.items() if user_resolver.is_external_user(email)
     )
     if external_users > 0:
         print(f"\nExternal users detected: {external_users}")
@@ -84,7 +83,7 @@ def print_dry_run_summary(
     # Get the report file path
     if report_file is None:
         # Get the output directory
-        output_dir = migrator.state.output_dir or "."
+        output_dir = state.output_dir or "."
         report_file = os.path.join(output_dir, "migration_report.yaml")
 
     print(f"\nDetailed report saved to {report_file}")
@@ -94,21 +93,21 @@ def print_dry_run_summary(
 
 
 def _group_failed_messages(
-    migrator: SlackToChatMigrator,
+    state: MigrationState,
 ) -> dict[str, list[FailedMessage]]:
     """Group failed messages by channel and write detailed failure logs.
 
     Args:
-        migrator: The migrator whose state contains failed messages.
+        state: Migration state containing failed messages.
 
     Returns:
         Dict mapping channel names to their list of FailedMessage entries.
     """
     failed_by_channel: dict[str, list[FailedMessage]] = {}
-    if not migrator.state.failed_messages:
+    if not state.failed_messages:
         return failed_by_channel
 
-    for failed_msg in migrator.state.failed_messages:
+    for failed_msg in state.failed_messages:
         channel = failed_msg.get("channel", "unknown")
         if channel not in failed_by_channel:
             failed_by_channel[channel] = []
@@ -116,7 +115,7 @@ def _group_failed_messages(
 
     log_with_context(
         logging.WARNING,
-        f"Migration completed with {len(migrator.state.failed_messages)} failed messages across {len(failed_by_channel)} channels",
+        f"Migration completed with {len(state.failed_messages)} failed messages across {len(failed_by_channel)} channels",
     )
 
     for channel, failures in failed_by_channel.items():
@@ -124,7 +123,7 @@ def _group_failed_messages(
             logging.WARNING,
             f"Channel {channel} had {len(failures)} failed messages",
         )
-        _write_failure_log(migrator.state.output_dir, channel, failures)
+        _write_failure_log(state.output_dir, channel, failures)
 
     return failed_by_channel
 
@@ -175,13 +174,15 @@ def _write_failure_log(
 
 
 def _build_recommendations(
-    migrator: SlackToChatMigrator,
+    state: MigrationState,
+    config: MigrationConfig,
     failed_by_channel: dict[str, list[FailedMessage]],
 ) -> list[dict[str, str]]:
     """Build the recommendations list for the migration report.
 
     Args:
-        migrator: The migrator instance.
+        state: Migration state.
+        config: Migration configuration.
         failed_by_channel: Failed messages grouped by channel.
 
     Returns:
@@ -189,27 +190,27 @@ def _build_recommendations(
     """
     recommendations: list[dict[str, str]] = []
 
-    if migrator.state.high_failure_rate_channels:
-        max_pct = migrator.config.max_failure_percentage
+    if state.high_failure_rate_channels:
+        max_pct = config.max_failure_percentage
         recommendations.append(
             {
                 "type": "high_failure_rate",
-                "message": f"Found {len(migrator.state.high_failure_rate_channels)} channels with failure rates exceeding {max_pct}%. Check the detailed logs for more information.",
+                "message": f"Found {len(state.high_failure_rate_channels)} channels with failure rates exceeding {max_pct}%. Check the detailed logs for more information.",
                 "severity": "warning",
             }
         )
 
-    if migrator.state.channel_conflicts:
+    if state.channel_conflicts:
         recommendations.append(
             {
                 "type": "duplicate_space_conflicts",
-                "message": f"Found {len(migrator.state.channel_conflicts)} channels with duplicate space conflicts. "
-                f"These channels were skipped. Add entries to space_mapping in config.yaml to resolve: {', '.join(migrator.state.channel_conflicts)}",
+                "message": f"Found {len(state.channel_conflicts)} channels with duplicate space conflicts. "
+                f"These channels were skipped. Add entries to space_mapping in config.yaml to resolve: {', '.join(state.channel_conflicts)}",
                 "severity": "error",
             }
         )
 
-    skipped_reactions = migrator.state.skipped_reactions
+    skipped_reactions = state.skipped_reactions
     if skipped_reactions:
         recommendations.append(
             {
@@ -224,13 +225,17 @@ def _build_recommendations(
 
 
 def _build_space_details(
-    migrator: SlackToChatMigrator,
+    state: MigrationState,
+    user_map: dict[str, str],
+    user_resolver: Any,
     failed_by_channel: dict[str, list[FailedMessage]],
 ) -> tuple[dict[str, Any], list[str]]:
     """Build per-space stats and identify skipped channels.
 
     Args:
-        migrator: The migrator instance.
+        state: Migration state.
+        user_map: Slack user ID to Google email mapping.
+        user_resolver: User identity resolver.
         failed_by_channel: Failed messages grouped by channel.
 
     Returns:
@@ -239,8 +244,8 @@ def _build_space_details(
     spaces: dict[str, Any] = {}
     skipped_channels: list[str] = []
 
-    for channel in migrator.state.migration_summary["channels_processed"]:
-        space_name = migrator.state.created_spaces.get(channel)
+    for channel in state.migration_summary["channels_processed"]:
+        space_name = state.created_spaces.get(channel)
         if not space_name:
             skipped_channels.append(channel)
             continue
@@ -249,7 +254,7 @@ def _build_space_details(
             "messages_migrated": 0,
             "reactions_migrated": 0,
             "files_migrated": 0,
-            "external_users_allowed": migrator.state.spaces_with_external_users.get(
+            "external_users_allowed": state.spaces_with_external_users.get(
                 space_name, False
             ),
             "internal_users": [],
@@ -257,18 +262,18 @@ def _build_space_details(
             "failed_messages": len(failed_by_channel.get(channel, [])),
         }
 
-        if channel in migrator.state.active_users_by_channel:
-            for user_id in migrator.state.active_users_by_channel[channel]:
-                user_email = migrator.user_map.get(user_id)
+        if channel in state.active_users_by_channel:
+            for user_id in state.active_users_by_channel[channel]:
+                user_email = user_map.get(user_id)
                 if not user_email:
                     continue
-                if migrator.user_resolver.is_external_user(user_email):
+                if user_resolver.is_external_user(user_email):
                     space_stats["external_users"].append(user_email)
                 else:
                     space_stats["internal_users"].append(user_email)
 
-        if channel in migrator.state.channel_stats:
-            ch_stats = migrator.state.channel_stats[channel]
+        if channel in state.channel_stats:
+            ch_stats = state.channel_stats[channel]
             space_stats["messages_migrated"] = ch_stats.get("message_count", 0)
             space_stats["reactions_migrated"] = ch_stats.get("reaction_count", 0)
             space_stats["files_migrated"] = ch_stats.get("file_count", 0)
@@ -279,13 +284,17 @@ def _build_space_details(
 
 
 def _build_user_section(
-    migrator: SlackToChatMigrator,
+    user_map: dict[str, str],
+    user_resolver: Any,
+    users_without_email: list[dict[str, Any]],
     recommendations: list[dict[str, str]],
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Build the users section and external user mappings for the report.
 
     Args:
-        migrator: The migrator instance.
+        user_map: Slack user ID to Google email mapping.
+        user_resolver: User identity resolver.
+        users_without_email: List of user dicts without email addresses.
         recommendations: Recommendations list to append user-related items to.
 
     Returns:
@@ -297,9 +306,9 @@ def _build_user_section(
     }
 
     # Users without email
-    if hasattr(migrator, "users_without_email") and migrator.users_without_email:
+    if users_without_email:
         users_without_email_data: dict[str, dict[str, str]] = {}
-        for user in migrator.users_without_email:
+        for user in users_without_email:
             uid = user.get("id")
             if not uid:
                 continue
@@ -325,8 +334,8 @@ def _build_user_section(
 
     # External users
     external_users: dict[str, str] = {}
-    for user_id, email in migrator.user_map.items():
-        if migrator.user_resolver.is_external_user(email):
+    for user_id, email in user_map.items():
+        if user_resolver.is_external_user(email):
             external_users[user_id] = email
 
     users_section["external_users"] = external_users
@@ -344,63 +353,71 @@ def _build_user_section(
     return users_section, external_users
 
 
-def generate_report(migrator: SlackToChatMigrator) -> str:
+def generate_report(
+    ctx: MigrationContext,
+    state: MigrationState,
+    user_resolver: Any,
+    file_handler: Any | None = None,
+) -> str:
     """Generate a detailed migration report.
 
     Args:
-        migrator: The migrator whose state is written to the report.
+        ctx: Immutable migration context.
+        state: Mutable migration state.
+        user_resolver: User identity resolver.
+        file_handler: Optional file handler with statistics.
 
     Returns:
         Path to the generated YAML report file.
     """
-    output_dir = migrator.state.output_dir or "."
+    output_dir = state.output_dir or "."
     report_path = os.path.join(output_dir, "migration_report.yaml")
 
-    failed_by_channel = _group_failed_messages(migrator)
+    failed_by_channel = _group_failed_messages(state)
 
     # File statistics
     file_stats: dict[str, Any] = {}
-    if hasattr(migrator, "file_handler") and hasattr(
-        migrator.file_handler, "get_file_statistics"
-    ):
+    if file_handler is not None and hasattr(file_handler, "get_file_statistics"):
         try:
-            file_stats = migrator.file_handler.get_file_statistics()
+            file_stats = file_handler.get_file_statistics()
         except Exception as e:
             log_with_context(
                 logging.WARNING,
                 f"Could not retrieve detailed file statistics: {e}",
             )
 
-    recommendations = _build_recommendations(migrator, failed_by_channel)
-    spaces, skipped_channels = _build_space_details(migrator, failed_by_channel)
-    users_section, external_users = _build_user_section(migrator, recommendations)
+    recommendations = _build_recommendations(state, ctx.config, failed_by_channel)
+    spaces, skipped_channels = _build_space_details(
+        state, ctx.user_map, user_resolver, failed_by_channel
+    )
+    users_section, external_users = _build_user_section(
+        ctx.user_map, user_resolver, ctx.users_without_email, recommendations
+    )
 
     report: dict[str, Any] = {
         "migration_summary": {
             "timestamp": datetime.datetime.now().isoformat(),
-            "dry_run": migrator.dry_run,
-            "workspace_admin": migrator.workspace_admin,
-            "export_path": str(migrator.export_root),
+            "dry_run": ctx.dry_run,
+            "workspace_admin": ctx.workspace_admin,
+            "export_path": str(ctx.export_root),
             "output_path": str(output_dir),
-            "channels_processed": len(
-                migrator.state.migration_summary["channels_processed"]
-            ),
-            "spaces_created": migrator.state.migration_summary["spaces_created"],
-            "messages_migrated": migrator.state.migration_summary["messages_created"],
-            "reactions_migrated": migrator.state.migration_summary["reactions_created"],
-            "files_migrated": migrator.state.migration_summary["files_created"],
-            "failed_messages_count": len(migrator.state.failed_messages),
+            "channels_processed": len(state.migration_summary["channels_processed"]),
+            "spaces_created": state.migration_summary["spaces_created"],
+            "messages_migrated": state.migration_summary["messages_created"],
+            "reactions_migrated": state.migration_summary["reactions_created"],
+            "files_migrated": state.migration_summary["files_created"],
+            "failed_messages_count": len(state.failed_messages),
             "channels_with_failures": len(failed_by_channel),
         },
         "spaces": spaces,
         "skipped_channels": skipped_channels,
         "failed_channels": list(failed_by_channel.keys()),
-        "high_failure_rate_channels": dict(migrator.state.high_failure_rate_channels),
-        "channel_issues": migrator.state.migration_issues,
-        "duplicate_space_conflicts": list(migrator.state.channel_conflicts),
+        "high_failure_rate_channels": dict(state.high_failure_rate_channels),
+        "channel_issues": state.migration_issues,
+        "duplicate_space_conflicts": list(state.channel_conflicts),
         "users": users_section,
         "file_upload_details": file_stats,
-        "skipped_reactions": list(migrator.state.skipped_reactions),
+        "skipped_reactions": list(state.skipped_reactions),
         "recommendations": recommendations,
     }
 
