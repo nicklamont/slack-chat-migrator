@@ -27,27 +27,31 @@ from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
+    from slack_migrator.core.context import MigrationContext
+    from slack_migrator.core.state import MigrationState
 
 
-def channel_has_external_users(migrator: SlackToChatMigrator, channel: str) -> bool:
+def channel_has_external_users(
+    ctx: MigrationContext, user_resolver: Any, channel: str
+) -> bool:
     """Check if a channel has external users that need access.
 
     Args:
-        migrator: The SlackToChatMigrator instance
-        channel: The channel name to check
+        ctx: Immutable migration context.
+        user_resolver: UserResolver for external-user checks.
+        channel: The channel name to check.
 
     Returns:
-        True if the channel has external users (excluding bots), False otherwise
+        True if the channel has external users (excluding bots), False otherwise.
     """
     # Get channel metadata for members
-    meta = migrator.channels_meta.get(channel, {})
+    meta = ctx.channels_meta.get(channel, {})
     members = meta.get("members", [])
 
     # If no members in metadata, check message history
     if not members:
-        ch_dir = migrator.export_root / channel
-        user_ids = set()
+        ch_dir = ctx.export_root / channel
+        user_ids: set[str] = set()
 
         # Scan message files for unique user IDs
         for jf in ch_dir.glob("*.json"):
@@ -69,13 +73,12 @@ def channel_has_external_users(migrator: SlackToChatMigrator, channel: str) -> b
     # Check if any member is an external user (excluding bots)
     for user_id in members:
         # Get email from user map
-        email = migrator.user_map.get(user_id)
+        email = ctx.user_map.get(user_id)
         if not email:
             continue
 
         # Check if this is an external user (not a bot)
-        # Ensure users_without_email is a list before iterating
-        users_without_email = getattr(migrator, "users_without_email", []) or []
+        users_without_email = ctx.users_without_email or []
 
         # Find user info in users_without_email
         user_info = None
@@ -91,7 +94,7 @@ def channel_has_external_users(migrator: SlackToChatMigrator, channel: str) -> b
                 "is_app_user", False
             )
 
-        if migrator.user_resolver.is_external_user(email) and not is_bot:
+        if user_resolver.is_external_user(email) and not is_bot:
             log_with_context(
                 logging.INFO,
                 f"Channel {channel} has external user {user_id} with email {email}",
@@ -102,11 +105,20 @@ def channel_has_external_users(migrator: SlackToChatMigrator, channel: str) -> b
     return False
 
 
-def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
+def create_space(
+    ctx: MigrationContext,
+    state: MigrationState,
+    chat: Any,
+    user_resolver: Any,
+    channel: str,
+) -> str:
     """Create a Google Chat space for a Slack channel in import mode.
 
     Args:
-        migrator: The migrator instance providing API services and config.
+        ctx: Immutable migration context.
+        state: Mutable migration state.
+        chat: Google Chat API service.
+        user_resolver: UserResolver for external-user checks.
         channel: Slack channel name to create a space for.
 
     Returns:
@@ -114,7 +126,7 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
         or an ``ERROR_NO_PERMISSION_`` sentinel on 403 errors.
     """
     # Get channel metadata
-    meta = migrator.channels_meta.get(channel, {})
+    meta = ctx.channels_meta.get(channel, {})
     display_name = f"{SPACE_NAME_PREFIX}{channel}"
 
     # Check if this is the general/default channel
@@ -136,7 +148,7 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
 
     # Create a space in import mode according to the documentation
     # https://developers.google.com/workspace/chat/import-data
-    body = {
+    body: dict[str, Any] = {
         "displayName": display_name,
         "spaceType": SPACE_TYPE,
         "importMode": True,
@@ -145,7 +157,7 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
 
     log_with_context(
         logging.DEBUG,
-        f"{'[DRY RUN] ' if migrator.dry_run else ''}Creating import mode space for {display_name}",
+        f"{'[DRY RUN] ' if ctx.dry_run else ''}Creating import mode space for {display_name}",
         channel=channel,
     )
 
@@ -154,21 +166,21 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
         body["createTime"] = create_time
 
     # Check if this channel has external users that need access
-    has_external_users = channel_has_external_users(migrator, channel)
+    has_external_users = channel_has_external_users(ctx, user_resolver, channel)
     if has_external_users:
         body["externalUserAllowed"] = True
         log_with_context(
             logging.INFO,
-            f"{'[DRY RUN] ' if migrator.dry_run else ''}Enabling external user access for channel {channel}",
+            f"{'[DRY RUN] ' if ctx.dry_run else ''}Enabling external user access for channel {channel}",
             channel=channel,
         )
 
     # Store space name (either real or generated)
     space_name = None
 
-    if migrator.dry_run:
+    if ctx.dry_run:
         # In dry run mode, increment the counter but don't make API call
-        migrator.state.migration_summary["spaces_created"] += 1
+        state.migration_summary["spaces_created"] += 1
         # Use a consistent space name format for tracking
         space_name = f"spaces/{channel}"
         log_with_context(
@@ -179,11 +191,11 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
     else:
         try:
             # Create the space in import mode
-            space = migrator.chat.spaces().create(body=body).execute()
+            space = chat.spaces().create(body=body).execute()
             space_name = space["name"]
 
             # Increment the spaces created counter
-            migrator.state.migration_summary["spaces_created"] += 1
+            state.migration_summary["spaces_created"] += 1
 
             log_with_context(
                 logging.INFO,
@@ -221,8 +233,10 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
 
                         update_mask = "spaceDetails"
 
-                        migrator.chat.spaces().patch(
-                            name=space_name, updateMask=update_mask, body=space_details
+                        chat.spaces().patch(
+                            name=space_name,
+                            updateMask=update_mask,
+                            body=space_details,
                         ).execute()
 
                         log_with_context(
@@ -247,13 +261,13 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
                 # For other errors, re-raise
                 raise
 
-    # Store the created space in the migrator
-    migrator.state.created_spaces[channel] = space_name
+    # Store the created space in state
+    state.created_spaces[channel] = space_name
 
     # Store whether this space has external users for later reference
-    if not hasattr(migrator.state, "spaces_with_external_users"):
-        migrator.state.spaces_with_external_users = {}
-    migrator.state.spaces_with_external_users[space_name] = has_external_users
+    if not hasattr(state, "spaces_with_external_users"):
+        state.spaces_with_external_users = {}
+    state.spaces_with_external_users[space_name] = has_external_users
 
     return space_name
 

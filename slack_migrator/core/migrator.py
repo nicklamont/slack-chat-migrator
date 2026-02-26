@@ -244,7 +244,7 @@ class SlackToChatMigrator:
             )
 
         # Load existing space mappings for update mode or file attachments
-        load_existing_space_mappings(self)
+        load_existing_space_mappings(self.ctx, self.state, self.chat)
 
     def _validate_export_format(self) -> None:
         """Validate that the export directory has the expected structure."""
@@ -376,7 +376,9 @@ class SlackToChatMigrator:
 
             # In update mode, discover existing spaces via API
             if self.update_mode:
-                discovered_spaces = load_space_mappings(self)
+                discovered_spaces = load_space_mappings(
+                    self.chat, self.ctx.channel_name_to_id, self.state
+                )
                 if discovered_spaces:
                     log_with_context(
                         logging.INFO,
@@ -404,7 +406,7 @@ class SlackToChatMigrator:
                     break
 
             # Log any space mapping conflicts that should be added to config
-            log_space_mapping_conflicts(self)
+            log_space_mapping_conflicts(self.state, self.ctx.dry_run)
 
             # Generate final unmapped user report
             if (

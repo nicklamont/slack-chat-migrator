@@ -1,12 +1,14 @@
 """Unit tests for the space management module."""
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 from slack_migrator.core.config import MigrationConfig
+from slack_migrator.core.context import MigrationContext
 from slack_migrator.core.state import MigrationState, _default_migration_summary
 from slack_migrator.services.membership_manager import (
     DEFAULT_FALLBACK_JOIN_TIME,
@@ -21,6 +23,36 @@ from slack_migrator.services.space_creator import (
     channel_has_external_users,
     create_space,
 )
+
+
+def _make_ctx(
+    user_map=None,
+    users_without_email=None,
+    workspace_domain="example.com",
+    channels_meta=None,
+    export_root=None,
+    dry_run=False,
+    workspace_admin="admin@example.com",
+):
+    """Create a MigrationContext with common test defaults."""
+    return MigrationContext(
+        export_root=export_root or Path("/fake/export"),
+        creds_path="/fake/creds.json",
+        workspace_admin=workspace_admin,
+        workspace_domain=workspace_domain,
+        dry_run=dry_run,
+        update_mode=False,
+        verbose=False,
+        debug_api=False,
+        config=MigrationConfig(),
+        user_map=user_map or {},
+        users_without_email=users_without_email
+        if users_without_email is not None
+        else [],
+        channels_meta=channels_meta or {},
+        channel_id_to_name={},
+        channel_name_to_id={},
+    )
 
 
 def _make_migrator(
@@ -67,48 +99,51 @@ class TestChannelHasExternalUsers:
     """Tests for channel_has_external_users()."""
 
     def test_no_external_users(self):
-        migrator = _make_migrator(
+        ctx = _make_ctx(
             user_map={"U001": "alice@example.com"},
             channels_meta={"general": {"members": ["U001"]}},
         )
-        migrator.user_resolver.is_external_user.return_value = False
+        user_resolver = MagicMock()
+        user_resolver.is_external_user.return_value = False
 
-        result = channel_has_external_users(migrator, "general")
+        result = channel_has_external_users(ctx, user_resolver, "general")
         assert result is False
 
     def test_has_external_user(self):
-        migrator = _make_migrator(
+        ctx = _make_ctx(
             user_map={"U001": "alice@example.com", "U002": "ext@other.com"},
             channels_meta={"general": {"members": ["U001", "U002"]}},
         )
-        migrator.user_resolver.is_external_user.side_effect = lambda email: (
+        user_resolver = MagicMock()
+        user_resolver.is_external_user.side_effect = lambda email: (
             email == "ext@other.com"
         )
 
-        result = channel_has_external_users(migrator, "general")
+        result = channel_has_external_users(ctx, user_resolver, "general")
         assert result is True
 
     def test_no_members_in_metadata(self, tmp_path):
         """When metadata has no members, scans message files."""
-        # Create channel directory with no message files
         ch_dir = tmp_path / "empty-channel"
         ch_dir.mkdir()
 
-        migrator = _make_migrator(
+        ctx = _make_ctx(
             channels_meta={"empty-channel": {}},
             export_root=tmp_path,
         )
+        user_resolver = MagicMock()
 
-        result = channel_has_external_users(migrator, "empty-channel")
+        result = channel_has_external_users(ctx, user_resolver, "empty-channel")
         assert result is False
 
     def test_unmapped_user_skipped(self):
-        migrator = _make_migrator(
+        ctx = _make_ctx(
             user_map={},  # No mappings
             channels_meta={"general": {"members": ["U001"]}},
         )
+        user_resolver = MagicMock()
 
-        result = channel_has_external_users(migrator, "general")
+        result = channel_has_external_users(ctx, user_resolver, "general")
         assert result is False
 
     def test_scans_message_files_for_users(self, tmp_path):
@@ -121,38 +156,39 @@ class TestChannelHasExternalUsers:
         ]
         (ch_dir / "2024-01-01.json").write_text(json.dumps(msgs))
 
-        migrator = _make_migrator(
+        ctx = _make_ctx(
             user_map={"U010": "internal@example.com", "U011": "ext@other.com"},
             channels_meta={"dev": {}},
             export_root=tmp_path,
         )
-        migrator.user_resolver.is_external_user.side_effect = lambda e: (
-            e == "ext@other.com"
-        )
+        user_resolver = MagicMock()
+        user_resolver.is_external_user.side_effect = lambda e: e == "ext@other.com"
 
-        assert channel_has_external_users(migrator, "dev") is True
+        assert channel_has_external_users(ctx, user_resolver, "dev") is True
 
     def test_bot_user_not_counted_as_external(self):
         """Bot users flagged in users_without_email are not external."""
-        migrator = _make_migrator(
+        ctx = _make_ctx(
             user_map={"U001": "bot@other.com"},
+            users_without_email=[{"id": "U001", "is_bot": True}],
             channels_meta={"general": {"members": ["U001"]}},
         )
-        migrator.users_without_email = [{"id": "U001", "is_bot": True}]
-        migrator.user_resolver.is_external_user.return_value = True
+        user_resolver = MagicMock()
+        user_resolver.is_external_user.return_value = True
 
-        assert channel_has_external_users(migrator, "general") is False
+        assert channel_has_external_users(ctx, user_resolver, "general") is False
 
     def test_app_user_not_counted_as_external(self):
         """App users flagged in users_without_email are not external."""
-        migrator = _make_migrator(
+        ctx = _make_ctx(
             user_map={"U001": "app@other.com"},
+            users_without_email=[{"id": "U001", "is_app_user": True}],
             channels_meta={"general": {"members": ["U001"]}},
         )
-        migrator.users_without_email = [{"id": "U001", "is_app_user": True}]
-        migrator.user_resolver.is_external_user.return_value = True
+        user_resolver = MagicMock()
+        user_resolver.is_external_user.return_value = True
 
-        assert channel_has_external_users(migrator, "general") is False
+        assert channel_has_external_users(ctx, user_resolver, "general") is False
 
     def test_malformed_json_file_handled(self, tmp_path):
         """Bad JSON in message files is gracefully handled."""
@@ -160,24 +196,27 @@ class TestChannelHasExternalUsers:
         ch_dir.mkdir()
         (ch_dir / "2024-01-01.json").write_text("NOT JSON")
 
-        migrator = _make_migrator(
+        ctx = _make_ctx(
             channels_meta={"broken": {}},
             export_root=tmp_path,
         )
+        user_resolver = MagicMock()
 
         # Should not raise; returns False because no users found
-        assert channel_has_external_users(migrator, "broken") is False
+        assert channel_has_external_users(ctx, user_resolver, "broken") is False
 
     def test_users_without_email_is_none(self):
         """Handles users_without_email being None instead of a list."""
-        migrator = _make_migrator(
+        ctx = _make_ctx(
             user_map={"U001": "ext@other.com"},
             channels_meta={"general": {"members": ["U001"]}},
         )
-        migrator.users_without_email = None
-        migrator.user_resolver.is_external_user.return_value = True
+        # Force None via object.__setattr__ on frozen dataclass to test defensive code
+        object.__setattr__(ctx, "users_without_email", None)
+        user_resolver = MagicMock()
+        user_resolver.is_external_user.return_value = True
 
-        assert channel_has_external_users(migrator, "general") is True
+        assert channel_has_external_users(ctx, user_resolver, "general") is True
 
 
 # ---------------------------------------------------------------------------
@@ -188,60 +227,68 @@ class TestChannelHasExternalUsers:
 class TestCreateSpace:
     """Tests for create_space()."""
 
+    def _setup(self, channels_meta=None, dry_run=False, user_map=None):
+        """Common setup: returns (ctx, state, chat, user_resolver)."""
+        ctx = _make_ctx(
+            channels_meta=channels_meta or {},
+            dry_run=dry_run,
+            user_map=user_map or {},
+        )
+        state = MigrationState()
+        state.migration_summary = _default_migration_summary()
+        chat = MagicMock()
+        user_resolver = MagicMock()
+        user_resolver.is_external_user.return_value = False
+        return ctx, state, chat, user_resolver
+
     def test_dry_run_returns_space_name(self):
         """Dry run creates a fake space name without API calls."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={"general": {"members": []}},
             dry_run=True,
         )
-        migrator.user_resolver.is_external_user.return_value = False
 
-        result = create_space(migrator, "general")
+        result = create_space(ctx, state, chat, user_resolver, "general")
 
         assert result == "spaces/general"
-        assert migrator.state.migration_summary["spaces_created"] == 1
-        assert migrator.state.created_spaces["general"] == "spaces/general"
+        assert state.migration_summary["spaces_created"] == 1
+        assert state.created_spaces["general"] == "spaces/general"
         # chat.spaces().create() should NOT be called in dry run
-        migrator.chat.spaces().create.assert_not_called()
+        chat.spaces().create.assert_not_called()
 
     def test_dry_run_general_channel_display_name(self):
         """General channel gets '(General)' suffix in dry run."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={"general": {"is_general": True, "members": []}},
             dry_run=True,
         )
-        migrator.user_resolver.is_external_user.return_value = False
 
-        result = create_space(migrator, "general")
+        result = create_space(ctx, state, chat, user_resolver, "general")
         assert result == "spaces/general"
 
     def test_creates_space_via_api(self):
         """Non-dry-run calls the Google Chat API to create a space."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={"dev": {"members": []}},
-            dry_run=False,
         )
-        migrator.user_resolver.is_external_user.return_value = False
         mock_execute = MagicMock(return_value={"name": "spaces/abc123"})
-        migrator.chat.spaces().create.return_value.execute = mock_execute
+        chat.spaces().create.return_value.execute = mock_execute
 
-        result = create_space(migrator, "dev")
+        result = create_space(ctx, state, chat, user_resolver, "dev")
 
         assert result == "spaces/abc123"
-        assert migrator.state.migration_summary["spaces_created"] == 1
-        assert migrator.state.created_spaces["dev"] == "spaces/abc123"
+        assert state.migration_summary["spaces_created"] == 1
+        assert state.created_spaces["dev"] == "spaces/abc123"
 
     def test_space_body_has_import_mode(self):
         """The API request body includes importMode and threading state."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={"dev": {"members": []}},
-            dry_run=False,
         )
-        migrator.user_resolver.is_external_user.return_value = False
-        mock_create = migrator.chat.spaces().create
+        mock_create = chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
 
-        create_space(migrator, "dev")
+        create_space(ctx, state, chat, user_resolver, "dev")
 
         call_kwargs = mock_create.call_args
         body = (
@@ -258,38 +305,35 @@ class TestCreateSpace:
 
     def test_channel_creation_time_included(self):
         """When channel metadata has 'created', createTime is set on the space."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={"dev": {"created": 1700000000, "members": []}},
-            dry_run=False,
         )
-        migrator.user_resolver.is_external_user.return_value = False
-        mock_create = migrator.chat.spaces().create
+        mock_create = chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
 
-        create_space(migrator, "dev")
+        create_space(ctx, state, chat, user_resolver, "dev")
 
         body = mock_create.call_args.kwargs["body"]
         assert "createTime" in body
 
     def test_external_users_flag_set(self):
         """When channel has external users, externalUserAllowed is set."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             user_map={"U001": "ext@other.com"},
             channels_meta={"dev": {"members": ["U001"]}},
-            dry_run=False,
         )
-        migrator.user_resolver.is_external_user.return_value = True
-        mock_create = migrator.chat.spaces().create
+        user_resolver.is_external_user.return_value = True
+        mock_create = chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
 
-        create_space(migrator, "dev")
+        create_space(ctx, state, chat, user_resolver, "dev")
 
         body = mock_create.call_args.kwargs["body"]
         assert body["externalUserAllowed"] is True
 
     def test_space_description_updated_with_purpose_and_topic(self):
         """When channel has purpose/topic, space description is patched."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={
                 "dev": {
                     "members": [],
@@ -297,20 +341,18 @@ class TestCreateSpace:
                     "topic": {"value": "Sprint 42"},
                 }
             },
-            dry_run=False,
         )
-        migrator.user_resolver.is_external_user.return_value = False
-        mock_create = migrator.chat.spaces().create
+        mock_create = chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
 
-        create_space(migrator, "dev")
+        create_space(ctx, state, chat, user_resolver, "dev")
 
         # patch() should have been called for the description update
-        migrator.chat.spaces().patch.assert_called()
+        chat.spaces().patch.assert_called()
 
     def test_space_description_only_purpose(self):
         """When channel has only purpose (no topic), description still set."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={
                 "dev": {
                     "members": [],
@@ -318,48 +360,42 @@ class TestCreateSpace:
                     "topic": {"value": ""},
                 }
             },
-            dry_run=False,
         )
-        migrator.user_resolver.is_external_user.return_value = False
-        mock_create = migrator.chat.spaces().create
+        mock_create = chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
 
-        create_space(migrator, "dev")
+        create_space(ctx, state, chat, user_resolver, "dev")
 
-        migrator.chat.spaces().patch.assert_called()
+        chat.spaces().patch.assert_called()
 
     def test_permission_denied_returns_error_string(self):
         """403 PERMISSION_DENIED returns an error marker, does not raise."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={"dev": {"members": []}},
-            dry_run=False,
         )
-        migrator.user_resolver.is_external_user.return_value = False
         error = _make_http_error(403, content=b"PERMISSION_DENIED")
-        migrator.chat.spaces().create.return_value.execute.side_effect = error
+        chat.spaces().create.return_value.execute.side_effect = error
 
-        result = create_space(migrator, "dev")
+        result = create_space(ctx, state, chat, user_resolver, "dev")
 
         assert result == "ERROR_NO_PERMISSION_dev"
 
     def test_other_http_error_reraises(self):
         """Non-403 HttpErrors propagate."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={"dev": {"members": []}},
-            dry_run=False,
         )
-        migrator.user_resolver.is_external_user.return_value = False
         error = _make_http_error(500, content=b"Internal Server Error")
-        migrator.chat.spaces().create.return_value.execute.side_effect = error
+        chat.spaces().create.return_value.execute.side_effect = error
 
         import pytest
 
         with pytest.raises(HttpError):
-            create_space(migrator, "dev")
+            create_space(ctx, state, chat, user_resolver, "dev")
 
     def test_patch_failure_does_not_raise(self):
         """HttpError during description patch is caught, space still returned."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={
                 "dev": {
                     "members": [],
@@ -367,41 +403,36 @@ class TestCreateSpace:
                     "topic": {"value": ""},
                 }
             },
-            dry_run=False,
         )
-        migrator.user_resolver.is_external_user.return_value = False
-        mock_create = migrator.chat.spaces().create
+        mock_create = chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/xyz"}
         # Patch fails with HttpError
         patch_error = _make_http_error(400, content=b"Bad Request")
-        migrator.chat.spaces().patch.return_value.execute.side_effect = patch_error
+        chat.spaces().patch.return_value.execute.side_effect = patch_error
 
-        result = create_space(migrator, "dev")
+        result = create_space(ctx, state, chat, user_resolver, "dev")
         assert result == "spaces/xyz"
 
     def test_spaces_with_external_users_tracking(self):
         """create_space stores external user status for the space."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={"dev": {"members": []}},
             dry_run=True,
         )
-        migrator.user_resolver.is_external_user.return_value = False
 
-        create_space(migrator, "dev")
+        create_space(ctx, state, chat, user_resolver, "dev")
 
-        assert migrator.state.spaces_with_external_users["spaces/dev"] is False
+        assert state.spaces_with_external_users["spaces/dev"] is False
 
     def test_general_channel_display_name_in_api(self):
         """General channel gets '(General)' suffix in the API call."""
-        migrator = _make_migrator(
+        ctx, state, chat, user_resolver = self._setup(
             channels_meta={"general": {"is_general": True, "members": []}},
-            dry_run=False,
         )
-        migrator.user_resolver.is_external_user.return_value = False
-        mock_create = migrator.chat.spaces().create
+        mock_create = chat.spaces().create
         mock_create.return_value.execute.return_value = {"name": "spaces/gen"}
 
-        create_space(migrator, "general")
+        create_space(ctx, state, chat, user_resolver, "general")
 
         body = mock_create.call_args.kwargs["body"]
         assert "(General)" in body["displayName"]

@@ -876,21 +876,21 @@ class TestLogSpaceMappingConflicts:
         migrator.state.channel_conflicts = set()
 
         # Should not raise
-        log_space_mapping_conflicts(migrator)
+        log_space_mapping_conflicts(migrator.state)
 
     def test_with_conflicts_logs_without_error(self):
         """Conflicts are logged without raising exceptions."""
         migrator = _make_migrator()
         migrator.state.channel_conflicts = {"channel-a", "channel-b"}
 
-        log_space_mapping_conflicts(migrator)
+        log_space_mapping_conflicts(migrator.state)
 
     def test_dry_run_with_no_conflicts(self):
         """Dry run with no conflicts works fine."""
         migrator = _make_migrator(dry_run=True)
         migrator.state.channel_conflicts = set()
 
-        log_space_mapping_conflicts(migrator)
+        log_space_mapping_conflicts(migrator.state, dry_run=True)
 
     def test_missing_channel_conflicts_attr(self):
         """Works when channel_conflicts attribute does not exist."""
@@ -898,4 +898,4 @@ class TestLogSpaceMappingConflicts:
         del migrator.state.channel_conflicts
 
         # Should not raise
-        log_space_mapping_conflicts(migrator)
+        log_space_mapping_conflicts(migrator.state)

@@ -218,7 +218,11 @@ class ChannelProcessor:
                 channel=channel,
             )
             space = migrator.state.space_cache.get(channel) or create_space(
-                migrator, channel
+                migrator.ctx,
+                migrator.state,
+                migrator.chat,
+                migrator.user_resolver,
+                channel,
             )
             migrator.state.space_cache[channel] = space
             return space, True
@@ -608,7 +612,7 @@ class ChannelProcessor:
             return
 
         # Get the timestamp of the last message in the space
-        last_timestamp = get_last_message_timestamp(migrator, channel, space_name)
+        last_timestamp = get_last_message_timestamp(migrator.chat, channel, space_name)
 
         if last_timestamp > 0:
             log_with_context(

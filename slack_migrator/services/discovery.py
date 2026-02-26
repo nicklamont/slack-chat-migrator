@@ -15,16 +15,21 @@ from slack_migrator.constants import SPACE_NAME_PREFIX, SPACES_PAGE_SIZE
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
+    from slack_migrator.core.context import MigrationContext
+    from slack_migrator.core.state import MigrationState
 
 
 def _fetch_all_migration_spaces(
-    migrator: SlackToChatMigrator,
+    chat: Any,
+    channel_name_to_id: dict[str, str],
+    state: MigrationState,
 ) -> dict[str, list[dict[str, Any]]]:
     """Paginate through Google Chat API to find spaces matching the migration pattern.
 
     Args:
-        migrator: The migrator providing API access and channel name mappings.
+        chat: Google Chat API service.
+        channel_name_to_id: Mapping of channel names to Slack channel IDs.
+        state: Mutable migration state.
 
     Returns:
         Dict mapping channel names to lists of space info dicts.
@@ -37,9 +42,7 @@ def _fetch_all_migration_spaces(
 
     page_token = None
     while True:
-        request = migrator.chat.spaces().list(
-            pageSize=SPACES_PAGE_SIZE, pageToken=page_token
-        )
+        request = chat.spaces().list(pageSize=SPACES_PAGE_SIZE, pageToken=page_token)
         response = request.execute()
 
         for space in response.get("spaces", []):
@@ -68,9 +71,9 @@ def _fetch_all_migration_spaces(
             all_spaces_by_channel[channel_name].append(space_info)
 
             # First-seen ID mapping
-            channel_id = migrator.channel_name_to_id.get(channel_name, "")
-            if channel_id and channel_id not in migrator.state.channel_id_to_space_id:
-                migrator.state.channel_id_to_space_id[channel_id] = space_id
+            channel_id = channel_name_to_id.get(channel_name, "")
+            if channel_id and channel_id not in state.channel_id_to_space_id:
+                state.channel_id_to_space_id[channel_id] = space_id
 
         page_token = response.get("nextPageToken")
         if not page_token:
@@ -81,13 +84,17 @@ def _fetch_all_migration_spaces(
 
 
 def _resolve_duplicate_spaces(
-    migrator: SlackToChatMigrator,
+    chat: Any,
+    channel_name_to_id: dict[str, str],
+    state: MigrationState,
     all_spaces_by_channel: dict[str, list[dict[str, Any]]],
 ) -> tuple[dict[str, str], dict[str, list[dict[str, Any]]]]:
     """Separate unique and duplicate space mappings, enriching duplicates with member counts.
 
     Args:
-        migrator: The migrator providing API access and state.
+        chat: Google Chat API service.
+        channel_name_to_id: Mapping of channel names to Slack channel IDs.
+        state: Mutable migration state.
         all_spaces_by_channel: All discovered spaces grouped by channel name.
 
     Returns:
@@ -101,11 +108,9 @@ def _resolve_duplicate_spaces(
         space_mappings[channel_name] = spaces[0]["space_name"]
 
         if len(spaces) == 1:
-            channel_id = migrator.channel_name_to_id.get(channel_name, "")
+            channel_id = channel_name_to_id.get(channel_name, "")
             if channel_id:
-                migrator.state.channel_id_to_space_id[channel_id] = spaces[0][
-                    "space_id"
-                ]
+                state.channel_id_to_space_id[channel_id] = spaces[0]["space_id"]
             continue
 
         # Duplicate — enrich with member counts for disambiguation
@@ -113,7 +118,7 @@ def _resolve_duplicate_spaces(
         for space_info in spaces:
             try:
                 members_response = (
-                    migrator.chat.spaces()
+                    chat.spaces()
                     .members()
                     .list(parent=space_info["space_name"], pageSize=1)
                     .execute()
@@ -130,13 +135,13 @@ def _resolve_duplicate_spaces(
                 )
 
         # Remove ambiguous ID mapping
-        channel_id = migrator.channel_name_to_id.get(channel_name, "")
-        if channel_id and channel_id in migrator.state.channel_id_to_space_id:
+        channel_id = channel_name_to_id.get(channel_name, "")
+        if channel_id and channel_id in state.channel_id_to_space_id:
             log_with_context(
                 logging.WARNING,
                 f"Removing ambiguous ID mapping for channel {channel_name} (ID: {channel_id})",
             )
-            del migrator.state.channel_id_to_space_id[channel_id]
+            del state.channel_id_to_space_id[channel_id]
 
     return space_mappings, duplicate_spaces
 
@@ -171,7 +176,9 @@ def _log_duplicate_spaces(
 
 
 def discover_existing_spaces(
-    migrator: SlackToChatMigrator,
+    chat: Any,
+    channel_name_to_id: dict[str, str],
+    state: MigrationState,
 ) -> tuple[dict[str, str], dict[str, list[dict[str, Any]]]]:
     """Query Google Chat API to find spaces matching the migration naming pattern.
 
@@ -179,7 +186,9 @@ def discover_existing_spaces(
     and reports duplicate spaces to help users disambiguate via config.
 
     Args:
-        migrator: The SlackToChatMigrator instance.
+        chat: Google Chat API service.
+        channel_name_to_id: Mapping of channel names to Slack channel IDs.
+        state: Mutable migration state.
 
     Returns:
         Tuple of (space_mappings, duplicate_spaces) where space_mappings maps
@@ -195,9 +204,11 @@ def discover_existing_spaces(
     duplicate_spaces: dict[str, list[dict[str, Any]]] = {}
 
     try:
-        all_spaces_by_channel = _fetch_all_migration_spaces(migrator)
+        all_spaces_by_channel = _fetch_all_migration_spaces(
+            chat, channel_name_to_id, state
+        )
         space_mappings, duplicate_spaces = _resolve_duplicate_spaces(
-            migrator, all_spaces_by_channel
+            chat, channel_name_to_id, state, all_spaces_by_channel
         )
         _log_duplicate_spaces(duplicate_spaces)
 
@@ -208,7 +219,7 @@ def discover_existing_spaces(
         )
         log_with_context(
             logging.INFO,
-            f"Created {len(migrator.state.channel_id_to_space_id)} channel ID to space ID mappings",
+            f"Created {len(state.channel_id_to_space_id)} channel ID to space ID mappings",
         )
 
     except HttpError as e:
@@ -221,9 +232,7 @@ def discover_existing_spaces(
     return space_mappings, duplicate_spaces
 
 
-def get_last_message_timestamp(
-    migrator: SlackToChatMigrator, channel: str, space: str
-) -> float:
+def get_last_message_timestamp(chat: Any, channel: str, space: str) -> float:
     """
     Query Google Chat API to get the timestamp of the last message in a space.
 
@@ -231,12 +240,12 @@ def get_last_message_timestamp(
     that are newer than the most recent message in the space.
 
     Args:
-        migrator: The SlackToChatMigrator instance
-        channel: The Slack channel name
-        space: The Google Chat space name (format: spaces/{space_id})
+        chat: Google Chat API service.
+        channel: The Slack channel name.
+        space: The Google Chat space name (format: spaces/{space_id}).
 
     Returns:
-        float: Unix timestamp of the last message, or 0 if no messages
+        float: Unix timestamp of the last message, or 0 if no messages.
     """
     log_with_context(
         logging.DEBUG,
@@ -249,7 +258,7 @@ def get_last_message_timestamp(
     try:
         # We only need the most recent message, so limit to 1 result sorted by createTime desc
         request = (
-            migrator.chat.spaces()
+            chat.spaces()
             .messages()
             .list(parent=space, pageSize=1, orderBy="createTime desc")
         )
@@ -321,37 +330,37 @@ def should_process_message(last_timestamp: float, message_ts: str) -> bool:
         return True
 
 
-def log_space_mapping_conflicts(migrator: SlackToChatMigrator) -> None:
+def log_space_mapping_conflicts(state: MigrationState, dry_run: bool = False) -> None:
     """Log information about space mapping conflicts that need to be resolved.
 
     Args:
-        migrator: The migrator instance whose state contains conflicts.
+        state: Migration state containing conflict data.
+        dry_run: Whether this is a dry-run execution.
     """
-    if migrator.dry_run:
+    if dry_run:
         log_with_context(logging.INFO, "[DRY RUN] Checking for space mapping conflicts")
 
     # Log any conflicts that should be added to config
-    if (
-        hasattr(migrator.state, "channel_conflicts")
-        and migrator.state.channel_conflicts
-    ):
+    if hasattr(state, "channel_conflicts") and state.channel_conflicts:
         log_with_context(
             logging.WARNING,
-            f"Found {len(migrator.state.channel_conflicts)} channels with duplicate space conflicts",
+            f"Found {len(state.channel_conflicts)} channels with duplicate space conflicts",
         )
         log_with_context(
             logging.WARNING,
             "Add the following entries to your config.yaml to resolve conflicts:",
         )
         log_with_context(logging.WARNING, "space_mapping:")
-        for channel_name in migrator.state.channel_conflicts:
+        for channel_name in state.channel_conflicts:
             log_with_context(
                 logging.WARNING,
                 f'  "{channel_name}": "<space_id>"  # Replace with the desired space ID',
             )
 
 
-def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa: C901
+def load_existing_space_mappings(  # noqa: C901
+    ctx: MigrationContext, state: MigrationState, chat: Any
+) -> None:
     """Load existing space mappings from Google Chat API into migrator state.
 
     In update mode, discovers spaces via the API and resolves duplicate-space
@@ -359,9 +368,11 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
     this is a no-op because we create new spaces rather than reusing existing ones.
 
     Args:
-        migrator: The migrator instance providing config, API services, and state.
+        ctx: Immutable migration context.
+        state: Mutable migration state.
+        chat: Google Chat API service.
     """
-    if not migrator.update_mode:
+    if not ctx.update_mode:
         log_with_context(
             logging.INFO,
             "Import mode: Will create new spaces (not discovering existing spaces)",
@@ -373,11 +384,13 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
             logging.INFO, "[UPDATE MODE] Discovering existing Google Chat spaces"
         )
 
-        discovered_spaces, duplicate_spaces = discover_existing_spaces(migrator)
+        discovered_spaces, duplicate_spaces = discover_existing_spaces(
+            chat, ctx.channel_name_to_id, state
+        )
 
         # --- Resolve duplicate-space conflicts --------------------------------
         if duplicate_spaces:
-            space_mapping = migrator.state.space_mapping
+            space_mapping = state.space_mapping
 
             log_with_context(
                 logging.WARNING,
@@ -407,7 +420,7 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
                         resolved_conflicts.append(channel_name)
                     else:
                         unresolved_conflicts.append(channel_name)
-                        migrator.state.channel_conflicts.add(channel_name)
+                        state.channel_conflicts.add(channel_name)
                         log_with_context(
                             logging.ERROR,
                             f"Configured space ID for channel '{channel_name}'"
@@ -416,7 +429,7 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
                         )
                 else:
                     unresolved_conflicts.append(channel_name)
-                    migrator.state.channel_conflicts.add(channel_name)
+                    state.channel_conflicts.add(channel_name)
                     log_with_context(
                         logging.ERROR,
                         f"Channel '{channel_name}' has {len(spaces)} duplicate"
@@ -442,7 +455,7 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
 
             if unresolved_conflicts:
                 for ch in unresolved_conflicts:
-                    migrator.state.migration_issues[ch] = (
+                    state.migration_issues[ch] = (
                         "Duplicate spaces found"
                         " - requires disambiguation in config.yaml"
                     )
@@ -461,7 +474,7 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
                     f" {', '.join(resolved_conflicts)}",
                 )
 
-        # --- Apply discovered spaces to migrator state ------------------------
+        # --- Apply discovered spaces to state ---------------------------------
         if discovered_spaces:
             log_with_context(
                 logging.INFO,
@@ -475,7 +488,7 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
                     else space_name
                 )
 
-                mode_info = "[UPDATE MODE] " if migrator.update_mode else ""
+                mode_info = "[UPDATE MODE] " if ctx.update_mode else ""
                 log_with_context(
                     logging.INFO,
                     f"{mode_info}Will use existing space {space_id}"
@@ -484,7 +497,7 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
                 )
 
             for channel_name, space_name in discovered_spaces.items():
-                migrator.state.channel_to_space[channel_name] = space_name
+                state.channel_to_space[channel_name] = space_name
 
                 space_id = (
                     space_name.split("/")[-1]
@@ -492,21 +505,21 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
                     else space_name
                 )
 
-                channel_id = migrator.channel_name_to_id.get(channel_name, "")
+                channel_id = ctx.channel_name_to_id.get(channel_name, "")
                 if channel_id:
-                    migrator.state.channel_id_to_space_id[channel_id] = space_id
+                    state.channel_id_to_space_id[channel_id] = space_id
                     log_with_context(
                         logging.DEBUG,
                         f"Mapped channel ID {channel_id} to space ID {space_id}",
                     )
 
-                if migrator.update_mode:
-                    migrator.state.created_spaces[channel_name] = space_name
+                if ctx.update_mode:
+                    state.created_spaces[channel_name] = space_name
 
             log_with_context(
                 logging.INFO,
                 f"Space discovery complete:"
-                f" {len(migrator.state.channel_to_space)} channels have"
+                f" {len(state.channel_to_space)} channels have"
                 " existing spaces, others will create new spaces",
             )
         else:
@@ -514,29 +527,35 @@ def load_existing_space_mappings(migrator: SlackToChatMigrator) -> None:  # noqa
 
     except HttpError as e:
         log_with_context(logging.ERROR, f"Failed to load existing space mappings: {e}")
-        if not migrator.dry_run:
+        if not ctx.dry_run:
             raise
 
 
-def load_space_mappings(migrator: SlackToChatMigrator) -> dict[str, str]:
+def load_space_mappings(
+    chat: Any, channel_name_to_id: dict[str, str], state: MigrationState
+) -> dict[str, str]:
     """Load space mappings for update mode.
 
     This uses the Google Chat API for discovery and the config file for overrides.
     No persisted mapping files are used anymore.
 
     Args:
-        migrator: The migrator instance providing config and API services.
+        chat: Google Chat API service.
+        channel_name_to_id: Mapping of channel names to Slack channel IDs.
+        state: Mutable migration state.
 
     Returns:
         Mapping from channel names to space IDs, or empty dict if not found.
     """
     try:
         # Initialize the channel_id_to_space_id mapping if not present
-        if not hasattr(migrator.state, "channel_id_to_space_id"):
-            migrator.state.channel_id_to_space_id = {}
+        if not hasattr(state, "channel_id_to_space_id"):
+            state.channel_id_to_space_id = {}
 
         # Use API discovery to find spaces
-        discovered_spaces, _duplicate_spaces = discover_existing_spaces(migrator)
+        discovered_spaces, _duplicate_spaces = discover_existing_spaces(
+            chat, channel_name_to_id, state
+        )
 
         # Log the discovery results
         if discovered_spaces:
@@ -546,7 +565,7 @@ def load_space_mappings(migrator: SlackToChatMigrator) -> dict[str, str]:
             )
 
         # Look for space_mapping overrides in state
-        space_mapping = migrator.state.space_mapping
+        space_mapping = state.space_mapping
         if space_mapping:
             log_with_context(
                 logging.INFO,
@@ -555,10 +574,10 @@ def load_space_mappings(migrator: SlackToChatMigrator) -> dict[str, str]:
 
             # Apply space mappings from config (overriding API discovery)
             for channel_name, space_id in space_mapping.items():
-                channel_id = migrator.channel_name_to_id.get(channel_name, "")
+                channel_id = channel_name_to_id.get(channel_name, "")
                 if channel_id:
                     # Override any discovered mapping with the config value
-                    migrator.state.channel_id_to_space_id[channel_id] = space_id
+                    state.channel_id_to_space_id[channel_id] = space_id
 
                     # Also update the name-based mapping for backward compatibility
                     discovered_spaces[channel_name] = f"spaces/{space_id}"

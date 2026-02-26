@@ -305,7 +305,13 @@ class TestCreateOrReuseSpace:
 
         assert space == "spaces/NEW1"
         assert is_new is True
-        mock_create.assert_called_once_with(migrator, "general")
+        mock_create.assert_called_once_with(
+            migrator.ctx,
+            migrator.state,
+            migrator.chat,
+            migrator.user_resolver,
+            "general",
+        )
         assert migrator.state.space_cache["general"] == "spaces/NEW1"
 
     def test_update_mode_reuses_existing_space(self, tmp_path):
@@ -762,7 +768,7 @@ class TestDiscoverChannelResources:
         processor = ChannelProcessor(migrator)
         processor._discover_channel_resources("general")
 
-        mock_get_ts.assert_called_once_with(migrator, "general", "spaces/S1")
+        mock_get_ts.assert_called_once_with(migrator.chat, "general", "spaces/S1")
         assert migrator.state.last_processed_timestamps["general"] == 12345.0
 
     def test_no_space_found_for_channel(self):
