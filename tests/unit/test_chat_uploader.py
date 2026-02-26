@@ -7,7 +7,6 @@ import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from slack_migrator.core.state import MigrationState
 from slack_migrator.services.chat.chat_uploader import (
     ChatFileUploader,
 )
@@ -34,27 +33,15 @@ def _make_uploader(dry_run=False):
 class TestGetCurrentChannel:
     """Tests for ChatFileUploader._get_current_channel."""
 
-    def test_returns_channel_when_migrator_is_set(self):
+    def test_returns_channel_when_set(self):
         uploader = _make_uploader()
-        migrator = MagicMock()
-        migrator.state = MigrationState()
-        migrator.state.current_channel = "general"
-        uploader.migrator = migrator
+        uploader.current_channel = "general"
 
         assert uploader._get_current_channel() == "general"
 
-    def test_returns_none_when_migrator_is_none(self):
+    def test_returns_none_when_not_set(self):
         uploader = _make_uploader()
-        uploader.migrator = None
-
-        assert uploader._get_current_channel() is None
-
-    def test_returns_none_when_migrator_has_no_current_channel(
-        self,
-    ):
-        uploader = _make_uploader()
-        migrator = MagicMock(spec=[])  # no attributes
-        uploader.migrator = migrator
+        assert uploader.current_channel is None
 
         assert uploader._get_current_channel() is None
 

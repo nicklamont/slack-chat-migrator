@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.utils.user_validation import (
@@ -21,28 +21,6 @@ from slack_migrator.utils.user_validation import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _make_migrator(
-    *,
-    export_root: str = "/fake/export",
-    user_map: dict | None = None,
-    config: MigrationConfig | None = None,
-    has_tracker: bool = True,
-) -> MagicMock:
-    """Build a lightweight MagicMock standing in for SlackToChatMigrator."""
-    migrator = MagicMock()
-    migrator.export_root = export_root
-    migrator.user_map = user_map or {}
-    migrator.config = config or MigrationConfig()
-
-    if has_tracker:
-        migrator.unmapped_user_tracker = UnmappedUserTracker()
-    else:
-        # Remove the attribute so hasattr checks return False
-        del migrator.unmapped_user_tracker
-
-    return migrator
 
 
 def _write_json(path: Path, data: list | dict) -> None:
@@ -293,10 +271,7 @@ class TestAnalyzeUnmappedUsers:
     """Tests for analyze_unmapped_users()."""
 
     def test_users_json_missing(self, tmp_path):
-        migrator = _make_migrator(export_root=str(tmp_path))
-
-        result = analyze_unmapped_users(migrator, ["U001"])
-
+        result = analyze_unmapped_users(tmp_path, ["U001"])
         assert result == {}
 
     def test_regular_user(self, tmp_path):
@@ -309,9 +284,8 @@ class TestAnalyzeUnmappedUsers:
             }
         ]
         _write_json(tmp_path / "users.json", users)
-        migrator = _make_migrator(export_root=str(tmp_path))
 
-        result = analyze_unmapped_users(migrator, ["U001"])
+        result = analyze_unmapped_users(tmp_path, ["U001"])
 
         assert result["U001"]["type"] == UserType.REGULAR_USER
         assert result["U001"]["name"] == "Alice A."
@@ -327,9 +301,8 @@ class TestAnalyzeUnmappedUsers:
             }
         ]
         _write_json(tmp_path / "users.json", users)
-        migrator = _make_migrator(export_root=str(tmp_path))
 
-        result = analyze_unmapped_users(migrator, ["B001"])
+        result = analyze_unmapped_users(tmp_path, ["B001"])
 
         assert result["B001"]["type"] == UserType.BOT
         assert "Bot/app integration" in result["B001"]["details"]
@@ -346,9 +319,8 @@ class TestAnalyzeUnmappedUsers:
             }
         ]
         _write_json(tmp_path / "users.json", users)
-        migrator = _make_migrator(export_root=str(tmp_path))
 
-        result = analyze_unmapped_users(migrator, ["W001"])
+        result = analyze_unmapped_users(tmp_path, ["W001"])
 
         assert result["W001"]["type"] == UserType.WORKFLOW_BOT
         assert "Slack workflow automation" in result["W001"]["details"]
@@ -364,9 +336,8 @@ class TestAnalyzeUnmappedUsers:
             }
         ]
         _write_json(tmp_path / "users.json", users)
-        migrator = _make_migrator(export_root=str(tmp_path))
 
-        result = analyze_unmapped_users(migrator, ["U002"])
+        result = analyze_unmapped_users(tmp_path, ["U002"])
 
         assert result["U002"]["type"] == UserType.DELETED_USER
 
@@ -381,9 +352,8 @@ class TestAnalyzeUnmappedUsers:
             }
         ]
         _write_json(tmp_path / "users.json", users)
-        migrator = _make_migrator(export_root=str(tmp_path))
 
-        result = analyze_unmapped_users(migrator, ["U003"])
+        result = analyze_unmapped_users(tmp_path, ["U003"])
 
         assert result["U003"]["type"] == UserType.RESTRICTED_USER
 
@@ -392,9 +362,8 @@ class TestAnalyzeUnmappedUsers:
             {"id": "U004", "name": "noemail", "real_name": "No Email", "profile": {}}
         ]
         _write_json(tmp_path / "users.json", users)
-        migrator = _make_migrator(export_root=str(tmp_path))
 
-        result = analyze_unmapped_users(migrator, ["U004"])
+        result = analyze_unmapped_users(tmp_path, ["U004"])
 
         assert result["U004"]["type"] == UserType.NO_EMAIL
 
@@ -407,9 +376,8 @@ class TestAnalyzeUnmappedUsers:
             }
         ]
         _write_json(tmp_path / "users.json", users)
-        migrator = _make_migrator(export_root=str(tmp_path))
 
-        result = analyze_unmapped_users(migrator, ["U999"])
+        result = analyze_unmapped_users(tmp_path, ["U999"])
 
         assert result["U999"]["type"] == UserType.MISSING_FROM_EXPORT
         assert result["U999"]["name"] == "Unknown"
@@ -438,9 +406,8 @@ class TestAnalyzeUnmappedUsers:
             },
         ]
         _write_json(tmp_path / "users.json", users)
-        migrator = _make_migrator(export_root=str(tmp_path))
 
-        result = analyze_unmapped_users(migrator, ["U001", "B001", "U002"])
+        result = analyze_unmapped_users(tmp_path, ["U001", "B001", "U002"])
 
         assert len(result) == 3
         assert result["U001"]["type"] == UserType.REGULAR_USER
@@ -450,18 +417,16 @@ class TestAnalyzeUnmappedUsers:
     def test_fallback_name_uses_name_field(self, tmp_path):
         users = [{"id": "U001", "name": "fallback_name", "profile": {}}]
         _write_json(tmp_path / "users.json", users)
-        migrator = _make_migrator(export_root=str(tmp_path))
 
-        result = analyze_unmapped_users(migrator, ["U001"])
+        result = analyze_unmapped_users(tmp_path, ["U001"])
 
         assert result["U001"]["name"] == "fallback_name"
 
     def test_exception_returns_empty_dict(self, tmp_path):
         """When users.json cannot be parsed, the function catches the error."""
         (tmp_path / "users.json").write_text("{bad json")
-        migrator = _make_migrator(export_root=str(tmp_path))
 
-        result = analyze_unmapped_users(migrator, ["U001"])
+        result = analyze_unmapped_users(tmp_path, ["U001"])
 
         assert result == {}
 
@@ -474,19 +439,14 @@ class TestAnalyzeUnmappedUsers:
 class TestInitializeUnmappedUserTracking:
     """Tests for initialize_unmapped_user_tracking()."""
 
-    def test_creates_tracker_when_absent(self):
-        migrator = _make_migrator(has_tracker=False)
-        tracker = initialize_unmapped_user_tracking(migrator)
-
+    def test_creates_new_tracker(self):
+        tracker = initialize_unmapped_user_tracking()
         assert isinstance(tracker, UnmappedUserTracker)
-        assert migrator.unmapped_user_tracker is tracker
 
-    def test_returns_existing_tracker(self):
-        migrator = _make_migrator(has_tracker=True)
-        existing = migrator.unmapped_user_tracker
-        tracker = initialize_unmapped_user_tracking(migrator)
-
-        assert tracker is existing
+    def test_returns_fresh_tracker_each_call(self):
+        t1 = initialize_unmapped_user_tracking()
+        t2 = initialize_unmapped_user_tracking()
+        assert t1 is not t2
 
 
 # ===========================================================================
@@ -498,10 +458,8 @@ class TestLogUnmappedUserSummaryForDryRun:
     """Tests for log_unmapped_user_summary_for_dry_run()."""
 
     @patch("slack_migrator.utils.user_validation.log_with_context")
-    def test_no_tracker_logs_success(self, mock_log):
-        migrator = _make_migrator(has_tracker=False)
-
-        log_unmapped_user_summary_for_dry_run(migrator)
+    def test_none_tracker_logs_success(self, mock_log):
+        log_unmapped_user_summary_for_dry_run(None, Path("/fake"))
 
         mock_log.assert_called_once_with(
             logging.INFO, "✅ No unmapped users detected during dry run"
@@ -509,10 +467,9 @@ class TestLogUnmappedUserSummaryForDryRun:
 
     @patch("slack_migrator.utils.user_validation.log_with_context")
     def test_empty_tracker_logs_success(self, mock_log):
-        migrator = _make_migrator(has_tracker=True)
-        # Tracker has no unmapped users
+        tracker = UnmappedUserTracker()
 
-        log_unmapped_user_summary_for_dry_run(migrator)
+        log_unmapped_user_summary_for_dry_run(tracker, Path("/fake"))
 
         mock_log.assert_called_once_with(
             logging.INFO, "✅ No unmapped users detected during dry run"
@@ -521,14 +478,14 @@ class TestLogUnmappedUserSummaryForDryRun:
     @patch("slack_migrator.utils.user_validation.analyze_unmapped_users")
     @patch("slack_migrator.utils.user_validation.log_with_context")
     def test_unmapped_users_triggers_error_logging(self, mock_log, mock_analyze):
-        migrator = _make_migrator(has_tracker=True)
-        migrator.unmapped_user_tracker.add_unmapped_user("U001", "mention")
+        tracker = UnmappedUserTracker()
+        tracker.add_unmapped_user("U001", "mention")
 
         mock_analyze.return_value = {
             "U001": {"type": UserType.REGULAR_USER, "name": "Alice"},
         }
 
-        log_unmapped_user_summary_for_dry_run(migrator)
+        log_unmapped_user_summary_for_dry_run(tracker, Path("/fake"))
 
         # Should have been called many times (the function logs a lot)
         assert mock_log.call_count > 5
@@ -539,14 +496,14 @@ class TestLogUnmappedUserSummaryForDryRun:
     @patch("slack_migrator.utils.user_validation.analyze_unmapped_users")
     @patch("slack_migrator.utils.user_validation.log_with_context")
     def test_bot_users_show_bot_recommendations(self, mock_log, mock_analyze):
-        migrator = _make_migrator(has_tracker=True)
-        migrator.unmapped_user_tracker.add_unmapped_user("B001")
+        tracker = UnmappedUserTracker()
+        tracker.add_unmapped_user("B001")
 
         mock_analyze.return_value = {
             "B001": {"type": UserType.BOT, "name": "TestBot"},
         }
 
-        log_unmapped_user_summary_for_dry_run(migrator)
+        log_unmapped_user_summary_for_dry_run(tracker, Path("/fake"))
 
         all_log_text = " ".join(str(c) for c in mock_log.call_args_list)
         assert "bot" in all_log_text.lower() or "Bot" in all_log_text
@@ -555,14 +512,14 @@ class TestLogUnmappedUserSummaryForDryRun:
     @patch("slack_migrator.utils.user_validation.analyze_unmapped_users")
     @patch("slack_migrator.utils.user_validation.log_with_context")
     def test_deleted_users_show_deleted_recommendations(self, mock_log, mock_analyze):
-        migrator = _make_migrator(has_tracker=True)
-        migrator.unmapped_user_tracker.add_unmapped_user("U001")
+        tracker = UnmappedUserTracker()
+        tracker.add_unmapped_user("U001")
 
         mock_analyze.return_value = {
             "U001": {"type": UserType.DELETED_USER, "name": "GoneUser"},
         }
 
-        log_unmapped_user_summary_for_dry_run(migrator)
+        log_unmapped_user_summary_for_dry_run(tracker, Path("/fake"))
 
         all_log_text = " ".join(str(c) for c in mock_log.call_args_list)
         assert "deleted" in all_log_text.lower()
@@ -570,16 +527,16 @@ class TestLogUnmappedUserSummaryForDryRun:
     @patch("slack_migrator.utils.user_validation.analyze_unmapped_users")
     @patch("slack_migrator.utils.user_validation.log_with_context")
     def test_no_bots_skips_ignore_bots_option(self, mock_log, mock_analyze):
-        migrator = _make_migrator(has_tracker=True)
-        migrator.unmapped_user_tracker.add_unmapped_user("U001")
+        tracker = UnmappedUserTracker()
+        tracker.add_unmapped_user("U001")
 
         mock_analyze.return_value = {
             "U001": {"type": UserType.REGULAR_USER, "name": "Alice"},
         }
 
-        log_unmapped_user_summary_for_dry_run(migrator)
+        log_unmapped_user_summary_for_dry_run(tracker, Path("/fake"))
 
-        # "Add user mappings:" is shown when no bots present (instead of "EASIEST SOLUTION")
+        # "Add user mappings:" is shown when no bots present
         error_calls = [c for c in mock_log.call_args_list if c[0][0] == logging.ERROR]
         messages = [str(c) for c in error_calls]
         assert any("Add user mappings" in m for m in messages)
@@ -587,16 +544,14 @@ class TestLogUnmappedUserSummaryForDryRun:
     @patch("slack_migrator.utils.user_validation.analyze_unmapped_users")
     @patch("slack_migrator.utils.user_validation.log_with_context")
     def test_context_info_appended_to_log(self, mock_log, mock_analyze):
-        migrator = _make_migrator(has_tracker=True)
-        migrator.unmapped_user_tracker.add_unmapped_user(
-            "U001", "channel_member:#general"
-        )
+        tracker = UnmappedUserTracker()
+        tracker.add_unmapped_user("U001", "channel_member:#general")
 
         mock_analyze.return_value = {
             "U001": {"type": UserType.REGULAR_USER, "name": "Alice"},
         }
 
-        log_unmapped_user_summary_for_dry_run(migrator)
+        log_unmapped_user_summary_for_dry_run(tracker, Path("/fake"))
 
         all_log_text = " ".join(str(c) for c in mock_log.call_args_list)
         assert "channel_member:#general" in all_log_text
@@ -612,10 +567,12 @@ class TestScanChannelMembersForUnmappedUsers:
 
     def test_no_channels_json(self, tmp_path):
         """When channels.json is absent, a warning is logged and function returns."""
-        migrator = _make_migrator(export_root=str(tmp_path), has_tracker=True)
+        tracker = UnmappedUserTracker()
 
         with patch("slack_migrator.utils.user_validation.log_with_context") as mock_log:
-            scan_channel_members_for_unmapped_users(migrator)
+            scan_channel_members_for_unmapped_users(
+                tracker, tmp_path, MigrationConfig(), {}
+            )
 
         warning_calls = [
             c for c in mock_log.call_args_list if c[0][0] == logging.WARNING
@@ -627,15 +584,14 @@ class TestScanChannelMembersForUnmappedUsers:
             {"name": "general", "members": ["U001", "U002"]},
         ]
         _write_json(tmp_path / "channels.json", channels)
-        migrator = _make_migrator(
-            export_root=str(tmp_path),
-            user_map={"U001": "a@x.com", "U002": "b@x.com"},
-        )
+        tracker = UnmappedUserTracker()
+        user_map = {"U001": "a@x.com", "U002": "b@x.com"}
 
         with patch("slack_migrator.utils.user_validation.log_with_context") as mock_log:
-            scan_channel_members_for_unmapped_users(migrator)
+            scan_channel_members_for_unmapped_users(
+                tracker, tmp_path, MigrationConfig(), user_map
+            )
 
-        tracker = migrator.unmapped_user_tracker
         assert not tracker.has_unmapped_users()
         # Verify success log
         info_calls = [c for c in mock_log.call_args_list if c[0][0] == logging.INFO]
@@ -646,15 +602,13 @@ class TestScanChannelMembersForUnmappedUsers:
             {"name": "general", "members": ["U001", "U002", "U003"]},
         ]
         _write_json(tmp_path / "channels.json", channels)
-        migrator = _make_migrator(
-            export_root=str(tmp_path),
-            user_map={"U001": "a@x.com"},
-        )
+        tracker = UnmappedUserTracker()
 
         with patch("slack_migrator.utils.user_validation.log_with_context"):
-            scan_channel_members_for_unmapped_users(migrator)
+            scan_channel_members_for_unmapped_users(
+                tracker, tmp_path, MigrationConfig(), {"U001": "a@x.com"}
+            )
 
-        tracker = migrator.unmapped_user_tracker
         assert tracker.get_unmapped_count() == 2
         assert set(tracker.get_unmapped_users_list()) == {"U002", "U003"}
 
@@ -665,16 +619,11 @@ class TestScanChannelMembersForUnmappedUsers:
         ]
         _write_json(tmp_path / "channels.json", channels)
         config = MigrationConfig(include_channels=["general"])
-        migrator = _make_migrator(
-            export_root=str(tmp_path),
-            user_map={},
-            config=config,
-        )
+        tracker = UnmappedUserTracker()
 
         with patch("slack_migrator.utils.user_validation.log_with_context"):
-            scan_channel_members_for_unmapped_users(migrator)
+            scan_channel_members_for_unmapped_users(tracker, tmp_path, config, {})
 
-        tracker = migrator.unmapped_user_tracker
         # Only U001 (from included "general") should be tracked
         assert tracker.get_unmapped_users_list() == ["U001"]
 
@@ -685,16 +634,11 @@ class TestScanChannelMembersForUnmappedUsers:
         ]
         _write_json(tmp_path / "channels.json", channels)
         config = MigrationConfig(exclude_channels=["random"])
-        migrator = _make_migrator(
-            export_root=str(tmp_path),
-            user_map={},
-            config=config,
-        )
+        tracker = UnmappedUserTracker()
 
         with patch("slack_migrator.utils.user_validation.log_with_context"):
-            scan_channel_members_for_unmapped_users(migrator)
+            scan_channel_members_for_unmapped_users(tracker, tmp_path, config, {})
 
-        tracker = migrator.unmapped_user_tracker
         # Only U001 (from non-excluded "general") should be tracked
         assert tracker.get_unmapped_users_list() == ["U001"]
 
@@ -717,16 +661,11 @@ class TestScanChannelMembersForUnmappedUsers:
         _write_json(tmp_path / "channels.json", channels)
         _write_json(tmp_path / "users.json", users)
         config = MigrationConfig(ignore_bots=True)
-        migrator = _make_migrator(
-            export_root=str(tmp_path),
-            user_map={},
-            config=config,
-        )
+        tracker = UnmappedUserTracker()
 
         with patch("slack_migrator.utils.user_validation.log_with_context"):
-            scan_channel_members_for_unmapped_users(migrator)
+            scan_channel_members_for_unmapped_users(tracker, tmp_path, config, {})
 
-        tracker = migrator.unmapped_user_tracker
         # Bot B001 should be skipped; only U001 should be tracked
         assert tracker.get_unmapped_users_list() == ["U001"]
 
@@ -735,35 +674,13 @@ class TestScanChannelMembersForUnmappedUsers:
         channels = [{"name": "general", "members": ["U001", "B001"]}]
         _write_json(tmp_path / "channels.json", channels)
         config = MigrationConfig(ignore_bots=True)
-        migrator = _make_migrator(
-            export_root=str(tmp_path),
-            user_map={},
-            config=config,
-        )
+        tracker = UnmappedUserTracker()
 
         with patch("slack_migrator.utils.user_validation.log_with_context"):
-            scan_channel_members_for_unmapped_users(migrator)
+            scan_channel_members_for_unmapped_users(tracker, tmp_path, config, {})
 
-        tracker = migrator.unmapped_user_tracker
         # Both should be tracked because we can't determine bot status
         assert tracker.get_unmapped_count() == 2
-
-    def test_initializes_tracker_if_absent(self, tmp_path):
-        channels = [{"name": "general", "members": ["U001"]}]
-        _write_json(tmp_path / "channels.json", channels)
-        migrator = _make_migrator(
-            export_root=str(tmp_path),
-            user_map={},
-            has_tracker=False,
-        )
-
-        with patch("slack_migrator.utils.user_validation.log_with_context"):
-            scan_channel_members_for_unmapped_users(migrator)
-
-        # Tracker should have been created
-        assert hasattr(migrator, "unmapped_user_tracker")
-        assert isinstance(migrator.unmapped_user_tracker, UnmappedUserTracker)
-        assert migrator.unmapped_user_tracker.get_unmapped_count() == 1
 
     def test_multiple_channels_with_overlapping_members(self, tmp_path):
         channels = [
@@ -771,15 +688,13 @@ class TestScanChannelMembersForUnmappedUsers:
             {"name": "random", "members": ["U002", "U003"]},
         ]
         _write_json(tmp_path / "channels.json", channels)
-        migrator = _make_migrator(
-            export_root=str(tmp_path),
-            user_map={},
-        )
+        tracker = UnmappedUserTracker()
 
         with patch("slack_migrator.utils.user_validation.log_with_context"):
-            scan_channel_members_for_unmapped_users(migrator)
+            scan_channel_members_for_unmapped_users(
+                tracker, tmp_path, MigrationConfig(), {}
+            )
 
-        tracker = migrator.unmapped_user_tracker
         # U002 appears in both channels but should only be counted once
         assert tracker.get_unmapped_count() == 3
         # U002 should have contexts from both channels
@@ -790,11 +705,13 @@ class TestScanChannelMembersForUnmappedUsers:
         """When an unexpected error occurs, it's caught and logged."""
         # Write invalid JSON to channels.json to trigger an exception
         (tmp_path / "channels.json").write_text("{invalid")
-        migrator = _make_migrator(export_root=str(tmp_path))
+        tracker = UnmappedUserTracker()
 
         with patch("slack_migrator.utils.user_validation.log_with_context") as mock_log:
             # Should not raise
-            scan_channel_members_for_unmapped_users(migrator)
+            scan_channel_members_for_unmapped_users(
+                tracker, tmp_path, MigrationConfig(), {}
+            )
 
         error_calls = [c for c in mock_log.call_args_list if c[0][0] == logging.ERROR]
         assert any("Error scanning" in str(c) for c in error_calls)
@@ -803,15 +720,13 @@ class TestScanChannelMembersForUnmappedUsers:
         """Channels missing the 'members' key default to empty list."""
         channels = [{"name": "general"}]
         _write_json(tmp_path / "channels.json", channels)
-        migrator = _make_migrator(
-            export_root=str(tmp_path),
-            user_map={},
-        )
+        tracker = UnmappedUserTracker()
 
         with patch("slack_migrator.utils.user_validation.log_with_context"):
-            scan_channel_members_for_unmapped_users(migrator)
+            scan_channel_members_for_unmapped_users(
+                tracker, tmp_path, MigrationConfig(), {}
+            )
 
-        tracker = migrator.unmapped_user_tracker
         assert not tracker.has_unmapped_users()
 
     def test_ignore_bots_with_invalid_users_json(self, tmp_path):
@@ -820,15 +735,10 @@ class TestScanChannelMembersForUnmappedUsers:
         _write_json(tmp_path / "channels.json", channels)
         (tmp_path / "users.json").write_text("{bad json")
         config = MigrationConfig(ignore_bots=True)
-        migrator = _make_migrator(
-            export_root=str(tmp_path),
-            user_map={},
-            config=config,
-        )
+        tracker = UnmappedUserTracker()
 
         with patch("slack_migrator.utils.user_validation.log_with_context"):
-            scan_channel_members_for_unmapped_users(migrator)
+            scan_channel_members_for_unmapped_users(tracker, tmp_path, config, {})
 
-        tracker = migrator.unmapped_user_tracker
         # Both should be tracked since we couldn't load user data
         assert tracker.get_unmapped_count() == 2

@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from slack_migrator.core.state import MigrationState
 from slack_migrator.services.drive.drive_uploader import (
     DriveFileUploader,
 )
@@ -94,28 +93,17 @@ class TestCalculateFileHash:
 class TestGetCurrentChannel:
     """Tests for _get_current_channel."""
 
-    def test_returns_channel_when_migrator_set(self):
-        """Returns channel name when migrator is set."""
+    def test_returns_channel_when_set(self):
+        """Returns channel name when current_channel is set."""
         uploader = _make_uploader()
-        migrator = MagicMock()
-        migrator.state = MigrationState()
-        migrator.state.current_channel = "general"
-        uploader.migrator = migrator
+        uploader.current_channel = "general"
 
         assert uploader._get_current_channel() == "general"
 
-    def test_returns_none_when_migrator_is_none(self):
-        """Returns None when migrator is None."""
+    def test_returns_none_when_not_set(self):
+        """Returns None when current_channel is None (the default)."""
         uploader = _make_uploader()
-        uploader.migrator = None
-
-        assert uploader._get_current_channel() is None
-
-    def test_returns_none_when_no_current_channel(self):
-        """Returns None when migrator has no current_channel."""
-        uploader = _make_uploader()
-        migrator = MagicMock(spec=[])  # no attributes
-        uploader.migrator = migrator
+        assert uploader.current_channel is None
 
         assert uploader._get_current_channel() is None
 
@@ -553,7 +541,7 @@ class TestInit:
         assert uploader.service_account_email == "sa@test.com"
         assert uploader.file_hash_cache == {}
         assert uploader.folders_pre_cached == set()
-        assert uploader.migrator is None
+        assert uploader.current_channel is None
 
 
 # -------------------------------------------------------------------

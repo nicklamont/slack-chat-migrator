@@ -1,5 +1,7 @@
 """Unit tests for the migrator module."""
 
+from __future__ import annotations
+
 import json
 import logging
 from pathlib import Path
@@ -10,16 +12,18 @@ import pytest
 from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
 from slack_migrator.core.config import MigrationConfig
+from slack_migrator.core.context import MigrationContext
 from slack_migrator.core.migration_logging import (
     log_migration_failure,
     log_migration_success,
 )
 from slack_migrator.core.migrator import SlackToChatMigrator
-from slack_migrator.core.state import _default_migration_summary
+from slack_migrator.core.state import MigrationState, _default_migration_summary
 from slack_migrator.services.space_creator import (
     _list_all_spaces,
     cleanup_import_mode_spaces,
 )
+from slack_migrator.services.user_resolver import UserResolver
 from slack_migrator.types import MigrationSummary
 
 
@@ -47,9 +51,13 @@ def _setup_export(tmp_path, users=None, channels=None):
 
 
 def _make_migrator(tmp_path, domain="example.com", users=None, channels=None, **kwargs):
-    """Create a migrator instance with a minimal export directory."""
+    """Create a migrator instance with a minimal export directory.
+
+    Also creates a UserResolver (normally done in _initialize_api_services)
+    so tests can exercise user_resolver methods without needing real API creds.
+    """
     _setup_export(tmp_path, users=users, channels=channels)
-    return SlackToChatMigrator(
+    m = SlackToChatMigrator(
         creds_path="fake_creds.json",
         export_path=str(tmp_path),
         workspace_admin=f"admin@{domain}",
@@ -59,6 +67,20 @@ def _make_migrator(tmp_path, domain="example.com", users=None, channels=None, **
         update_mode=kwargs.get("update_mode", False),
         debug_api=kwargs.get("debug_api", False),
     )
+    # Create UserResolver eagerly (mirrors _initialize_api_services but
+    # with chat=None — tests here don't exercise impersonation/API calls).
+    m.user_resolver = UserResolver(
+        config=m.config,
+        state=m.state,
+        chat=None,
+        creds_path=m.creds_path,
+        user_map=m.user_map,
+        unmapped_user_tracker=m.unmapped_user_tracker,
+        export_root=m.export_root,
+        workspace_admin=m.workspace_admin,
+        workspace_domain=m.workspace_domain,
+    )
+    return m
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +551,46 @@ class TestSpaceNameHelpers:
 
 
 # ---------------------------------------------------------------------------
+# ChannelProcessor._should_abort_import / _delete_space_if_errors helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_channel_processor(
+    dry_run: bool = False,
+    config: MigrationConfig | None = None,
+    chat: MagicMock | None = None,
+) -> ChannelProcessor:
+    """Build a lightweight ChannelProcessor with explicit deps for unit tests."""
+    if config is None:
+        config = MigrationConfig()
+    ctx = MigrationContext(
+        export_root=Path("/tmp/fake"),
+        creds_path="/tmp/fake_creds.json",
+        workspace_admin="admin@example.com",
+        workspace_domain="example.com",
+        dry_run=dry_run,
+        update_mode=False,
+        verbose=False,
+        debug_api=False,
+        config=config,
+        user_map={"U001": "user1@example.com"},
+        users_without_email=[],
+        channels_meta={},
+        channel_id_to_name={},
+        channel_name_to_id={},
+    )
+    state = MigrationState()
+    return ChannelProcessor(
+        ctx=ctx,
+        state=state,
+        chat=chat or MagicMock(),
+        user_resolver=MagicMock(),
+        file_handler=None,
+        attachment_processor=MagicMock(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # ChannelProcessor._should_abort_import tests
 # ---------------------------------------------------------------------------
 
@@ -536,31 +598,28 @@ class TestSpaceNameHelpers:
 class TestShouldAbortImport:
     """Tests for ChannelProcessor._should_abort_import()."""
 
-    def test_no_abort_in_dry_run(self, tmp_path):
-        m = _make_migrator(tmp_path, dry_run=True)
-        m.config = MigrationConfig(abort_on_error=True)
-        assert ChannelProcessor(m)._should_abort_import("general", 10, 5) is False
+    def test_no_abort_in_dry_run(self):
+        p = _make_channel_processor(
+            dry_run=True, config=MigrationConfig(abort_on_error=True)
+        )
+        assert p._should_abort_import("general", 10, 5) is False
 
-    def test_no_abort_when_no_failures(self, tmp_path):
-        m = _make_migrator(tmp_path, dry_run=False)
-        m.config = MigrationConfig(abort_on_error=True)
-        assert ChannelProcessor(m)._should_abort_import("general", 10, 0) is False
+    def test_no_abort_when_no_failures(self):
+        p = _make_channel_processor(config=MigrationConfig(abort_on_error=True))
+        assert p._should_abort_import("general", 10, 0) is False
 
-    def test_abort_when_failures_and_abort_enabled(self, tmp_path):
-        m = _make_migrator(tmp_path, dry_run=False)
-        m.config = MigrationConfig(abort_on_error=True)
-        assert ChannelProcessor(m)._should_abort_import("general", 10, 1) is True
+    def test_abort_when_failures_and_abort_enabled(self):
+        p = _make_channel_processor(config=MigrationConfig(abort_on_error=True))
+        assert p._should_abort_import("general", 10, 1) is True
 
-    def test_no_abort_when_failures_but_abort_disabled(self, tmp_path):
-        m = _make_migrator(tmp_path, dry_run=False)
-        m.config = MigrationConfig(abort_on_error=False)
-        assert ChannelProcessor(m)._should_abort_import("general", 10, 3) is False
+    def test_no_abort_when_failures_but_abort_disabled(self):
+        p = _make_channel_processor(config=MigrationConfig(abort_on_error=False))
+        assert p._should_abort_import("general", 10, 3) is False
 
-    def test_abort_with_zero_processed(self, tmp_path):
+    def test_abort_with_zero_processed(self):
         """Failures with zero processed should still trigger abort if enabled."""
-        m = _make_migrator(tmp_path, dry_run=False)
-        m.config = MigrationConfig(abort_on_error=True)
-        assert ChannelProcessor(m)._should_abort_import("general", 0, 1) is True
+        p = _make_channel_processor(config=MigrationConfig(abort_on_error=True))
+        assert p._should_abort_import("general", 0, 1) is True
 
 
 # ---------------------------------------------------------------------------
@@ -571,76 +630,81 @@ class TestShouldAbortImport:
 class TestDeleteSpaceIfErrors:
     """Tests for ChannelProcessor._delete_space_if_errors()."""
 
-    def test_no_delete_when_cleanup_disabled(self, tmp_path):
-        m = _make_migrator(tmp_path)
-        m.config = MigrationConfig(cleanup_on_error=False)
-        m.chat = MagicMock()
-        ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
-        m.chat.spaces().delete.assert_not_called()
+    def test_no_delete_when_cleanup_disabled(self):
+        p = _make_channel_processor(config=MigrationConfig(cleanup_on_error=False))
+        p._delete_space_if_errors("spaces/abc123", "general")
+        p.chat.spaces().delete.assert_not_called()
 
-    def test_delete_when_cleanup_enabled(self, tmp_path):
-        m = _make_migrator(tmp_path)
-        m.config = MigrationConfig(cleanup_on_error=True)
-        m.chat = MagicMock()
-        m.state.created_spaces = {"general": "spaces/abc123"}
-        m.state.migration_summary = _make_summary(spaces_created=1)
-        ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
-        m.chat.spaces().delete.assert_called_once_with(name="spaces/abc123")
-        assert "general" not in m.state.created_spaces
-        assert m.state.migration_summary["spaces_created"] == 0
+    def test_delete_when_cleanup_enabled(self):
+        mock_chat = MagicMock()
+        p = _make_channel_processor(
+            config=MigrationConfig(cleanup_on_error=True), chat=mock_chat
+        )
+        p.state.created_spaces = {"general": "spaces/abc123"}
+        p.state.migration_summary = _make_summary(spaces_created=1)
+        p._delete_space_if_errors("spaces/abc123", "general")
+        mock_chat.spaces().delete.assert_called_once_with(name="spaces/abc123")
+        assert "general" not in p.state.created_spaces
+        assert p.state.migration_summary["spaces_created"] == 0
 
-    def test_delete_handles_api_error(self, tmp_path):
+    def test_delete_handles_api_error(self):
         from google.auth.exceptions import RefreshError
 
-        m = _make_migrator(tmp_path)
-        m.config = MigrationConfig(cleanup_on_error=True)
-        m.chat = MagicMock()
-        m.chat.spaces().delete().execute.side_effect = RefreshError("API error")
-        m.state.created_spaces = {"general": "spaces/abc123"}
-        m.state.migration_summary = _make_summary(spaces_created=1)
+        mock_chat = MagicMock()
+        mock_chat.spaces().delete().execute.side_effect = RefreshError("API error")
+        p = _make_channel_processor(
+            config=MigrationConfig(cleanup_on_error=True), chat=mock_chat
+        )
+        p.state.created_spaces = {"general": "spaces/abc123"}
+        p.state.migration_summary = _make_summary(spaces_created=1)
         # Should not raise
-        ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
+        p._delete_space_if_errors("spaces/abc123", "general")
 
-    def test_delete_handles_transport_error(self, tmp_path):
+    def test_delete_handles_transport_error(self):
         from google.auth.exceptions import TransportError
 
-        m = _make_migrator(tmp_path)
-        m.config = MigrationConfig(cleanup_on_error=True)
-        m.chat = MagicMock()
-        m.chat.spaces().delete().execute.side_effect = TransportError("network down")
-        m.state.created_spaces = {"general": "spaces/abc123"}
-        m.state.migration_summary = _make_summary(spaces_created=1)
+        mock_chat = MagicMock()
+        mock_chat.spaces().delete().execute.side_effect = TransportError("network down")
+        p = _make_channel_processor(
+            config=MigrationConfig(cleanup_on_error=True), chat=mock_chat
+        )
+        p.state.created_spaces = {"general": "spaces/abc123"}
+        p.state.migration_summary = _make_summary(spaces_created=1)
         # Should not raise — TransportError is a recoverable network issue
-        ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
+        p._delete_space_if_errors("spaces/abc123", "general")
 
-    def test_delete_handles_http_error(self, tmp_path):
+    def test_delete_handles_http_error(self):
         from googleapiclient.errors import HttpError
 
-        m = _make_migrator(tmp_path)
-        m.config = MigrationConfig(cleanup_on_error=True)
-        m.chat = MagicMock()
+        mock_chat = MagicMock()
         resp = MagicMock()
         resp.status = 500
-        m.chat.spaces().delete().execute.side_effect = HttpError(
+        mock_chat.spaces().delete().execute.side_effect = HttpError(
             resp=resp, content=b"Server Error"
         )
-        m.state.created_spaces = {"general": "spaces/abc123"}
-        m.state.migration_summary = _make_summary(spaces_created=1)
+        p = _make_channel_processor(
+            config=MigrationConfig(cleanup_on_error=True), chat=mock_chat
+        )
+        p.state.created_spaces = {"general": "spaces/abc123"}
+        p.state.migration_summary = _make_summary(spaces_created=1)
         # Should not raise — HttpError is caught and logged
-        ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
+        p._delete_space_if_errors("spaces/abc123", "general")
         # Space should NOT be removed from created_spaces (delete failed)
-        assert "general" in m.state.created_spaces
+        assert "general" in p.state.created_spaces
 
-    def test_delete_propagates_unexpected_error(self, tmp_path):
-        m = _make_migrator(tmp_path)
-        m.config = MigrationConfig(cleanup_on_error=True)
-        m.chat = MagicMock()
-        m.chat.spaces().delete().execute.side_effect = RuntimeError("truly unexpected")
-        m.state.created_spaces = {"general": "spaces/abc123"}
-        m.state.migration_summary = _make_summary(spaces_created=1)
+    def test_delete_propagates_unexpected_error(self):
+        mock_chat = MagicMock()
+        mock_chat.spaces().delete().execute.side_effect = RuntimeError(
+            "truly unexpected"
+        )
+        p = _make_channel_processor(
+            config=MigrationConfig(cleanup_on_error=True), chat=mock_chat
+        )
+        p.state.created_spaces = {"general": "spaces/abc123"}
+        p.state.migration_summary = _make_summary(spaces_created=1)
         # Should raise — RuntimeError is not a known API/transport error
         with pytest.raises(RuntimeError):
-            ChannelProcessor(m)._delete_space_if_errors("spaces/abc123", "general")
+            p._delete_space_if_errors("spaces/abc123", "general")
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +717,7 @@ class TestInitializeApiServices:
 
     @patch("slack_migrator.core.migrator.get_gcp_service")
     def test_services_initialized(self, mock_gcp_service, tmp_path):
-        m = _make_migrator(tmp_path)
+        m = _make_migrator(tmp_path, dry_run=False)
         mock_chat = MagicMock()
         mock_drive = MagicMock()
         mock_gcp_service.side_effect = [mock_chat, mock_drive]
@@ -664,6 +728,20 @@ class TestInitializeApiServices:
 
         assert m.chat is mock_chat
         assert m.drive is mock_drive
+        assert m._api_services_initialized is True
+
+    def test_dry_run_uses_noop_services(self, tmp_path):
+        """In dry-run mode, DryRunChatService and DryRunDriveService are injected."""
+        from slack_migrator.services.chat.dry_run_service import DryRunChatService
+        from slack_migrator.services.drive.dry_run_service import DryRunDriveService
+
+        m = _make_migrator(tmp_path, dry_run=True)
+
+        with patch.object(m, "_initialize_dependent_services"):
+            m._initialize_api_services()
+
+        assert isinstance(m.chat, DryRunChatService)
+        assert isinstance(m.drive, DryRunDriveService)
         assert m._api_services_initialized is True
 
     @patch("slack_migrator.core.migrator.get_gcp_service")
@@ -686,7 +764,7 @@ class TestCleanupChannelHandlers:
         m = _make_migrator(tmp_path)
         handler = MagicMock()
         m.state.channel_handlers = {"general": handler}
-        cleanup_channel_handlers(m)
+        cleanup_channel_handlers(m.state)
         handler.flush.assert_called_once()
         handler.close.assert_called_once()
         assert m.state.channel_handlers == {}
@@ -695,13 +773,13 @@ class TestCleanupChannelHandlers:
         m = _make_migrator(tmp_path)
         m.state.channel_handlers = {}
         # Should not raise
-        cleanup_channel_handlers(m)
+        cleanup_channel_handlers(m.state)
 
     def test_cleanup_with_empty_handlers(self, tmp_path):
         m = _make_migrator(tmp_path)
         m.state.channel_handlers = {}
         # Should not raise — channel_handlers always exists on MigrationState
-        cleanup_channel_handlers(m)
+        cleanup_channel_handlers(m.state)
 
     def test_cleanup_handles_handler_error(self, tmp_path):
         m = _make_migrator(tmp_path)
@@ -709,7 +787,7 @@ class TestCleanupChannelHandlers:
         handler.flush.side_effect = OSError("flush failed")
         m.state.channel_handlers = {"general": handler}
         # Should not raise despite handler error
-        cleanup_channel_handlers(m)
+        cleanup_channel_handlers(m.state)
         assert m.state.channel_handlers == {}
 
     def test_cleanup_multiple_handlers(self, tmp_path):
@@ -717,7 +795,7 @@ class TestCleanupChannelHandlers:
         handler1 = MagicMock()
         handler2 = MagicMock()
         m.state.channel_handlers = {"general": handler1, "random": handler2}
-        cleanup_channel_handlers(m)
+        cleanup_channel_handlers(m.state)
         handler1.flush.assert_called_once()
         handler1.close.assert_called_once()
         handler2.flush.assert_called_once()
@@ -923,7 +1001,7 @@ class TestLogMigrationSuccess:
             messages_created=10,
         )
         with caplog.at_level(logging.INFO, logger="slack_migrator"):
-            log_migration_success(m, 60.0)
+            log_migration_success(m.state, m.dry_run, 60.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "DRY RUN" in messages
         assert "1.0 minutes" in messages
@@ -938,7 +1016,7 @@ class TestLogMigrationSuccess:
             files_created=5,
         )
         with caplog.at_level(logging.INFO, logger="slack_migrator"):
-            log_migration_success(m, 120.0)
+            log_migration_success(m.state, m.dry_run, 120.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "Channels processed: 2" in messages
         assert "Spaces created/updated: 2" in messages
@@ -954,7 +1032,7 @@ class TestLogMigrationSuccess:
         m.state.channels_with_errors = ["general"]
         m.state.incomplete_import_spaces = [("spaces/abc", "general")]
         with caplog.at_level(logging.WARNING, logger="slack_migrator"):
-            log_migration_success(m, 30.0)
+            log_migration_success(m.state, m.dry_run, 30.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "Channels with errors: 1" in messages
         assert "Incomplete imports: 1" in messages
@@ -963,7 +1041,7 @@ class TestLogMigrationSuccess:
         m = _make_migrator(tmp_path, dry_run=False)
         m.state.migration_summary = _default_migration_summary()
         with caplog.at_level(logging.WARNING, logger="slack_migrator"):
-            log_migration_success(m, 5.0)
+            log_migration_success(m.state, m.dry_run, 5.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "INTERRUPTED" in messages
 
@@ -985,7 +1063,7 @@ class TestLogMigrationFailure:
         )
         exc = RuntimeError("something broke")
         with caplog.at_level(logging.ERROR, logger="slack_migrator"):
-            log_migration_failure(m, exc, 30.0)
+            log_migration_failure(m.state, m.dry_run, exc, 30.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "RuntimeError" in messages
         assert "something broke" in messages
@@ -1000,7 +1078,7 @@ class TestLogMigrationFailure:
         )
         exc = KeyboardInterrupt()
         with caplog.at_level(logging.WARNING, logger="slack_migrator"):
-            log_migration_failure(m, exc, 10.0)
+            log_migration_failure(m.state, m.dry_run, exc, 10.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "INTERRUPTED" in messages
         assert "User interruption" in messages
@@ -1010,7 +1088,7 @@ class TestLogMigrationFailure:
         m.state.migration_summary = _default_migration_summary()
         exc = ValueError("bad config")
         with caplog.at_level(logging.ERROR, logger="slack_migrator"):
-            log_migration_failure(m, exc, 2.0)
+            log_migration_failure(m.state, m.dry_run, exc, 2.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "DRY RUN VALIDATION FAILED" in messages
 
@@ -1023,7 +1101,7 @@ class TestLogMigrationFailure:
         )
         exc = Exception("api error")
         with caplog.at_level(logging.ERROR, logger="slack_migrator"):
-            log_migration_failure(m, exc, 60.0)
+            log_migration_failure(m.state, m.dry_run, exc, 60.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "Channels processed: 2" in messages
         assert "Spaces created: 2" in messages
@@ -1280,14 +1358,26 @@ class TestCleanup:
     def test_dry_run_skips_cleanup(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=True)
         with caplog.at_level(logging.INFO, logger="slack_migrator"):
-            run_cleanup(m)
+            run_cleanup(
+                m.ctx,
+                m.state,
+                m.chat,
+                m.user_resolver,
+                getattr(m, "file_handler", None),
+            )
         messages = " ".join(r.message for r in caplog.records)
         assert "DRY RUN" in messages
 
     def test_clears_current_channel(self, tmp_path):
         m = _make_migrator(tmp_path, dry_run=True)
         m.state.current_channel = "general"
-        run_cleanup(m)
+        run_cleanup(
+            m.ctx,
+            m.state,
+            m.chat,
+            m.user_resolver,
+            getattr(m, "file_handler", None),
+        )
         assert m.state.current_channel is None
 
 

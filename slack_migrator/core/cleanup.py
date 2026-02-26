@@ -2,15 +2,15 @@
 Post-migration cleanup: complete import mode and add members back to spaces.
 
 Extracted from ``migrator.py`` to keep the orchestrator focused on control flow.
-Each function takes a ``migrator`` instance as its first argument, following the
-same pattern used by ``space_creator.py`` and ``reaction_processor.py``.
+Each function receives only the specific dependencies it needs.
 """
 
 from __future__ import annotations
 
 import logging
 import traceback
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
@@ -20,26 +20,28 @@ from slack_migrator.constants import (
     HTTP_FORBIDDEN,
     HTTP_RATE_LIMIT,
     HTTP_SERVER_ERROR_MIN,
+    SPACE_NAME_PREFIX,
 )
 from slack_migrator.services.membership_manager import add_regular_members
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
+    from slack_migrator.core.context import MigrationContext
+    from slack_migrator.core.state import MigrationState
 
 
-def cleanup_channel_handlers(migrator: SlackToChatMigrator) -> None:
+def cleanup_channel_handlers(state: MigrationState) -> None:
     """Clean up and close all channel-specific log handlers.
 
     Args:
-        migrator: The migrator instance whose state holds channel handlers.
+        state: The migration state holding channel handlers.
     """
-    if not migrator.state.channel_handlers:
+    if not state.channel_handlers:
         return
 
     logger = logging.getLogger("slack_migrator")
 
-    for channel_name, handler in list(migrator.state.channel_handlers.items()):
+    for channel_name, handler in list(state.channel_handlers.items()):
         try:
             handler.flush()
             handler.close()
@@ -54,10 +56,16 @@ def cleanup_channel_handlers(migrator: SlackToChatMigrator) -> None:
                 f" for channel {channel_name}: {e}"
             )
 
-    migrator.state.channel_handlers.clear()
+    state.channel_handlers.clear()
 
 
-def run_cleanup(migrator: SlackToChatMigrator) -> None:  # noqa: C901
+def run_cleanup(  # noqa: C901
+    ctx: MigrationContext,
+    state: MigrationState,
+    chat: Any,
+    user_resolver: Any,
+    file_handler: Any | None,
+) -> None:
     """Complete import mode on spaces and add regular members back.
 
     This is the instance-level cleanup that runs after a migration. It
@@ -66,12 +74,16 @@ def run_cleanup(migrator: SlackToChatMigrator) -> None:  # noqa: C901
     (non-historical) members.
 
     Args:
-        migrator: The migrator instance providing API services and state.
+        ctx: Immutable migration context (config, paths, flags).
+        state: Mutable migration state.
+        chat: Google Chat API service.
+        user_resolver: User identity resolver.
+        file_handler: File handler for drive operations, or None.
     """
     # Clear current_channel so cleanup operations don't get tagged with channel context
-    migrator.state.current_channel = None
+    state.current_channel = None
 
-    if migrator.dry_run:
+    if ctx.dry_run:
         log_with_context(logging.INFO, "[DRY RUN] Would perform post-migration cleanup")
         return
 
@@ -82,9 +94,9 @@ def run_cleanup(migrator: SlackToChatMigrator) -> None:  # noqa: C901
             logging.DEBUG, "Listing all spaces to check for import mode..."
         )
         try:
-            if migrator.chat is None:
+            if chat is None:
                 raise RuntimeError("Chat API service not initialized")
-            spaces = migrator.chat.spaces().list().execute().get("spaces", [])
+            spaces = chat.spaces().list().execute().get("spaces", [])
         except HttpError as http_e:
             log_with_context(
                 logging.ERROR,
@@ -114,9 +126,9 @@ def run_cleanup(migrator: SlackToChatMigrator) -> None:  # noqa: C901
                 continue
 
             try:
-                if migrator.chat is None:
+                if chat is None:
                     raise RuntimeError("Chat API service not initialized")
-                space_info = migrator.chat.spaces().get(name=space_name).execute()
+                space_info = chat.spaces().get(name=space_name).execute()
                 if space_info.get("importMode"):
                     import_mode_spaces.append((space_name, space_info))
             except HttpError as http_e:
@@ -141,7 +153,9 @@ def run_cleanup(migrator: SlackToChatMigrator) -> None:  # noqa: C901
                 )
 
         if import_mode_spaces:
-            _complete_import_mode_spaces(migrator, import_mode_spaces)
+            _complete_import_mode_spaces(
+                ctx, state, chat, user_resolver, file_handler, import_mode_spaces
+            )
         else:
             log_with_context(
                 logging.INFO, "No spaces found in import mode during cleanup."
@@ -185,13 +199,21 @@ def run_cleanup(migrator: SlackToChatMigrator) -> None:  # noqa: C901
 
 
 def _complete_import_mode_spaces(
-    migrator: SlackToChatMigrator,
+    ctx: MigrationContext,
+    state: MigrationState,
+    chat: Any,
+    user_resolver: Any,
+    file_handler: Any | None,
     import_mode_spaces: list[tuple[str, dict]],
 ) -> None:
     """Complete import mode for discovered spaces and add members.
 
     Args:
-        migrator: The migrator instance providing API services and state.
+        ctx: Immutable migration context.
+        state: Mutable migration state.
+        chat: Google Chat API service.
+        user_resolver: User identity resolver.
+        file_handler: File handler for drive operations, or None.
         import_mode_spaces: List of (space_name, space_info) tuples.
     """
     log_with_context(
@@ -202,11 +224,11 @@ def _complete_import_mode_spaces(
 
     log_with_context(
         logging.INFO,
-        f"Current channel_to_space mapping: {migrator.state.channel_to_space}",
+        f"Current channel_to_space mapping: {state.channel_to_space}",
     )
     log_with_context(
         logging.INFO,
-        f"Current created_spaces mapping: {migrator.state.created_spaces}",
+        f"Current created_spaces mapping: {state.created_spaces}",
     )
 
     pbar = tqdm(import_mode_spaces, desc="Completing import mode for spaces")
@@ -217,7 +239,15 @@ def _complete_import_mode_spaces(
         )
 
         try:
-            _complete_single_space(migrator, space_name, space_info)
+            _complete_single_space(
+                ctx,
+                state,
+                chat,
+                user_resolver,
+                file_handler,
+                space_name,
+                space_info,
+            )
         except HttpError as http_e:
             log_with_context(
                 logging.ERROR,
@@ -242,21 +272,29 @@ def _complete_import_mode_spaces(
 
 
 def _complete_single_space(
-    migrator: SlackToChatMigrator, space_name: str, space_info: dict
+    ctx: MigrationContext,
+    state: MigrationState,
+    chat: Any,
+    user_resolver: Any,
+    file_handler: Any | None,
+    space_name: str,
+    space_info: dict,
 ) -> None:
     """Complete import mode for a single space, preserve settings, and add members.
 
     Args:
-        migrator: The migrator instance providing API services and state.
+        ctx: Immutable migration context.
+        state: Mutable migration state.
+        chat: Google Chat API service.
+        user_resolver: User identity resolver.
+        file_handler: File handler for drive operations, or None.
         space_name: The Google Chat space resource name (e.g. ``spaces/AAAA``).
         space_info: The space metadata dict from the API.
     """
     external_users_allowed = space_info.get("externalUserAllowed", False)
 
     if not external_users_allowed:
-        external_users_allowed = migrator.state.spaces_with_external_users.get(
-            space_name, False
-        )
+        external_users_allowed = state.spaces_with_external_users.get(space_name, False)
         if external_users_allowed:
             log_with_context(
                 logging.INFO,
@@ -272,9 +310,9 @@ def _complete_single_space(
 
     # --- Complete import mode ---------------------------------------------
     try:
-        if migrator.chat is None:
+        if chat is None:
             raise RuntimeError("Chat API service not initialized")
-        migrator.chat.spaces().completeImport(name=space_name).execute()
+        chat.spaces().completeImport(name=space_name).execute()
         log_with_context(
             logging.DEBUG,
             f"Successfully completed import mode for space: {space_name}",
@@ -306,9 +344,9 @@ def _complete_single_space(
     # --- Preserve external user access ------------------------------------
     if external_users_allowed:
         try:
-            if migrator.chat is None:
+            if chat is None:
                 raise RuntimeError("Chat API service not initialized")
-            migrator.chat.spaces().patch(
+            chat.spaces().patch(
                 name=space_name,
                 updateMask="externalUserAllowed",
                 body={"externalUserAllowed": True},
@@ -339,7 +377,7 @@ def _complete_single_space(
             )
 
     # --- Resolve channel name and add members -----------------------------
-    channel_name = _resolve_channel_name(migrator, space_name, space_info)
+    channel_name = _resolve_channel_name(state, ctx.export_root, space_name, space_info)
 
     if channel_name:
         log_with_context(
@@ -347,7 +385,15 @@ def _complete_single_space(
             f"Step 5/6: Adding regular members to space for channel: {channel_name}",
         )
         try:
-            add_regular_members(migrator, space_name, channel_name)
+            add_regular_members(
+                ctx,
+                state,
+                chat,
+                user_resolver,
+                file_handler,
+                space_name,
+                channel_name,
+            )
             log_with_context(
                 logging.DEBUG,
                 f"Successfully added regular members to space"
@@ -374,15 +420,20 @@ def _complete_single_space(
 
 
 def _resolve_channel_name(
-    migrator: SlackToChatMigrator, space_name: str, space_info: dict
+    state: MigrationState,
+    export_root: Path,
+    space_name: str,
+    space_info: dict,
 ) -> str | None:
     """Try to find the Slack channel name that corresponds to a space.
 
     First checks the ``channel_to_space`` mapping, then falls back to
-    matching the space display name against known channel names.
+    matching the space display name against known channel names derived
+    from the export directory.
 
     Args:
-        migrator: The migrator instance providing state and helper methods.
+        state: Migration state with channel_to_space mapping.
+        export_root: Path to the Slack export directory.
         space_name: The Google Chat space resource name.
         space_info: The space metadata dict from the API.
 
@@ -390,7 +441,7 @@ def _resolve_channel_name(
         The channel name if found, or ``None``.
     """
     # Try channel_to_space mapping first
-    for ch, sp in migrator.state.channel_to_space.items():
+    for ch, sp in state.channel_to_space.items():
         if sp == space_name:
             log_with_context(
                 logging.INFO,
@@ -406,9 +457,10 @@ def _resolve_channel_name(
         f"Attempting to extract channel name from display name: {display_name}",
     )
 
-    for ch in migrator._get_all_channel_names():
-        ch_name = migrator._get_space_name(ch)
-        if ch_name in display_name:
+    all_channel_names = [d.name for d in export_root.iterdir() if d.is_dir()]
+    for ch in all_channel_names:
+        ch_display = f"{SPACE_NAME_PREFIX}{ch}"
+        if ch_display in display_name:
             log_with_context(
                 logging.INFO,
                 f"Found channel {ch} for space {space_name} using display name",

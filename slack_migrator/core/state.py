@@ -1,8 +1,8 @@
 """
 Migration state container for the Slack to Google Chat migration.
 
-Extracts mutable tracking state from SlackToChatMigrator into a dedicated
-dataclass, making the migrator's runtime state inspectable and testable.
+Mutable tracking state for a migration run, separated from immutable
+configuration (MigrationContext) for clear ownership boundaries.
 """
 
 from __future__ import annotations

@@ -2,17 +2,17 @@
 Simple unmapped user tracking integrated into existing user mapping logic.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from collections import defaultdict
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from slack_migrator.core.config import MigrationConfig
 from slack_migrator.utils.logging import log_with_context
-
-if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
 
 
 class UserType(str, Enum):
@@ -103,24 +103,25 @@ class UnmappedUserTracker:
         return sorted(self.unmapped_users)
 
 
-def log_unmapped_user_summary_for_dry_run(migrator: "SlackToChatMigrator") -> None:
+def log_unmapped_user_summary_for_dry_run(
+    unmapped_user_tracker: UnmappedUserTracker | None,
+    export_root: Path | str,
+) -> None:
     """Log a simple summary of unmapped users during dry run.
 
     Args:
-        migrator: The SlackToChatMigrator instance
+        unmapped_user_tracker: The tracker instance, or None if not available.
+        export_root: Path to the Slack export directory.
     """
-    if (
-        not hasattr(migrator, "unmapped_user_tracker")
-        or not migrator.unmapped_user_tracker.has_unmapped_users()
-    ):
+    if unmapped_user_tracker is None or not unmapped_user_tracker.has_unmapped_users():
         log_with_context(logging.INFO, "✅ No unmapped users detected during dry run")
         return
 
-    tracker = migrator.unmapped_user_tracker
+    tracker = unmapped_user_tracker
     unmapped_users = tracker.get_unmapped_users_list()
 
     # Analyze unmapped users to provide better guidance
-    user_analysis = analyze_unmapped_users(migrator, unmapped_users)
+    user_analysis = analyze_unmapped_users(export_root, unmapped_users)
 
     log_with_context(
         logging.ERROR, f"🚨 DRY RUN DETECTED {len(unmapped_users)} UNMAPPED USERS 🚨"
@@ -244,12 +245,12 @@ def log_unmapped_user_summary_for_dry_run(migrator: "SlackToChatMigrator") -> No
 
 
 def analyze_unmapped_users(
-    migrator: "SlackToChatMigrator", unmapped_user_ids: list[str]
+    export_root: Path | str, unmapped_user_ids: list[str]
 ) -> dict[str, dict[str, Any]]:
     """Analyze unmapped users to determine their types and provide better guidance.
 
     Args:
-        migrator: The SlackToChatMigrator instance
+        export_root: Path to the Slack export directory.
         unmapped_user_ids: List of unmapped user IDs to analyze
 
     Returns:
@@ -259,7 +260,7 @@ def analyze_unmapped_users(
 
     try:
         # Load users.json to get detailed user information
-        users_file = Path(migrator.export_root) / "users.json"
+        users_file = Path(export_root) / "users.json"
         if not users_file.exists():
             log_with_context(
                 logging.WARNING, "users.json not found, cannot analyze unmapped users"
@@ -357,39 +358,36 @@ def categorize_user_analysis(
     return categories
 
 
-def initialize_unmapped_user_tracking(
-    migrator: "SlackToChatMigrator",
-) -> UnmappedUserTracker:
-    """Initialize simple unmapped user tracking for the migrator.
-
-    Args:
-        migrator: The SlackToChatMigrator instance
+def initialize_unmapped_user_tracking() -> UnmappedUserTracker:
+    """Create and return a new unmapped user tracker.
 
     Returns:
-        UnmappedUserTracker: The initialized tracker instance
+        A fresh UnmappedUserTracker instance.
     """
-    if not hasattr(migrator, "unmapped_user_tracker"):
-        migrator.unmapped_user_tracker = UnmappedUserTracker()
-
-    return migrator.unmapped_user_tracker
+    return UnmappedUserTracker()
 
 
-def scan_channel_members_for_unmapped_users(migrator: "SlackToChatMigrator") -> None:
+def scan_channel_members_for_unmapped_users(
+    unmapped_user_tracker: UnmappedUserTracker,
+    export_root: Path | str,
+    config: MigrationConfig,
+    user_map: dict[str, str],
+) -> None:
     """Scan channels.json for users listed as members but not in user_map.
 
     This is crucial because Google Chat will try to add all channel members
     to the migrated spaces, so we need mappings for all of them.
 
     Args:
-        migrator: The SlackToChatMigrator instance
+        unmapped_user_tracker: The tracker to record unmapped users into.
+        export_root: Path to the Slack export directory.
+        config: Migration configuration (for include/exclude channels, ignore_bots).
+        user_map: Mapping of Slack user IDs to Google email addresses.
     """
-    if not hasattr(migrator, "unmapped_user_tracker"):
-        initialize_unmapped_user_tracking(migrator)
-
-    tracker = migrator.unmapped_user_tracker
+    tracker = unmapped_user_tracker
 
     try:
-        channels_file = Path(migrator.export_root) / "channels.json"
+        channels_file = Path(export_root) / "channels.json"
         if not channels_file.exists():
             log_with_context(
                 logging.WARNING,
@@ -403,15 +401,15 @@ def scan_channel_members_for_unmapped_users(migrator: "SlackToChatMigrator") -> 
         channels_to_check = []
 
         # Determine which channels to check based on include/exclude settings
-        if migrator.config.include_channels:
+        if config.include_channels:
             # Only check included channels
-            include_set = set(migrator.config.include_channels)
+            include_set = set(config.include_channels)
             channels_to_check = [
                 ch for ch in channels_data if ch.get("name") in include_set
             ]
         else:
             # Check all channels except excluded ones
-            exclude_set = set(migrator.config.exclude_channels)
+            exclude_set = set(config.exclude_channels)
             channels_to_check = [
                 ch for ch in channels_data if ch.get("name") not in exclude_set
             ]
@@ -421,10 +419,10 @@ def scan_channel_members_for_unmapped_users(migrator: "SlackToChatMigrator") -> 
 
         # Load user data once if ignore_bots is enabled
         user_lookup = {}
-        ignore_bots = migrator.config.ignore_bots
+        ignore_bots = config.ignore_bots
         if ignore_bots:
             try:
-                users_file = Path(migrator.export_root) / "users.json"
+                users_file = Path(export_root) / "users.json"
                 if users_file.exists():
                     with open(users_file) as f:
                         users_data = json.load(f)
@@ -443,7 +441,7 @@ def scan_channel_members_for_unmapped_users(migrator: "SlackToChatMigrator") -> 
                 total_members_checked += 1
 
                 # Check if this member has a mapping
-                if member_id not in migrator.user_map:
+                if member_id not in user_map:
                     # If ignore_bots is enabled, check if this is a bot before tracking as unmapped
                     if ignore_bots and user_lookup:
                         user_data = user_lookup.get(member_id, {})

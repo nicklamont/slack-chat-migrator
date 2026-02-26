@@ -17,16 +17,19 @@ from slack_migrator.constants import SPACE_NAME_PREFIX
 from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.cleanup import cleanup_channel_handlers
 from slack_migrator.core.config import load_config, load_space_mapping
+from slack_migrator.core.context import MigrationContext
 from slack_migrator.core.migration_logging import (
     log_migration_failure,
     log_migration_success,
 )
 from slack_migrator.core.state import MigrationState
+from slack_migrator.services.chat.dry_run_service import DryRunChatService
 from slack_migrator.services.discovery import (
     load_existing_space_mappings,
     load_space_mappings,
     log_space_mapping_conflicts,
 )
+from slack_migrator.services.drive.dry_run_service import DryRunDriveService
 from slack_migrator.services.file import FileHandler
 from slack_migrator.services.message_attachments import MessageAttachmentProcessor
 from slack_migrator.services.user import generate_user_map
@@ -111,11 +114,16 @@ class SlackToChatMigrator:
         )
 
         # Initialize simple unmapped user tracking
-        self.unmapped_user_tracker = initialize_unmapped_user_tracking(self)
+        self.unmapped_user_tracker = initialize_unmapped_user_tracking()
 
         # Scan channel members to ensure all channel members have user mappings
         # This is crucial because Google Chat needs to add all channel members to spaces
-        scan_channel_members_for_unmapped_users(self)
+        scan_channel_members_for_unmapped_users(
+            self.unmapped_user_tracker,
+            self.export_root,
+            self.config,
+            self.user_map,
+        )
 
         # API services are initialized lazily by _initialize_api_services(),
         # called from migrate() or validate_permissions(). Typed as Any so
@@ -125,8 +133,12 @@ class SlackToChatMigrator:
         self.drive: Any = None
         self._api_services_initialized = False
 
-        # User resolver is needed before API services (e.g. for is_external_user)
-        self.user_resolver = UserResolver.from_migrator(self)
+        # UserResolver is created in _initialize_api_services() after chat
+        # is available, avoiding the two-phase init pattern (create with
+        # chat=None, then mutate chat later).  Typed as Any so callers
+        # don't need union-attr ignores — all code paths guarantee
+        # initialization before first use (same pattern as chat/drive).
+        self.user_resolver: Any = None
 
         # Load channel metadata from channels.json
         self.channels_meta, self.channel_id_to_name = self._load_channels_meta()
@@ -136,37 +148,73 @@ class SlackToChatMigrator:
             name: id for id, name in self.channel_id_to_name.items()
         }
 
+        # Build immutable context from the now-populated attributes.
+        # During Phase 1 of DI refactoring, both self.ctx.X and self.X
+        # coexist; later phases migrate callers to use ctx directly.
+        self.ctx = MigrationContext(
+            export_root=self.export_root,
+            creds_path=self.creds_path,
+            workspace_admin=self.workspace_admin,
+            workspace_domain=self.workspace_domain,
+            dry_run=self.dry_run,
+            update_mode=self.update_mode,
+            verbose=self.verbose,
+            debug_api=self.debug_api,
+            config=self.config,
+            user_map=self.user_map,
+            users_without_email=self.users_without_email,
+            channels_meta=self.channels_meta,
+            channel_id_to_name=self.channel_id_to_name,
+            channel_name_to_id=self.channel_name_to_id,
+        )
+
     def _initialize_api_services(self) -> None:
         """Initialize Google API services after permission validation."""
         if self._api_services_initialized:
             return
 
-        log_with_context(
-            logging.INFO, "Initializing Google Chat and Drive API services..."
-        )
+        if self.dry_run:
+            log_with_context(
+                logging.INFO,
+                "Dry-run mode: using no-op Chat and Drive services",
+            )
+            self.chat = DryRunChatService(self.state)
+            self.drive = DryRunDriveService()
+        else:
+            log_with_context(
+                logging.INFO,
+                "Initializing Google Chat and Drive API services...",
+            )
+            creds_path_str = str(self.creds_path)
+            self.chat = get_gcp_service(
+                creds_path_str,
+                self.workspace_admin,
+                "chat",
+                "v1",
+                max_retries=self.config.max_retries,
+                retry_delay=self.config.retry_delay,
+            )
+            self.drive = get_gcp_service(
+                creds_path_str,
+                self.workspace_admin,
+                "drive",
+                "v3",
+                max_retries=self.config.max_retries,
+                retry_delay=self.config.retry_delay,
+            )
 
-        # Convert Path to str for API clients
-        creds_path_str = str(self.creds_path)
-        self.chat = get_gcp_service(
-            creds_path_str,
-            self.workspace_admin,
-            "chat",
-            "v1",
-            max_retries=self.config.max_retries,
-            retry_delay=self.config.retry_delay,
+        # Create UserResolver now that chat is available — no two-phase init
+        self.user_resolver = UserResolver(
+            config=self.config,
+            state=self.state,
+            chat=self.chat,
+            creds_path=self.creds_path,
+            user_map=self.user_map,
+            unmapped_user_tracker=self.unmapped_user_tracker,
+            export_root=self.export_root,
+            workspace_admin=self.workspace_admin,
+            workspace_domain=self.workspace_domain,
         )
-        self.drive = get_gcp_service(
-            creds_path_str,
-            self.workspace_admin,
-            "drive",
-            "v3",
-            max_retries=self.config.max_retries,
-            retry_delay=self.config.retry_delay,
-        )
-
-        # Update the user resolver's chat reference — it was None at construction
-        # time because API services are initialized after the resolver.
-        self.user_resolver.chat = self.chat
 
         self._api_services_initialized = True
         log_with_context(
@@ -178,9 +226,17 @@ class SlackToChatMigrator:
 
     def _initialize_dependent_services(self) -> None:
         """Initialize services that depend on API clients."""
-        # Initialize file handler
+        # Initialize file handler with explicit deps (no migrator back-reference)
         self.file_handler = FileHandler(
-            self.drive, self.chat, folder_id=None, migrator=self, dry_run=self.dry_run
+            self.drive,
+            self.chat,
+            folder_id=None,
+            config=self.config,
+            workspace_domain=self.workspace_domain,
+            user_map=self.user_map,
+            user_resolver=self.user_resolver,
+            state=self.state,
+            dry_run=self.dry_run,
         )
         # FileHandler now handles its own drive folder initialization automatically
 
@@ -202,7 +258,7 @@ class SlackToChatMigrator:
             )
 
         # Load existing space mappings for update mode or file attachments
-        load_existing_space_mappings(self)
+        load_existing_space_mappings(self.ctx, self.state, self.chat)
 
     def _validate_export_format(self) -> None:
         """Validate that the export directory has the expected structure."""
@@ -288,7 +344,8 @@ class SlackToChatMigrator:
             log_with_context(logging.WARNING, "")
             log_with_context(logging.WARNING, "MIGRATION INTERRUPTED BY SIGNAL")
             log_migration_failure(
-                self,
+                self.state,
+                self.dry_run,
                 KeyboardInterrupt("Migration interrupted by signal"),
                 migration_duration,
             )
@@ -334,7 +391,9 @@ class SlackToChatMigrator:
 
             # In update mode, discover existing spaces via API
             if self.update_mode:
-                discovered_spaces = load_space_mappings(self)
+                discovered_spaces = load_space_mappings(
+                    self.chat, self.ctx.channel_name_to_id, self.state
+                )
                 if discovered_spaces:
                     log_with_context(
                         logging.INFO,
@@ -355,14 +414,21 @@ class SlackToChatMigrator:
             )
 
             # Process each channel
-            self.channel_processor = ChannelProcessor(self)
+            self.channel_processor = ChannelProcessor(
+                ctx=self.ctx,
+                state=self.state,
+                chat=self.chat,
+                user_resolver=self.user_resolver,
+                file_handler=getattr(self, "file_handler", None),
+                attachment_processor=self.attachment_processor,
+            )
             for ch in all_channel_dirs:
                 should_abort = self.channel_processor.process_channel(ch)
                 if should_abort:
                     break
 
             # Log any space mapping conflicts that should be added to config
-            log_space_mapping_conflicts(self)
+            log_space_mapping_conflicts(self.state, self.ctx.dry_run)
 
             # Generate final unmapped user report
             if (
@@ -388,16 +454,23 @@ class SlackToChatMigrator:
 
             # If this was a dry run, provide specific unmapped user guidance
             if self.dry_run and hasattr(self, "unmapped_user_tracker"):
-                log_unmapped_user_summary_for_dry_run(self)
+                log_unmapped_user_summary_for_dry_run(
+                    self.unmapped_user_tracker, self.export_root
+                )
 
             # Calculate migration duration
             migration_duration = time.time() - migration_start_time
 
             # Log final success status
-            log_migration_success(self, migration_duration)
+            log_migration_success(
+                self.state,
+                self.dry_run,
+                migration_duration,
+                getattr(self, "unmapped_user_tracker", None),
+            )
 
             # Clean up channel handlers in success case (finally block will also run)
-            cleanup_channel_handlers(self)
+            cleanup_channel_handlers(self.state)
 
             return True
 
@@ -406,7 +479,7 @@ class SlackToChatMigrator:
             migration_duration = time.time() - migration_start_time
 
             # Log final failure status
-            log_migration_failure(self, e, migration_duration)
+            log_migration_failure(self.state, self.dry_run, e, migration_duration)
 
             # Re-raise the exception to maintain existing error handling behavior
             raise
@@ -414,4 +487,4 @@ class SlackToChatMigrator:
             # Restore the original signal handler
             signal.signal(signal.SIGINT, old_signal_handler)
             # Always ensure proper cleanup of channel log handlers
-            cleanup_channel_handlers(self)
+            cleanup_channel_handlers(self.state)

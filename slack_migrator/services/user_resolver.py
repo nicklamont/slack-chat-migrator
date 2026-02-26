@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from slack_migrator.core.config import MigrationConfig
-    from slack_migrator.core.migrator import SlackToChatMigrator
     from slack_migrator.core.state import MigrationState
     from slack_migrator.utils.user_validation import UnmappedUserTracker
 
@@ -64,28 +63,6 @@ class UserResolver:
         self.workspace_admin = workspace_admin
         self.workspace_domain = workspace_domain
         self._users_data: dict[str, dict[str, Any]] | None = None
-
-    @classmethod
-    def from_migrator(cls, migrator: SlackToChatMigrator) -> UserResolver:
-        """Create a UserResolver from a SlackToChatMigrator instance.
-
-        Args:
-            migrator: The migrator instance to extract dependencies from.
-
-        Returns:
-            A fully initialised UserResolver.
-        """
-        return cls(
-            config=migrator.config,
-            state=migrator.state,
-            chat=migrator.chat,
-            creds_path=migrator.creds_path,
-            user_map=migrator.user_map,
-            unmapped_user_tracker=migrator.unmapped_user_tracker,
-            export_root=migrator.export_root,
-            workspace_admin=migrator.workspace_admin,
-            workspace_domain=migrator.workspace_domain,
-        )
 
     def get_delegate(self, email: str) -> Any:
         """Get a Google Chat API service with user impersonation.
