@@ -16,35 +16,46 @@ from slack_migrator.services.file import FileHandler
 # ---------------------------------------------------------------------------
 
 
-def _make_migrator(**overrides):
-    """Create a mock migrator with reasonable defaults."""
-    migrator = MagicMock()
-    migrator.state = MigrationState()
-    migrator.config = MigrationConfig(
-        shared_drive=SharedDriveConfig(name="Test Drive", id=None),
+def _make_deps(**overrides):
+    """Create explicit dependency values for FileHandler construction."""
+    state = MigrationState()
+    state.current_channel = overrides.pop("current_channel", "general")
+
+    config = overrides.pop(
+        "config",
+        MigrationConfig(
+            shared_drive=SharedDriveConfig(name="Test Drive", id=None),
+        ),
     )
-    migrator.workspace_domain = "example.com"
-    migrator.state.current_channel = "general"
-    migrator.user_map = {"U123": "alice@example.com"}
-    migrator.is_external_user = MagicMock(return_value=False)
-    migrator.user_resolver.is_external_user = MagicMock(return_value=False)
-    _state_attrs = {f.name for f in MigrationState.__dataclass_fields__.values()}
+    user_map = overrides.pop("user_map", {"U123": "alice@example.com"})
+    user_resolver = overrides.pop("user_resolver", MagicMock())
+    if not hasattr(user_resolver, "is_external_user") or not callable(
+        user_resolver.is_external_user
+    ):
+        user_resolver.is_external_user = MagicMock(return_value=False)
+    workspace_domain = overrides.pop("workspace_domain", "example.com")
+
+    # Apply remaining overrides to state
     for key, value in overrides.items():
-        if key in _state_attrs:
-            setattr(migrator.state, key, value)
-        else:
-            setattr(migrator, key, value)
-    return migrator
+        if hasattr(state, key):
+            setattr(state, key, value)
+
+    return {
+        "config": config,
+        "workspace_domain": workspace_domain,
+        "user_map": user_map,
+        "user_resolver": user_resolver,
+        "state": state,
+    }
 
 
 def _make_handler(
-    migrator=None,
     folder_id=None,
     dry_run=False,
+    **dep_overrides,
 ):
     """Build a FileHandler with all heavy sub-services mocked out."""
-    if migrator is None:
-        migrator = _make_migrator()
+    deps = _make_deps(**dep_overrides)
 
     drive_service = MagicMock()
     chat_service = MagicMock()
@@ -59,8 +70,8 @@ def _make_handler(
             drive_service=drive_service,
             chat_service=chat_service,
             folder_id=folder_id,
-            migrator=migrator,
             dry_run=dry_run,
+            **deps,
         )
 
     return handler
@@ -112,10 +123,13 @@ class TestFileHandlerInit:
         assert stats["ownership_transfer_failed"] == 0
         assert stats["files_by_channel"] == {}
 
-    def test_migrator_reference_stored(self):
-        migrator = _make_migrator()
-        handler = _make_handler(migrator=migrator)
-        assert handler.migrator is migrator
+    def test_explicit_deps_stored(self):
+        handler = _make_handler()
+        assert handler.config is not None
+        assert handler.workspace_domain == "example.com"
+        assert handler.user_map == {"U123": "alice@example.com"}
+        assert handler.user_resolver is not None
+        assert handler.state is not None
 
     def test_sub_services_created(self):
         handler = _make_handler()
@@ -197,9 +211,7 @@ class TestGetCurrentChannel:
         assert handler._get_current_channel() == "general"
 
     def test_returns_none_without_current_channel(self):
-        migrator = _make_migrator()
-        migrator.state.current_channel = None
-        handler = _make_handler(migrator=migrator)
+        handler = _make_handler(current_channel=None)
         assert handler._get_current_channel() is None
 
 
@@ -447,9 +459,13 @@ class TestUploadStrategy:
         assert handler.file_stats["failed_uploads"] == 1
 
     def test_external_user_tracked(self):
-        migrator = _make_migrator()
-        migrator.is_external_user = MagicMock(return_value=True)
-        handler = _make_handler(migrator=migrator, folder_id="root")
+        ext_resolver = MagicMock()
+        ext_resolver.is_external_user = MagicMock(return_value=True)
+        handler = _make_handler(
+            folder_id="root",
+            user_resolver=ext_resolver,
+            user_map={"UEXT": "ext@other.com"},
+        )
         handler._drive_initialized = True
         handler._download_file = MagicMock(return_value=None)
 

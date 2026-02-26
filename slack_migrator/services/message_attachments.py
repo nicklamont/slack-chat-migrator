@@ -27,19 +27,8 @@ class MessageAttachmentProcessor:
         self.dry_run = dry_run
 
     def _get_current_channel(self) -> str | None:
-        """Helper method to get the current channel from the migrator.
-
-        Returns:
-            Current channel name or None if not available
-        """
-        if (
-            hasattr(self, "file_handler")
-            and hasattr(self.file_handler, "migrator")
-            and hasattr(self.file_handler.migrator, "state")
-            and hasattr(self.file_handler.migrator.state, "current_channel")
-        ):
-            return self.file_handler.migrator.state.current_channel
-        return None
+        """Return the current channel name for logging context."""
+        return self.file_handler.state.current_channel
 
     def process_message_attachments(
         self,
@@ -183,15 +172,7 @@ class MessageAttachmentProcessor:
             Google Chat attachment object or None if failed
         """
         if not upload_result or not isinstance(upload_result, dict):
-            # Try to get channel from parent migrator
-            current_channel = None
-            if (
-                hasattr(self, "file_handler")
-                and hasattr(self.file_handler, "migrator")
-                and hasattr(self.file_handler.migrator, "state")
-                and hasattr(self.file_handler.migrator.state, "current_channel")
-            ):
-                current_channel = self.file_handler.migrator.state.current_channel
+            current_channel = self._get_current_channel()
 
             log_with_context(
                 logging.WARNING,

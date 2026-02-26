@@ -199,9 +199,17 @@ class SlackToChatMigrator:
 
     def _initialize_dependent_services(self) -> None:
         """Initialize services that depend on API clients."""
-        # Initialize file handler
+        # Initialize file handler with explicit deps (no migrator back-reference)
         self.file_handler = FileHandler(
-            self.drive, self.chat, folder_id=None, migrator=self, dry_run=self.dry_run
+            self.drive,
+            self.chat,
+            folder_id=None,
+            config=self.config,
+            workspace_domain=self.workspace_domain,
+            user_map=self.user_map,
+            user_resolver=self.user_resolver,
+            state=self.state,
+            dry_run=self.dry_run,
         )
         # FileHandler now handles its own drive folder initialization automatically
 

@@ -9,7 +9,7 @@ import logging
 import mimetypes
 import os
 import tempfile
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 import requests
 from googleapiclient.errors import HttpError
@@ -19,6 +19,8 @@ from slack_migrator.constants import (
     HTTP_OK,
     HTTP_UNAUTHORIZED,
 )
+from slack_migrator.core.config import MigrationConfig
+from slack_migrator.core.state import MigrationState
 from slack_migrator.services.chat import ChatFileUploader
 from slack_migrator.services.drive import (
     DriveFileUploader,
@@ -28,9 +30,6 @@ from slack_migrator.services.drive import (
 from slack_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_migrator")
-
-if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
 
 
 class FileHandler:
@@ -54,7 +53,11 @@ class FileHandler:
         drive_service: Any,
         chat_service: Any,
         folder_id: str | None,
-        migrator: SlackToChatMigrator,
+        config: MigrationConfig,
+        workspace_domain: str,
+        user_map: dict[str, str],
+        user_resolver: Any,
+        state: MigrationState,
         dry_run: bool = False,
     ) -> None:
         """Initialize the FileHandler.
@@ -63,12 +66,20 @@ class FileHandler:
             drive_service: The Drive API service instance
             chat_service: The Chat API service instance
             folder_id: The ID of the root folder in Drive to store files (can be None for auto-creation)
-            migrator: The parent Migrator instance
+            config: Migration configuration
+            workspace_domain: Workspace domain for permission checks
+            user_map: Slack user ID to Google email mapping
+            user_resolver: User resolver for external user detection
+            state: Mutable migration state
             dry_run: Whether to run in dry run mode
         """
         self.drive_service = drive_service
         self.chat_service = chat_service
-        self.migrator = migrator
+        self.config = config
+        self.workspace_domain = workspace_domain
+        self.user_map = user_map
+        self.user_resolver = user_resolver
+        self.state = state
         self.dry_run = dry_run
 
         # Initialize the dictionary to track processed files
@@ -89,12 +100,9 @@ class FileHandler:
             "files_by_channel": {},
         }
 
-        # Get workspace domain for permissions
-        workspace_domain = getattr(migrator, "workspace_domain", None)
-
         # Initialize modular services
         self.shared_drive_manager = SharedDriveManager(
-            drive_service, migrator.config, dry_run=dry_run
+            drive_service, config, dry_run=dry_run
         )
         self.folder_manager = FolderManager(
             drive_service, workspace_domain, dry_run=dry_run
@@ -103,10 +111,6 @@ class FileHandler:
             drive_service, workspace_domain, dry_run=dry_run
         )
         self.chat_uploader = ChatFileUploader(chat_service, dry_run=dry_run)
-
-        # Set migrator reference on sub-services for channel context
-        self.drive_uploader.migrator = migrator
-        self.chat_uploader.migrator = migrator
 
         # Initialize the root folder and shared drive
         self._shared_drive_id: str | None = None
@@ -159,16 +163,8 @@ class FileHandler:
         self._root_folder_id = value
 
     def _get_current_channel(self) -> str | None:
-        """Helper method to get the current channel from the migrator.
-
-        Returns:
-            Current channel name or None if not available
-        """
-        if hasattr(self, "migrator") and hasattr(
-            self.migrator.state, "current_channel"
-        ):
-            return self.migrator.state.current_channel
-        return None
+        """Return the current channel name for logging context."""
+        return self.state.current_channel
 
     @property
     def shared_drive_id(self) -> str | None:
@@ -190,8 +186,8 @@ class FileHandler:
         """Initialize the shared drive and root folder for attachments."""
         try:
             # Get shared drive configuration
-            shared_drive_name = self.migrator.config.shared_drive.name
-            shared_drive_id: str | None = self.migrator.config.shared_drive.id
+            shared_drive_name = self.config.shared_drive.name
+            shared_drive_id: str | None = self.config.shared_drive.id
 
             # If no shared drive specified, use default name
             if not shared_drive_name and not shared_drive_id:
@@ -369,6 +365,11 @@ class FileHandler:
                 'name': file name
             }
         """
+        # Sync current channel to sub-uploaders for logging context
+        current_ch = self.state.current_channel
+        self.drive_uploader.current_channel = current_ch
+        self.chat_uploader.current_channel = current_ch
+
         try:
             # Ensure drive structures are initialized before processing files
             self.ensure_drive_initialized()
@@ -387,12 +388,9 @@ class FileHandler:
 
             # Check if user is external (if we have user info)
             username = file_obj.get("user", None)
-            if (
-                username
-                and self.migrator
-                and hasattr(self.migrator, "is_external_user")
-            ):
-                if self.migrator.is_external_user(username):
+            if username:
+                user_email = self.user_map.get(username)
+                if user_email and self.user_resolver.is_external_user(user_email):
                     self.file_stats["external_user_files"] += 1
 
             log_with_context(
@@ -527,8 +525,8 @@ class FileHandler:
             # Get the user's email for setting file permissions and editor access
             username = file_obj.get("user")
             user_email = None
-            if username and hasattr(self.migrator, "user_map"):
-                user_email = self.migrator.user_map.get(username)
+            if username:
+                user_email = self.user_map.get(username)
                 log_with_context(
                     logging.DEBUG,
                     f"Found user email {user_email} for user ID {username}, will grant editor permission",
@@ -649,8 +647,8 @@ class FileHandler:
                     user_chat_uploader = ChatFileUploader(
                         user_service, dry_run=self.dry_run
                     )
-                    # Set migrator reference for channel context logging
-                    user_chat_uploader.migrator = self.migrator
+                    # Set channel context for logging
+                    user_chat_uploader.current_channel = self.state.current_channel
                     upload_response, attachment_metadata = (
                         user_chat_uploader.upload_file_to_chat(
                             temp_file_path, name, space
@@ -810,8 +808,8 @@ class FileHandler:
 
             # Get the user's email for setting file ownership
             user_email = None
-            if user_id and hasattr(self.migrator, "user_map"):
-                user_email = self.migrator.user_map.get(user_id)
+            if user_id:
+                user_email = self.user_map.get(user_id)
 
             # Get or create a folder for this channel
             folder_id = None
@@ -918,7 +916,7 @@ class FileHandler:
                 # Also, external users cannot be made owners of files
                 if (
                     user_email
-                    and not self.migrator.user_resolver.is_external_user(user_email)
+                    and not self.user_resolver.is_external_user(user_email)
                     and not self._shared_drive_id
                 ):
                     # For regular Drive folders, transfer ownership to the original internal poster
@@ -940,9 +938,7 @@ class FileHandler:
                             channel=channel,
                             file_id=file_id,
                         )
-                elif user_email and self.migrator.user_resolver.is_external_user(
-                    user_email
-                ):
+                elif user_email and self.user_resolver.is_external_user(user_email):
                     log_with_context(
                         logging.DEBUG,
                         f"External user {user_email} cannot be made file owner, using service account ownership",
@@ -1354,8 +1350,8 @@ class FileHandler:
 
             # If we're here, the file is not in a channel folder, so we need to set individual permissions
             if (
-                not hasattr(self.migrator.state, "active_users_by_channel")
-                or channel not in self.migrator.state.active_users_by_channel
+                not hasattr(self.state, "active_users_by_channel")
+                or channel not in self.state.active_users_by_channel
             ):
                 log_with_context(
                     logging.WARNING,
@@ -1364,12 +1360,12 @@ class FileHandler:
                 )
                 return False
 
-            active_users = self.migrator.state.active_users_by_channel[channel]
+            active_users = self.state.active_users_by_channel[channel]
             emails_to_share = []
 
             # Get emails for all active users (INCLUDING external users for channel folder access)
             for user_id in active_users:
-                email = self.migrator.user_map.get(user_id)
+                email = self.user_map.get(user_id)
                 if email:
                     emails_to_share.append(
                         email

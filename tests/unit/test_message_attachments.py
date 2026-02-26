@@ -13,9 +13,8 @@ from slack_migrator.services.message_attachments import MessageAttachmentProcess
 def _make_file_handler(**overrides):
     """Create a mock file handler with reasonable defaults."""
     handler = MagicMock()
-    handler.migrator = MagicMock()
-    handler.migrator.state = MigrationState()
-    handler.migrator.state.current_channel = "general"
+    handler.state = MigrationState()
+    handler.state.current_channel = "general"
     for key, value in overrides.items():
         setattr(handler, key, value)
     return handler
@@ -58,19 +57,13 @@ class TestInit:
 class TestGetCurrentChannel:
     def test_returns_channel_when_available(self):
         handler = _make_file_handler()
-        handler.migrator.state.current_channel = "random"
+        handler.state.current_channel = "random"
         processor = _make_processor(file_handler=handler)
         assert processor._get_current_channel() == "random"
 
-    def test_returns_none_when_migrator_missing(self):
-        handler = MagicMock(spec=[])  # no attributes at all
-        processor = MessageAttachmentProcessor(file_handler=handler, dry_run=False)
-        # file_handler exists but has no migrator attribute
-        assert processor._get_current_channel() is None
-
-    def test_returns_none_when_current_channel_missing(self):
-        handler = MagicMock()
-        handler.migrator.state = MigrationState()
+    def test_returns_none_when_current_channel_not_set(self):
+        handler = _make_file_handler()
+        handler.state = MigrationState()
         processor = MessageAttachmentProcessor(file_handler=handler, dry_run=False)
         assert processor._get_current_channel() is None
 

@@ -7,15 +7,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import mimetypes
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 # Third-party imports
 # pylint: disable=import-error
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
-
-if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
 
 from slack_migrator.utils.logging import (
     log_with_context,
@@ -48,22 +45,12 @@ class DriveFileUploader:
         self.service_account_email = service_account_email
         self.file_hash_cache: dict[str, tuple[str | None, str | None]] = {}
         self.folders_pre_cached: set[str] = set()
-        self.migrator: SlackToChatMigrator | None = None  # Set by FileHandler
+        # Set by FileHandler before each channel is processed
+        self.current_channel: str | None = None
 
     def _get_current_channel(self) -> str | None:
-        """Helper method to get the current channel from the migrator.
-
-        Returns:
-            Current channel name or None if not available
-        """
-        if (
-            hasattr(self, "migrator")
-            and self.migrator is not None
-            and hasattr(self.migrator, "state")
-            and hasattr(self.migrator.state, "current_channel")
-        ):
-            return self.migrator.state.current_channel
-        return None
+        """Return the current channel name for logging context."""
+        return self.current_channel
 
     def _calculate_file_hash(self, file_path: str) -> str:
         """Calculate MD5 hash of a file.

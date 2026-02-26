@@ -8,10 +8,7 @@ import json
 import logging
 import mimetypes
 import os
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from slack_migrator.core.migrator import SlackToChatMigrator
+from typing import Any
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
@@ -33,22 +30,12 @@ class ChatFileUploader:
         """
         self.chat_service = chat_service
         self.dry_run = dry_run
-        self.migrator: SlackToChatMigrator | None = None  # Set by FileHandler
+        # Set by FileHandler before each channel is processed
+        self.current_channel: str | None = None
 
     def _get_current_channel(self) -> str | None:
-        """Helper method to get the current channel from the migrator.
-
-        Returns:
-            Current channel name or None if not available
-        """
-        if (
-            hasattr(self, "migrator")
-            and self.migrator
-            and hasattr(self.migrator, "state")
-            and hasattr(self.migrator.state, "current_channel")
-        ):
-            return self.migrator.state.current_channel
-        return None
+        """Return the current channel name for logging context."""
+        return self.current_channel
 
     def upload_file_to_chat(
         self, file_path: str, filename: str, parent_space: str | None = None
