@@ -394,12 +394,15 @@ class RetryWrapper:
                     # If parsing fails, just use string representation
                     request_data = {"body": str(request_details["body"])[:500]}
 
-            log_api_request(
-                method=request_details["method"],  # type: ignore[arg-type]
-                url=request_details["uri"],  # type: ignore[arg-type]
-                data=request_data,
-                channel=channel_context,
-            )
+            method = request_details.get("method")
+            uri = request_details.get("uri")
+            if method is not None and uri is not None:
+                log_api_request(
+                    method=method,
+                    url=uri,
+                    data=request_data,
+                    channel=channel_context,
+                )
         except (ImportError, AttributeError, Exception):
             # Silently ignore logging errors to not break API calls
             pass
@@ -422,12 +425,14 @@ class RetryWrapper:
             # Import the actual logging function only when needed
             from slack_migrator.utils.logging import log_api_response
 
-            log_api_response(
-                status_code=status_code,
-                url=request_details["uri"],  # type: ignore[arg-type]
-                response_data=response_data,
-                channel=channel_context,
-            )
+            uri = request_details.get("uri")
+            if uri is not None:
+                log_api_response(
+                    status_code=status_code,
+                    url=uri,
+                    response_data=response_data,
+                    channel=channel_context,
+                )
         except (ImportError, AttributeError, Exception):
             # Silently ignore logging errors to not break API calls
             pass

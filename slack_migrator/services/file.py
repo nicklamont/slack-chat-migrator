@@ -105,8 +105,8 @@ class FileHandler:
         self.chat_uploader = ChatFileUploader(chat_service, dry_run=dry_run)
 
         # Set migrator reference on sub-services for channel context
-        self.drive_uploader.migrator = migrator  # type: ignore[assignment]
-        self.chat_uploader.migrator = migrator  # type: ignore[assignment]
+        self.drive_uploader.migrator = migrator
+        self.chat_uploader.migrator = migrator
 
         # Initialize the root folder and shared drive
         self._shared_drive_id: str | None = None
@@ -650,7 +650,7 @@ class FileHandler:
                         user_service, dry_run=self.dry_run
                     )
                     # Set migrator reference for channel context logging
-                    user_chat_uploader.migrator = self.migrator  # type: ignore[assignment]
+                    user_chat_uploader.migrator = self.migrator
                     upload_response, attachment_metadata = (
                         user_chat_uploader.upload_file_to_chat(
                             temp_file_path, name, space

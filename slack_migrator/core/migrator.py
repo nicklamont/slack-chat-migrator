@@ -117,9 +117,12 @@ class SlackToChatMigrator:
         # This is crucial because Google Chat needs to add all channel members to spaces
         scan_channel_members_for_unmapped_users(self)
 
-        # API services will be initialized later after permission checks
-        self.chat: Any | None = None
-        self.drive: Any | None = None
+        # API services are initialized lazily by _initialize_api_services(),
+        # called from migrate() or validate_permissions(). Typed as Any so
+        # callers don't need union-attr ignores — all code paths guarantee
+        # initialization before first use.
+        self.chat: Any = None
+        self.drive: Any = None
         self._api_services_initialized = False
 
         # User resolver is needed before API services (e.g. for is_external_user)

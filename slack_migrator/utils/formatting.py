@@ -126,279 +126,265 @@ def _parse_rich_text_elements(elements: list[dict]) -> str:
     return "".join(output_parts)
 
 
-def parse_slack_blocks(message: dict) -> str:  # noqa: C901
-    """
-    Parse Slack block kit format from a message to extract rich text content.
+def _extract_forwarded_messages(message: dict) -> list[str]:
+    """Extract forwarded/shared message content from Slack attachments.
 
-    This function handles various Slack block types including sections, rich text blocks,
-    headers, context blocks, and dividers. For each block type, it extracts the text content
-    and applies appropriate formatting. Rich text blocks are processed recursively to handle
-    nested formatting.
-
-    Also checks for forwarded/shared message content in the attachments array.
-
-    Supported block types:
-    - section: Basic text blocks and fields
-    - rich_text: Complex formatted text including sections, lists, quotes, and code blocks
-    - header: Converted to bold text
-    - context: Small text elements typically shown below a message
-    - divider: Horizontal line separator
+    Processes attachments that represent forwarded messages, extracting
+    text content with author and timestamp metadata. Converts bullet
+    formatting to Google Chat compatible format.
 
     Args:
-        message: A dictionary containing a Slack message with 'blocks' and/or 'text' fields
+        message: A Slack message dict with an optional 'attachments' field.
 
     Returns:
-        A string with all the formatted text content from the message blocks,
-        or the raw text field if no blocks are present or no content could be extracted
+        List of formatted forwarded message strings.
     """
-    # First check for forwarded message content
-    forwarded_texts = []
-    attachments = message.get("attachments", [])
-    for attachment in attachments:
-        # Check if this is a forwarded/shared message
-        if attachment.get("is_share") or attachment.get("is_msg_unfurl"):
-            # Try to get text from various fields in the attachment
-            forwarded_text = ""
-            author_info = ""
-            timestamp_info = ""
+    forwarded_texts: list[str] = []
+    for attachment in message.get("attachments", []):
+        if not (attachment.get("is_share") or attachment.get("is_msg_unfurl")):
+            continue
 
-            # Extract author information if available
-            if attachment.get("author_name"):
-                author_info = f" from {attachment['author_name']}"
-            elif attachment.get("author_subname"):
-                author_info = f" from {attachment['author_subname']}"
+        author_info = ""
+        if attachment.get("author_name"):
+            author_info = f" from {attachment['author_name']}"
+        elif attachment.get("author_subname"):
+            author_info = f" from {attachment['author_subname']}"
 
-            # Extract timestamp information if available
-            if attachment.get("ts"):
-                # Convert timestamp to readable format
-                try:
-                    timestamp = float(attachment["ts"])
-                    readable_time = datetime.fromtimestamp(timestamp).strftime(
-                        "%B %d, %Y at %I:%M %p"
-                    )
-                    timestamp_info = f" (originally sent {readable_time})"
-                except (ValueError, OSError):
-                    # Fallback if timestamp conversion fails
-                    timestamp_info = f" (originally sent at {attachment['ts']})"
+        timestamp_info = ""
+        if attachment.get("ts"):
+            try:
+                timestamp = float(attachment["ts"])
+                readable_time = datetime.fromtimestamp(timestamp).strftime(
+                    "%B %d, %Y at %I:%M %p"
+                )
+                timestamp_info = f" (originally sent {readable_time})"
+            except (ValueError, OSError):
+                timestamp_info = f" (originally sent at {attachment['ts']})"
 
-            # Prefer rich message_blocks over plain text for better formatting
-            if "message_blocks" in attachment:
-                for msg_block in attachment.get("message_blocks", []):
-                    if "message" in msg_block and "blocks" in msg_block["message"]:
-                        # Recursively parse blocks from the forwarded message to preserve rich formatting
-                        forwarded_text = parse_slack_blocks(msg_block["message"])
-                        break
+        # Prefer rich message_blocks over plain text
+        forwarded_text = ""
+        if "message_blocks" in attachment:
+            for msg_block in attachment.get("message_blocks", []):
+                if "message" in msg_block and "blocks" in msg_block["message"]:
+                    forwarded_text = parse_slack_blocks(msg_block["message"])
+                    break
 
-            # Fall back to plain text fields if no message_blocks available
-            if not forwarded_text:
-                if attachment.get("text"):
-                    forwarded_text = attachment.get("text", "")
-                elif attachment.get("fallback"):
-                    forwarded_text = attachment.get("fallback", "")
+        if not forwarded_text:
+            forwarded_text = attachment.get("text") or attachment.get("fallback") or ""
 
-            if forwarded_text.strip():
-                # Handle bullet formatting directly for Google Chat compatibility
-                lines = forwarded_text.strip().split("\n")
-                improved_lines = []
+        if not forwarded_text.strip():
+            continue
 
-                for line in lines:
-                    stripped = line.strip()
-                    # Handle indented bullets by converting to different bullet types
-                    if re.match(r"^\s+•", line):
-                        # Convert indented bullets to different bullet characters
-                        indent_level = len(line) - len(line.lstrip())
-                        content = (
-                            stripped[1:].strip()
-                            if stripped.startswith("•")
-                            else stripped
-                        )
-                        if indent_level <= 4:
-                            # Use official Google Chat bullet format for first level
-                            improved_lines.append(f"* {content}")
-                        elif indent_level <= 8:
-                            # Calculate indentation: 4 spaces base + 5 spaces for level 1
-                            indent_spaces = " " * (4 + 5)  # 9 spaces total
-                            improved_lines.append(f"{indent_spaces}◦ {content}")
-                        else:
-                            # Calculate indentation: 4 spaces base + 5 spaces per level (assuming level 2+)
-                            level = 2 if indent_level <= 12 else 3
-                            indent_spaces = " " * (4 + (5 * level))
-                            improved_lines.append(f"{indent_spaces}▪ {content}")
-                    elif stripped.startswith("•"):
-                        # Convert top-level bullets to official Google Chat format
-                        content = stripped[1:].strip() if len(stripped) > 1 else ""
-                        improved_lines.append(f"* {content}")
-                    else:
-                        improved_lines.append(line)
+        forwarded_text = _convert_bullets_to_gchat(forwarded_text.strip())
+        header = f"*Forwarded message{author_info}{timestamp_info}:*"
+        forwarded_texts.append(f"{header}\n{forwarded_text}")
 
-                forwarded_text = "\n".join(improved_lines)
+    return forwarded_texts
 
-                # Add indicator with author and timestamp info when available
-                # Use Google Chat bold formatting (*text* instead of **text**)
-                header = f"*Forwarded message{author_info}{timestamp_info}:*"
-                forwarded_texts.append(f"{header}\n{forwarded_text}")
 
-    # Now process the main message blocks
-    if "blocks" not in message or not message["blocks"]:
-        main_text: str = message.get("text", "")
-        # If we have forwarded content but no main text, use forwarded content
-        if not main_text.strip() and forwarded_texts:
-            return "\n\n".join(forwarded_texts)
-        # If we have both, combine them
-        elif main_text.strip() and forwarded_texts:
-            return main_text + "\n\n" + "\n\n".join(forwarded_texts)
-        # Otherwise just return main text
+def _convert_bullets_to_gchat(text: str) -> str:
+    """Convert Slack bullet formatting to Google Chat compatible bullets.
+
+    Args:
+        text: Text that may contain bullet-point lines.
+
+    Returns:
+        Text with bullets converted to Google Chat format.
+    """
+    lines = text.split("\n")
+    improved_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r"^\s+•", line):
+            indent_level = len(line) - len(line.lstrip())
+            content = stripped[1:].strip() if stripped.startswith("•") else stripped
+            if indent_level <= 4:
+                improved_lines.append(f"* {content}")
+            elif indent_level <= 8:
+                indent_spaces = " " * (4 + 5)
+                improved_lines.append(f"{indent_spaces}◦ {content}")
+            else:
+                level = 2 if indent_level <= 12 else 3
+                indent_spaces = " " * (4 + (5 * level))
+                improved_lines.append(f"{indent_spaces}▪ {content}")
+        elif stripped.startswith("•"):
+            content = stripped[1:].strip() if len(stripped) > 1 else ""
+            improved_lines.append(f"* {content}")
         else:
-            return main_text
+            improved_lines.append(line)
 
-    texts = []
-    blocks_data = message.get("blocks", [])
+    return "\n".join(improved_lines)
 
-    for block in blocks_data:
-        block_type = block.get("type")
 
-        if block_type == "section":
-            if text_obj := block.get("text"):
-                texts.append(text_obj.get("text", ""))
-            for field in block.get("fields", []):
-                if field and isinstance(field, dict):
-                    texts.append(field.get("text", ""))
+def _combine_with_forwarded(main_text: str, forwarded_texts: list[str]) -> str:
+    """Combine main message text with forwarded message content.
 
-        elif block_type == "rich_text":
-            # Process rich text elements, handling lists specially to maintain proper indentation
-            rich_text_parts = []
-            list_items: list[str] = []  # Track consecutive list items
+    Args:
+        main_text: The primary message text.
+        forwarded_texts: List of formatted forwarded message strings.
 
-            for element in block.get("elements", []):
-                element_type = element.get("type")
+    Returns:
+        Combined text, preferring forwarded content when main text is empty.
+    """
+    if not main_text.strip() and forwarded_texts:
+        return "\n\n".join(forwarded_texts)
+    if main_text.strip() and forwarded_texts:
+        return main_text + "\n\n" + "\n\n".join(forwarded_texts)
+    return main_text
 
-                if element_type == "rich_text_section":
-                    # If we have accumulated list items, add them first
-                    if list_items:
-                        rich_text_parts.append("\n".join(list_items))
-                        list_items = []
 
-                    rich_text_content = _parse_rich_text_elements(
-                        element.get("elements", [])
-                    )
-                    if rich_text_content.strip():  # Only add non-empty content
-                        # Remove excessive trailing newlines but preserve intentional line breaks
-                        cleaned_content = rich_text_content.rstrip("\n")
-                        if (
-                            cleaned_content
-                        ):  # Make sure we still have content after cleaning
-                            rich_text_parts.append(cleaned_content)
+def _parse_rich_text_block(block: dict) -> str:
+    """Parse a single rich_text block into formatted text.
 
-                elif element_type == "rich_text_list":
-                    # Process list item with Google Chat compatible formatting
-                    list_style = element.get("style", "bullet")
-                    indent_level = element.get("indent", 0)
+    Handles rich_text_section, rich_text_list, rich_text_quote,
+    and rich_text_preformatted element types.
 
-                    # Use proper Google Chat list formatting for first level
-                    # and fallback characters for deeper levels
-                    if list_style == "bullet":
-                        if indent_level == 0:
-                            # Use official Google Chat bullet format for proper line wrapping
-                            prefix = "*"  # Official Google Chat bullet format
-                        elif indent_level == 1:
-                            prefix = "◦"  # Hollow bullet for level 1
-                        else:
-                            prefix = "▪"  # Small bullet for level 2+
-                    else:
-                        # For numbered lists
-                        pass  # Will use i+1 in the loop
+    Args:
+        block: A Slack rich_text block dict with an 'elements' field.
 
-                    for i, item in enumerate(element.get("elements", [])):
-                        item_text = _parse_rich_text_elements(item.get("elements", []))
-                        if list_style == "bullet":
-                            if indent_level == 0:
-                                # Format first-level bullets with official Google Chat format
-                                list_items.append(f"* {item_text}")
-                            else:
-                                # Calculate indentation: 4 spaces base + 5 spaces per level
-                                indent_spaces = " " * (4 + (5 * indent_level))
-                                list_items.append(
-                                    f"{indent_spaces}{prefix} {item_text}"
-                                )
-                        else:
-                            # For numbered lists
-                            if indent_level == 0:
-                                list_items.append(f"{i + 1}. {item_text}")
-                            else:
-                                # Same indentation formula for numbered lists
-                                indent_spaces = " " * (4 + (5 * indent_level))
-                                list_items.append(
-                                    f"{indent_spaces}{i + 1}. {item_text}"
-                                )
+    Returns:
+        Formatted text string from the rich text block.
+    """
+    rich_text_parts: list[str] = []
+    list_items: list[str] = []
 
-                elif element_type == "rich_text_quote":
-                    # If we have accumulated list items, add them first
-                    if list_items:
-                        rich_text_parts.append("\n".join(list_items))
-                        list_items = []
+    for element in block.get("elements", []):
+        element_type = element.get("type")
 
-                    quote_content = _parse_rich_text_elements(
-                        element.get("elements", [])
-                    )
-                    # Split by paragraph, wrap each in italics, and rejoin.
-                    paragraphs = quote_content.strip().split("\n\n")
-                    italicized_paragraphs = [
-                        f"_{p.strip()}_" for p in paragraphs if p.strip()
-                    ]
-                    rich_text_parts.append("\n\n".join(italicized_paragraphs))
-
-                elif element_type == "rich_text_preformatted":
-                    # If we have accumulated list items, add them first
-                    if list_items:
-                        rich_text_parts.append("\n".join(list_items))
-                        list_items = []
-
-                    code_text = _parse_rich_text_elements(element.get("elements", []))
-                    rich_text_parts.append(f"```\n{code_text}\n```")
-
-            # Add any remaining list items
+        if element_type == "rich_text_section":
             if list_items:
                 rich_text_parts.append("\n".join(list_items))
+                list_items = []
+            content = _parse_rich_text_elements(element.get("elements", []))
+            cleaned = content.rstrip("\n")
+            if cleaned.strip():
+                rich_text_parts.append(cleaned)
 
-            # Join rich text parts
-            if rich_text_parts:
-                texts.append(
-                    "\n\n".join(part for part in rich_text_parts if part.strip())
-                )
+        elif element_type == "rich_text_list":
+            _parse_rich_text_list(element, list_items)
 
-        elif block_type == "header":
-            if text_obj := block.get("text"):
-                texts.append(f"*{text_obj.get('text', '')}*")
+        elif element_type == "rich_text_quote":
+            if list_items:
+                rich_text_parts.append("\n".join(list_items))
+                list_items = []
+            quote_content = _parse_rich_text_elements(element.get("elements", []))
+            paragraphs = quote_content.strip().split("\n\n")
+            italicized = [f"_{p.strip()}_" for p in paragraphs if p.strip()]
+            rich_text_parts.append("\n\n".join(italicized))
 
-        elif block_type == "context":
-            context_texts = [
-                element.get("text", "")
-                for element in block.get("elements", [])
-                if element.get("type") in ("mrkdwn", "plain_text")
-            ]
-            if context_texts:
-                texts.append(" ".join(context_texts))
+        elif element_type == "rich_text_preformatted":
+            if list_items:
+                rich_text_parts.append("\n".join(list_items))
+                list_items = []
+            code_text = _parse_rich_text_elements(element.get("elements", []))
+            rich_text_parts.append(f"```\n{code_text}\n```")
 
-        elif block_type == "divider":
-            texts.append("---")
+    if list_items:
+        rich_text_parts.append("\n".join(list_items))
 
-    # Filter out empty texts and join
+    return "\n\n".join(part for part in rich_text_parts if part.strip())
+
+
+def _parse_rich_text_list(element: dict, list_items: list[str]) -> None:
+    """Parse a rich_text_list element and append items to list_items.
+
+    Args:
+        element: A Slack rich_text_list element dict.
+        list_items: Accumulator list to append formatted items to.
+    """
+    list_style = element.get("style", "bullet")
+    indent_level = element.get("indent", 0)
+
+    if list_style == "bullet":
+        if indent_level == 0:
+            prefix = "*"
+        elif indent_level == 1:
+            prefix = "◦"
+        else:
+            prefix = "▪"
+
+    for i, item in enumerate(element.get("elements", [])):
+        item_text = _parse_rich_text_elements(item.get("elements", []))
+        if list_style == "bullet":
+            if indent_level == 0:
+                list_items.append(f"* {item_text}")
+            else:
+                indent_spaces = " " * (4 + (5 * indent_level))
+                list_items.append(f"{indent_spaces}{prefix} {item_text}")
+        else:
+            if indent_level == 0:
+                list_items.append(f"{i + 1}. {item_text}")
+            else:
+                indent_spaces = " " * (4 + (5 * indent_level))
+                list_items.append(f"{indent_spaces}{i + 1}. {item_text}")
+
+
+def _parse_single_block(block: dict, texts: list[str]) -> None:
+    """Parse a single Slack block and append its text content.
+
+    Args:
+        block: A single Slack block dict.
+        texts: Accumulator list to append extracted text to.
+    """
+    block_type = block.get("type")
+
+    if block_type == "section":
+        if text_obj := block.get("text"):
+            texts.append(text_obj.get("text", ""))
+        for field in block.get("fields", []):
+            if field and isinstance(field, dict):
+                texts.append(field.get("text", ""))
+
+    elif block_type == "rich_text":
+        rich_text = _parse_rich_text_block(block)
+        if rich_text:
+            texts.append(rich_text)
+
+    elif block_type == "header":
+        if text_obj := block.get("text"):
+            texts.append(f"*{text_obj.get('text', '')}*")
+
+    elif block_type == "context":
+        context_texts = [
+            el.get("text", "")
+            for el in block.get("elements", [])
+            if el.get("type") in ("mrkdwn", "plain_text")
+        ]
+        if context_texts:
+            texts.append(" ".join(context_texts))
+
+    elif block_type == "divider":
+        texts.append("---")
+
+
+def parse_slack_blocks(message: dict) -> str:
+    """Parse Slack block kit format from a message to extract rich text content.
+
+    Handles section, rich_text, header, context, and divider block types.
+    Also checks for forwarded/shared message content in the attachments array.
+
+    Args:
+        message: A Slack message dict with 'blocks' and/or 'text' fields.
+
+    Returns:
+        Formatted text content from the message blocks, or the raw text field
+        if no blocks are present or no content could be extracted.
+    """
+    forwarded_texts = _extract_forwarded_messages(message)
+
+    if "blocks" not in message or not message["blocks"]:
+        return _combine_with_forwarded(message.get("text", ""), forwarded_texts)
+
+    texts: list[str] = []
+    for block in message.get("blocks", []):
+        _parse_single_block(block, texts)
+
     result = "\n\n".join(text.strip() for text in texts if text and text.strip())
 
-    # If we didn't get any meaningful content from blocks, fall back to text field
     if not result:
-        main_text = str(message.get("text", ""))
-        # If we have forwarded content but no main text, use forwarded content
-        if not main_text.strip() and forwarded_texts:
-            return "\n\n".join(forwarded_texts)
-        # If we have both, combine them
-        elif main_text.strip() and forwarded_texts:
-            return main_text + "\n\n" + "\n\n".join(forwarded_texts)
-        # Otherwise just return main text
-        else:
-            return main_text
+        return _combine_with_forwarded(str(message.get("text", "")), forwarded_texts)
 
-    # If we have both main content and forwarded content, combine them
     if forwarded_texts:
         result = result + "\n\n" + "\n\n".join(forwarded_texts)
 

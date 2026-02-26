@@ -331,8 +331,8 @@ def _enable_http_client_debug() -> None:
             http_logger.debug("Header: %s: %s", header, header_value)
         return _orig_putheader(self, header, *values)
 
-    _debug_putheader._patched_for_debug = True  # type: ignore[attr-defined]
-    http.client.HTTPConnection.putheader = _debug_putheader  # type: ignore[assignment]
+    _debug_putheader._patched_for_debug = True  # type: ignore[attr-defined]  # dynamic attr on wrapper function
+    http.client.HTTPConnection.putheader = _debug_putheader  # type: ignore[assignment]  # monkey-patch for debug logging
 
 
 def setup_channel_logger(

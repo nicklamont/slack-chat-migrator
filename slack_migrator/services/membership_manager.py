@@ -70,32 +70,29 @@ def _collect_user_membership_data(  # noqa: C901
             with open(jf) as f:
                 msgs = json.load(f)
             for m in msgs:
-                # Track users who sent messages
-                if m.get("type") == "message" and "user" in m and m["user"]:
-                    user_id = m["user"]
-                    timestamp = slack_ts_to_rfc3339(m["ts"])
+                if m.get("type") != "message":
+                    continue
 
+                # Track users who sent messages (all message types)
+                user_id = m.get("user")
+                if user_id:
+                    timestamp = slack_ts_to_rfc3339(m["ts"])
                     if user_id not in user_membership:
                         user_membership[user_id] = {
                             "join_time": None,
                             "leave_time": None,
-                            "active": True,  # Assume active by default
+                            "active": True,
                             "first_message_time": timestamp,
                         }
-                        active_users.add(user_id)  # Initially mark as active
-                    else:
-                        # Track earliest message time
-                        if timestamp < user_membership[user_id].get(
-                            "first_message_time", timestamp
-                        ):
-                            user_membership[user_id]["first_message_time"] = timestamp
+                        active_users.add(user_id)
+                    elif timestamp < user_membership[user_id].get(
+                        "first_message_time", timestamp
+                    ):
+                        user_membership[user_id]["first_message_time"] = timestamp
 
                 # Check for join/leave messages
-                if (
-                    m.get("type") == "message"
-                    and m.get("subtype") == CHANNEL_JOIN_SUBTYPE
-                    and "user" in m
-                ):
+                subtype = m.get("subtype")
+                if subtype == CHANNEL_JOIN_SUBTYPE and "user" in m:
                     user_id = m["user"]
                     timestamp = slack_ts_to_rfc3339(m["ts"])
                     if user_id not in user_membership:
@@ -105,34 +102,27 @@ def _collect_user_membership_data(  # noqa: C901
                             "active": True,
                             "first_message_time": None,
                         }
-                        active_users.add(user_id)  # Add to active users
-                    else:
-                        # Update join time if it's earlier than existing
-                        if (
-                            not user_membership[user_id]["join_time"]
-                            or timestamp < user_membership[user_id]["join_time"]
-                        ):
-                            user_membership[user_id]["join_time"] = timestamp
-                            user_membership[user_id]["active"] = True
-                            active_users.add(user_id)  # Mark as active
+                        active_users.add(user_id)
+                    elif (
+                        not user_membership[user_id]["join_time"]
+                        or timestamp < user_membership[user_id]["join_time"]
+                    ):
+                        user_membership[user_id]["join_time"] = timestamp
+                        user_membership[user_id]["active"] = True
+                        active_users.add(user_id)
 
-                elif (
-                    m.get("type") == "message"
-                    and m.get("subtype") == CHANNEL_LEAVE_SUBTYPE
-                    and "user" in m
-                ):
+                elif subtype == CHANNEL_LEAVE_SUBTYPE and "user" in m:
                     user_id = m["user"]
                     timestamp = slack_ts_to_rfc3339(m["ts"])
-                    if user_id in user_membership:
-                        # Update leave time if it's later than existing
-                        if (
-                            not user_membership[user_id]["leave_time"]
-                            or timestamp > user_membership[user_id]["leave_time"]
-                        ):
-                            user_membership[user_id]["leave_time"] = timestamp
-                            user_membership[user_id]["active"] = False
-                            if user_id in active_users:
-                                active_users.remove(user_id)  # Remove from active users
+                    if user_id not in user_membership:
+                        continue
+                    if (
+                        not user_membership[user_id]["leave_time"]
+                        or timestamp > user_membership[user_id]["leave_time"]
+                    ):
+                        user_membership[user_id]["leave_time"] = timestamp
+                        user_membership[user_id]["active"] = False
+                        active_users.discard(user_id)
         except (OSError, json.JSONDecodeError) as e:
             log_with_context(
                 logging.WARNING,
@@ -370,7 +360,7 @@ def _add_historical_members_batch(
             )
 
             # Use the admin user for adding members
-            migrator.chat.spaces().members().create(  # type: ignore[union-attr]
+            migrator.chat.spaces().members().create(
                 parent=space, body=membership_body
             ).execute()
 
@@ -535,14 +525,14 @@ def _collect_active_user_emails(
         if not migrator.dry_run:
             try:
                 # Get current space settings
-                space_info = migrator.chat.spaces().get(name=space).execute()  # type: ignore[union-attr]
+                space_info = migrator.chat.spaces().get(name=space).execute()
                 external_users_allowed = space_info.get("externalUserAllowed", False)
 
                 # If external users are not allowed, update the space
                 if not external_users_allowed:
                     update_body = {"externalUserAllowed": True}
                     update_mask = "externalUserAllowed"
-                    migrator.chat.spaces().patch(  # type: ignore[union-attr]
+                    migrator.chat.spaces().patch(
                         name=space, updateMask=update_mask, body=update_body
                     ).execute()
                     log_with_context(
@@ -639,7 +629,7 @@ def _add_regular_members_batch(
 
             # API request details are already logged by API utilities
             # Use the admin user for adding members
-            migrator.chat.spaces().members().create(  # type: ignore[union-attr]
+            migrator.chat.spaces().members().create(
                 parent=space, body=membership_body
             ).execute()
 
@@ -719,6 +709,60 @@ def _add_regular_members_batch(
     return added_count
 
 
+def _find_admin_user_id(
+    migrator: SlackToChatMigrator, admin_email: str, channel: str
+) -> str | None:
+    """Look up the workspace admin's Slack user ID from the user map.
+
+    Args:
+        migrator: The migrator with user_map.
+        admin_email: The admin's email address.
+        channel: Channel name for log context.
+
+    Returns:
+        The Slack user ID if found, else None.
+    """
+    for slack_user_id, email in migrator.user_map.items():
+        if email.lower() == admin_email.lower():
+            log_with_context(
+                logging.DEBUG,
+                f"Found Slack user ID for admin: {slack_user_id}",
+                channel=channel,
+            )
+            return slack_user_id
+    log_with_context(
+        logging.DEBUG,
+        f"Workspace admin ({admin_email}) was not found in Slack user map",
+        channel=channel,
+    )
+    return None
+
+
+def _find_admin_membership(
+    members: list[dict[str, Any]], admin_email: str
+) -> str | None:
+    """Find the admin's membership resource name in the members list.
+
+    Args:
+        members: List of membership dicts from the Chat API.
+        admin_email: The admin's email address.
+
+    Returns:
+        The membership resource name if found, else None.
+    """
+    for member in members:
+        member_name = member.get("member", {}).get("name", "")
+        if (
+            member_name == f"users/{admin_email}"
+            or member_name.lower() == f"users/{admin_email.lower()}"
+        ):
+            return member.get("name")
+        member_email = member.get("member", {}).get("email", "")
+        if member_email and member_email.lower() == admin_email.lower():
+            return member.get("name")
+    return None
+
+
 def _verify_and_handle_admin(
     migrator: SlackToChatMigrator,
     space: str,
@@ -745,121 +789,72 @@ def _verify_and_handle_admin(
             logging.DEBUG, f"Verifying members added to space {space}", channel=channel
         )
 
-        # List members to verify they were added
-        members_result = migrator.chat.spaces().members().list(parent=space).execute()  # type: ignore[union-attr]
+        members_result = migrator.chat.spaces().members().list(parent=space).execute()
         members = members_result.get("memberships", [])
-        actual_member_count = len(members)
 
-        # Just log the count, detailed API response is already logged by the API utilities
         log_with_context(
             logging.DEBUG,
-            f"Space {space} has {actual_member_count} members after adding {added_count} regular members",
+            f"Space {space} has {len(members)} members after adding {added_count} regular members",
             channel=channel,
         )
 
-        # Check if workspace admin needs to be removed because they weren't in the original channel
         admin_email = migrator.workspace_admin
-        admin_user_id = None
-
         log_with_context(
             logging.DEBUG,
             f"Checking if workspace admin ({admin_email}) should be in space {space} for channel {channel}",
             channel=channel,
         )
 
-        # Look up the admin's Slack user ID if they had one
-        for slack_user_id, email in migrator.user_map.items():
-            if email.lower() == admin_email.lower():
-                admin_user_id = slack_user_id
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found Slack user ID for admin: {slack_user_id}",
-                    channel=channel,
-                )
-                break
+        # Look up admin's Slack user ID
+        admin_user_id = _find_admin_user_id(migrator, admin_email, channel)
 
-        if not admin_user_id:
-            log_with_context(
-                logging.DEBUG,
-                f"Workspace admin ({admin_email}) was not found in Slack user map",
-                channel=channel,
-            )
-
-        # If admin is not in the active users list for this channel, they should be removed
-        admin_in_channel = False
+        # If admin is in the original channel, keep them — nothing to do
         if admin_user_id and admin_user_id in active_users:
-            admin_in_channel = True
             log_with_context(
                 logging.DEBUG,
                 f"Workspace admin ({admin_email}) was in the original Slack channel - will keep in space",
                 channel=channel,
             )
-        else:
+            return
+
+        log_with_context(
+            logging.DEBUG,
+            f"Workspace admin ({admin_email}) was NOT in the original Slack channel - will attempt removal",
+            channel=channel,
+        )
+
+        admin_membership = _find_admin_membership(members, admin_email)
+        if not admin_membership:
             log_with_context(
                 logging.DEBUG,
-                f"Workspace admin ({admin_email}) was NOT in the original Slack channel - will attempt removal",
+                f"Workspace admin ({admin_email}) membership not found in space {space}",
                 channel=channel,
             )
+            log_with_context(
+                logging.DEBUG,
+                f"Members in space {space}: {[m.get('member', {}).get('name', '') for m in members]}",
+                channel=channel,
+            )
+            return
 
-        if not admin_in_channel:
-            # Find the admin in the members list to get their membership ID
-            admin_membership = None
-            for member in members:
-                # Check member name for exact admin email match
-                member_name = member.get("member", {}).get("name", "")
-                # Check both exact match "users/{email}" and case-insensitive match
-                if (
-                    member_name == f"users/{admin_email}"
-                    or member_name.lower() == f"users/{admin_email.lower()}"
-                ):
-                    admin_membership = member.get("name")
-                    break
-
-                # Also check for email field which might be present instead of name
-                member_email = member.get("member", {}).get("email", "")
-                if member_email and (
-                    member_email == admin_email
-                    or member_email.lower() == admin_email.lower()
-                ):
-                    admin_membership = member.get("name")
-                    break
-
-            if admin_membership:
-                log_with_context(
-                    logging.INFO,
-                    f"Removing workspace admin ({admin_email}) from space {space} because they weren't in the original Slack channel {channel}",
-                    channel=channel,
-                )
-
-                # Remove the admin from the space
-                try:
-                    migrator.chat.spaces().members().delete(  # type: ignore[union-attr]
-                        name=admin_membership
-                    ).execute()
-                    log_with_context(
-                        logging.INFO,
-                        f"Successfully removed workspace admin from space {space}",
-                        channel=channel,
-                    )
-                except HttpError as e:
-                    log_with_context(
-                        logging.WARNING,
-                        f"Failed to remove workspace admin from space {space}: {e}",
-                        channel=channel,
-                    )
-            else:
-                log_with_context(
-                    logging.DEBUG,  # Changed from DEBUG to INFO for better visibility
-                    f"Workspace admin ({admin_email}) membership not found in space {space}",
-                    channel=channel,
-                )
-
-                # Log the members we found for debugging
-                log_with_context(
-                    logging.DEBUG,
-                    f"Members in space {space}: {[member.get('member', {}).get('name', '') for member in members]}",
-                    channel=channel,
-                )
+        log_with_context(
+            logging.INFO,
+            f"Removing workspace admin ({admin_email}) from space {space} because they weren't in the original Slack channel {channel}",
+            channel=channel,
+        )
+        try:
+            migrator.chat.spaces().members().delete(name=admin_membership).execute()
+            log_with_context(
+                logging.INFO,
+                f"Successfully removed workspace admin from space {space}",
+                channel=channel,
+            )
+        except HttpError as e:
+            log_with_context(
+                logging.WARNING,
+                f"Failed to remove workspace admin from space {space}: {e}",
+                channel=channel,
+            )
     except HttpError as e:
         log_with_context(
             logging.WARNING,
@@ -890,13 +885,17 @@ def _update_folder_permissions(
     ):
         return
 
+    root_folder_id = migrator.file_handler._root_folder_id
+    if root_folder_id is None:
+        return
+
     folder_id = None
 
     try:
         # Get the channel folder if it exists
         folder_id = migrator.file_handler.folder_manager.get_channel_folder_id(
             channel,
-            migrator.file_handler._root_folder_id,  # type: ignore[arg-type]
+            root_folder_id,
             migrator.file_handler._shared_drive_id,
         )
 

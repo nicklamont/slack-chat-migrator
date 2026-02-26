@@ -179,7 +179,7 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
     else:
         try:
             # Create the space in import mode
-            space = migrator.chat.spaces().create(body=body).execute()  # type: ignore[union-attr]
+            space = migrator.chat.spaces().create(body=body).execute()
             space_name = space["name"]
 
             # Increment the spaces created counter
@@ -221,7 +221,7 @@ def create_space(migrator: SlackToChatMigrator, channel: str) -> str:
 
                         update_mask = "spaceDetails"
 
-                        migrator.chat.spaces().patch(  # type: ignore[union-attr]
+                        migrator.chat.spaces().patch(
                             name=space_name, updateMask=update_mask, body=space_details
                         ).execute()
 

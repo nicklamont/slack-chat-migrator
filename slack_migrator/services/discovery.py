@@ -18,202 +18,204 @@ if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
 
 
-def discover_existing_spaces(  # noqa: C901
+def _fetch_all_migration_spaces(
     migrator: SlackToChatMigrator,
-) -> tuple[dict[str, str], dict[str, list[dict[str, Any]]]]:
-    """
-    Query Google Chat API to find spaces that match our Slack channel naming pattern.
-
-    This function searches for spaces that appear to have been created by this migration tool
-    by looking for spaces with names matching the pattern "Slack #<channel-name>".
-
-    If multiple spaces have the same channel name, this will detect the conflict and
-    report the conflicting spaces to help users disambiguate in the config.
+) -> dict[str, list[dict[str, Any]]]:
+    """Paginate through Google Chat API to find spaces matching the migration pattern.
 
     Args:
-        migrator: The SlackToChatMigrator instance
+        migrator: The migrator providing API access and channel name mappings.
 
     Returns:
-        tuple: (space_mappings, duplicate_spaces)
-            - space_mappings: Dict mapping channel names to Google Chat space names
-            - duplicate_spaces: Dict mapping channel names to lists of conflicting space information
+        Dict mapping channel names to lists of space info dicts.
+
+    Raises:
+        HttpError: If the API call fails.
+    """
+    all_spaces_by_channel: dict[str, list[dict[str, Any]]] = {}
+    prefix = SPACE_NAME_PREFIX
+
+    page_token = None
+    while True:
+        request = migrator.chat.spaces().list(
+            pageSize=SPACES_PAGE_SIZE, pageToken=page_token
+        )
+        response = request.execute()
+
+        for space in response.get("spaces", []):
+            display_name = space.get("displayName", "")
+            space_name = space.get("name", "")
+            space_id = space_name.split("/")[-1] if space_name else ""
+
+            if not (display_name and display_name.startswith(prefix)):
+                continue
+
+            channel_name = display_name[len(prefix) :].strip()
+            if not channel_name:
+                continue
+
+            space_info = {
+                "display_name": display_name,
+                "space_name": space_name,
+                "space_id": space_id,
+                "space_type": space.get("spaceType", ""),
+                "member_count": 0,
+                "create_time": space.get("createTime", "Unknown"),
+            }
+
+            if channel_name not in all_spaces_by_channel:
+                all_spaces_by_channel[channel_name] = []
+            all_spaces_by_channel[channel_name].append(space_info)
+
+            # First-seen ID mapping
+            channel_id = migrator.channel_name_to_id.get(channel_name, "")
+            if channel_id and channel_id not in migrator.state.channel_id_to_space_id:
+                migrator.state.channel_id_to_space_id[channel_id] = space_id
+
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+        time.sleep(0.2)
+
+    return all_spaces_by_channel
+
+
+def _resolve_duplicate_spaces(
+    migrator: SlackToChatMigrator,
+    all_spaces_by_channel: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, str], dict[str, list[dict[str, Any]]]]:
+    """Separate unique and duplicate space mappings, enriching duplicates with member counts.
+
+    Args:
+        migrator: The migrator providing API access and state.
+        all_spaces_by_channel: All discovered spaces grouped by channel name.
+
+    Returns:
+        Tuple of (space_mappings, duplicate_spaces).
+    """
+    space_mappings: dict[str, str] = {}
+    duplicate_spaces: dict[str, list[dict[str, Any]]] = {}
+
+    for channel_name, spaces in all_spaces_by_channel.items():
+        # Default to first space found
+        space_mappings[channel_name] = spaces[0]["space_name"]
+
+        if len(spaces) == 1:
+            channel_id = migrator.channel_name_to_id.get(channel_name, "")
+            if channel_id:
+                migrator.state.channel_id_to_space_id[channel_id] = spaces[0][
+                    "space_id"
+                ]
+            continue
+
+        # Duplicate — enrich with member counts for disambiguation
+        duplicate_spaces[channel_name] = spaces
+        for space_info in spaces:
+            try:
+                members_response = (
+                    migrator.chat.spaces()
+                    .members()
+                    .list(parent=space_info["space_name"], pageSize=1)
+                    .execute()
+                )
+                if "memberships" in members_response:
+                    count = len(members_response.get("memberships", []))
+                    space_info["member_count"] = (
+                        f"{count}+" if "nextPageToken" in members_response else count
+                    )
+            except HttpError as e:
+                log_with_context(
+                    logging.DEBUG,
+                    f"Error fetching members for space {space_info['space_name']}: {e}",
+                )
+
+        # Remove ambiguous ID mapping
+        channel_id = migrator.channel_name_to_id.get(channel_name, "")
+        if channel_id and channel_id in migrator.state.channel_id_to_space_id:
+            log_with_context(
+                logging.WARNING,
+                f"Removing ambiguous ID mapping for channel {channel_name} (ID: {channel_id})",
+            )
+            del migrator.state.channel_id_to_space_id[channel_id]
+
+    return space_mappings, duplicate_spaces
+
+
+def _log_duplicate_spaces(
+    duplicate_spaces: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Log details about channels with multiple matching spaces.
+
+    Args:
+        duplicate_spaces: Dict mapping channel names to lists of conflicting space info.
+    """
+    if not duplicate_spaces:
+        return
+
+    log_with_context(
+        logging.WARNING,
+        f"Found {len(duplicate_spaces)} channels with duplicate spaces: {', '.join(duplicate_spaces.keys())}",
+    )
+    for channel_name, spaces in duplicate_spaces.items():
+        log_with_context(
+            logging.WARNING,
+            f"Channel '{channel_name}' has {len(spaces)} duplicate spaces:",
+        )
+        for i, space_info in enumerate(spaces):
+            log_with_context(
+                logging.WARNING,
+                f"  Space {i + 1}: {space_info['display_name']} (ID: {space_info['space_id']}, "
+                f"Type: {space_info['space_type']}, Members: {space_info['member_count']}, "
+                f"Created: {space_info['create_time']})",
+            )
+
+
+def discover_existing_spaces(
+    migrator: SlackToChatMigrator,
+) -> tuple[dict[str, str], dict[str, list[dict[str, Any]]]]:
+    """Query Google Chat API to find spaces matching the migration naming pattern.
+
+    Searches for spaces with names matching "Slack #<channel-name>". Detects
+    and reports duplicate spaces to help users disambiguate via config.
+
+    Args:
+        migrator: The SlackToChatMigrator instance.
+
+    Returns:
+        Tuple of (space_mappings, duplicate_spaces) where space_mappings maps
+        channel names to space resource names and duplicate_spaces maps channel
+        names to lists of conflicting space info dicts.
     """
     log_with_context(
         logging.INFO,
         "Discovering existing Google Chat spaces that may have been created by previous migrations",
-        channel=None,  # This is a global operation, not channel-specific
     )
 
-    # Track all spaces by channel name to detect duplicates
-    all_spaces_by_channel: dict[str, list[dict[str, Any]]] = {}
     space_mappings: dict[str, str] = {}
     duplicate_spaces: dict[str, list[dict[str, Any]]] = {}
 
-    # Initialize the channel_id_to_space_id mapping if it doesn't exist
-    if not hasattr(migrator.state, "channel_id_to_space_id"):
-        migrator.state.channel_id_to_space_id = {}
-
-    spaces_found = 0
-    prefix = SPACE_NAME_PREFIX
-
     try:
-        # Paginate through all spaces accessible to the service account
-        page_token = None
-        while True:
-            request = migrator.chat.spaces().list(  # type: ignore[union-attr]
-                pageSize=SPACES_PAGE_SIZE, pageToken=page_token
-            )
-            response = request.execute()
+        all_spaces_by_channel = _fetch_all_migration_spaces(migrator)
+        space_mappings, duplicate_spaces = _resolve_duplicate_spaces(
+            migrator, all_spaces_by_channel
+        )
+        _log_duplicate_spaces(duplicate_spaces)
 
-            # Process each space
-            for space in response.get("spaces", []):
-                display_name = space.get("displayName", "")
-                space_name = space.get(
-                    "name", ""
-                )  # This is the format "spaces/{space_id}"
-                space_id = space_name.split("/")[-1] if space_name else ""
-                space_type = space.get("spaceType", "")
-
-                # Check if this is a space created by our migration tool
-                if display_name and display_name.startswith(prefix):
-                    # Extract the channel name from the display name
-                    channel_name = display_name[len(prefix) :].strip()
-
-                    if channel_name:
-                        # Gather additional metadata for potential disambiguation
-                        space_info = {
-                            "display_name": display_name,
-                            "space_name": space_name,
-                            "space_id": space_id,
-                            "space_type": space_type,
-                            "member_count": 0,  # Will be populated later if needed
-                            "create_time": space.get("createTime", "Unknown"),
-                        }
-
-                        # Track all spaces for this channel name
-                        if channel_name not in all_spaces_by_channel:
-                            all_spaces_by_channel[channel_name] = []
-
-                        all_spaces_by_channel[channel_name].append(space_info)
-                        spaces_found += 1
-
-                        # Get channel ID directly from our mapping
-                        channel_id = migrator.channel_name_to_id.get(channel_name, "")
-                        if channel_id:
-                            # Associate the space ID with this channel ID
-                            # (only for first occurrence - duplicates will be handled later)
-                            if channel_id not in migrator.state.channel_id_to_space_id:
-                                migrator.state.channel_id_to_space_id[channel_id] = (
-                                    space_id
-                                )
-
-            # Get the next page token
-            page_token = response.get("nextPageToken")
-            if not page_token:
-                break
-
-            # Add a small delay to avoid rate limiting
-            time.sleep(0.2)
-
-        # Now process the collected spaces and identify duplicates
-        for channel_name, spaces in all_spaces_by_channel.items():
-            if len(spaces) == 1:
-                # No duplicates, just map the channel to the space
-                space_mappings[channel_name] = spaces[0]["space_name"]
-
-                # Try to create an ID-based mapping as well
-                channel_id = migrator.channel_name_to_id.get(channel_name, "")
-                if channel_id:
-                    # This will overwrite any previous entry
-                    migrator.state.channel_id_to_space_id[channel_id] = spaces[0][
-                        "space_id"
-                    ]
-            else:
-                # Multiple spaces with the same channel name
-                # Store the first one by default, but also track the conflict
-                space_mappings[channel_name] = spaces[0]["space_name"]
-                duplicate_spaces[channel_name] = spaces
-
-                # Get more metadata for each space to help with disambiguation
-                for space_info in spaces:
-                    try:
-                        # Try to get member count for each duplicate space
-                        members_response = (
-                            migrator.chat.spaces()  # type: ignore[union-attr]
-                            .members()
-                            .list(
-                                parent=space_info["space_name"],
-                                pageSize=1,  # Just need the count, not the actual members
-                            )
-                            .execute()
-                        )
-
-                        # Store the member count if available
-                        if "memberships" in members_response:
-                            space_info["member_count"] = len(
-                                members_response.get("memberships", [])
-                            )
-
-                            # If we need more members, we could paginate here
-                            if "nextPageToken" in members_response:
-                                space_info["member_count"] = (
-                                    str(space_info["member_count"]) + "+"
-                                )
-                    except HttpError as e:
-                        # Just log the error and continue
-                        log_with_context(
-                            logging.DEBUG,
-                            f"Error fetching members for space {space_info['space_name']}: {e}",
-                        )
-
-                # For channels with duplicate spaces, remove any ID-based mappings
-                # until the user disambiguates via space_mapping config
-                channel_id = migrator.channel_name_to_id.get(channel_name, "")
-                if channel_id and channel_id in migrator.state.channel_id_to_space_id:
-                    log_with_context(
-                        logging.WARNING,
-                        f"Removing ambiguous ID mapping for channel {channel_name} (ID: {channel_id})",
-                    )
-                    del migrator.state.channel_id_to_space_id[channel_id]
-
-        # Log duplicate spaces
-        if duplicate_spaces:
-            log_with_context(
-                logging.WARNING,
-                f"Found {len(duplicate_spaces)} channels with duplicate spaces: {', '.join(duplicate_spaces.keys())}",
-            )
-            for channel_name, spaces in duplicate_spaces.items():
-                log_with_context(
-                    logging.WARNING,
-                    f"Channel '{channel_name}' has {len(spaces)} duplicate spaces:",
-                )
-                for i, space_info in enumerate(spaces):
-                    log_with_context(
-                        logging.WARNING,
-                        f"  Space {i + 1}: {space_info['display_name']} (ID: {space_info['space_id']}, "
-                        f"Type: {space_info['space_type']}, Members: {space_info['member_count']}, "
-                        f"Created: {space_info['create_time']})",
-                    )
+        spaces_found = sum(len(s) for s in all_spaces_by_channel.values())
+        log_with_context(
+            logging.INFO,
+            f"Found {spaces_found} existing spaces matching migration pattern across {len(all_spaces_by_channel)} channels",
+        )
+        log_with_context(
+            logging.INFO,
+            f"Created {len(migrator.state.channel_id_to_space_id)} channel ID to space ID mappings",
+        )
 
     except HttpError as e:
         log_with_context(
             logging.WARNING,
             f"Error discovering spaces: {e}",
             error=str(e),
-            channel=None,  # Global operation
-        )
-
-    log_with_context(
-        logging.INFO,
-        f"Found {spaces_found} existing spaces matching migration pattern across {len(all_spaces_by_channel)} channels",
-        channel=None,  # Global operation
-    )
-
-    if hasattr(migrator.state, "channel_id_to_space_id"):
-        log_with_context(
-            logging.INFO,
-            f"Created {len(migrator.state.channel_id_to_space_id)} channel ID to space ID mappings",
-            channel=None,  # Global operation
         )
 
     return space_mappings, duplicate_spaces
@@ -247,7 +249,7 @@ def get_last_message_timestamp(
     try:
         # We only need the most recent message, so limit to 1 result sorted by createTime desc
         request = (
-            migrator.chat.spaces()  # type: ignore[union-attr]
+            migrator.chat.spaces()
             .messages()
             .list(parent=space, pageSize=1, orderBy="createTime desc")
         )
