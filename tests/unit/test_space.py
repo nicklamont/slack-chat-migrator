@@ -455,8 +455,12 @@ class TestAddUsersToSpace:
         (ch_dir / "2024-01-01.json").write_text(json.dumps(messages))
         return ch_dir
 
-    def test_dry_run_returns_early(self, tmp_path):
-        """In dry run mode, no API calls are made."""
+    @patch("slack_migrator.services.membership_manager.time.sleep")
+    @patch(
+        "slack_migrator.services.membership_manager.tqdm", side_effect=lambda x, **kw: x
+    )
+    def test_dry_run_processes_via_noop_service(self, mock_tqdm, mock_sleep, tmp_path):
+        """In dry run mode, API calls flow through the no-op service layer."""
         msgs = [{"type": "message", "user": "U001", "ts": "1700000000.000000"}]
         self._setup_channel_dir(tmp_path, "dev", msgs)
 
@@ -466,11 +470,13 @@ class TestAddUsersToSpace:
             export_root=tmp_path,
             dry_run=True,
         )
+        ur.get_internal_email.return_value = "alice@example.com"
+        ur.is_external_user.return_value = False
 
         add_users_to_space(ctx, state, chat, ur, "spaces/dev", "dev")
 
-        # No API calls in dry run
-        chat.spaces().members().create.assert_not_called()
+        # With DI, dry-run calls flow through mock (DryRunChatService in prod)
+        chat.spaces().members().create.assert_called()
 
     @patch("slack_migrator.services.membership_manager.time.sleep")
     @patch(
@@ -749,8 +755,12 @@ class TestAddUsersToSpace:
 class TestAddRegularMembers:
     """Tests for add_regular_members()."""
 
-    def test_dry_run_returns_early(self):
-        """In dry run mode, no API calls are made."""
+    @patch("slack_migrator.services.membership_manager.time.sleep")
+    @patch(
+        "slack_migrator.services.membership_manager.tqdm", side_effect=lambda x, **kw: x
+    )
+    def test_dry_run_processes_via_noop_service(self, mock_tqdm, mock_sleep):
+        """In dry run mode, API calls flow through the no-op service layer."""
         ctx, state, chat, ur = _make_membership_deps(
             user_map={"U001": "alice@example.com"},
             dry_run=True,
@@ -758,10 +768,15 @@ class TestAddRegularMembers:
         state.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "alice@example.com"
         ur.is_external_user.return_value = False
+        # Mock the members list for _verify_and_handle_admin
+        chat.spaces().members().list.return_value.execute.return_value = {
+            "memberships": []
+        }
 
         add_regular_members(ctx, state, chat, ur, None, "spaces/dev", "dev")
 
-        chat.spaces().members().create.assert_not_called()
+        # With DI, dry-run calls flow through mock (DryRunChatService in prod)
+        chat.spaces().members().create.assert_called()
 
     @patch("slack_migrator.services.membership_manager.time.sleep")
     @patch(

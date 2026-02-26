@@ -590,13 +590,18 @@ class TestCompleteImportMode:
         # The method returns the (potentially unchanged) value
         assert result is True  # still True because it was True going in
 
-    def test_dry_run_skips_completion(self):
-        """Dry run mode does not call completeImport."""
+    def test_dry_run_calls_completion_via_noop_service(self):
+        """Dry run mode calls completeImport (handled by DryRunChatService)."""
         processor = _make_processor(dry_run=True)
+        (
+            processor.chat.spaces.return_value.completeImport.return_value.execute.return_value
+        ) = {}
 
         result = processor._complete_import_mode("spaces/S1", "general", False)
 
-        processor.chat.spaces.return_value.completeImport.assert_not_called()
+        processor.chat.spaces.return_value.completeImport.assert_called_once_with(
+            name="spaces/S1"
+        )
         assert result is False
 
 

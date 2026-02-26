@@ -527,8 +527,7 @@ def load_existing_space_mappings(  # noqa: C901
 
     except HttpError as e:
         log_with_context(logging.ERROR, f"Failed to load existing space mappings: {e}")
-        if not ctx.dry_run:
-            raise
+        raise
 
 
 def load_space_mappings(

@@ -141,10 +141,12 @@ def process_reactions_batch(  # noqa: C901
     # Always increment the reaction count, regardless of dry run mode
     state.migration_summary["reactions_created"] += reaction_count
 
+    # Keep dry-run check: DryRunChatService doesn't support new_batch_http_request()
+    # which is used below for batched reaction processing
     if ctx.dry_run:
         log_with_context(
             logging.DEBUG,
-            f"[DRY RUN] Would add {reaction_count} reactions from {len(requests_by_user)} users to message {message_id}",
+            f"{ctx.log_prefix}Would add {reaction_count} reactions from {len(requests_by_user)} users to message {message_id}",
             message_id=message_id,
             channel=getattr(state, "current_channel", None),
         )

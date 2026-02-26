@@ -157,7 +157,7 @@ def create_space(
 
     log_with_context(
         logging.DEBUG,
-        f"{'[DRY RUN] ' if ctx.dry_run else ''}Creating import mode space for {display_name}",
+        f"{ctx.log_prefix}Creating import mode space for {display_name}",
         channel=channel,
     )
 
@@ -171,7 +171,7 @@ def create_space(
         body["externalUserAllowed"] = True
         log_with_context(
             logging.INFO,
-            f"{'[DRY RUN] ' if ctx.dry_run else ''}Enabling external user access for channel {channel}",
+            f"{ctx.log_prefix}Enabling external user access for channel {channel}",
             channel=channel,
         )
 

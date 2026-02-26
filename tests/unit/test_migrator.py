@@ -717,7 +717,7 @@ class TestInitializeApiServices:
 
     @patch("slack_migrator.core.migrator.get_gcp_service")
     def test_services_initialized(self, mock_gcp_service, tmp_path):
-        m = _make_migrator(tmp_path)
+        m = _make_migrator(tmp_path, dry_run=False)
         mock_chat = MagicMock()
         mock_drive = MagicMock()
         mock_gcp_service.side_effect = [mock_chat, mock_drive]
@@ -728,6 +728,20 @@ class TestInitializeApiServices:
 
         assert m.chat is mock_chat
         assert m.drive is mock_drive
+        assert m._api_services_initialized is True
+
+    def test_dry_run_uses_noop_services(self, tmp_path):
+        """In dry-run mode, DryRunChatService and DryRunDriveService are injected."""
+        from slack_migrator.services.chat.dry_run_service import DryRunChatService
+        from slack_migrator.services.drive.dry_run_service import DryRunDriveService
+
+        m = _make_migrator(tmp_path, dry_run=True)
+
+        with patch.object(m, "_initialize_dependent_services"):
+            m._initialize_api_services()
+
+        assert isinstance(m.chat, DryRunChatService)
+        assert isinstance(m.drive, DryRunDriveService)
         assert m._api_services_initialized is True
 
     @patch("slack_migrator.core.migrator.get_gcp_service")

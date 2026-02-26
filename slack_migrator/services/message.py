@@ -130,13 +130,9 @@ def _should_skip_message(  # noqa: C901
         state.migration_summary["messages_created"] += 1
 
     if ctx.dry_run:
-        mode_prefix = "[DRY RUN]"
-        if is_update_mode:
-            mode_prefix = "[DRY RUN] [UPDATE MODE]"
-
         log_with_context(
             logging.DEBUG,
-            f"{mode_prefix} Would send message TS={ts} from user={user_id}",
+            f"{ctx.log_prefix}Would send message TS={ts} from user={user_id}",
             channel=channel,
             ts=ts,
             user_id=user_id,
@@ -935,13 +931,9 @@ def track_message_stats(  # noqa: C901
         if ctx.dry_run:
             state.migration_summary["reactions_created"] += reaction_count
 
-            mode_prefix = "[DRY RUN]"
-            if is_update_mode:
-                mode_prefix = "[DRY RUN] [UPDATE MODE]"
-
             log_with_context(
                 logging.DEBUG,
-                f"{mode_prefix} Counted {reaction_count} reactions for message {ts}",
+                f"{ctx.log_prefix}Counted {reaction_count} reactions for message {ts}",
                 channel=channel,
                 ts=ts,
             )
@@ -1024,14 +1016,9 @@ def send_intro(
     # Log the action
     log_with_context(
         logging.INFO,
-        f"{'[DRY RUN] ' if ctx.dry_run else ''}Sending intro message to space {space} for channel {channel}",
+        f"{ctx.log_prefix}Sending intro message to space {space} for channel {channel}",
         channel=channel,
     )
-
-    if ctx.dry_run:
-        # In dry run mode, just count the message
-        state.migration_summary["messages_created"] += 1
-        return
 
     # Create the message
     try:

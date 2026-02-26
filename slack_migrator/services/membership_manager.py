@@ -443,7 +443,7 @@ def add_users_to_space(
     """
     log_with_context(
         logging.DEBUG,
-        f"{'[DRY RUN] ' if ctx.dry_run else ''}Adding historical memberships for channel {channel}",
+        f"{ctx.log_prefix}Adding historical memberships for channel {channel}",
         channel=channel,
     )
 
@@ -452,15 +452,11 @@ def add_users_to_space(
     # Log what we're doing
     log_with_context(
         logging.DEBUG,
-        f"{'[DRY RUN] ' if ctx.dry_run else ''}Adding {len(user_membership)} users to space {space} for channel {channel}",
+        f"{ctx.log_prefix}Adding {len(user_membership)} users to space {space} for channel {channel}",
         channel=channel,
         space=space,
         user_count=len(user_membership),
     )
-
-    if ctx.dry_run:
-        # In dry run mode, just count and return
-        return
 
     # Check if the workspace admin is in the active users
     # Google Chat automatically adds the creator as a member, but we only want them if they were in the channel
@@ -536,34 +532,33 @@ def _collect_active_user_emails(
     if has_external_users:
         log_with_context(
             logging.INFO,
-            f"{'[DRY RUN] ' if ctx.dry_run else ''}Enabling external user access for space {space} before adding members",
+            f"{ctx.log_prefix}Enabling external user access for space {space} before adding members",
             channel=channel,
         )
 
-        if not ctx.dry_run:
-            try:
-                # Get current space settings
-                space_info = chat.spaces().get(name=space).execute()
-                external_users_allowed = space_info.get("externalUserAllowed", False)
+        try:
+            # Get current space settings
+            space_info = chat.spaces().get(name=space).execute()
+            external_users_allowed = space_info.get("externalUserAllowed", False)
 
-                # If external users are not allowed, update the space
-                if not external_users_allowed:
-                    update_body = {"externalUserAllowed": True}
-                    update_mask = "externalUserAllowed"
-                    chat.spaces().patch(
-                        name=space, updateMask=update_mask, body=update_body
-                    ).execute()
-                    log_with_context(
-                        logging.INFO,
-                        f"Successfully enabled external user access for space {space}",
-                        channel=channel,
-                    )
-            except HttpError as e:
+            # If external users are not allowed, update the space
+            if not external_users_allowed:
+                update_body = {"externalUserAllowed": True}
+                update_mask = "externalUserAllowed"
+                chat.spaces().patch(
+                    name=space, updateMask=update_mask, body=update_body
+                ).execute()
                 log_with_context(
-                    logging.WARNING,
-                    f"Failed to enable external user access for space {space}: {e}",
+                    logging.INFO,
+                    f"Successfully enabled external user access for space {space}",
                     channel=channel,
                 )
+        except HttpError as e:
+            log_with_context(
+                logging.WARNING,
+                f"Failed to enable external user access for space {space}: {e}",
+                channel=channel,
+            )
 
     return active_user_emails
 
@@ -889,7 +884,6 @@ def _verify_and_handle_admin(
 
 def _update_folder_permissions(
     file_handler: Any,
-    dry_run: bool,
     channel: str,
     active_user_emails: list[str],
 ) -> None:
@@ -901,7 +895,6 @@ def _update_folder_permissions(
 
     Args:
         file_handler: FileHandler instance (may be None).
-        dry_run: Whether this is a dry-run.
         channel: Slack channel name for folder lookup and log context.
         active_user_emails: Email addresses that should have folder access.
     """
@@ -926,19 +919,18 @@ def _update_folder_permissions(
             # Step 6: Update file permissions
             log_with_context(
                 logging.INFO,
-                f"{'[DRY RUN] ' if dry_run else ''}Step 6/6: Updating file permissions for {channel} folder to match {len(active_user_emails)} active members",
+                f"Step 6/6: Updating file permissions for {channel} folder to match {len(active_user_emails)} active members",
                 channel=channel,
                 folder_id=folder_id,
             )
 
-            if not dry_run:
-                # Update permissions to ensure only active members have access
-                file_handler.folder_manager.set_channel_folder_permissions(
-                    folder_id,
-                    channel,
-                    active_user_emails,
-                    file_handler._shared_drive_id,
-                )
+            # Update permissions to ensure only active members have access
+            file_handler.folder_manager.set_channel_folder_permissions(
+                folder_id,
+                channel,
+                active_user_emails,
+                file_handler._shared_drive_id,
+            )
     except HttpError as e:
         log_with_context(
             logging.WARNING,
@@ -1026,7 +1018,7 @@ def add_regular_members(
     active_users = state.active_users_by_channel[channel]
     log_with_context(
         logging.DEBUG,
-        f"{'[DRY RUN] ' if ctx.dry_run else ''}Adding {len(active_users)} regular members to space {space} for channel {channel}",
+        f"{ctx.log_prefix}Adding {len(active_users)} regular members to space {space} for channel {channel}",
         channel=channel,
     )
 
@@ -1034,14 +1026,10 @@ def add_regular_members(
         ctx, chat, user_resolver, space, channel, active_users
     )
 
-    # In dry run mode, just log and return
-    if ctx.dry_run:
-        return
-
     added_count = _add_regular_members_batch(
         ctx, state, chat, user_resolver, space, channel, active_users
     )
 
     _verify_and_handle_admin(ctx, chat, space, channel, active_users, added_count)
 
-    _update_folder_permissions(file_handler, ctx.dry_run, channel, active_user_emails)
+    _update_folder_permissions(file_handler, channel, active_user_emails)

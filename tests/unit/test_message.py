@@ -876,14 +876,16 @@ class TestSendIntro:
         chat.spaces.return_value.messages.return_value.create.assert_called_once()
         assert state.migration_summary["messages_created"] == 1
 
-    def test_dry_run_counts_but_does_not_call_api(self):
-        """In dry run, intro message is counted but not sent."""
+    @patch("slack_migrator.services.message.time")
+    def test_dry_run_sends_via_noop_service(self, mock_time):
+        """In dry run, intro message is sent (handled by DryRunChatService)."""
+        mock_time.time.return_value = 1700000000
         ctx, state, chat = self._setup(dry_run=True)
 
         send_intro(ctx, state, chat, "spaces/SPACE1", "general")
 
         assert state.migration_summary["messages_created"] == 1
-        chat.spaces.return_value.messages.return_value.create.return_value.execute.assert_not_called()
+        chat.spaces.return_value.messages.return_value.create.assert_called_once()
 
     def test_update_mode_skips_intro(self):
         """In update mode, intro messages are not resent."""

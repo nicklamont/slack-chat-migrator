@@ -23,11 +23,13 @@ from slack_migrator.core.migration_logging import (
     log_migration_success,
 )
 from slack_migrator.core.state import MigrationState
+from slack_migrator.services.chat.dry_run_service import DryRunChatService
 from slack_migrator.services.discovery import (
     load_existing_space_mappings,
     load_space_mappings,
     log_space_mapping_conflicts,
 )
+from slack_migrator.services.drive.dry_run_service import DryRunDriveService
 from slack_migrator.services.file import FileHandler
 from slack_migrator.services.message_attachments import MessageAttachmentProcessor
 from slack_migrator.services.user import generate_user_map
@@ -171,28 +173,35 @@ class SlackToChatMigrator:
         if self._api_services_initialized:
             return
 
-        log_with_context(
-            logging.INFO, "Initializing Google Chat and Drive API services..."
-        )
-
-        # Convert Path to str for API clients
-        creds_path_str = str(self.creds_path)
-        self.chat = get_gcp_service(
-            creds_path_str,
-            self.workspace_admin,
-            "chat",
-            "v1",
-            max_retries=self.config.max_retries,
-            retry_delay=self.config.retry_delay,
-        )
-        self.drive = get_gcp_service(
-            creds_path_str,
-            self.workspace_admin,
-            "drive",
-            "v3",
-            max_retries=self.config.max_retries,
-            retry_delay=self.config.retry_delay,
-        )
+        if self.dry_run:
+            log_with_context(
+                logging.INFO,
+                "Dry-run mode: using no-op Chat and Drive services",
+            )
+            self.chat = DryRunChatService(self.state)
+            self.drive = DryRunDriveService()
+        else:
+            log_with_context(
+                logging.INFO,
+                "Initializing Google Chat and Drive API services...",
+            )
+            creds_path_str = str(self.creds_path)
+            self.chat = get_gcp_service(
+                creds_path_str,
+                self.workspace_admin,
+                "chat",
+                "v1",
+                max_retries=self.config.max_retries,
+                retry_delay=self.config.retry_delay,
+            )
+            self.drive = get_gcp_service(
+                creds_path_str,
+                self.workspace_admin,
+                "drive",
+                "v3",
+                max_retries=self.config.max_retries,
+                retry_delay=self.config.retry_delay,
+            )
 
         # Create UserResolver now that chat is available — no two-phase init
         self.user_resolver = UserResolver(

@@ -328,13 +328,7 @@ class ChannelProcessor:
         channel_failures: list[str] = []
 
         # Create progress bar
-        progress_prefix = ""
-        if self.ctx.dry_run:
-            progress_prefix = "[DRY RUN] "
-        elif self.ctx.update_mode:
-            progress_prefix = "[UPDATE] "
-
-        progress_desc = f"{progress_prefix}Adding messages to {channel}"
+        progress_desc = f"{self.ctx.log_prefix}Adding messages to {channel}"
         pbar = tqdm(msgs, desc=progress_desc)
         for m in pbar:
             if m.get("type") != "message":
@@ -432,7 +426,7 @@ class ChannelProcessor:
         if (
             not channel_had_errors
             or completion_strategy == ImportCompletionStrategy.FORCE_COMPLETE
-        ) and not self.ctx.dry_run:
+        ):
             try:
                 log_with_context(
                     logging.DEBUG,
@@ -458,7 +452,7 @@ class ChannelProcessor:
                 )
                 channel_had_errors = True
                 self.state.incomplete_import_spaces.append((space, channel))
-        elif channel_had_errors and not self.ctx.dry_run:
+        elif channel_had_errors:
             log_with_context(
                 logging.WARNING,
                 f"Skipping import completion for space {space} due to errors (strategy: {completion_strategy})",
