@@ -767,7 +767,7 @@ def send_message(
             channel=channel,
             ts=ts,
         )
-        result = chat_service.spaces().messages().create(**request_params).execute()  # type: ignore[union-attr]
+        result = chat_service.spaces().messages().create(**request_params).execute()
         message_name: str | None = result.get("name")
 
         _handle_send_result(
@@ -987,7 +987,7 @@ def send_intro(migrator: SlackToChatMigrator, space: str, channel: str) -> None:
 
         # Send the message
         (
-            migrator.chat.spaces()  # type: ignore[union-attr]
+            migrator.chat.spaces()
             .messages()
             .create(parent=space, body=message_body)
             .execute()

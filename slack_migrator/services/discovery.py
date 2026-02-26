@@ -37,7 +37,7 @@ def _fetch_all_migration_spaces(
 
     page_token = None
     while True:
-        request = migrator.chat.spaces().list(  # type: ignore[union-attr]
+        request = migrator.chat.spaces().list(
             pageSize=SPACES_PAGE_SIZE, pageToken=page_token
         )
         response = request.execute()
@@ -113,7 +113,7 @@ def _resolve_duplicate_spaces(
         for space_info in spaces:
             try:
                 members_response = (
-                    migrator.chat.spaces()  # type: ignore[union-attr]
+                    migrator.chat.spaces()
                     .members()
                     .list(parent=space_info["space_name"], pageSize=1)
                     .execute()
@@ -249,7 +249,7 @@ def get_last_message_timestamp(
     try:
         # We only need the most recent message, so limit to 1 result sorted by createTime desc
         request = (
-            migrator.chat.spaces()  # type: ignore[union-attr]
+            migrator.chat.spaces()
             .messages()
             .list(parent=space, pageSize=1, orderBy="createTime desc")
         )

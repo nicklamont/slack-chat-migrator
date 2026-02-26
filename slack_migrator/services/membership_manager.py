@@ -370,7 +370,7 @@ def _add_historical_members_batch(
             )
 
             # Use the admin user for adding members
-            migrator.chat.spaces().members().create(  # type: ignore[union-attr]
+            migrator.chat.spaces().members().create(
                 parent=space, body=membership_body
             ).execute()
 
@@ -535,14 +535,14 @@ def _collect_active_user_emails(
         if not migrator.dry_run:
             try:
                 # Get current space settings
-                space_info = migrator.chat.spaces().get(name=space).execute()  # type: ignore[union-attr]
+                space_info = migrator.chat.spaces().get(name=space).execute()
                 external_users_allowed = space_info.get("externalUserAllowed", False)
 
                 # If external users are not allowed, update the space
                 if not external_users_allowed:
                     update_body = {"externalUserAllowed": True}
                     update_mask = "externalUserAllowed"
-                    migrator.chat.spaces().patch(  # type: ignore[union-attr]
+                    migrator.chat.spaces().patch(
                         name=space, updateMask=update_mask, body=update_body
                     ).execute()
                     log_with_context(
@@ -639,7 +639,7 @@ def _add_regular_members_batch(
 
             # API request details are already logged by API utilities
             # Use the admin user for adding members
-            migrator.chat.spaces().members().create(  # type: ignore[union-attr]
+            migrator.chat.spaces().members().create(
                 parent=space, body=membership_body
             ).execute()
 
@@ -746,7 +746,7 @@ def _verify_and_handle_admin(
         )
 
         # List members to verify they were added
-        members_result = migrator.chat.spaces().members().list(parent=space).execute()  # type: ignore[union-attr]
+        members_result = migrator.chat.spaces().members().list(parent=space).execute()
         members = members_result.get("memberships", [])
         actual_member_count = len(members)
 
@@ -833,7 +833,7 @@ def _verify_and_handle_admin(
 
                 # Remove the admin from the space
                 try:
-                    migrator.chat.spaces().members().delete(  # type: ignore[union-attr]
+                    migrator.chat.spaces().members().delete(
                         name=admin_membership
                     ).execute()
                     log_with_context(
