@@ -38,25 +38,30 @@ if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
 
 
-def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) -> None:  # noqa: C901
-    """Add users to a space as historical members.
+def _collect_user_membership_data(  # noqa: C901
+    migrator: SlackToChatMigrator, channel: str
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """Collect user participation data from message files and channel metadata.
+
+    Scans all JSON message files in the channel directory to build a map of
+    user membership events (join/leave times, first message times). Then
+    augments with the definitive member list from channel metadata.
+
+    Also stores the active user set on ``migrator.state.active_users_by_channel``
+    for later use by :func:`add_regular_members`.
 
     Args:
-        migrator: The migrator instance providing API services and user maps.
-        space: Google Chat space resource name (e.g. ``spaces/AAAA``).
-        channel: Slack channel name used for log context and data lookup.
-    """
-    log_with_context(
-        logging.DEBUG,
-        f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding historical memberships for channel {channel}",
-        channel=channel,
-    )
+        migrator: The migrator instance providing export root and channel metadata.
+        channel: Slack channel name.
 
-    # Map to track user join/leave times and store info about who is currently active
+    Returns:
+        A tuple of ``(user_membership, active_users)`` where *user_membership*
+        maps Slack user IDs to dicts with ``join_time``, ``leave_time``,
+        ``active``, and ``first_message_time`` keys, and *active_users* is
+        the set of user IDs considered currently active.
+    """
     user_membership: dict[str, dict[str, Any]] = {}
-    active_users: set[str] = (
-        set()
-    )  # Track users who are still active for adding after import
+    active_users: set[str] = set()
     ch_dir = migrator.export_root / channel
 
     # First pass: identify all users and their join/leave events
@@ -164,41 +169,35 @@ def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) 
     )
     migrator.state.active_users_by_channel[channel] = active_users
 
-    # Log what we're doing
-    log_with_context(
-        logging.DEBUG,
-        f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding {len(user_membership)} users to space {space} for channel {channel}",
-        channel=channel,
-        space=space,
-        user_count=len(user_membership),
-    )
+    return user_membership, active_users
 
-    if migrator.dry_run:
-        # In dry run mode, just count and return
-        return
 
-    # Check if the workspace admin is in the active users
-    # Google Chat automatically adds the creator as a member, but we only want them if they were in the channel
-    admin_email = migrator.workspace_admin
-    admin_user_id = None
+def _compute_membership_times(
+    migrator: SlackToChatMigrator,
+    channel: str,
+    user_membership: dict[str, dict[str, Any]],
+) -> None:
+    """Fill in missing join and leave times for historical memberships.
 
-    # Look up the admin's Slack user ID if they had one (they'll be in user_map if they were in Slack)
-    for slack_user_id, email in migrator.user_map.items():
-        if email.lower() == admin_email.lower():
-            admin_user_id = slack_user_id
-            break
+    Mutates *user_membership* in place, applying the following cascade for
+    ``join_time``:
 
-    # If we found a user ID for the admin, check if they were in the channel
-    admin_in_channel = False
-    if admin_user_id:
-        admin_in_channel = admin_user_id in active_users
+    1. Explicit ``channel_join`` event (already set by caller).
+    2. User's first message time minus 1 minute.
+    3. Channel creation time from metadata.
+    4. Earliest message time in the channel minus 2 minutes.
+    5. :data:`DEFAULT_FALLBACK_JOIN_TIME` as the last resort.
 
-    log_with_context(
-        logging.DEBUG,
-        f"Workspace admin ({admin_email}) {'was' if admin_in_channel else 'was not'} in original Slack channel {channel}",
-        channel=channel,
-    )
+    For ``leave_time``, any user without an explicit ``channel_leave`` event
+    gets the current UTC time minus
+    :data:`HISTORICAL_DELETE_TIME_OFFSET_SECONDS` seconds, as required by the
+    Google Chat import-mode API.
 
+    Args:
+        migrator: The migrator instance (used for channel metadata).
+        channel: Slack channel name for log context and metadata lookup.
+        user_membership: Mutable mapping of user IDs to membership dicts.
+    """
     # Get channel creation time from metadata to use as fallback
     # (We can't get space info in import mode and don't need to try)
     channel_creation_time = None
@@ -300,7 +299,28 @@ def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) 
         if not membership["leave_time"]:
             membership["leave_time"] = historical_delete_time
 
-    # Add each user to the space as historical membership
+
+def _add_historical_members_batch(
+    migrator: SlackToChatMigrator,
+    space: str,
+    channel: str,
+    user_membership: dict[str, dict[str, Any]],
+    active_users: set[str],
+) -> None:
+    """Add historical memberships to a Google Chat space via the API.
+
+    Iterates over *user_membership*, resolves each Slack user ID to an
+    internal email address, and creates an import-mode membership with the
+    computed ``createTime`` and ``deleteTime``.
+
+    Args:
+        migrator: The migrator instance providing API services and user maps.
+        space: Google Chat space resource name (e.g. ``spaces/AAAA``).
+        channel: Slack channel name for log context.
+        user_membership: Mapping of Slack user IDs to membership dicts
+            (must already have ``join_time`` and ``leave_time`` populated).
+        active_users: Set of user IDs considered active (used for summary log).
+    """
     added_count = 0
     failed_count = 0
 
@@ -407,80 +427,86 @@ def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) 
     )
 
 
-def add_regular_members(  # noqa: C901
-    migrator: SlackToChatMigrator, space: str, channel: str
-) -> None:
-    """Add regular members to a space after import mode is complete.
-
-    After completing import mode, this method adds back all active members
-    to the space as regular members. This ensures that users have access
-    to the space after migration.
-
-    This method also updates any channel folder permissions to ensure only
-    active members have access to shared files.
+def add_users_to_space(migrator: SlackToChatMigrator, space: str, channel: str) -> None:
+    """Add users to a space as historical members.
 
     Args:
         migrator: The migrator instance providing API services and user maps.
         space: Google Chat space resource name (e.g. ``spaces/AAAA``).
         channel: Slack channel name used for log context and data lookup.
     """
-    # Initialize the active_users_by_channel attribute if it doesn't exist
-    if not hasattr(migrator.state, "active_users_by_channel"):
-        migrator.state.active_users_by_channel = {}
-    # Get the list of active users we saved during add_users_to_space
-    if channel not in migrator.state.active_users_by_channel:
-        # If we don't have active users for this channel, try to get them from the channel directory
-        log_with_context(
-            logging.WARNING,
-            f"No active users tracked for channel {channel}, attempting to load from channel data",
-            channel=channel,
-        )
-
-        try:
-            # Try to load channel members from the channel data
-            export_root = Path(migrator.export_root)
-            channels_file = export_root / "channels.json"
-
-            if channels_file.exists():
-                with open(channels_file) as f:
-                    channels_data = json.load(f)
-
-                for ch in channels_data:
-                    if ch.get("name") == channel:
-                        # Found the channel, get its members
-                        members = ch.get("members", [])
-                        log_with_context(
-                            logging.INFO,
-                            f"Found {len(members)} members for channel {channel} in channels.json",
-                            channel=channel,
-                        )
-                        migrator.state.active_users_by_channel[channel] = members
-                        break
-        except (OSError, json.JSONDecodeError) as e:
-            log_with_context(
-                logging.ERROR,
-                f"Failed to load channel members from channels.json: {e}",
-                channel=channel,
-            )
-
-    # If we still don't have active users, we can't proceed
-    if channel not in migrator.state.active_users_by_channel:
-        log_with_context(
-            logging.ERROR,
-            f"No active users found for channel {channel}, can't add regular members",
-            channel=channel,
-        )
-        return
-
-    active_users = migrator.state.active_users_by_channel[channel]
     log_with_context(
         logging.DEBUG,
-        f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding {len(active_users)} regular members to space {space} for channel {channel}",
+        f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding historical memberships for channel {channel}",
         channel=channel,
     )
 
-    # Collect emails of all active users, both for space membership and file permissions
-    active_user_emails = []
+    user_membership, active_users = _collect_user_membership_data(migrator, channel)
+
+    # Log what we're doing
+    log_with_context(
+        logging.DEBUG,
+        f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding {len(user_membership)} users to space {space} for channel {channel}",
+        channel=channel,
+        space=space,
+        user_count=len(user_membership),
+    )
+
+    if migrator.dry_run:
+        # In dry run mode, just count and return
+        return
+
+    # Check if the workspace admin is in the active users
+    # Google Chat automatically adds the creator as a member, but we only want them if they were in the channel
+    admin_email = migrator.workspace_admin
+    admin_user_id = None
+
+    # Look up the admin's Slack user ID if they had one (they'll be in user_map if they were in Slack)
+    for slack_user_id, email in migrator.user_map.items():
+        if email.lower() == admin_email.lower():
+            admin_user_id = slack_user_id
+            break
+
+    # If we found a user ID for the admin, check if they were in the channel
+    admin_in_channel = False
+    if admin_user_id:
+        admin_in_channel = admin_user_id in active_users
+
+    log_with_context(
+        logging.DEBUG,
+        f"Workspace admin ({admin_email}) {'was' if admin_in_channel else 'was not'} in original Slack channel {channel}",
+        channel=channel,
+    )
+
+    _compute_membership_times(migrator, channel, user_membership)
+
+    _add_historical_members_batch(
+        migrator, space, channel, user_membership, active_users
+    )
+
+
+def _collect_active_user_emails(
+    migrator: SlackToChatMigrator,
+    space: str,
+    channel: str,
+    active_users: set[str] | list[str],
+) -> list[str]:
+    """Collect internal email addresses for active users and enable external access.
+
+    Resolves each active Slack user ID to an internal email via the user
+    resolver.  If any external users are found, ensures the Google Chat space
+    has ``externalUserAllowed`` set to ``True``.
+
+    Args:
+        migrator: The migrator instance providing user maps and API services.
+        space: Google Chat space resource name.
+        channel: Slack channel name for log context.
+        active_users: Iterable of Slack user IDs considered active.
+
+    Returns:
+        De-duplicated list of internal email addresses for all active users.
+    """
+    active_user_emails: list[str] = []
 
     # Check if any active users are external
     has_external_users = False
@@ -531,11 +557,32 @@ def add_regular_members(  # noqa: C901
                     channel=channel,
                 )
 
-    # In dry run mode, just log and return
-    if migrator.dry_run:
-        return
+    return active_user_emails
 
-    # Add each active user as a regular member
+
+def _add_regular_members_batch(
+    migrator: SlackToChatMigrator,
+    space: str,
+    channel: str,
+    active_users: set[str] | list[str],
+) -> int:
+    """Add active users to a Google Chat space as regular members.
+
+    Iterates over *active_users*, resolves each to an internal email via the
+    user resolver, and creates a regular membership.  Handles HTTP 409
+    (conflict / already exists), HTTP 400 (bad request), and other errors
+    individually per user.
+
+    Args:
+        migrator: The migrator instance providing API services and user maps.
+        space: Google Chat space resource name.
+        channel: Slack channel name for log context.
+        active_users: Iterable of Slack user IDs to add.
+
+    Returns:
+        The number of members successfully added (including 409 conflicts
+        treated as already present).
+    """
     added_count = 0
     failed_count = 0
 
@@ -548,7 +595,7 @@ def add_regular_members(  # noqa: C901
             # Track unmapped user for space membership
             log_with_context(
                 logging.ERROR,  # Escalated from WARNING to ERROR
-                f"🚨 CRITICAL: No email mapping found for user {user_id} - cannot add as regular member",
+                f"\U0001f6a8 CRITICAL: No email mapping found for user {user_id} - cannot add as regular member",
                 user_id=user_id,
                 channel=channel,
             )
@@ -669,7 +716,30 @@ def add_regular_members(  # noqa: C901
         channel=channel,
     )
 
-    # Verify the members were added
+    return added_count
+
+
+def _verify_and_handle_admin(
+    migrator: SlackToChatMigrator,
+    space: str,
+    channel: str,
+    active_users: set[str] | list[str],
+    added_count: int,
+) -> None:
+    """Verify members were added and remove workspace admin if appropriate.
+
+    Lists the current space members to verify the batch add succeeded, then
+    checks whether the workspace admin was part of the original Slack channel.
+    If the admin was *not* in the channel, attempts to remove them from the
+    Google Chat space (they were auto-added as the space creator).
+
+    Args:
+        migrator: The migrator instance providing API services and user maps.
+        space: Google Chat space resource name.
+        channel: Slack channel name for log context.
+        active_users: Set/list of Slack user IDs considered active in the channel.
+        added_count: Number of members successfully added (for log message).
+    """
     try:
         log_with_context(
             logging.DEBUG, f"Verifying members added to space {space}", channel=channel
@@ -797,42 +867,147 @@ def add_regular_members(  # noqa: C901
             channel=channel,
         )
 
-    # Update Drive folder permissions for this channel to ensure only active members have access
-    if hasattr(migrator, "file_handler") and hasattr(
-        migrator.file_handler, "folder_manager"
+
+def _update_folder_permissions(
+    migrator: SlackToChatMigrator,
+    channel: str,
+    active_user_emails: list[str],
+) -> None:
+    """Update Drive folder permissions to match active channel members.
+
+    If the migrator has a ``file_handler`` with a ``folder_manager``, looks up
+    the channel's Drive folder and updates its permissions so only the given
+    *active_user_emails* have access.
+
+    Args:
+        migrator: The migrator instance providing the file handler.
+        channel: Slack channel name for folder lookup and log context.
+        active_user_emails: Email addresses that should have folder access.
+    """
+    if not (
+        hasattr(migrator, "file_handler")
+        and hasattr(migrator.file_handler, "folder_manager")
     ):
-        # First check if we have a channel folder
-        folder_id = None
+        return
+
+    folder_id = None
+
+    try:
+        # Get the channel folder if it exists
+        folder_id = migrator.file_handler.folder_manager.get_channel_folder_id(
+            channel,
+            migrator.file_handler._root_folder_id,  # type: ignore[arg-type]
+            migrator.file_handler._shared_drive_id,
+        )
+
+        if folder_id:
+            # Step 6: Update file permissions
+            log_with_context(
+                logging.INFO,
+                f"{'[DRY RUN] ' if migrator.dry_run else ''}Step 6/6: Updating file permissions for {channel} folder to match {len(active_user_emails)} active members",
+                channel=channel,
+                folder_id=folder_id,
+            )
+
+            if not migrator.dry_run:
+                # Update permissions to ensure only active members have access
+                migrator.file_handler.folder_manager.set_channel_folder_permissions(
+                    folder_id,
+                    channel,
+                    active_user_emails,
+                    migrator.file_handler._shared_drive_id,
+                )
+    except HttpError as e:
+        log_with_context(
+            logging.WARNING,
+            f"Error updating channel folder permissions: {e}",
+            channel=channel,
+            error=str(e),
+        )
+
+
+def add_regular_members(
+    migrator: SlackToChatMigrator, space: str, channel: str
+) -> None:
+    """Add regular members to a space after import mode is complete.
+
+    After completing import mode, this method adds back all active members
+    to the space as regular members. This ensures that users have access
+    to the space after migration.
+
+    This method also updates any channel folder permissions to ensure only
+    active members have access to shared files.
+
+    Args:
+        migrator: The migrator instance providing API services and user maps.
+        space: Google Chat space resource name (e.g. ``spaces/AAAA``).
+        channel: Slack channel name used for log context and data lookup.
+    """
+    # Initialize the active_users_by_channel attribute if it doesn't exist
+    if not hasattr(migrator.state, "active_users_by_channel"):
+        migrator.state.active_users_by_channel = {}
+    # Get the list of active users we saved during add_users_to_space
+    if channel not in migrator.state.active_users_by_channel:
+        # If we don't have active users for this channel, try to get them from the channel directory
+        log_with_context(
+            logging.WARNING,
+            f"No active users tracked for channel {channel}, attempting to load from channel data",
+            channel=channel,
+        )
 
         try:
-            # Get the channel folder if it exists
-            folder_id = migrator.file_handler.folder_manager.get_channel_folder_id(
-                channel,
-                migrator.file_handler._root_folder_id,  # type: ignore[arg-type]
-                migrator.file_handler._shared_drive_id,
-            )
+            # Try to load channel members from the channel data
+            export_root = Path(migrator.export_root)
+            channels_file = export_root / "channels.json"
 
-            if folder_id:
-                # Step 6: Update file permissions
-                log_with_context(
-                    logging.INFO,
-                    f"{'[DRY RUN] ' if migrator.dry_run else ''}Step 6/6: Updating file permissions for {channel} folder to match {len(active_user_emails)} active members",
-                    channel=channel,
-                    folder_id=folder_id,
-                )
+            if channels_file.exists():
+                with open(channels_file) as f:
+                    channels_data = json.load(f)
 
-                if not migrator.dry_run:
-                    # Update permissions to ensure only active members have access
-                    migrator.file_handler.folder_manager.set_channel_folder_permissions(
-                        folder_id,
-                        channel,
-                        active_user_emails,
-                        migrator.file_handler._shared_drive_id,
-                    )
-        except HttpError as e:
+                for ch in channels_data:
+                    if ch.get("name") == channel:
+                        # Found the channel, get its members
+                        members = ch.get("members", [])
+                        log_with_context(
+                            logging.INFO,
+                            f"Found {len(members)} members for channel {channel} in channels.json",
+                            channel=channel,
+                        )
+                        migrator.state.active_users_by_channel[channel] = members
+                        break
+        except (OSError, json.JSONDecodeError) as e:
             log_with_context(
-                logging.WARNING,
-                f"Error updating channel folder permissions: {e}",
+                logging.ERROR,
+                f"Failed to load channel members from channels.json: {e}",
                 channel=channel,
-                error=str(e),
             )
+
+    # If we still don't have active users, we can't proceed
+    if channel not in migrator.state.active_users_by_channel:
+        log_with_context(
+            logging.ERROR,
+            f"No active users found for channel {channel}, can't add regular members",
+            channel=channel,
+        )
+        return
+
+    active_users = migrator.state.active_users_by_channel[channel]
+    log_with_context(
+        logging.DEBUG,
+        f"{'[DRY RUN] ' if migrator.dry_run else ''}Adding {len(active_users)} regular members to space {space} for channel {channel}",
+        channel=channel,
+    )
+
+    active_user_emails = _collect_active_user_emails(
+        migrator, space, channel, active_users
+    )
+
+    # In dry run mode, just log and return
+    if migrator.dry_run:
+        return
+
+    added_count = _add_regular_members_batch(migrator, space, channel, active_users)
+
+    _verify_and_handle_admin(migrator, space, channel, active_users, added_count)
+
+    _update_folder_permissions(migrator, channel, active_user_emails)
