@@ -428,8 +428,8 @@ def convert_formatting(
 
         # Enhanced logging and tracking for unmapped user mentions
         if unmapped_user_tracker:
-            current_channel = getattr(state, "current_channel", "unknown")
-            current_ts = getattr(state, "current_message_ts", "unknown")
+            current_channel = state.current_channel or "unknown"
+            current_ts = state.current_message_ts or "unknown"
 
             # Track this unmapped mention
             unmapped_user_tracker.track_unmapped_mention(

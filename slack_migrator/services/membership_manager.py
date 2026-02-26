@@ -149,10 +149,8 @@ def _collect_user_membership_data(  # noqa: C901
                     "first_message_time": None,
                 }
 
-    # Store active users in class variable to add back after import completes
+    # Store active users to add back after import completes
     # We'll use this for both regular membership and file permissions
-    if not hasattr(state, "active_users_by_channel"):
-        state.active_users_by_channel = {}
     # Log active user counts for debugging
     log_with_context(
         logging.DEBUG,
@@ -967,9 +965,6 @@ def add_regular_members(
         space: Google Chat space resource name (e.g. ``spaces/AAAA``).
         channel: Slack channel name used for log context and data lookup.
     """
-    # Initialize the active_users_by_channel attribute if it doesn't exist
-    if not hasattr(state, "active_users_by_channel"):
-        state.active_users_by_channel = {}
     # Get the list of active users we saved during add_users_to_space
     if channel not in state.active_users_by_channel:
         # If we don't have active users for this channel, try to get them from the channel directory

@@ -341,7 +341,7 @@ def log_space_mapping_conflicts(state: MigrationState, dry_run: bool = False) ->
         log_with_context(logging.INFO, "[DRY RUN] Checking for space mapping conflicts")
 
     # Log any conflicts that should be added to config
-    if hasattr(state, "channel_conflicts") and state.channel_conflicts:
+    if state.channel_conflicts:
         log_with_context(
             logging.WARNING,
             f"Found {len(state.channel_conflicts)} channels with duplicate space conflicts",
@@ -547,10 +547,6 @@ def load_space_mappings(
         Mapping from channel names to space IDs, or empty dict if not found.
     """
     try:
-        # Initialize the channel_id_to_space_id mapping if not present
-        if not hasattr(state, "channel_id_to_space_id"):
-            state.channel_id_to_space_id = {}
-
         # Use API discovery to find spaces
         discovered_spaces, _duplicate_spaces = discover_existing_spaces(
             chat, channel_name_to_id, state

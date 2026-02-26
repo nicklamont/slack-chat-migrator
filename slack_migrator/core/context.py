@@ -1,13 +1,9 @@
 """Immutable migration context.
 
 MigrationContext is a frozen dataclass that holds all configuration and
-loaded data for a migration run.  It is created once during
-``SlackToChatMigrator.__init__`` and shared (read-only) with every
-service function that needs configuration, paths, or user/channel
-metadata.
-
-This replaces the pattern of passing the entire migrator object around —
-functions now receive only the immutable data they need.
+loaded data for a migration run.  It is created once during migrator
+initialization and shared (read-only) with every service function that
+needs configuration, paths, or user/channel metadata.
 """
 
 from __future__ import annotations

@@ -949,10 +949,10 @@ class TestLogSpaceMappingConflicts:
 
         log_space_mapping_conflicts(state, dry_run=True)
 
-    def test_missing_channel_conflicts_attr(self):
-        """Works when channel_conflicts attribute does not exist."""
+    def test_empty_channel_conflicts(self):
+        """Works when channel_conflicts is empty."""
         state = _make_state()
-        del state.channel_conflicts
+        state.channel_conflicts = set()
 
         # Should not raise
         log_space_mapping_conflicts(state)

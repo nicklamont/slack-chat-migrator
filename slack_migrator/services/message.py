@@ -98,7 +98,7 @@ def _should_skip_message(  # noqa: C901
 
     # --- Update-mode deduplication ---
     # First, check if this message is older than the last processed timestamp
-    if is_update_mode and hasattr(state, "last_processed_timestamps"):
+    if is_update_mode and state.last_processed_timestamps:
         last_timestamp = state.last_processed_timestamps.get(channel, 0)
         if last_timestamp > 0:
             if not should_process_message(last_timestamp, ts):
@@ -877,10 +877,6 @@ def track_message_stats(  # noqa: C901
 
     # Check if we're in update mode
     is_update_mode = ctx.update_mode
-
-    # Initialize channel stats if not already done
-    if not hasattr(state, "channel_stats"):
-        state.channel_stats = {}
 
     if channel not in state.channel_stats:
         state.channel_stats[channel] = {

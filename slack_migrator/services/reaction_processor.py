@@ -59,7 +59,7 @@ def process_reactions_batch(  # noqa: C901
                 error=str(exception),
                 message_id=message_id,
                 request_id=request_id,
-                channel=getattr(state, "current_channel", None),
+                channel=state.current_channel,
             )
         else:
             log_with_context(
@@ -67,7 +67,7 @@ def process_reactions_batch(  # noqa: C901
                 "Successfully added reaction in batch",
                 message_id=message_id,
                 request_id=request_id,
-                channel=getattr(state, "current_channel", None),
+                channel=state.current_channel,
             )
 
     # Group reactions by user for batch processing
@@ -78,7 +78,7 @@ def process_reactions_batch(  # noqa: C901
         logging.DEBUG,
         f"Processing {len(reactions)} reaction types for message {message_id}",
         message_id=message_id,
-        channel=getattr(state, "current_channel", None),
+        channel=state.current_channel,
     )
 
     for react in reactions:
@@ -95,7 +95,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Processing emoji :{emoji_name}: with {len(emoji_users)} users",
                 message_id=message_id,
                 emoji=emoji_name,
-                channel=getattr(state, "current_channel", None),
+                channel=state.current_channel,
             )
 
             for uid in emoji_users:
@@ -109,7 +109,7 @@ def process_reactions_batch(  # noqa: C901
                             message_id=message_id,
                             emoji=emoji_name,
                             user_id=uid,
-                            channel=getattr(state, "current_channel", None),
+                            channel=state.current_channel,
                         )
                         continue
 
@@ -124,7 +124,7 @@ def process_reactions_batch(  # noqa: C901
                 else:
                     # Handle unmapped user reaction with new graceful approach
                     reaction_name = react.get("name", "unknown")
-                    message_ts = getattr(state, "current_message_ts", "unknown")
+                    message_ts = state.current_message_ts or "unknown"
                     user_resolver.handle_unmapped_user_reaction(
                         uid, reaction_name, message_ts
                     )
@@ -135,7 +135,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Failed to process reaction {react.get('name')}: {e!s}",
                 message_id=message_id,
                 error=str(e),
-                channel=getattr(state, "current_channel", None),
+                channel=state.current_channel,
             )
 
     # Always increment the reaction count, regardless of dry run mode
@@ -148,7 +148,7 @@ def process_reactions_batch(  # noqa: C901
             logging.DEBUG,
             f"{ctx.log_prefix}Would add {reaction_count} reactions from {len(requests_by_user)} users to message {message_id}",
             message_id=message_id,
-            channel=getattr(state, "current_channel", None),
+            channel=state.current_channel,
         )
         return
 
@@ -156,7 +156,7 @@ def process_reactions_batch(  # noqa: C901
         logging.DEBUG,
         f"Adding {reaction_count} reactions from {len(requests_by_user)} users to message {message_id}",
         message_id=message_id,
-        channel=getattr(state, "current_channel", None),
+        channel=state.current_channel,
     )
 
     user_batches: dict[str, BatchHttpRequest] = {}
@@ -169,7 +169,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Skipping {len(emojis)} reactions from external user {email} to avoid admin attribution",
                 message_id=message_id,
                 user=email,
-                channel=getattr(state, "current_channel", None),
+                channel=state.current_channel,
             )
             continue
 
@@ -185,7 +185,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Using admin account for user {email} (impersonation not available)",
                 message_id=message_id,
                 user=email,
-                channel=getattr(state, "current_channel", None),
+                channel=state.current_channel,
             )
 
             for emo in emojis:
@@ -205,7 +205,7 @@ def process_reactions_batch(  # noqa: C901
                         error_code=e.resp.status,
                         user=email,
                         message_id=message_id,
-                        channel=getattr(state, "current_channel", None),
+                        channel=state.current_channel,
                     )
             continue
 
@@ -215,7 +215,7 @@ def process_reactions_batch(  # noqa: C901
             f"Creating batch request for user {email} with {len(emojis)} reactions",
             message_id=message_id,
             user=email,
-            channel=getattr(state, "current_channel", None),
+            channel=state.current_channel,
         )
 
         if email not in user_batches:
@@ -244,7 +244,7 @@ def process_reactions_batch(  # noqa: C901
                     message_id=message_id,
                     user=email,
                     emoji=emo,
-                    channel=getattr(state, "current_channel", None),
+                    channel=state.current_channel,
                 )
                 # Fall back to direct API call
                 try:
@@ -271,7 +271,7 @@ def process_reactions_batch(  # noqa: C901
                 f"Executing batch request for user {email}",
                 message_id=message_id,
                 user=email,
-                channel=getattr(state, "current_channel", None),
+                channel=state.current_channel,
             )
             batch.execute()
         except HttpError as e:
@@ -280,6 +280,6 @@ def process_reactions_batch(  # noqa: C901
                 f"Reaction batch execution failed for user {email}: {e}",
                 message_id=message_id,
                 user=email,
-                channel=getattr(state, "current_channel", None),
+                channel=state.current_channel,
                 error=str(e),
             )

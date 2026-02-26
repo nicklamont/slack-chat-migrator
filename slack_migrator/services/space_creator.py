@@ -265,8 +265,6 @@ def create_space(
     state.created_spaces[channel] = space_name
 
     # Store whether this space has external users for later reference
-    if not hasattr(state, "spaces_with_external_users"):
-        state.spaces_with_external_users = {}
     state.spaces_with_external_users[space_name] = has_external_users
 
     return space_name

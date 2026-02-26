@@ -88,10 +88,7 @@ class ChannelProcessor:
             return False
 
         # Check for unresolved space conflicts
-        if (
-            hasattr(self.state, "channel_conflicts")
-            and channel in self.state.channel_conflicts
-        ):
+        if channel in self.state.channel_conflicts:
             log_with_context(
                 logging.ERROR,
                 f"Skipping channel {channel} due to unresolved duplicate space conflict",
@@ -637,7 +634,7 @@ class ChannelProcessor:
             self.state.last_processed_timestamps[channel] = last_timestamp
 
             # Initialize an empty thread_map so we don't try to load it again
-            if not hasattr(self.state, "thread_map") or self.state.thread_map is None:
+            if self.state.thread_map is None:
                 self.state.thread_map = {}
         else:
             # If no messages were found, log it but don't set a last timestamp

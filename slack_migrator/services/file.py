@@ -1349,10 +1349,7 @@ class FileHandler:
                     continue
 
             # If we're here, the file is not in a channel folder, so we need to set individual permissions
-            if (
-                not hasattr(self.state, "active_users_by_channel")
-                or channel not in self.state.active_users_by_channel
-            ):
+            if channel not in self.state.active_users_by_channel:
                 log_with_context(
                     logging.WARNING,
                     f"No active users tracked for channel {channel}, can't share file",
