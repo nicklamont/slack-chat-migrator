@@ -400,7 +400,7 @@ def convert_formatting(
     Args:
         text: The Slack message text to convert
         user_map: A dictionary mapping Slack user IDs to Google Chat user IDs/emails
-        state: Optional MigrationState for context (current_channel, current_message_ts)
+        state: Optional MigrationState for context (context.current_channel, context.current_message_ts)
         unmapped_user_tracker: Optional tracker for unmapped user mentions
 
     Returns:
@@ -428,8 +428,8 @@ def convert_formatting(
 
         # Enhanced logging and tracking for unmapped user mentions
         if unmapped_user_tracker:
-            current_channel = state.current_channel or "unknown"
-            current_ts = state.current_message_ts or "unknown"
+            current_channel = state.context.current_channel or "unknown"
+            current_ts = state.context.current_message_ts or "unknown"
 
             # Track this unmapped mention
             unmapped_user_tracker.track_unmapped_mention(

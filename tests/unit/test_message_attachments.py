@@ -14,7 +14,7 @@ def _make_file_handler(**overrides):
     """Create a mock file handler with reasonable defaults."""
     handler = MagicMock()
     handler.state = MigrationState()
-    handler.state.current_channel = "general"
+    handler.state.context.current_channel = "general"
     for key, value in overrides.items():
         setattr(handler, key, value)
     return handler
