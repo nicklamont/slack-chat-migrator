@@ -14,11 +14,6 @@ from typing import Any, ClassVar
 import requests
 from googleapiclient.errors import HttpError
 
-from slack_migrator.constants import (
-    HTTP_FORBIDDEN,
-    HTTP_OK,
-    HTTP_UNAUTHORIZED,
-)
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.state import MigrationState
 from slack_migrator.services.chat import ChatFileUploader
@@ -27,6 +22,18 @@ from slack_migrator.services.drive import (
     FolderManager,
     SharedDriveManager,
 )
+from slack_migrator.services.file_download import (
+    create_drive_reference,
+    download_file,
+)
+from slack_migrator.services.file_permissions import (
+    share_file_with_members as _share_file_with_members,
+)
+from slack_migrator.services.file_permissions import (
+    transfer_file_ownership,
+)
+from slack_migrator.types import UploadResult
+from slack_migrator.utils.api import escape_drive_query_value
 from slack_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_migrator")
@@ -164,7 +171,7 @@ class FileHandler:
 
     def _get_current_channel(self) -> str | None:
         """Return the current channel name for logging context."""
-        return self.state.current_channel
+        return self.state.context.current_channel
 
     @property
     def shared_drive_id(self) -> str | None:
@@ -280,7 +287,8 @@ class FileHandler:
             # This is important for migrations that are being resumed
             try:
                 # Query for all folders under the root folder
-                query = f"'{self._root_folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+                safe_root = escape_drive_query_value(self._root_folder_id)
+                query = f"'{safe_root}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
 
                 params = {"q": query, "fields": "files(id,name)", "pageSize": 1000}
 
@@ -336,42 +344,33 @@ class FileHandler:
                 f"Failed to pre-cache file hashes from root folder: {e}. Continuing without pre-cache.",
             )
 
-    def upload_attachment(  # noqa: C901
+    def upload_attachment(
         self,
         file_obj: dict[str, Any],
         channel: str | None = None,
         space: str | None = None,
         user_service: Any = None,
         sender_email: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> UploadResult:
         """Upload a file using the most appropriate method based on file type.
 
-        This method determines whether to use direct upload to Chat or Google Drive
+        Determines whether to use direct upload to Chat or Google Drive
         based on the file's MIME type and size.
 
         Args:
             file_obj: The file object from Slack
             channel: Optional channel name for context
-            space: Optional space ID where the file will be used (e.g., "spaces/AAAAy2-BTIA")
+            space: Optional space ID where the file will be used
             user_service: Optional user-specific Chat service to use for upload
             sender_email: Email address of the message sender (for permissions handling)
 
         Returns:
-            Dict with upload details if successful, None otherwise
-            Format: {
-                'type': 'direct' or 'drive',
-                'ref': reference object or None,
-                'link': link to file (for Drive uploads),
-                'name': file name
-            }
+            UploadResult with upload details. Check ``.success``, ``.skipped``,
+            or ``.error`` to determine outcome.
         """
-        # Sync current channel to sub-uploaders for logging context
-        current_ch = self.state.current_channel
-        self.drive_uploader.current_channel = current_ch
-        self.chat_uploader.current_channel = current_ch
+        self._sync_channel_context()
 
         try:
-            # Ensure drive structures are initialized before processing files
             self.ensure_drive_initialized()
 
             file_id = file_obj.get("id", "unknown")
@@ -379,19 +378,7 @@ class FileHandler:
             mime_type = file_obj.get("mimetype", "application/octet-stream")
             size = file_obj.get("size", 0)
 
-            # Update statistics
-            self.file_stats["total_files"] += 1
-            if channel:
-                if channel not in self.file_stats["files_by_channel"]:
-                    self.file_stats["files_by_channel"][channel] = 0
-                self.file_stats["files_by_channel"][channel] += 1
-
-            # Check if user is external (if we have user info)
-            username = file_obj.get("user", None)
-            if username:
-                user_email = self.user_map.get(username)
-                if user_email and self.user_resolver.is_external_user(user_email):
-                    self.file_stats["external_user_files"] += 1
+            self._update_file_stats(file_obj, channel)
 
             log_with_context(
                 logging.DEBUG,
@@ -400,57 +387,23 @@ class FileHandler:
                 file_id=file_id,
             )
 
-            # Check if we've already processed this file
-            if file_id in self.processed_files:
-                cached_result: dict[str, Any] | None = self.processed_files[file_id]
-                log_with_context(
-                    logging.DEBUG,
-                    f"File {name} already processed, using cached result",
-                    channel=channel,
-                    file_id=file_id,
-                )
-                return cached_result
+            found, cached = self._check_attachment_cache(file_id, name, channel)
+            if found and cached is not None:
+                cached.cached = True
+                return cached
 
-            # Download the file content
-            file_content = self._download_file(file_obj)
-            if not file_content:
-                log_with_context(
-                    logging.ERROR,
-                    f"Failed to download file {name}, skipping attachment processing",
-                    channel=channel,
-                    file_id=file_id,
-                    url_private=file_obj.get("url_private", "No URL")[:100],
-                )
-                self.file_stats["failed_uploads"] += 1
-                return None
+            file_content = self._download_file_content(file_obj, name, channel, file_id)
+            if file_content is None:
+                return UploadResult(error="Download failed", name=name)
 
-            # Check if this is a Google Docs file that should be skipped
-            if file_content == b"__GOOGLE_DOCS_SKIP__":
-                log_with_context(
-                    logging.DEBUG,
-                    f"Google Docs/Sheets file cannot be attached - will appear as link in message text: {name}",
-                    channel=channel,
-                    file_id=file_id,
-                )
-                # Return a special result indicating this was a Google Docs skip, not a failure
-                return {
-                    "type": "skip",
-                    "reason": "google_docs_link",
-                    "name": name,
-                    "url": file_obj.get("url_private", ""),
-                }
+            # Handle sentinel values from _download_file
+            handled, sentinel_result = self._handle_download_sentinel(
+                file_content, file_obj, name, channel, file_id
+            )
+            if handled:
+                return sentinel_result
 
-            # Check if this is a Google Drive file that should be referenced directly
-            if file_content == b"__GOOGLE_DRIVE_FILE__":
-                log_with_context(
-                    logging.DEBUG,
-                    f"Creating direct Google Drive reference for file: {name}",
-                    channel=channel,
-                    file_id=file_id,
-                )
-                return self._create_drive_reference(file_obj, channel)
-
-            # Check for excessively large files that might cause memory issues
+            # Validate size and resolve MIME type
             MAX_FILE_SIZE = 200 * 1024 * 1024  # 200MB - Drive API limit
             if len(file_content) > MAX_FILE_SIZE:
                 log_with_context(
@@ -460,11 +413,9 @@ class FileHandler:
                     file_id=file_id,
                 )
 
-            # Ensure we have a valid MIME type
             if not mime_type or mime_type == "null":
                 guessed_type, _ = mimetypes.guess_type(name)
                 mime_type = guessed_type if guessed_type else "application/octet-stream"
-
                 log_with_context(
                     logging.DEBUG,
                     f"Using guessed MIME type {mime_type} for file {name}",
@@ -472,94 +423,34 @@ class FileHandler:
                     file_id=file_id,
                 )
 
-            # Determine the best upload method based on file characteristics
-            actual_size = len(file_content)
-
-            # Decision logic for upload method:
-            # 1. For import mode, Google generally recommends Drive for all attachments
-            # 2. Small images can optionally use direct upload for better user experience
-            # 3. All other files should use Drive upload for reliability and sharing
-            # 4. Direct upload is limited to 25MB and specific MIME types
-
-            use_direct_upload = (
-                mime_type in self.DIRECT_UPLOAD_MIME_TYPES
-                and actual_size <= self.DIRECT_UPLOAD_MAX_SIZE
-                and not self.dry_run
-                and self.chat_uploader.is_suitable_for_direct_upload(name, actual_size)
+            # Try direct Chat upload for eligible small images
+            direct_result = self._try_direct_upload(
+                file_obj,
+                file_content,
+                mime_type,
+                channel,
+                space,
+                user_service,
+                sender_email,
+                file_id,
+                name,
             )
+            if direct_result:
+                return direct_result
 
-            if use_direct_upload:
-                log_with_context(
-                    logging.DEBUG,
-                    f"Attempting direct Chat upload for small image: {name} ({actual_size} bytes)",
-                    channel=channel,
-                    file_id=file_id,
-                )
-
-                # Try direct upload to Chat API first
-                direct_result = self._upload_direct_to_chat(
-                    file_obj, file_content, channel, space, user_service, sender_email
-                )
-                if direct_result:
-                    # Store result for future reference and update stats
-                    self.processed_files[file_id] = direct_result
-                    self.file_stats["direct_uploads"] += 1
-                    return direct_result
-                else:
-                    log_with_context(
-                        logging.DEBUG,
-                        f"Direct upload failed for {name}, falling back to Drive upload",
-                        channel=channel,
-                        file_id=file_id,
-                    )
-                    # Fall through to Drive upload
-
-            # Use Google Drive upload (recommended for import mode and fallback)
-            log_with_context(
-                logging.DEBUG,
-                f"Using Google Drive upload for file: {name} ({actual_size} bytes, {mime_type})",
-                channel=channel,
-                file_id=file_id,
-            )
-
-            # Get the user's email for setting file permissions and editor access
-            username = file_obj.get("user")
-            user_email = None
-            if username:
-                user_email = self.user_map.get(username)
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found user email {user_email} for user ID {username}, will grant editor permission",
-                    channel=channel,
-                    file_id=file_id,
-                )
-
-            drive_result = self._upload_to_drive(
-                file_obj, file_content, channel, sender_email
+            # Fall back to Drive upload
+            drive_result = self._try_drive_upload(
+                file_obj,
+                file_content,
+                channel,
+                sender_email,
+                file_id,
+                name,
             )
             if drive_result:
-                # Store result for future reference and update stats
-                self.processed_files[file_id] = drive_result
-                self.file_stats["drive_uploads"] += 1
-
-                log_with_context(
-                    logging.DEBUG,
-                    f"Successfully uploaded file {name} to Drive: {drive_result.get('link')}",
-                    channel=channel,
-                    file_id=file_id,
-                    drive_file_id=drive_result.get("drive_id"),
-                )
-
                 return drive_result
-            else:
-                log_with_context(
-                    logging.ERROR,
-                    f"Failed to upload file {name}",
-                    channel=channel,
-                    file_id=file_id,
-                )
-                self.file_stats["failed_uploads"] += 1
-                return None
+
+            return UploadResult(error="Upload failed", name=name)
 
         except (HttpError, requests.RequestException, OSError) as e:
             self.file_stats["failed_uploads"] += 1
@@ -570,7 +461,199 @@ class FileHandler:
                 file_id=file_obj.get("id", "unknown"),
                 error=str(e),
             )
+            return UploadResult(error=str(e), name=file_obj.get("name"))
+
+    def _sync_channel_context(self) -> None:
+        """Propagate current channel to sub-uploaders for logging context."""
+        current_ch = self.state.context.current_channel
+        self.drive_uploader.current_channel = current_ch
+        self.chat_uploader.current_channel = current_ch
+
+    def _update_file_stats(self, file_obj: dict[str, Any], channel: str | None) -> None:
+        """Update file processing statistics counters."""
+        self.file_stats["total_files"] += 1
+        if channel:
+            if channel not in self.file_stats["files_by_channel"]:
+                self.file_stats["files_by_channel"][channel] = 0
+            self.file_stats["files_by_channel"][channel] += 1
+
+        username = file_obj.get("user", None)
+        if username:
+            user_email = self.user_map.get(username)
+            if user_email and self.user_resolver.is_external_user(user_email):
+                self.file_stats["external_user_files"] += 1
+
+    def _check_attachment_cache(
+        self, file_id: str, name: str, channel: str | None
+    ) -> tuple[bool, UploadResult | None]:
+        """Check if this file was already processed.
+
+        Returns (found, cached_result). If found is False, cached_result is None.
+        """
+        if file_id in self.processed_files:
+            cached_result: UploadResult | None = self.processed_files[file_id]
+            log_with_context(
+                logging.DEBUG,
+                f"File {name} already processed, using cached result",
+                channel=channel,
+                file_id=file_id,
+            )
+            return True, cached_result
+        return False, None
+
+    def _download_file_content(
+        self,
+        file_obj: dict[str, Any],
+        name: str,
+        channel: str | None,
+        file_id: str,
+    ) -> bytes | None:
+        """Download file content and return it, or None on failure."""
+        file_content = self._download_file(file_obj)
+        if not file_content:
+            log_with_context(
+                logging.ERROR,
+                f"Failed to download file {name}, skipping attachment processing",
+                channel=channel,
+                file_id=file_id,
+                url_private=file_obj.get("url_private", "No URL")[:100],
+            )
+            self.file_stats["failed_uploads"] += 1
             return None
+        return file_content
+
+    def _handle_download_sentinel(
+        self,
+        file_content: bytes,
+        file_obj: dict[str, Any],
+        name: str,
+        channel: str | None,
+        file_id: str,
+    ) -> tuple[bool, UploadResult]:
+        """Handle special sentinel values returned by _download_file.
+
+        Returns (handled, result). If handled is False, content should be uploaded normally.
+        """
+        if file_content == b"__GOOGLE_DOCS_SKIP__":
+            log_with_context(
+                logging.DEBUG,
+                f"Google Docs/Sheets file cannot be attached - will appear as link in message text: {name}",
+                channel=channel,
+                file_id=file_id,
+            )
+            return True, UploadResult(
+                upload_type="skip",
+                skip_reason="google_docs_link",
+                name=name,
+                url=file_obj.get("url_private", ""),
+            )
+
+        if file_content == b"__GOOGLE_DRIVE_FILE__":
+            log_with_context(
+                logging.DEBUG,
+                f"Creating direct Google Drive reference for file: {name}",
+                channel=channel,
+                file_id=file_id,
+            )
+            ref_result = self._create_drive_reference(file_obj, channel)
+            if ref_result:
+                return True, ref_result
+            return True, UploadResult(
+                error="Failed to create Drive reference", name=name
+            )
+
+        return False, UploadResult()  # placeholder, not used when handled=False
+
+    def _try_direct_upload(
+        self,
+        file_obj: dict[str, Any],
+        file_content: bytes,
+        mime_type: str,
+        channel: str | None,
+        space: str | None,
+        user_service: Any,
+        sender_email: str | None,
+        file_id: str,
+        name: str,
+    ) -> UploadResult | None:
+        """Attempt direct Chat upload for eligible small images.
+
+        Returns the UploadResult if successful, None to fall through to Drive.
+        """
+        actual_size = len(file_content)
+        use_direct = (
+            mime_type in self.DIRECT_UPLOAD_MIME_TYPES
+            and actual_size <= self.DIRECT_UPLOAD_MAX_SIZE
+            and not self.dry_run
+            and self.chat_uploader.is_suitable_for_direct_upload(name, actual_size)
+        )
+        if not use_direct:
+            return None
+
+        log_with_context(
+            logging.DEBUG,
+            f"Attempting direct Chat upload for small image: {name} ({actual_size} bytes)",
+            channel=channel,
+            file_id=file_id,
+        )
+
+        direct_result = self._upload_direct_to_chat(
+            file_obj, file_content, channel, space, user_service, sender_email
+        )
+        if direct_result:
+            self.processed_files[file_id] = direct_result
+            self.file_stats["direct_uploads"] += 1
+            return direct_result
+
+        log_with_context(
+            logging.DEBUG,
+            f"Direct upload failed for {name}, falling back to Drive upload",
+            channel=channel,
+            file_id=file_id,
+        )
+        return None
+
+    def _try_drive_upload(
+        self,
+        file_obj: dict[str, Any],
+        file_content: bytes,
+        channel: str | None,
+        sender_email: str | None,
+        file_id: str,
+        name: str,
+    ) -> UploadResult | None:
+        """Upload file to Google Drive and cache the result."""
+        actual_size = len(file_content)
+        log_with_context(
+            logging.DEBUG,
+            f"Using Google Drive upload for file: {name} ({actual_size} bytes)",
+            channel=channel,
+            file_id=file_id,
+        )
+
+        drive_result = self._upload_to_drive(
+            file_obj, file_content, channel, sender_email
+        )
+        if drive_result:
+            self.processed_files[file_id] = drive_result
+            self.file_stats["drive_uploads"] += 1
+            log_with_context(
+                logging.DEBUG,
+                f"Successfully uploaded file {name} to Drive: {drive_result.url}",
+                channel=channel,
+                file_id=file_id,
+                drive_file_id=drive_result.drive_id,
+            )
+            return drive_result
+
+        log_with_context(
+            logging.ERROR,
+            f"Failed to upload file {name}",
+            channel=channel,
+            file_id=file_id,
+        )
+        self.file_stats["failed_uploads"] += 1
+        return None
 
     def upload_file(
         self, file_obj: dict[str, Any], channel: str | None = None
@@ -589,8 +672,8 @@ class FileHandler:
         """
         try:
             result = self.upload_attachment(file_obj, channel)
-            if result and isinstance(result, dict) and result.get("type") == "drive":
-                return result.get("drive_id")
+            if result.upload_type == "drive":
+                return result.drive_id
             return None
 
         except (HttpError, requests.RequestException, OSError) as e:
@@ -611,7 +694,7 @@ class FileHandler:
         space: str | None = None,
         user_service: Any = None,
         sender_email: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> UploadResult | None:
         """Upload a file directly to Google Chat API.
 
         Args:
@@ -621,10 +704,9 @@ class FileHandler:
             space: Optional space ID where the file will be used (e.g., "spaces/AAAAy2-BTIA")
             user_service: Optional user-specific Chat service to use for upload
             sender_email: Email address of the message sender (for permissions handling)
-            user_service: Optional user-specific Chat service to use for upload
 
         Returns:
-            Dict with upload details if successful, None otherwise
+            UploadResult with direct upload details if successful, None otherwise
         """
         try:
             file_id = file_obj.get("id", "unknown")
@@ -648,7 +730,9 @@ class FileHandler:
                         user_service, dry_run=self.dry_run
                     )
                     # Set channel context for logging
-                    user_chat_uploader.current_channel = self.state.current_channel
+                    user_chat_uploader.current_channel = (
+                        self.state.context.current_channel
+                    )
                     upload_response, attachment_metadata = (
                         user_chat_uploader.upload_file_to_chat(
                             temp_file_path, name, space
@@ -670,14 +754,16 @@ class FileHandler:
                         upload_response, attachment_metadata
                     )
 
-                    result = {
-                        "type": "direct",
-                        "ref": attachment_ref,
-                        "name": name,
-                        "mime_type": mime_type,
-                        "upload_response": upload_response,
-                        "metadata": attachment_metadata,
-                    }
+                    result = UploadResult(
+                        upload_type="direct",
+                        attachment_ref=attachment_ref,
+                        name=name,
+                        mime_type=mime_type,
+                        metadata={
+                            "upload_response": upload_response,
+                            "attachment_metadata": attachment_metadata,
+                        },
+                    )
 
                     log_with_context(
                         logging.DEBUG,
@@ -717,13 +803,13 @@ class FileHandler:
             )
             return None
 
-    def _upload_to_drive(  # noqa: C901
+    def _upload_to_drive(
         self,
         file_obj: dict[str, Any],
         file_content: bytes,
         channel: str | None = None,
         sender_email: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> UploadResult | None:
         """Upload a file to Google Drive.
 
         Args:
@@ -733,71 +819,14 @@ class FileHandler:
             sender_email: Email address of the message sender (for permissions handling)
 
         Returns:
-            Dict with upload details if successful, None otherwise
-            Format: {
-                'type': 'drive',
-                'drive_id': drive_file_id,
-                'link': link to file,
-                'name': file name
-            }
+            UploadResult with drive upload details if successful, None otherwise
         """
         try:
             file_id = file_obj.get("id", "unknown")
             name = file_obj.get("name", f"file_{file_id}")
-            mime_type = file_obj.get("mimetype", "application/octet-stream")
             user_id = file_obj.get("user")
-            url_private = file_obj.get("url_private", "")
 
-            # Special handling for Google Docs/Sheets links to preserve correct MIME type
-            is_google_docs_link = (
-                "docs.google.com" in url_private
-                or "drive.google.com" in url_private
-                or "sheets.google.com" in url_private
-                or "slides.google.com" in url_private
-            )
-
-            if is_google_docs_link:
-                # Determine the correct MIME type based on the URL
-                if "docs.google.com/document" in url_private:
-                    mime_type = "application/vnd.google-apps.document"
-                elif (
-                    "docs.google.com/spreadsheets" in url_private
-                    or "sheets.google.com" in url_private
-                ):
-                    mime_type = "application/vnd.google-apps.spreadsheet"
-                elif "docs.google.com/presentation" in url_private:
-                    mime_type = "application/vnd.google-apps.presentation"
-                elif "drive.google.com" in url_private:
-                    # Generic Google Drive file - keep existing MIME type or guess from name
-                    if not mime_type or mime_type == "application/octet-stream":
-                        guessed_type, _ = mimetypes.guess_type(name)
-                        mime_type = (
-                            guessed_type
-                            if guessed_type
-                            else "application/vnd.google-apps.document"
-                        )
-
-                log_with_context(
-                    logging.DEBUG,
-                    f"Detected Google Docs link, using MIME type {mime_type} for file {name}",
-                    channel=channel,
-                    file_id=file_id,
-                    url=url_private[:100],
-                )
-            else:
-                # Ensure we have a valid MIME type for regular files
-                if not mime_type or mime_type == "null":
-                    guessed_type, _ = mimetypes.guess_type(name)
-                    mime_type = (
-                        guessed_type if guessed_type else "application/octet-stream"
-                    )
-
-                    log_with_context(
-                        logging.DEBUG,
-                        f"Using guessed MIME type {mime_type} for file {name}",
-                        channel=channel,
-                        file_id=file_id,
-                    )
+            mime_type = self._resolve_drive_mime_type(file_obj, name, channel, file_id)
 
             log_with_context(
                 logging.DEBUG,
@@ -806,183 +835,22 @@ class FileHandler:
                 file_id=file_id,
             )
 
-            # Get the user's email for setting file ownership
-            user_email = None
-            if user_id:
-                user_email = self.user_map.get(user_id)
+            user_email = self.user_map.get(user_id) if user_id else None
 
-            # Get or create a folder for this channel
-            folder_id = None
-
-            if channel and self._root_folder_id:
-                folder_id = self.folder_manager.get_or_create_channel_folder(
-                    channel, self._root_folder_id, self._shared_drive_id
-                )
-
-                # Mark this channel folder as processed to avoid redundant setup
-                # Note: Channel folder permissions will be set later in add_regular_members()
-                # after migration is complete and we have definitive member data
-                channel_folder_key = f"{channel}_{folder_id}"
-                if folder_id and channel_folder_key not in self.shared_channel_folders:
-                    log_with_context(
-                        logging.DEBUG,
-                        f"Channel folder created for {channel}, permissions will be set after migration completes",
-                        channel=channel,
-                    )
-                    # Mark this channel folder as processed to avoid redundant processing
-                    self.shared_channel_folders.add(channel_folder_key)
-                else:
-                    log_with_context(
-                        logging.DEBUG,
-                        f"Channel folder for {channel} already processed",
-                        channel=channel,
-                    )
-
-                # Pre-cache file hashes from this folder to avoid duplicate uploads
-                if folder_id:
-                    self.drive_uploader.pre_cache_folder_file_hashes(
-                        folder_id, self._shared_drive_id
-                    )
-
-            # If we couldn't get or create a channel folder, use the root folder
+            folder_id = self._resolve_upload_folder(channel, file_id)
             if not folder_id:
-                folder_id = self._root_folder_id
-
-            if not folder_id:
-                log_with_context(
-                    logging.ERROR,
-                    "No valid folder ID available for file upload",
-                    channel=channel,
-                    file_id=file_id,
-                )
                 return None
 
-            # Write file content to a temporary file for upload
-            with tempfile.NamedTemporaryFile(
-                delete=False, suffix=f"_{name}"
-            ) as temp_file:
-                temp_file.write(file_content)
-                temp_file_path = temp_file.name
-
-            try:
-                # We now rely on folder permissions for access control
-                # We only pass the message poster's email to grant them editor permissions
-                # Use sender_email if provided, otherwise fall back to user_email
-                message_poster_email = sender_email or user_email
-
-                # Calculate hash of file content for logging and debugging
-                content_hash = hashlib.md5(file_content).hexdigest()  # noqa: S324 — not used for security
-                log_with_context(
-                    logging.DEBUG,
-                    f"File content hash: {content_hash}",
-                    channel=channel,
-                    file_id=file_id,
-                )
-
-                drive_file_id, public_url = self.drive_uploader.upload_file_to_drive(
-                    temp_file_path,
-                    name,
-                    folder_id,
-                    self._shared_drive_id,
-                    message_poster_email=message_poster_email,
-                )
-
-                if not drive_file_id:
-                    log_with_context(
-                        logging.ERROR,
-                        f"Failed to upload file {name} to Drive",
-                        channel=channel,
-                        file_id=file_id,
-                    )
-                    return None
-
-                if message_poster_email:
-                    log_with_context(
-                        logging.DEBUG,
-                        f"Gave editor permission to message poster {message_poster_email} for file {drive_file_id}",
-                        channel=channel,
-                        file_id=file_id,
-                    )
-                else:
-                    log_with_context(
-                        logging.WARNING,
-                        "No user email available for message poster, could not assign editor permissions",
-                        channel=channel,
-                        file_id=file_id,
-                    )
-
-                # Set ownership to the original poster if possible
-                # Note: Ownership transfer only works for regular Drive folders, not shared drives
-                # Also, external users cannot be made owners of files
-                if (
-                    user_email
-                    and not self.user_resolver.is_external_user(user_email)
-                    and not self._shared_drive_id
-                ):
-                    # For regular Drive folders, transfer ownership to the original internal poster
-                    try:
-                        self._transfer_file_ownership(drive_file_id, user_email)
-                        self.file_stats["ownership_transferred"] += 1
-                        log_with_context(
-                            logging.DEBUG,
-                            f"Transferred file ownership to original poster: {user_email}",
-                            channel=channel,
-                            file_id=file_id,
-                            drive_file_id=drive_file_id,
-                        )
-                    except HttpError as e:
-                        self.file_stats["ownership_transfer_failed"] += 1
-                        log_with_context(
-                            logging.WARNING,
-                            f"Could not transfer file ownership to {user_email}: {e}",
-                            channel=channel,
-                            file_id=file_id,
-                        )
-                elif user_email and self.user_resolver.is_external_user(user_email):
-                    log_with_context(
-                        logging.DEBUG,
-                        f"External user {user_email} cannot be made file owner, using service account ownership",
-                        channel=channel,
-                        file_id=file_id,
-                        drive_file_id=drive_file_id,
-                    )
-                elif self._shared_drive_id:
-                    log_with_context(
-                        logging.DEBUG,
-                        "Files in shared drives use inherited permissions, not individual ownership",
-                        channel=channel,
-                        file_id=file_id,
-                        drive_file_id=drive_file_id,
-                    )
-
-                log_with_context(
-                    logging.DEBUG,
-                    f"Successfully uploaded file to Drive: {name}",
-                    channel=channel,
-                    file_id=file_id,
-                    drive_file_id=drive_file_id,
-                )
-
-                # Return the Drive file information
-                drive_result = {
-                    "type": "drive",
-                    "link": public_url
-                    or f"https://drive.google.com/file/d/{drive_file_id}/view",
-                    "drive_id": drive_file_id,
-                    "name": name,
-                    "mime_type": mime_type,
-                }
-
-                return drive_result
-
-            finally:
-                # Clean up temporary file
-                try:
-                    os.unlink(temp_file_path)
-                except OSError:
-                    logger.debug(
-                        "Failed to clean up temp file %s", temp_file_path, exc_info=True
-                    )
+            return self._execute_drive_upload(
+                file_content,
+                name,
+                mime_type,
+                folder_id,
+                channel,
+                file_id,
+                user_email,
+                sender_email,
+            )
 
         except (HttpError, OSError) as e:
             log_with_context(
@@ -993,6 +861,258 @@ class FileHandler:
                 error=str(e),
             )
             return None
+
+    def _resolve_drive_mime_type(
+        self,
+        file_obj: dict[str, Any],
+        name: str,
+        channel: str | None,
+        file_id: str,
+    ) -> str:
+        """Determine the correct MIME type for a file being uploaded to Drive.
+
+        Handles Google Docs/Sheets/Slides links specially and falls back
+        to guessing from filename for regular files.
+        """
+        mime_type: str = file_obj.get("mimetype", "application/octet-stream")
+        url_private: str = file_obj.get("url_private", "")
+
+        is_google_docs_link = (
+            "docs.google.com" in url_private
+            or "drive.google.com" in url_private
+            or "sheets.google.com" in url_private
+            or "slides.google.com" in url_private
+        )
+
+        if is_google_docs_link:
+            mime_type = self._resolve_google_docs_mime_type(
+                url_private, mime_type, name
+            )
+            log_with_context(
+                logging.DEBUG,
+                f"Detected Google Docs link, using MIME type {mime_type} for file {name}",
+                channel=channel,
+                file_id=file_id,
+                url=url_private[:100],
+            )
+        elif not mime_type or mime_type == "null":
+            guessed_type, _ = mimetypes.guess_type(name)
+            mime_type = guessed_type if guessed_type else "application/octet-stream"
+            log_with_context(
+                logging.DEBUG,
+                f"Using guessed MIME type {mime_type} for file {name}",
+                channel=channel,
+                file_id=file_id,
+            )
+
+        return mime_type
+
+    @staticmethod
+    def _resolve_google_docs_mime_type(
+        url_private: str, current_mime: str, name: str
+    ) -> str:
+        """Map a Google Docs/Drive URL to its correct MIME type."""
+        if "docs.google.com/document" in url_private:
+            return "application/vnd.google-apps.document"
+        if (
+            "docs.google.com/spreadsheets" in url_private
+            or "sheets.google.com" in url_private
+        ):
+            return "application/vnd.google-apps.spreadsheet"
+        if "docs.google.com/presentation" in url_private:
+            return "application/vnd.google-apps.presentation"
+        if "drive.google.com" in url_private:
+            if not current_mime or current_mime == "application/octet-stream":
+                guessed_type, _ = mimetypes.guess_type(name)
+                return guessed_type or "application/vnd.google-apps.document"
+        return current_mime
+
+    def _resolve_upload_folder(self, channel: str | None, file_id: str) -> str | None:
+        """Get or create the target Drive folder for an upload.
+
+        Returns the folder ID, or None if no valid folder is available.
+        """
+        folder_id = None
+
+        if channel and self._root_folder_id:
+            folder_id = self.folder_manager.get_or_create_channel_folder(
+                channel, self._root_folder_id, self._shared_drive_id
+            )
+
+            channel_folder_key = f"{channel}_{folder_id}"
+            if folder_id and channel_folder_key not in self.shared_channel_folders:
+                log_with_context(
+                    logging.DEBUG,
+                    f"Channel folder created for {channel}, permissions will be set after migration completes",
+                    channel=channel,
+                )
+                self.shared_channel_folders.add(channel_folder_key)
+            else:
+                log_with_context(
+                    logging.DEBUG,
+                    f"Channel folder for {channel} already processed",
+                    channel=channel,
+                )
+
+            if folder_id:
+                self.drive_uploader.pre_cache_folder_file_hashes(
+                    folder_id, self._shared_drive_id
+                )
+
+        if not folder_id:
+            folder_id = self._root_folder_id
+
+        if not folder_id:
+            log_with_context(
+                logging.ERROR,
+                "No valid folder ID available for file upload",
+                channel=channel,
+                file_id=file_id,
+            )
+            return None
+
+        return folder_id
+
+    def _execute_drive_upload(
+        self,
+        file_content: bytes,
+        name: str,
+        mime_type: str,
+        folder_id: str,
+        channel: str | None,
+        file_id: str,
+        user_email: str | None,
+        sender_email: str | None,
+    ) -> UploadResult | None:
+        """Write content to a temp file, upload to Drive, and handle permissions.
+
+        Returns the UploadResult or None on failure.
+        """
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{name}") as temp_file:
+            temp_file.write(file_content)
+            temp_file_path = temp_file.name
+
+        try:
+            message_poster_email = sender_email or user_email
+
+            content_hash = hashlib.md5(file_content).hexdigest()  # noqa: S324 — not used for security
+            log_with_context(
+                logging.DEBUG,
+                f"File content hash: {content_hash}",
+                channel=channel,
+                file_id=file_id,
+            )
+
+            drive_file_id, public_url = self.drive_uploader.upload_file_to_drive(
+                temp_file_path,
+                name,
+                folder_id,
+                self._shared_drive_id,
+                message_poster_email=message_poster_email,
+            )
+
+            if not drive_file_id:
+                log_with_context(
+                    logging.ERROR,
+                    f"Failed to upload file {name} to Drive",
+                    channel=channel,
+                    file_id=file_id,
+                )
+                return None
+
+            if message_poster_email:
+                log_with_context(
+                    logging.DEBUG,
+                    f"Gave editor permission to message poster {message_poster_email} for file {drive_file_id}",
+                    channel=channel,
+                    file_id=file_id,
+                )
+            else:
+                log_with_context(
+                    logging.WARNING,
+                    "No user email available for message poster, could not assign editor permissions",
+                    channel=channel,
+                    file_id=file_id,
+                )
+
+            self._handle_ownership_transfer(drive_file_id, user_email, channel, file_id)
+
+            log_with_context(
+                logging.DEBUG,
+                f"Successfully uploaded file to Drive: {name}",
+                channel=channel,
+                file_id=file_id,
+                drive_file_id=drive_file_id,
+            )
+
+            return UploadResult(
+                upload_type="drive",
+                url=public_url
+                or f"https://drive.google.com/file/d/{drive_file_id}/view",
+                drive_id=drive_file_id,
+                name=name,
+                mime_type=mime_type,
+            )
+
+        finally:
+            try:
+                os.unlink(temp_file_path)
+            except OSError:
+                logger.debug(
+                    "Failed to clean up temp file %s", temp_file_path, exc_info=True
+                )
+
+    def _handle_ownership_transfer(
+        self,
+        drive_file_id: str,
+        user_email: str | None,
+        channel: str | None,
+        file_id: str,
+    ) -> None:
+        """Transfer file ownership if conditions allow it.
+
+        Ownership transfer only works for regular Drive folders (not shared drives)
+        and only for internal users.
+        """
+        if (
+            user_email
+            and not self.user_resolver.is_external_user(user_email)
+            and not self._shared_drive_id
+        ):
+            try:
+                self._transfer_file_ownership(drive_file_id, user_email)
+                self.file_stats["ownership_transferred"] += 1
+                log_with_context(
+                    logging.DEBUG,
+                    f"Transferred file ownership to original poster: {user_email}",
+                    channel=channel,
+                    file_id=file_id,
+                    drive_file_id=drive_file_id,
+                )
+            except HttpError as e:
+                self.file_stats["ownership_transfer_failed"] += 1
+                log_with_context(
+                    logging.WARNING,
+                    f"Could not transfer file ownership to {user_email}: {e}",
+                    channel=channel,
+                    file_id=file_id,
+                )
+        elif user_email and self.user_resolver.is_external_user(user_email):
+            log_with_context(
+                logging.DEBUG,
+                f"External user {user_email} cannot be made file owner, using service account ownership",
+                channel=channel,
+                file_id=file_id,
+                drive_file_id=drive_file_id,
+            )
+        elif self._shared_drive_id:
+            log_with_context(
+                logging.DEBUG,
+                "Files in shared drives use inherited permissions, not individual ownership",
+                channel=channel,
+                file_id=file_id,
+                drive_file_id=drive_file_id,
+            )
 
     def get_file_statistics(self) -> dict[str, Any]:
         """Get detailed file upload statistics.
@@ -1023,410 +1143,38 @@ class FileHandler:
     def _transfer_file_ownership(self, file_id: str, new_owner_email: str) -> bool:
         """Transfer ownership of a file to a new owner.
 
-        Args:
-            file_id: ID of the file to transfer
-            new_owner_email: Email of the new owner
-
-        Returns:
-            True if successful, False otherwise
+        Delegates to :func:`file_permissions.transfer_file_ownership`.
         """
-        try:
-            permission = {
-                "type": "user",
-                "role": "owner",
-                "emailAddress": new_owner_email,
-            }
-            self.drive_service.permissions().create(
-                fileId=file_id,
-                body=permission,
-                transferOwnership=True,
-                sendNotificationEmail=False,
-            ).execute()
-
-            log_with_context(
-                logging.DEBUG,
-                f"Transferred ownership of file {file_id} to {new_owner_email}",
-            )
-
-            return True
-
-        except HttpError as e:
-            log_with_context(logging.WARNING, f"Failed to transfer file ownership: {e}")
-            return False
+        return transfer_file_ownership(self.drive_service, file_id, new_owner_email)
 
     def _download_file(self, file_obj: dict[str, Any]) -> bytes | None:
         """Download a file from Slack export or URL.
 
-        Args:
-            file_obj: The file object from Slack
-
-        Returns:
-            File content as bytes, or None if download failed
+        Delegates to :func:`file_download.download_file`.
         """
-        try:
-            file_id = file_obj.get("id", "unknown")
-            name = file_obj.get("name", f"file_{file_id}")
-            url_private = file_obj.get("url_private")
-
-            if not url_private:
-                log_with_context(
-                    logging.WARNING,
-                    f"No URL found for file: {name}",
-                    file_id=file_id,
-                    channel=self._get_current_channel(),
-                )
-                return None
-
-            # Skip Google Docs links - these should not be processed as file attachments
-            # Google Docs URLs in Slack messages are text links, not downloadable files
-            # Only skip if they are actual Google Docs/Sheets/Slides documents
-            is_google_docs = (
-                ("docs.google.com/document" in url_private)
-                or ("docs.google.com/spreadsheets" in url_private)
-                or ("docs.google.com/presentation" in url_private)
-                or ("sheets.google.com" in url_private and "/edit" in url_private)
-                or ("slides.google.com" in url_private and "/edit" in url_private)
-            )
-
-            # Check if this is a Google Drive file that we should reference directly
-            is_google_drive_file = (
-                "drive.google.com/file/d/" in url_private
-                or "drive.google.com/open?id=" in url_private
-            )
-
-            if is_google_docs:
-                log_with_context(
-                    logging.DEBUG,
-                    f"Skipping Google Docs link - not a downloadable file: {url_private[:100]}{'...' if len(url_private) > 100 else ''}",
-                    file_id=file_id,
-                    file_name=name,
-                    channel=self._get_current_channel(),
-                )
-                return b"__GOOGLE_DOCS_SKIP__"
-
-            if is_google_drive_file:
-                log_with_context(
-                    logging.DEBUG,
-                    f"Google Drive file detected - will create direct reference instead of downloading: {url_private[:100]}{'...' if len(url_private) > 100 else ''}",
-                    file_id=file_id,
-                    file_name=name,
-                    channel=self._get_current_channel(),
-                )
-                # Return a special marker to indicate this is a Drive file
-                return b"__GOOGLE_DRIVE_FILE__"
-
-            log_with_context(
-                logging.DEBUG,
-                f"Downloading file from URL: {url_private[:100]}{'...' if len(url_private) > 100 else ''}",
-                file_id=file_id,
-                file_name=name,
-                channel=self._get_current_channel(),
-            )
-
-            # For files in the export, the URL might already contain a token
-            # We'll try to download using requests with default headers
-            headers: dict[str, str] = {}
-
-            # Note: Slack token authentication removed as not needed
-            # Export URLs already contain authentication tokens
-
-            response = requests.get(
-                url_private, headers=headers, stream=True, timeout=60
-            )
-
-            if response.status_code != HTTP_OK:
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to download file {name}: HTTP {response.status_code}",
-                    file_id=file_id,
-                    http_status=response.status_code,
-                    channel=self._get_current_channel(),
-                )
-                # Raise an exception to trigger the retry
-                response.raise_for_status()
-                return None
-
-            # Get content length if available
-            content_length = response.headers.get("Content-Length")
-            if content_length:
-                log_with_context(
-                    logging.DEBUG,
-                    f"File size from headers: {content_length} bytes",
-                    file_id=file_id,
-                    channel=self._get_current_channel(),
-                )
-
-            # Return the actual file content
-            content = response.content
-            log_with_context(
-                logging.DEBUG,
-                f"Successfully downloaded file: {name} (Size: {len(content)} bytes)",
-                file_id=file_id,
-                channel=self._get_current_channel(),
-            )
-            return content
-
-        except requests.exceptions.RequestException as e:
-            # Check for authentication errors (401, 403) which are unlikely to be resolved by retrying
-            if (
-                hasattr(e, "response")
-                and e.response
-                and e.response.status_code in (HTTP_UNAUTHORIZED, HTTP_FORBIDDEN)
-            ):
-                log_with_context(
-                    logging.WARNING,
-                    f"Authentication error downloading file, not retrying: {e!s}",
-                    file_id=file_obj.get("id", "unknown"),
-                    file_name=file_obj.get("name", "unknown"),
-                    error=str(e),
-                    status_code=e.response.status_code,
-                    channel=self._get_current_channel(),
-                )
-                # Return None instead of re-raising to prevent further retries for auth errors
-                return None
-
-            # For other network errors, log and re-raise to trigger retry
-            log_with_context(
-                logging.WARNING,
-                f"Error downloading file: {e!s}",
-                file_id=file_obj.get("id", "unknown"),
-                file_name=file_obj.get("name", "unknown"),
-                error=str(e),
-                channel=self._get_current_channel(),
-            )
-            raise  # Re-raise to trigger retry
-        except Exception as e:
-            log_with_context(
-                logging.ERROR,
-                f"Error downloading file: {e!s}",
-                file_id=file_obj.get("id", "unknown"),
-                file_name=file_obj.get("name", "unknown"),
-                error=str(e),
-                channel=self._get_current_channel(),
-            )
-            return None
+        return download_file(file_obj, self._get_current_channel())
 
     def _create_drive_reference(
         self, file_obj: dict[str, Any], channel: str | None = None
-    ) -> dict[str, Any] | None:
+    ) -> UploadResult | None:
         """Create a direct reference to an existing Google Drive file.
 
-        Args:
-            file_obj: The file object from Slack containing Google Drive URL
-            channel: Optional channel name for context
-
-        Returns:
-            Dict with drive reference details if successful, None otherwise
+        Delegates to :func:`file_download.create_drive_reference`.
         """
-        try:
-            file_id = file_obj.get("id", "unknown")
-            name = file_obj.get("name", f"file_{file_id}")
-            url_private = file_obj.get("url_private", "")
-
-            # Extract Google Drive file ID from the URL
-            drive_file_id = None
-
-            if "drive.google.com/file/d/" in url_private:
-                # Format: https://drive.google.com/file/d/FILE_ID/view
-                try:
-                    drive_file_id = url_private.split("/file/d/")[1].split("/")[0]
-                except IndexError:
-                    pass
-            elif "drive.google.com/open?id=" in url_private:
-                # Format: https://drive.google.com/open?id=FILE_ID
-                try:
-                    drive_file_id = url_private.split("id=")[1].split("&")[0]
-                except IndexError:
-                    pass
-
-            if not drive_file_id:
-                log_with_context(
-                    logging.WARNING,
-                    f"Could not extract Drive file ID from URL: {url_private}",
-                    channel=channel,
-                    file_id=file_id,
-                )
-                return None
-
-            log_with_context(
-                logging.DEBUG,
-                f"Created direct Drive reference for existing file: {name} (Drive ID: {drive_file_id})",
-                channel=channel,
-                file_id=file_id,
-                drive_file_id=drive_file_id,
-            )
-
-            # Update statistics
-            self.file_stats["drive_uploads"] += 1
-
-            # Create the result format
-            drive_result = {
-                "type": "drive",
-                "link": url_private,
-                "drive_id": drive_file_id,
-                "name": name,
-                "mime_type": file_obj.get("mimetype", "application/octet-stream"),
-                "is_reference": True,  # Flag to indicate this is a reference, not an upload
-            }
-
-            # Cache the result
-            self.processed_files[file_id] = drive_result
-
-            return drive_result
-
-        except Exception as e:
-            log_with_context(
-                logging.ERROR,
-                f"Error creating Drive reference: {e}",
-                channel=channel,
-                file_id=file_obj.get("id", "unknown"),
-                error=str(e),
-            )
-            return None
+        return create_drive_reference(
+            file_obj, channel, self.processed_files, self.file_stats
+        )
 
     def share_file_with_members(self, drive_file_id: str, channel: str) -> bool:
         """Share a Drive file with all active members of a channel.
 
-        If the file is already in a shared folder with proper permissions,
-        this method will skip setting individual permissions.
-
-        Args:
-            drive_file_id: The ID of the Drive file to share
-            channel: The channel name to get members from
-
-        Returns:
-            True if sharing was successful, False otherwise
+        Delegates to :func:`file_permissions.share_file_with_members`.
         """
-        try:
-            # First check if this file is already in a shared folder
-            if self._shared_drive_id:
-                # For shared drives, check if file is in the shared drive
-                file_info = (
-                    self.drive_service.files()
-                    .get(fileId=drive_file_id, fields="parents", supportsAllDrives=True)
-                    .execute()
-                )
-            else:
-                file_info = (
-                    self.drive_service.files()
-                    .get(fileId=drive_file_id, fields="parents")
-                    .execute()
-                )
-
-            parent_folders = file_info.get("parents", [])
-
-            # Check if any of the parent folders is our channel folder or shared drive
-            for parent_id in parent_folders:
-                try:
-                    if self._shared_drive_id:
-                        folder_info = (
-                            self.drive_service.files()
-                            .get(
-                                fileId=parent_id, fields="name", supportsAllDrives=True
-                            )
-                            .execute()
-                        )
-                    else:
-                        folder_info = (
-                            self.drive_service.files()
-                            .get(fileId=parent_id, fields="name")
-                            .execute()
-                        )
-
-                    folder_name = folder_info.get("name", "")
-
-                    # If this is our channel folder or shared drive, we don't need to set individual permissions
-                    if folder_name == channel or parent_id == self._shared_drive_id:
-                        log_with_context(
-                            logging.DEBUG,
-                            f"File {drive_file_id} is already in shared folder for channel {channel}, skipping individual permissions",
-                            channel=channel,
-                            file_id=drive_file_id,
-                        )
-                        return True
-                except HttpError:
-                    logger.debug("Failed to get folder info, continuing", exc_info=True)
-                    continue
-
-            # If we're here, the file is not in a channel folder, so we need to set individual permissions
-            if channel not in self.state.active_users_by_channel:
-                log_with_context(
-                    logging.WARNING,
-                    f"No active users tracked for channel {channel}, can't share file",
-                    channel=channel,
-                )
-                return False
-
-            active_users = self.state.active_users_by_channel[channel]
-            emails_to_share = []
-
-            # Get emails for all active users (INCLUDING external users for channel folder access)
-            for user_id in active_users:
-                email = self.user_map.get(user_id)
-                if email:
-                    emails_to_share.append(
-                        email
-                    )  # Include ALL users, both internal and external
-
-            if not emails_to_share:
-                log_with_context(
-                    logging.WARNING,
-                    f"No valid emails found for active users in channel {channel}",
-                    channel=channel,
-                )
-                return False
-
-            # Share the file with each user
-            log_with_context(
-                logging.DEBUG,
-                f"Sharing Drive file {drive_file_id} with {len(emails_to_share)} users",
-                channel=channel,
-            )
-
-            for email in emails_to_share:
-                try:
-                    # Create a permission for the user
-                    permission = {
-                        "type": "user",
-                        "role": "reader",
-                        "emailAddress": email,
-                    }
-                    if self._shared_drive_id:
-                        self.drive_service.permissions().create(
-                            fileId=drive_file_id,
-                            body=permission,
-                            sendNotificationEmail=False,
-                            supportsAllDrives=True,
-                        ).execute()
-                    else:
-                        self.drive_service.permissions().create(
-                            fileId=drive_file_id,
-                            body=permission,
-                            sendNotificationEmail=False,
-                        ).execute()
-
-                except HttpError as e:
-                    log_with_context(
-                        logging.WARNING,
-                        f"Failed to share file with {email}: {e}",
-                        channel=channel,
-                        file_id=drive_file_id,
-                    )
-
-            log_with_context(
-                logging.DEBUG,
-                "Successfully shared Drive file with channel members",
-                channel=channel,
-                file_id=drive_file_id,
-            )
-            return True
-
-        except HttpError as e:
-            log_with_context(
-                logging.ERROR,
-                f"Failed to share Drive file: {e}",
-                channel=channel,
-                file_id=drive_file_id,
-            )
-            # Re-raise to trigger retry
-            raise
+        return _share_file_with_members(
+            self.drive_service,
+            drive_file_id,
+            channel,
+            self._shared_drive_id,
+            self.state.progress.active_users_by_channel,
+            self.user_map,
+        )

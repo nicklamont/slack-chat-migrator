@@ -1,8 +1,19 @@
-"""Unit tests for the MigrationState dataclass."""
+"""Unit tests for the MigrationState dataclass and sub-states."""
+
+from __future__ import annotations
 
 import pytest
 
-from slack_migrator.core.state import MigrationState, _default_migration_summary
+from slack_migrator.core.state import (
+    ContextState,
+    ErrorState,
+    MessageState,
+    MigrationState,
+    ProgressState,
+    SpaceState,
+    UserState,
+    _default_migration_summary,
+)
 from slack_migrator.types import FailedMessage, MigrationSummary
 
 
@@ -25,90 +36,119 @@ def _make_failed(ts: str = "1", channel: str = "general") -> FailedMessage:
 
 
 # ---------------------------------------------------------------------------
+# Sub-state construction
+# ---------------------------------------------------------------------------
+
+
+class TestSubStateConstruction:
+    """Tests that sub-state dataclasses can be independently created."""
+
+    def test_space_state_defaults(self):
+        s = SpaceState()
+        assert s.space_mapping == {}
+        assert s.channel_handlers == {}
+
+    def test_message_state_defaults(self):
+        m = MessageState()
+        assert m.thread_map == {}
+        assert m.sent_messages == set()
+        assert m.failed_messages == []
+
+    def test_user_state_defaults(self):
+        u = UserState()
+        assert u.external_users == set()
+        assert u.skipped_reactions == []
+
+    def test_progress_state_defaults(self):
+        p = ProgressState()
+        assert p.migration_summary == _default_migration_summary()
+
+    def test_error_state_defaults(self):
+        e = ErrorState()
+        assert e.channel_error_count == 0
+        assert e.migration_errors == []
+
+    def test_context_state_defaults(self):
+        c = ContextState()
+        assert c.current_channel is None
+        assert c.first_channel_processed is False
+
+
+# ---------------------------------------------------------------------------
+# MigrationState construction and backward compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestMigrationStateConstruction:
+    """Tests that MigrationState composes sub-states correctly."""
+
+    def test_default_construction(self):
+        state = MigrationState()
+        assert state.errors.channel_error_count == 0
+        assert state.context.first_channel_processed is False
+        assert state.context.current_channel is None
+        assert state.spaces.space_mapping == {}
+        assert state.messages.thread_map == {}
+        assert state.progress.migration_summary == _default_migration_summary()
+
+    def test_sub_state_construction(self):
+        """Construct with explicit sub-states."""
+        state = MigrationState(
+            spaces=SpaceState(channel_handlers={"ch1": "handler"}),
+            errors=ErrorState(channel_error_count=5),
+        )
+        assert state.spaces.channel_handlers == {"ch1": "handler"}
+        assert state.errors.channel_error_count == 5
+
+    def test_sub_state_reads(self):
+        """Reading through sub-state attributes returns correct values."""
+        state = MigrationState(
+            spaces=SpaceState(space_cache={"s1": "v1"}),
+            messages=MessageState(sent_messages={"msg1"}),
+            users=UserState(external_users={"ext@ex.com"}),
+        )
+        assert state.spaces.space_cache == {"s1": "v1"}
+        assert state.messages.sent_messages == {"msg1"}
+        assert state.users.external_users == {"ext@ex.com"}
+
+    def test_sub_state_writes(self):
+        """Setting sub-state attributes updates correctly."""
+        state = MigrationState()
+        state.spaces.channel_handlers = {"ch1": "handler"}
+        assert state.spaces.channel_handlers == {"ch1": "handler"}
+
+        state.messages.thread_map = {"ts1": "thread1"}
+        assert state.messages.thread_map == {"ts1": "thread1"}
+
+        state.context.current_channel = "general"
+        assert state.context.current_channel == "general"
+
+    def test_drive_files_cache_is_top_level(self):
+        """drive_files_cache remains a direct field on MigrationState."""
+        state = MigrationState()
+        state.drive_files_cache["f1"] = {"id": "f1"}
+        assert state.drive_files_cache == {"f1": {"id": "f1"}}
+
+
+# ---------------------------------------------------------------------------
 # __post_init__ validation
 # ---------------------------------------------------------------------------
 
 
 class TestPostInitValidation:
-    """Tests for __post_init__ type and value validation."""
-
-    def test_default_construction(self):
-        state = MigrationState()
-        assert state.channel_error_count == 0
-        assert state.first_channel_processed is False
-        assert state.current_channel is None
+    """Tests for __post_init__ validation."""
 
     def test_negative_channel_error_count_raises(self):
         with pytest.raises(ValueError, match="non-negative"):
-            MigrationState(channel_error_count=-1)
+            MigrationState(errors=ErrorState(channel_error_count=-1))
 
     def test_zero_channel_error_count_ok(self):
-        state = MigrationState(channel_error_count=0)
-        assert state.channel_error_count == 0
+        state = MigrationState(errors=ErrorState(channel_error_count=0))
+        assert state.errors.channel_error_count == 0
 
     def test_positive_channel_error_count_ok(self):
-        state = MigrationState(channel_error_count=5)
-        assert state.channel_error_count == 5
-
-    def test_dict_field_wrong_type_raises(self):
-        with pytest.raises(TypeError, match="space_cache must be a dict"):
-            MigrationState(space_cache=[])  # type: ignore[arg-type]
-
-    def test_list_field_wrong_type_raises(self):
-        with pytest.raises(TypeError, match="failed_messages must be a list"):
-            MigrationState(failed_messages={})  # type: ignore[arg-type]
-
-    def test_set_field_wrong_type_raises(self):
-        with pytest.raises(TypeError, match="sent_messages must be a set"):
-            MigrationState(sent_messages=[])  # type: ignore[arg-type]
-
-    @pytest.mark.parametrize(
-        "field_name",
-        [
-            "created_spaces",
-            "channel_to_space",
-            "channel_id_to_space_id",
-            "channel_handlers",
-            "thread_map",
-            "message_id_map",
-            "failed_messages_by_channel",
-            "drive_files_cache",
-            "chat_delegates",
-            "valid_users",
-            "migration_summary",
-            "last_processed_timestamps",
-            "channel_stats",
-            "spaces_with_external_users",
-            "active_users_by_channel",
-            "high_failure_rate_channels",
-            "migration_issues",
-        ],
-    )
-    def test_all_dict_fields_reject_non_dict(self, field_name):
-        with pytest.raises(TypeError, match=f"{field_name} must be a dict"):
-            MigrationState(**{field_name: "not a dict"})  # type: ignore[arg-type]
-
-    @pytest.mark.parametrize(
-        "field_name",
-        [
-            "failed_messages",
-            "skipped_reactions",
-            "incomplete_import_spaces",
-            "migration_errors",
-            "channels_with_errors",
-        ],
-    )
-    def test_all_list_fields_reject_non_list(self, field_name):
-        with pytest.raises(TypeError, match=f"{field_name} must be a list"):
-            MigrationState(**{field_name: "not a list"})  # type: ignore[arg-type]
-
-    @pytest.mark.parametrize(
-        "field_name",
-        ["sent_messages", "external_users", "channel_conflicts"],
-    )
-    def test_all_set_fields_reject_non_set(self, field_name):
-        with pytest.raises(TypeError, match=f"{field_name} must be a set"):
-            MigrationState(**{field_name: "not a set"})  # type: ignore[arg-type]
+        state = MigrationState(errors=ErrorState(channel_error_count=5))
+        assert state.errors.channel_error_count == 5
 
 
 # ---------------------------------------------------------------------------
@@ -120,80 +160,88 @@ class TestResetForRun:
     """Tests for MigrationState.reset_for_run."""
 
     def test_resets_channel_handlers(self):
-        state = MigrationState(channel_handlers={"ch1": "handler"})
+        state = MigrationState(spaces=SpaceState(channel_handlers={"ch1": "handler"}))
         state.reset_for_run()
-        assert state.channel_handlers == {}
+        assert state.spaces.channel_handlers == {}
 
     def test_resets_thread_map(self):
-        state = MigrationState(thread_map={"ts1": "thread1"})
+        state = MigrationState(messages=MessageState(thread_map={"ts1": "thread1"}))
         state.reset_for_run()
-        assert state.thread_map == {}
+        assert state.messages.thread_map == {}
 
     def test_resets_migration_summary_to_initial_structure(self):
         state = MigrationState(
-            migration_summary=_make_summary(
-                channels_processed=["a", "b"],
-                spaces_created=5,
-                messages_created=100,
-                reactions_created=20,
-                files_created=10,
+            progress=ProgressState(
+                migration_summary=_make_summary(
+                    channels_processed=["a", "b"],
+                    spaces_created=5,
+                    messages_created=100,
+                    reactions_created=20,
+                    files_created=10,
+                )
             )
         )
         state.reset_for_run()
-        assert state.migration_summary == _default_migration_summary()
+        assert state.progress.migration_summary == _default_migration_summary()
 
     def test_resets_migration_errors(self):
-        state = MigrationState(migration_errors=["error1"])
+        state = MigrationState(errors=ErrorState(migration_errors=["error1"]))
         state.reset_for_run()
-        assert state.migration_errors == []
+        assert state.errors.migration_errors == []
 
     def test_resets_channels_with_errors(self):
-        state = MigrationState(channels_with_errors=["ch1"])
+        state = MigrationState(errors=ErrorState(channels_with_errors=["ch1"]))
         state.reset_for_run()
-        assert state.channels_with_errors == []
+        assert state.errors.channels_with_errors == []
 
     def test_resets_channel_error_count(self):
-        state = MigrationState(channel_error_count=3)
+        state = MigrationState(errors=ErrorState(channel_error_count=3))
         state.reset_for_run()
-        assert state.channel_error_count == 0
+        assert state.errors.channel_error_count == 0
 
     def test_resets_first_channel_processed(self):
-        state = MigrationState(first_channel_processed=True)
+        state = MigrationState(context=ContextState(first_channel_processed=True))
         state.reset_for_run()
-        assert state.first_channel_processed is False
+        assert state.context.first_channel_processed is False
 
     def test_does_not_reset_space_cache(self):
         """Space cache should persist across runs (it is not per-run state)."""
-        state = MigrationState(space_cache={"s1": "v1"})
+        state = MigrationState(spaces=SpaceState(space_cache={"s1": "v1"}))
         state.reset_for_run()
-        assert state.space_cache == {"s1": "v1"}
+        assert state.spaces.space_cache == {"s1": "v1"}
 
     def test_does_not_reset_sent_messages(self):
         """Sent messages should persist across runs for deduplication."""
-        state = MigrationState(sent_messages={"msg1"})
+        state = MigrationState(messages=MessageState(sent_messages={"msg1"}))
         state.reset_for_run()
-        assert state.sent_messages == {"msg1"}
+        assert state.messages.sent_messages == {"msg1"}
 
     def test_complete_reset(self):
         """Verify all expected fields are reset when starting from dirty state."""
         state = MigrationState(
-            channel_handlers={"h": "v"},
-            thread_map={"t": "v"},
-            migration_summary=_make_summary(channels_processed=["x"], spaces_created=1),
-            migration_errors=["err"],
-            channels_with_errors=["ch"],
-            channel_error_count=2,
-            first_channel_processed=True,
+            spaces=SpaceState(channel_handlers={"h": "v"}),
+            messages=MessageState(thread_map={"t": "v"}),
+            progress=ProgressState(
+                migration_summary=_make_summary(
+                    channels_processed=["x"], spaces_created=1
+                )
+            ),
+            errors=ErrorState(
+                migration_errors=["err"],
+                channels_with_errors=["ch"],
+                channel_error_count=2,
+            ),
+            context=ContextState(first_channel_processed=True),
         )
         state.reset_for_run()
-        assert state.channel_handlers == {}
-        assert state.thread_map == {}
-        assert state.migration_summary["channels_processed"] == []
-        assert state.migration_summary["spaces_created"] == 0
-        assert state.migration_errors == []
-        assert state.channels_with_errors == []
-        assert state.channel_error_count == 0
-        assert state.first_channel_processed is False
+        assert state.spaces.channel_handlers == {}
+        assert state.messages.thread_map == {}
+        assert state.progress.migration_summary["channels_processed"] == []
+        assert state.progress.migration_summary["spaces_created"] == 0
+        assert state.errors.migration_errors == []
+        assert state.errors.channels_with_errors == []
+        assert state.errors.channel_error_count == 0
+        assert state.context.first_channel_processed is False
 
 
 # ---------------------------------------------------------------------------
@@ -209,22 +257,24 @@ class TestHasErrors:
         assert state.has_errors is False
 
     def test_migration_errors_present(self):
-        state = MigrationState(migration_errors=["some error"])
+        state = MigrationState(errors=ErrorState(migration_errors=["some error"]))
         assert state.has_errors is True
 
     def test_channels_with_errors_present(self):
-        state = MigrationState(channels_with_errors=["ch1"])
+        state = MigrationState(errors=ErrorState(channels_with_errors=["ch1"]))
         assert state.has_errors is True
 
     def test_both_error_types_present(self):
         state = MigrationState(
-            migration_errors=["err"],
-            channels_with_errors=["ch"],
+            errors=ErrorState(
+                migration_errors=["err"],
+                channels_with_errors=["ch"],
+            )
         )
         assert state.has_errors is True
 
     def test_empty_error_lists(self):
-        state = MigrationState(migration_errors=[], channels_with_errors=[])
+        state = MigrationState()
         assert state.has_errors is False
 
 
@@ -242,41 +292,45 @@ class TestSuccessRate:
 
     def test_all_messages_successful(self):
         state = MigrationState(
-            migration_summary=_make_summary(messages_created=10),
-            failed_messages=[],
+            progress=ProgressState(
+                migration_summary=_make_summary(messages_created=10)
+            ),
         )
         assert state.success_rate == 100.0
 
     def test_all_messages_failed(self):
         state = MigrationState(
-            migration_summary=_make_summary(messages_created=0),
-            failed_messages=[_make_failed("1"), _make_failed("2")],
+            messages=MessageState(
+                failed_messages=[_make_failed("1"), _make_failed("2")]
+            ),
         )
         assert state.success_rate == 0.0
 
     def test_partial_failure(self):
         state = MigrationState(
-            migration_summary=_make_summary(messages_created=7),
-            failed_messages=[
-                _make_failed("1"),
-                _make_failed("2"),
-                _make_failed("3"),
-            ],
+            progress=ProgressState(migration_summary=_make_summary(messages_created=7)),
+            messages=MessageState(
+                failed_messages=[
+                    _make_failed("1"),
+                    _make_failed("2"),
+                    _make_failed("3"),
+                ]
+            ),
         )
         # 7 / 10 = 70%
         assert state.success_rate == pytest.approx(70.0)
 
     def test_one_success_one_failure(self):
         state = MigrationState(
-            migration_summary=_make_summary(messages_created=1),
-            failed_messages=[_make_failed("x")],
+            progress=ProgressState(migration_summary=_make_summary(messages_created=1)),
+            messages=MessageState(failed_messages=[_make_failed("x")]),
         )
         assert state.success_rate == pytest.approx(50.0)
 
     def test_default_summary_zero_messages(self):
         """Default MigrationSummary has messages_created=0."""
         state = MigrationState(
-            failed_messages=[_make_failed("1")],
+            messages=MessageState(failed_messages=[_make_failed("1")]),
         )
         assert state.success_rate == 0.0
 
@@ -294,19 +348,25 @@ class TestTotalMessagesAttempted:
         assert state.total_messages_attempted == 0
 
     def test_only_created(self):
-        state = MigrationState(migration_summary=_make_summary(messages_created=5))
+        state = MigrationState(
+            progress=ProgressState(migration_summary=_make_summary(messages_created=5))
+        )
         assert state.total_messages_attempted == 5
 
     def test_only_failed(self):
         state = MigrationState(
-            failed_messages=[_make_failed("1"), _make_failed("2")],
+            messages=MessageState(
+                failed_messages=[_make_failed("1"), _make_failed("2")]
+            ),
         )
         assert state.total_messages_attempted == 2
 
     def test_created_plus_failed(self):
         state = MigrationState(
-            migration_summary=_make_summary(messages_created=8),
-            failed_messages=[_make_failed("1"), _make_failed("2")],
+            progress=ProgressState(migration_summary=_make_summary(messages_created=8)),
+            messages=MessageState(
+                failed_messages=[_make_failed("1"), _make_failed("2")]
+            ),
         )
         assert state.total_messages_attempted == 10
 

@@ -180,7 +180,7 @@ def create_space(
 
     if ctx.dry_run:
         # In dry run mode, increment the counter but don't make API call
-        state.migration_summary["spaces_created"] += 1
+        state.progress.migration_summary["spaces_created"] += 1
         # Use a consistent space name format for tracking
         space_name = f"spaces/{channel}"
         log_with_context(
@@ -195,7 +195,7 @@ def create_space(
             space_name = space["name"]
 
             # Increment the spaces created counter
-            state.migration_summary["spaces_created"] += 1
+            state.progress.migration_summary["spaces_created"] += 1
 
             log_with_context(
                 logging.INFO,
@@ -262,10 +262,10 @@ def create_space(
                 raise
 
     # Store the created space in state
-    state.created_spaces[channel] = space_name
+    state.spaces.created_spaces[channel] = space_name
 
     # Store whether this space has external users for later reference
-    state.spaces_with_external_users[space_name] = has_external_users
+    state.progress.spaces_with_external_users[space_name] = has_external_users
 
     return space_name
 

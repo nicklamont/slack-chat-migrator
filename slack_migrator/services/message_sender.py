@@ -1,25 +1,25 @@
-"""
-Functions for handling message processing during Slack to Google Chat migration
-"""
+"""Message sending, tracking, and error handling for Slack-to-Chat migration."""
 
 from __future__ import annotations
 
 import datetime
-import hashlib
 import logging
 import time
-import uuid
-from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
 from slack_migrator.constants import BOT_SUBTYPES, SYSTEM_SUBTYPES
 from slack_migrator.services.discovery import should_process_message
+from slack_migrator.services.message_builder import (
+    _build_message_payload,
+    _generate_message_id,
+    _process_attachments,
+)
 from slack_migrator.services.reaction_processor import process_reactions_batch
-from slack_migrator.types import FailedMessage
+from slack_migrator.types import FailedMessage, MessageResult, SendResult
 from slack_migrator.utils.api import slack_ts_to_rfc3339
-from slack_migrator.utils.formatting import convert_formatting, parse_slack_blocks
+from slack_migrator.utils.formatting import parse_slack_blocks
 from slack_migrator.utils.logging import (
     log_with_context,
 )
@@ -27,19 +27,6 @@ from slack_migrator.utils.logging import (
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
-
-
-MESSAGE_ID_MAX_LENGTH = 63
-CLIENT_MESSAGE_PREFIX = "client-slack-"
-CLIENT_EDIT_PREFIX = "client-slack-edit-"
-
-
-class MessageResult(str, Enum):
-    """Sentinel return values from send_message() for non-API outcomes."""
-
-    IGNORED_BOT = "IGNORED_BOT"
-    ALREADY_SENT = "ALREADY_SENT"
-    SKIPPED = "SKIPPED"
 
 
 def _should_skip_message(  # noqa: C901
@@ -54,7 +41,7 @@ def _should_skip_message(  # noqa: C901
     is_edited: bool,
     edited_ts: str,
     message_key: str,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, MessageResult | None]:
     """Check whether a message should be skipped before processing.
 
     Handles bot checks, update-mode deduplication, dry-run early return,
@@ -98,8 +85,8 @@ def _should_skip_message(  # noqa: C901
 
     # --- Update-mode deduplication ---
     # First, check if this message is older than the last processed timestamp
-    if is_update_mode and state.last_processed_timestamps:
-        last_timestamp = state.last_processed_timestamps.get(channel, 0)
+    if is_update_mode and state.progress.last_processed_timestamps:
+        last_timestamp = state.progress.last_processed_timestamps.get(channel, 0)
         if last_timestamp > 0:
             if not should_process_message(last_timestamp, ts):
                 log_with_context(
@@ -113,7 +100,7 @@ def _should_skip_message(  # noqa: C901
                 return True, MessageResult.ALREADY_SENT
 
     # Also check the sent_messages set for additional protection
-    if is_update_mode and message_key in state.sent_messages:
+    if is_update_mode and message_key in state.messages.sent_messages:
         log_with_context(
             logging.INFO,
             f"[UPDATE MODE] Skipping already sent message TS={ts} from user={user_id}",
@@ -127,7 +114,7 @@ def _should_skip_message(  # noqa: C901
     # Only increment the message count in non-dry run mode
     # In dry run mode, this is handled in the migrate method
     if not ctx.dry_run:
-        state.migration_summary["messages_created"] += 1
+        state.progress.migration_summary["messages_created"] += 1
 
     if ctx.dry_run:
         log_with_context(
@@ -179,303 +166,6 @@ def _should_skip_message(  # noqa: C901
     return False, None
 
 
-def _build_message_payload(
-    ctx: MigrationContext,
-    state: MigrationState,
-    user_resolver: Any,
-    message: dict[str, Any],
-    ts: str,
-    user_id: str,
-    thread_ts: str | None,
-    channel: str,
-    is_edited: bool,
-    edited_ts: str,
-) -> tuple[dict[str, Any], str | None, bool, str | None]:
-    """Build the Google Chat message payload from a Slack message.
-
-    Handles text formatting, sender resolution (internal / external / unmapped),
-    edit indicators, and thread routing.
-
-    Returns:
-        A tuple of ``(payload, user_email, is_thread_reply, message_reply_option)``.
-    """
-    # Extract text from Slack blocks (rich formatting) or fallback to plain text
-    text = parse_slack_blocks(message)
-
-    # Create a mapping dictionary that has all user mapping overrides applied for ALL users
-    user_map_with_overrides = {}
-
-    # Map ALL user IDs with their proper overrides by iterating over .items()
-    # This ensures we never miss any mentions and handles all potential edge cases
-    for slack_user_id, email in ctx.user_map.items():
-        internal_email = user_resolver.get_internal_email(slack_user_id, email)
-        if internal_email:  # Only add if we got a valid email back
-            user_map_with_overrides[slack_user_id] = internal_email
-
-    # Set current message context for enhanced user tracking
-    state.current_message_ts = ts
-
-    # Convert Slack formatting to Google Chat formatting using the correct mapping
-    formatted_text = convert_formatting(
-        text,
-        user_map_with_overrides,
-        state=state,
-        unmapped_user_tracker=getattr(user_resolver, "unmapped_user_tracker", None),
-    )
-
-    # For edited messages, add an edit indicator
-    if is_edited:
-        edit_time = datetime.datetime.fromtimestamp(float(edited_ts)).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-        formatted_text = f"{formatted_text}\n\n_(edited at {edit_time})_"
-
-    # Convert Slack timestamp to RFC3339 format for Google Chat
-    create_time = slack_ts_to_rfc3339(ts)
-
-    # Prepare the message payload
-    payload: dict[str, Any] = {"createTime": create_time}
-
-    # Set the sender if available
-    user_email = ctx.user_map.get(user_id)
-    final_text = formatted_text
-
-    if user_email:
-        # Get the internal email for this user (now just returns the mapped email)
-        internal_email = user_resolver.get_internal_email(user_id, user_email)
-        if internal_email:
-            # Check if this is an external user - if so, use admin with attribution
-            if user_resolver.is_external_user(internal_email):
-                # External user - send via admin with attribution
-                admin_email, attributed_text = (
-                    user_resolver.handle_unmapped_user_message(user_id, formatted_text)
-                )
-                final_text = attributed_text
-                payload["sender"] = {"type": "HUMAN", "name": f"users/{admin_email}"}
-            else:
-                # Regular internal user - send directly
-                payload["sender"] = {"type": "HUMAN", "name": f"users/{internal_email}"}
-        else:
-            # This shouldn't happen if user_email exists, but handle it gracefully
-            admin_email, attributed_text = user_resolver.handle_unmapped_user_message(
-                user_id, formatted_text
-            )
-            final_text = attributed_text
-            payload["sender"] = {"type": "HUMAN", "name": f"users/{admin_email}"}
-    elif user_id:  # We have a user_id but no mapping
-        # Handle unmapped user with new graceful approach
-        admin_email, attributed_text = user_resolver.handle_unmapped_user_message(
-            user_id, formatted_text
-        )
-        final_text = attributed_text
-        payload["sender"] = {"type": "HUMAN", "name": f"users/{admin_email}"}
-    # If no user_id at all (system messages, etc.), leave sender empty
-
-    # Add message text (potentially modified for unmapped user attribution)
-    payload["text"] = final_text
-
-    # Log the final payload for debugging
-    log_with_context(
-        logging.DEBUG,
-        f"Final formatted text for message {ts}: '{final_text}'",
-        channel=channel,
-        ts=ts,
-    )
-
-    # Handle thread replies
-    is_thread_reply = False
-    message_reply_option = None
-
-    if thread_ts and thread_ts != ts:  # This is a thread reply
-        is_thread_reply = True
-
-        # Convert thread_ts to string for consistent lookup
-        thread_ts_str = str(thread_ts)
-
-        # Check if we have the thread name from a previous message
-        existing_thread_name = state.thread_map.get(thread_ts_str)
-
-        log_with_context(
-            logging.DEBUG,
-            f"Processing thread reply: ts={ts}, thread_ts={thread_ts_str}, existing_thread_name={existing_thread_name}",
-            channel=channel,
-            ts=ts,
-            thread_ts=thread_ts_str,
-        )
-
-        if existing_thread_name:
-            # Use the existing thread name to reply to the correct thread
-            payload["thread"] = {"name": existing_thread_name}
-            log_with_context(
-                logging.DEBUG,
-                f"Message {ts} is replying to existing thread {existing_thread_name} (original ts={thread_ts_str})",
-                channel=channel,
-                ts=ts,
-                thread_ts=thread_ts_str,
-                thread_name=existing_thread_name,
-            )
-        else:
-            # Fallback to thread_key if we don't have the thread name yet
-            # This might happen if messages are processed out of order
-            payload["thread"] = {"thread_key": thread_ts_str}
-            log_with_context(
-                logging.WARNING,
-                f"Message {ts} is replying to thread {thread_ts_str} but no thread name found, using thread_key fallback",
-                channel=channel,
-                ts=ts,
-                thread_ts=thread_ts_str,
-            )
-
-        # Set message reply option to fallback to new thread if needed
-        message_reply_option = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
-    else:
-        # For new thread starters, use their own timestamp as the thread_key
-        payload["thread"] = {"thread_key": str(ts)}
-        log_with_context(
-            logging.DEBUG,
-            f"Creating new thread with thread.thread_key: {ts}",
-            channel=channel,
-            ts=ts,
-        )
-
-    return payload, user_email, is_thread_reply, message_reply_option
-
-
-def _generate_message_id(ts: str, is_edited: bool, edited_ts: str) -> str:
-    """Generate a unique Google Chat ``messageId`` for a Slack message.
-
-    Combines the Slack timestamp, current wall-clock milliseconds, and a
-    random UUID fragment.  Falls back to an MD5-based shorter form when
-    the raw ID exceeds the Google Chat 63-character limit.
-    """
-    clean_ts = ts.replace(".", "-")
-    current_ms = int(time.time() * 1000)
-    unique_id = str(uuid.uuid4()).replace("-", "")[:8]
-
-    # For edited messages, include the edited timestamp in the message ID
-    if is_edited:
-        message_id = f"{CLIENT_EDIT_PREFIX}{clean_ts}-{current_ms}-{unique_id}"
-    else:
-        message_id = f"{CLIENT_MESSAGE_PREFIX}{clean_ts}-{current_ms}-{unique_id}"
-
-    # Ensure the ID is within the Google Chat character limit
-    if len(message_id) > MESSAGE_ID_MAX_LENGTH:
-        # Hash the timestamps and use a shorter ID format
-        hash_input = ts
-        if is_edited:
-            hash_input = f"{ts}:{edited_ts}"
-
-        hash_obj = hashlib.md5(hash_input.encode())  # noqa: S324 — not used for security
-        hash_digest = hash_obj.hexdigest()[:8]
-
-        # Create a shorter ID that still maintains uniqueness
-        if is_edited:
-            message_id = (
-                f"{CLIENT_EDIT_PREFIX}{hash_digest}-{current_ms}-{unique_id[:4]}"
-            )
-        else:
-            message_id = (
-                f"{CLIENT_MESSAGE_PREFIX}{hash_digest}-{current_ms}-{unique_id[:4]}"
-            )
-
-    return message_id
-
-
-def _process_attachments(
-    user_resolver: Any,
-    attachment_processor: Any,
-    message: dict[str, Any],
-    channel: str,
-    space: str,
-    user_id: str,
-    user_email: str | None,
-    chat_service: Any,
-    payload: dict[str, Any],
-    ts: str,
-) -> None:
-    """Process file attachments and update *payload* in-place.
-
-    Drive-file attachments are converted to inline links appended to the
-    message text.  Non-Drive attachments are added to the ``attachment``
-    field of the payload.
-    """
-    # For impersonated users, ensure they have access to any drive files
-    sender_email = None
-    if user_email and not user_resolver.is_external_user(user_email):
-        sender_email = user_email
-
-    # Process file attachments with the sender's email to ensure proper permissions
-    attachments = attachment_processor.process_message_attachments(
-        message,
-        channel,
-        space,
-        user_id,
-        chat_service,
-        sender_email=sender_email,
-    )
-
-    # TEMPORARY SOLUTION: For Drive files, append links to message text instead of using attachments
-    # This is because the Drive file attachment method is not working correctly
-    drive_links = []
-    non_drive_attachments = []
-
-    if attachments:
-        for attachment in attachments:
-            if "driveDataRef" in attachment:
-                # This is a Drive file attachment
-                drive_file_id = attachment.get("driveDataRef", {}).get("driveFileId")
-                if drive_file_id:
-                    # Construct standard Drive link from the file ID
-                    drive_link = f"https://drive.google.com/file/d/{drive_file_id}/view"
-                    drive_links.append(drive_link)
-                    log_with_context(
-                        logging.DEBUG,
-                        f"Converting Drive attachment to link: {drive_link}",
-                        channel=channel,
-                        ts=ts,
-                        drive_file_id=drive_file_id,
-                    )
-            else:
-                # Keep non-Drive attachments as they are
-                non_drive_attachments.append(attachment)
-
-        # If we have Drive links, append them to the message text
-        if drive_links:
-            # Only add newlines if the message text is not empty
-            if payload["text"].strip():
-                links_text = "\n\n" + "\n".join(
-                    [f"\U0001f4ce {link}" for link in drive_links]
-                )
-            else:
-                # If message is empty, don't add extra newlines
-                links_text = "\n".join([f"\U0001f4ce {link}" for link in drive_links])
-
-            payload["text"] = payload["text"] + links_text
-            log_with_context(
-                logging.DEBUG,
-                f"Appended {len(drive_links)} Drive links to message text for {ts}",
-                channel=channel,
-                ts=ts,
-            )
-
-        # Only add non-Drive attachments to the payload
-        if non_drive_attachments:
-            payload["attachment"] = non_drive_attachments
-            log_with_context(
-                logging.DEBUG,
-                f"Added {len(non_drive_attachments)} non-Drive attachments to message payload for {ts}",
-                channel=channel,
-                ts=ts,
-            )
-    else:
-        log_with_context(
-            logging.DEBUG,
-            f"No attachments processed for message {ts}",
-            channel=channel,
-            ts=ts,
-        )
-
-
 def _handle_send_result(
     ctx: MigrationContext,
     state: MigrationState,
@@ -502,7 +192,7 @@ def _handle_send_result(
         # For edited messages, store with a special key that includes the edit timestamp
         if is_edited:
             edit_key = f"{ts}:edited:{edited_ts}"
-            state.message_id_map[edit_key] = message_name
+            state.messages.message_id_map[edit_key] = message_name
             log_with_context(
                 logging.DEBUG,
                 f"Stored message ID mapping for edited message: {edit_key} -> {message_name}",
@@ -511,7 +201,7 @@ def _handle_send_result(
                 edited_ts=edited_ts,
             )
         else:
-            state.message_id_map[ts] = message_name
+            state.messages.message_id_map[ts] = message_name
 
     # Store thread mapping for both parent messages and thread replies
     if message_name:
@@ -528,7 +218,7 @@ def _handle_send_result(
         if thread_name:
             if not is_thread_reply:
                 # For new thread starters, store the mapping using their own timestamp
-                state.thread_map[str(ts)] = thread_name
+                state.messages.thread_map[str(ts)] = thread_name
                 log_with_context(
                     logging.DEBUG,
                     f"Stored new thread mapping: {ts} -> {thread_name}",
@@ -538,9 +228,9 @@ def _handle_send_result(
             else:
                 # For thread replies, ensure the original thread timestamp mapping exists
                 thread_ts_str = str(thread_ts)
-                if thread_ts_str not in state.thread_map:
+                if thread_ts_str not in state.messages.thread_map:
                     # Store the mapping using the original thread timestamp
-                    state.thread_map[thread_ts_str] = thread_name
+                    state.messages.thread_map[thread_ts_str] = thread_name
                     log_with_context(
                         logging.DEBUG,
                         f"Stored thread mapping from reply: {thread_ts_str} -> {thread_name}",
@@ -550,7 +240,7 @@ def _handle_send_result(
                     )
                 else:
                     # Verify the mapping is consistent
-                    existing_thread_name = state.thread_map[thread_ts_str]
+                    existing_thread_name = state.messages.thread_map[thread_ts_str]
                     if existing_thread_name != thread_name:
                         log_with_context(
                             logging.WARNING,
@@ -578,7 +268,7 @@ def _handle_send_result(
     # Process reactions if any
     if "reactions" in message and message_name:
         # Store the current message timestamp for context in reaction processing
-        state.current_message_ts = ts
+        state.context.current_message_ts = ts
 
         # The message_id for reactions should be the final segment of the message_name
         final_message_id = message_name.split("/")[-1]
@@ -608,7 +298,7 @@ def _handle_send_result(
     )
 
     # Mark this message as successfully sent to avoid duplicates
-    state.sent_messages.add(message_key)
+    state.messages.sent_messages.add(message_key)
 
 
 def _handle_send_error(
@@ -617,10 +307,14 @@ def _handle_send_error(
     message: dict[str, Any],
     ts: str,
     channel: str | None,
-) -> None:
-    """Log and record an ``HttpError`` that occurred while sending a message."""
+) -> SendResult:
+    """Log and record an ``HttpError`` that occurred while sending a message.
+
+    Returns a :class:`SendResult` encoding the error details.
+    """
     error_message = f"Failed to send message: {error}"
-    error_code = error.resp.status if hasattr(error, "resp") else "unknown"
+    status_code: int | None = error.resp.status if hasattr(error, "resp") else None
+    error_code_display = status_code if status_code is not None else "unknown"
     error_details = (
         error.content.decode("utf-8") if hasattr(error, "content") else str(error)
     )
@@ -630,7 +324,7 @@ def _handle_send_error(
         error_message,
         channel=channel,
         ts=ts,
-        error_code=error_code,
+        error_code=error_code_display,
         error_details=error_details[:500] + ("..." if len(error_details) > 500 else ""),
     )
 
@@ -638,11 +332,56 @@ def _handle_send_error(
     failed_msg = FailedMessage(
         channel=channel or "unknown",
         ts=ts,
-        error=f"{error_message} (Code: {error_code})",
+        error=f"{error_message} (Code: {error_code_display})",
         error_details=error_details,
         payload=message,
     )
-    state.failed_messages.append(failed_msg)
+    state.messages.failed_messages.append(failed_msg)
+
+    retryable = status_code is not None and (status_code == 429 or status_code >= 500)
+    return SendResult(
+        error=error_message,
+        error_code=status_code,
+        retryable=retryable,
+    )
+
+
+def _resolve_chat_service(
+    chat: Any,
+    user_resolver: Any,
+    user_email: str | None,
+    channel: str,
+    ts: str,
+    user_id: str,
+) -> Any:
+    """Return the appropriate Chat service for sending a message.
+
+    Uses impersonation when available for the user, otherwise falls back
+    to the admin service.
+    """
+    if not user_email or user_resolver.is_external_user(user_email):
+        return chat
+
+    chat_service = user_resolver.get_delegate(user_email)
+
+    if chat_service != chat:
+        log_with_context(
+            logging.DEBUG,
+            f"Using impersonated service for user {user_email}",
+            channel=channel,
+            ts=ts,
+            user_id=user_id,
+        )
+    else:
+        log_with_context(
+            logging.DEBUG,
+            f"Using admin service for user {user_email} (impersonation not available)",
+            channel=channel,
+            ts=ts,
+            user_id=user_id,
+        )
+
+    return chat_service
 
 
 def send_message(
@@ -653,7 +392,7 @@ def send_message(
     attachment_processor: Any,
     space: str,
     message: dict[str, Any],
-) -> str | None:
+) -> SendResult:
     """Send a message to a Google Chat space.
 
     Args:
@@ -666,20 +405,20 @@ def send_message(
         message: The Slack message to convert and send.
 
     Returns:
-        The message name of the sent message, or None if there was an error.
+        A :class:`SendResult` encoding success, skip, or failure.
     """
     # Extract basic message info for logging
     ts = message.get("ts", "")
     user_id = message.get("user", "")
     thread_ts = message.get("thread_ts")
-    channel = state.current_channel
+    channel = state.context.current_channel
     if channel is None:
         log_with_context(
             logging.ERROR,
             "send_message called without current_channel set",
             ts=ts,
         )
-        return None
+        return SendResult(error="No current channel set")
 
     # Check for edited messages
     edited = message.get("edited", {})
@@ -706,7 +445,11 @@ def send_message(
         message_key,
     )
     if should_skip:
-        return skip_result
+        if skip_result is not None:
+            return SendResult(skipped=skip_result)
+        # None from _should_skip_message means dry-run or empty message —
+        # neither a real success nor an intentional skip with a named reason.
+        return SendResult()
 
     is_update_mode = ctx.update_mode
 
@@ -739,30 +482,9 @@ def send_message(
     )
 
     try:
-        # Get the appropriate service for this user (impersonation)
-        chat_service = chat  # Default to admin service
-
-        # If we have a valid user email, try to use impersonation
-        if user_email and not user_resolver.is_external_user(user_email):
-            chat_service = user_resolver.get_delegate(user_email)
-
-            # Log whether we're using impersonation or falling back to admin
-            if chat_service != chat:
-                log_with_context(
-                    logging.DEBUG,
-                    f"Using impersonated service for user {user_email}",
-                    channel=channel,
-                    ts=ts,
-                    user_id=user_id,
-                )
-            else:
-                log_with_context(
-                    logging.DEBUG,
-                    f"Using admin service for user {user_email} (impersonation not available)",
-                    channel=channel,
-                    ts=ts,
-                    user_id=user_id,
-                )
+        chat_service = _resolve_chat_service(
+            chat, user_resolver, user_email, channel, ts, user_id
+        )
 
         message_id = _generate_message_id(ts, is_edited, edited_ts)
 
@@ -818,10 +540,9 @@ def send_message(
             is_thread_reply,
         )
 
-        return message_name
+        return SendResult(message_name=message_name)
     except HttpError as e:
-        _handle_send_error(state, e, message, ts, channel)
-        return None
+        return _handle_send_error(state, e, message, ts, channel)
 
 
 def track_message_stats(  # noqa: C901
@@ -841,7 +562,7 @@ def track_message_stats(  # noqa: C901
         m: A single Slack message dictionary.
     """
     # Get the current channel being processed
-    channel = state.current_channel
+    channel = state.context.current_channel
     if channel is None:
         return
     ts = m.get("ts", "")
@@ -878,8 +599,8 @@ def track_message_stats(  # noqa: C901
     # Check if we're in update mode
     is_update_mode = ctx.update_mode
 
-    if channel not in state.channel_stats:
-        state.channel_stats[channel] = {
+    if channel not in state.progress.channel_stats:
+        state.progress.channel_stats[channel] = {
             "message_count": 0,
             "reaction_count": 0,
             "file_count": 0,
@@ -895,7 +616,7 @@ def track_message_stats(  # noqa: C901
             message_key = f"{channel}:{ts}:edited:{edited_ts}"
 
         # If this message has already been sent in a previous run, don't count it
-        if message_key in state.sent_messages:
+        if message_key in state.messages.sent_messages:
             log_with_context(
                 logging.DEBUG,
                 f"[UPDATE MODE] Skipping stats for already sent message {ts}",
@@ -905,7 +626,7 @@ def track_message_stats(  # noqa: C901
             return
 
     # Increment message count for this channel
-    state.channel_stats[channel]["message_count"] += 1
+    state.progress.channel_stats[channel]["message_count"] += 1
 
     # Track reactions
     reaction_count = 0
@@ -920,12 +641,12 @@ def track_message_stats(  # noqa: C901
                         continue
                 reaction_count += 1
 
-        state.channel_stats[channel]["reaction_count"] += reaction_count
+        state.progress.channel_stats[channel]["reaction_count"] += reaction_count
 
         # Also increment the global reaction count in dry run mode
         # (in normal mode this is done by process_reactions_batch)
         if ctx.dry_run:
-            state.migration_summary["reactions_created"] += reaction_count
+            state.progress.migration_summary["reactions_created"] += reaction_count
 
             log_with_context(
                 logging.DEBUG,
@@ -947,10 +668,10 @@ def track_message_stats(  # noqa: C901
             channel=channel,
             ts=ts,
         )
-        state.channel_stats[channel]["file_count"] += file_count
+        state.progress.channel_stats[channel]["file_count"] += file_count
 
         # Also increment the global file count
-        state.migration_summary["files_created"] += file_count
+        state.progress.migration_summary["files_created"] += file_count
 
     # We don't need to process files here - they are handled in send_message
 
@@ -1028,7 +749,7 @@ def send_intro(
         # Send the message
         (chat.spaces().messages().create(parent=space, body=message_body).execute())
         # Increment the counter
-        state.migration_summary["messages_created"] += 1
+        state.progress.migration_summary["messages_created"] += 1
 
         log_with_context(
             logging.INFO, f"Sent intro message to space {space}", channel=channel

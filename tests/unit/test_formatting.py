@@ -326,8 +326,8 @@ class TestConvertFormatting:
     def test_unmapped_user_with_tracker(self):
         """Covers unmapped user with unmapped_user_tracker."""
         state = MigrationState()
-        state.current_channel = "general"
-        state.current_message_ts = "1234567890.000100"
+        state.context.current_channel = "general"
+        state.context.current_message_ts = "1234567890.000100"
         tracker = MagicMock()
 
         result = convert_formatting(
