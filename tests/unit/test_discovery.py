@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from slack_migrator.core.state import MigrationState
 from slack_migrator.services.discovery import (
     discover_existing_spaces,
     get_last_message_timestamp,
@@ -15,13 +14,12 @@ from slack_migrator.services.discovery import (
 
 def _make_migrator(channel_name_to_id=None, channel_id_to_space_id=None):
     """Create a mock migrator with common attributes for discovery tests."""
-    migrator = MagicMock()
-    migrator.channel_name_to_id = channel_name_to_id or {}
-    state = MigrationState()
+    from tests.unit.conftest import _build_mock_migrator
+
+    kwargs = {"channel_name_to_id": channel_name_to_id or {}}
     if channel_id_to_space_id is not None:
-        state.channel_id_to_space_id = channel_id_to_space_id
-    migrator.state = state
-    return migrator
+        kwargs["channel_id_to_space_id"] = channel_id_to_space_id
+    return _build_mock_migrator(**kwargs)
 
 
 def _make_space(

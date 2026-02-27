@@ -6,8 +6,6 @@ from unittest.mock import MagicMock, patch
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from slack_migrator.core.config import MigrationConfig
-from slack_migrator.core.state import MigrationState, _default_migration_summary
 from slack_migrator.services.membership_manager import (
     DEFAULT_FALLBACK_JOIN_TIME,
     EARLIEST_MESSAGE_OFFSET_MINUTES,
@@ -31,22 +29,21 @@ def _make_migrator(
     dry_run=False,
     workspace_admin="admin@example.com",
 ):
-    """Create a mock migrator with common attributes."""
-    migrator = MagicMock()
-    migrator.state = MigrationState()
-    migrator.user_map = user_map or {}
-    migrator.workspace_domain = workspace_domain
-    migrator.channels_meta = channels_meta or {}
-    migrator.users_without_email = []
-    migrator.dry_run = dry_run
-    migrator.workspace_admin = workspace_admin
-    migrator.state.migration_summary = _default_migration_summary()
-    migrator.state.created_spaces = {}
-    migrator.state.external_users = set()
-    migrator.config = MigrationConfig()
-    migrator.state.current_channel = "general"
+    """Create a mock migrator with common attributes for space tests."""
+    from tests.unit.conftest import _build_mock_migrator
+
+    kwargs = dict(
+        user_map=user_map or {},
+        workspace_domain=workspace_domain,
+        channels_meta=channels_meta or {},
+        dry_run=dry_run,
+        workspace_admin=workspace_admin,
+        current_channel="general",
+    )
     if export_root:
-        migrator.export_root = export_root
+        kwargs["export_root"] = export_root
+    migrator = _build_mock_migrator(**kwargs)
+    migrator.users_without_email = []
     return migrator
 
 

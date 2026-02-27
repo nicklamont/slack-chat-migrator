@@ -31,10 +31,13 @@ def _make_migrator(
     has_tracker: bool = True,
 ) -> MagicMock:
     """Build a lightweight MagicMock standing in for SlackToChatMigrator."""
-    migrator = MagicMock()
-    migrator.export_root = export_root
-    migrator.user_map = user_map or {}
-    migrator.config = config or MigrationConfig()
+    from tests.unit.conftest import _build_mock_migrator
+
+    migrator = _build_mock_migrator(
+        export_root=export_root,
+        user_map=user_map or {},
+        config=config or MigrationConfig(),
+    )
 
     if has_tracker:
         migrator.unmapped_user_tracker = UnmappedUserTracker()

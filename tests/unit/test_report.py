@@ -8,8 +8,7 @@ from unittest.mock import MagicMock, patch
 import yaml
 
 from slack_migrator.cli.report import generate_report, print_dry_run_summary
-from slack_migrator.core.config import MigrationConfig
-from slack_migrator.core.state import MigrationState, _default_migration_summary
+from slack_migrator.core.state import _default_migration_summary
 from slack_migrator.types import FailedMessage, MigrationSummary
 
 
@@ -38,43 +37,28 @@ def _make_failed(
 
 
 def _make_migrator(**overrides):
-    """Build a MagicMock that behaves like SlackToChatMigrator."""
-    m = MagicMock()
-    m.state = MigrationState()
-    m.state.migration_summary = _make_summary(
-        channels_processed=["general", "random"],
-        spaces_created=2,
-        messages_created=50,
-        reactions_created=10,
-        files_created=5,
-    )
-    m.user_map = {"U001": "alice@example.com", "U002": "bob@example.com"}
-    m.user_resolver.is_external_user.return_value = False
-    m.state.output_dir = None
-    m.dry_run = True
-    m.workspace_admin = "admin@example.com"
-    m.export_root = "/tmp/slack_export"
-    m.config = MigrationConfig()
-    m.state.failed_messages = []
-    m.state.created_spaces = {"general": "spaces/abc", "random": "spaces/def"}
-    m.state.channel_stats = {}
-    m.users_without_email = []
-    m.state.high_failure_rate_channels = {}
-    m.state.channel_conflicts = set()
-    m.state.migration_issues = {}
-    m.state.skipped_reactions = []
-    m.state.spaces_with_external_users = {}
-    m.state.active_users_by_channel = {}
+    """Build a MagicMock that behaves like SlackToChatMigrator for report tests."""
+    from tests.unit.conftest import _build_mock_migrator
 
+    defaults: dict = dict(
+        migration_summary=_make_summary(
+            channels_processed=["general", "random"],
+            spaces_created=2,
+            messages_created=50,
+            reactions_created=10,
+            files_created=5,
+        ),
+        user_map={"U001": "alice@example.com", "U002": "bob@example.com"},
+        dry_run=True,
+        export_root="/tmp/slack_export",
+        created_spaces={"general": "spaces/abc", "random": "spaces/def"},
+        users_without_email=[],
+    )
+    defaults.update(overrides)
+    m = _build_mock_migrator(**defaults)
+    m.user_resolver.is_external_user.return_value = False
     # No file_handler by default — tests that need it can set it
     del m.file_handler
-
-    _state_attrs = {f.name for f in MigrationState.__dataclass_fields__.values()}
-    for key, value in overrides.items():
-        if key in _state_attrs:
-            setattr(m.state, key, value)
-        else:
-            setattr(m, key, value)
     return m
 
 

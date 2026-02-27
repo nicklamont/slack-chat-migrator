@@ -9,7 +9,6 @@ from googleapiclient.errors import HttpError
 
 from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.config import ImportCompletionStrategy, MigrationConfig
-from slack_migrator.core.state import MigrationState, _default_migration_summary
 
 
 def _make_migrator(
@@ -21,25 +20,22 @@ def _make_migrator(
     max_failure_percentage=10,
 ):
     """Create a mock migrator for channel processor testing."""
-    migrator = MagicMock()
-    migrator.dry_run = dry_run
-    migrator.update_mode = update_mode
-    migrator.verbose = False
-    migrator.config = MigrationConfig(
-        abort_on_error=abort_on_error,
-        cleanup_on_error=cleanup_on_error,
-        import_completion_strategy=import_completion_strategy,
-        max_failure_percentage=max_failure_percentage,
+    from tests.unit.conftest import _build_mock_migrator
+
+    migrator = _build_mock_migrator(
+        dry_run=dry_run,
+        update_mode=update_mode,
+        verbose=False,
+        config=MigrationConfig(
+            abort_on_error=abort_on_error,
+            cleanup_on_error=cleanup_on_error,
+            import_completion_strategy=import_completion_strategy,
+            max_failure_percentage=max_failure_percentage,
+        ),
+        export_root=Path("/tmp/test_export"),
+        current_channel="general",
+        output_dir=Path("/tmp/test_output"),
     )
-    migrator.export_root = Path("/tmp/test_export")
-
-    # Mutable state lives under migrator.state
-    migrator.state = MigrationState()
-    migrator.state.current_channel = "general"
-    migrator.state.current_space = None
-    migrator.state.migration_summary = _default_migration_summary()
-    migrator.state.output_dir = Path("/tmp/test_output")
-
     return migrator
 
 
