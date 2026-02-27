@@ -21,12 +21,12 @@ from slack_migrator.core.config import ImportCompletionStrategy, should_process_
 from slack_migrator.services.discovery import get_last_message_timestamp
 from slack_migrator.services.historical_membership import add_users_to_space
 from slack_migrator.services.message_sender import (
-    MessageResult,
     send_message,
     track_message_stats,
 )
 from slack_migrator.services.regular_membership import add_regular_members
 from slack_migrator.services.space_creator import create_space
+from slack_migrator.types import MessageResult
 from slack_migrator.utils.logging import (
     is_debug_api_enabled,
     log_with_context,
@@ -376,11 +376,7 @@ class ChannelProcessor:
                 m,
             )
 
-            if result:
-                if result != MessageResult.SKIPPED:
-                    processed_ts.append(ts)
-                    processed_count += 1
-            else:
+            if result.failed:
                 failed_count += 1
                 channel_failures.append(ts)
 
@@ -398,6 +394,9 @@ class ChannelProcessor:
                         self.state.errors.high_failure_rate_channels[channel] = (
                             failure_percentage
                         )
+            elif result.skipped != MessageResult.SKIPPED:
+                processed_ts.append(ts)
+                processed_count += 1
 
             time.sleep(0.05)  # Throttle to avoid Chat API rate limits
 

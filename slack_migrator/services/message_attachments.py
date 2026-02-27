@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from slack_migrator.types import UploadResult
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
@@ -111,23 +112,22 @@ class MessageAttachmentProcessor:
                     file_obj, channel, space, user_service, sender_email
                 )
 
-                if upload_result:
-                    # Check if this is a skip result (e.g., Google Docs files)
-                    if upload_result.get("type") == "skip":
-                        log_with_context(
-                            logging.DEBUG,
-                            f"Skipping attachment (reason: {upload_result.get('reason', 'unknown')}): {upload_result.get('name', 'unknown')}",
-                            channel=channel,
-                            file_id=file_obj.get("id", "unknown"),
-                        )
-                        continue  # Skip this attachment but don't log it as an error
+                if upload_result.skipped:
+                    log_with_context(
+                        logging.DEBUG,
+                        f"Skipping attachment (reason: {upload_result.skip_reason or 'unknown'}): {upload_result.name or 'unknown'}",
+                        channel=channel,
+                        file_id=file_obj.get("id", "unknown"),
+                    )
+                    continue
 
+                if upload_result.success:
                     attachment = self._create_attachment_from_result(upload_result)
                     if attachment:
                         attachments.append(attachment)
                         log_with_context(
                             logging.DEBUG,
-                            f"Added attachment to message: {upload_result.get('name', 'unknown')}",
+                            f"Added attachment to message: {upload_result.name or 'unknown'}",
                             channel=channel,
                             file_id=file_obj.get("id", "unknown"),
                         )
@@ -137,7 +137,7 @@ class MessageAttachmentProcessor:
                             f"Failed to create attachment from upload result for file: {file_obj.get('name', 'unknown')}",
                             channel=channel,
                             file_id=file_obj.get("id", "unknown"),
-                            upload_result_type=upload_result.get("type", "unknown"),
+                            upload_result_type=upload_result.upload_type or "unknown",
                         )
                 else:
                     log_with_context(
@@ -161,68 +161,42 @@ class MessageAttachmentProcessor:
         return attachments
 
     def _create_attachment_from_result(
-        self, upload_result: dict[str, Any]
+        self, upload_result: UploadResult
     ) -> dict[str, Any] | None:
         """Create Google Chat attachment object from upload result.
 
         Args:
-            upload_result: Result from FileHandler.upload_attachment()
+            upload_result: UploadResult from FileHandler.upload_attachment()
 
         Returns:
             Google Chat attachment object or None if failed
         """
-        if not upload_result or not isinstance(upload_result, dict):
-            current_channel = self._get_current_channel()
-
-            log_with_context(
-                logging.WARNING,
-                f"Invalid upload result: {upload_result}",
-                upload_result_type=type(upload_result).__name__,
-                channel=current_channel,
-            )
-            return None
-
-        upload_type = upload_result.get("type")
-
         log_with_context(
             logging.DEBUG,
-            f"Creating attachment from upload result: type={upload_type}, result={upload_result}",
-            upload_type=upload_type,
+            f"Creating attachment from upload result: type={upload_result.upload_type}",
+            upload_type=upload_result.upload_type,
             channel=self._get_current_channel(),
         )
 
-        if upload_type == "drive":
-            # For Drive uploads, use only the driveDataRef with driveFileId
-            # According to the API: https://developers.google.com/workspace/chat/api/reference/rest/v1/DriveDataRef
-
-            # First check if the drive ID is in the ref structure (new format)
-            ref = upload_result.get("ref", {})
-            if isinstance(ref, dict) and "driveFileId" in ref:
-                drive_id = ref["driveFileId"]
-            else:
-                # Fallback to old format
-                drive_id = upload_result.get("drive_id")
-
-            file_name = upload_result.get("name")
+        if upload_result.upload_type == "drive":
+            drive_id = upload_result.drive_id
 
             log_with_context(
                 logging.DEBUG,
-                f"Processing Drive attachment: ref={ref}, drive_id={drive_id}, file_name={file_name}",
+                f"Processing Drive attachment: drive_id={drive_id}, file_name={upload_result.name}",
                 drive_id=drive_id,
-                file_name=file_name,
+                file_name=upload_result.name,
                 channel=self._get_current_channel(),
             )
 
             if drive_id:
-                # Create the attachment object with ONLY the driveDataRef field
-                # The Google Chat API will handle the rest of the metadata
                 attachment = {"driveDataRef": {"driveFileId": drive_id}}
 
                 log_with_context(
                     logging.DEBUG,
                     f"Created Drive attachment with driveFileId: {drive_id}",
                     drive_id=drive_id,
-                    file_name=file_name,
+                    file_name=upload_result.name,
                     channel=self._get_current_channel(),
                 )
 
@@ -230,15 +204,13 @@ class MessageAttachmentProcessor:
             else:
                 log_with_context(
                     logging.WARNING,
-                    f"Drive upload result missing drive file ID in both drive_id and ref.driveFileId: {upload_result}",
+                    f"Drive upload result missing drive file ID: {upload_result}",
                     channel=self._get_current_channel(),
                 )
 
-        elif upload_type == "direct":
-            # For direct uploads, the ref contains the complete attachment object
-            attachment_ref: dict[str, Any] | None = upload_result.get("ref")
+        elif upload_result.upload_type == "direct":
+            attachment_ref = upload_result.attachment_ref
             if attachment_ref and isinstance(attachment_ref, dict):
-                # The attachment_ref is already a complete attachment object from ChatFileUploader
                 log_with_context(
                     logging.DEBUG,
                     f"Using direct upload attachment: {attachment_ref}",
@@ -249,13 +221,13 @@ class MessageAttachmentProcessor:
             else:
                 log_with_context(
                     logging.WARNING,
-                    f"Direct upload result missing or invalid ref: {upload_result}",
+                    f"Direct upload result missing or invalid attachment_ref: {upload_result}",
                     channel=self._get_current_channel(),
                 )
         else:
             log_with_context(
                 logging.WARNING,
-                f"Unknown upload result type: {upload_type} in result: {upload_result}",
+                f"Unknown upload result type: {upload_result.upload_type}",
                 channel=self._get_current_channel(),
             )
 

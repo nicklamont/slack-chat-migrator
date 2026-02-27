@@ -13,6 +13,7 @@ from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.config import ImportCompletionStrategy, MigrationConfig
 from slack_migrator.core.context import MigrationContext
 from slack_migrator.core.state import MigrationState, _default_migration_summary
+from slack_migrator.types import SendResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -93,7 +94,7 @@ class TestProcessChannel:
     @patch("slack_migrator.core.channel_processor.track_message_stats")
     @patch(
         "slack_migrator.core.channel_processor.send_message",
-        return_value="spaces/SPACE1/messages/MSG1",
+        return_value=SendResult(message_name="spaces/SPACE1/messages/MSG1"),
     )
     @patch("slack_migrator.core.channel_processor.add_users_to_space")
     @patch("slack_migrator.core.channel_processor.add_regular_members")
@@ -384,7 +385,7 @@ class TestProcessMessages:
 
     @patch(
         "slack_migrator.core.channel_processor.send_message",
-        return_value="spaces/S/messages/M1",
+        return_value=SendResult(message_name="spaces/S/messages/M1"),
     )
     @patch("slack_migrator.core.channel_processor.track_message_stats")
     def test_happy_path_with_messages(self, mock_track, mock_send, tmp_path):
@@ -434,7 +435,7 @@ class TestProcessMessages:
 
     @patch(
         "slack_migrator.core.channel_processor.send_message",
-        return_value="spaces/S/messages/M1",
+        return_value=SendResult(message_name="spaces/S/messages/M1"),
     )
     @patch("slack_migrator.core.channel_processor.track_message_stats")
     def test_duplicate_message_deduplication(self, mock_track, mock_send, tmp_path):
@@ -507,8 +508,10 @@ class TestProcessMessages:
 
         (ch_dir / "2024-01-01.json").write_text(json.dumps(messages))
 
-        # First call succeeds, rest fail (return None)
-        mock_send.side_effect = ["spaces/S/messages/M1"] + [None] * 10
+        # First call succeeds, rest fail
+        mock_send.side_effect = [SendResult(message_name="spaces/S/messages/M1")] + [
+            SendResult(error="test error")
+        ] * 10
 
         with patch.object(processor, "_discover_channel_resources"):
             _processed, _failed, had_errors = processor._process_messages(

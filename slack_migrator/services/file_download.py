@@ -12,6 +12,7 @@ from slack_migrator.constants import (
     HTTP_OK,
     HTTP_UNAUTHORIZED,
 )
+from slack_migrator.types import UploadResult
 from slack_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_migrator")
@@ -180,7 +181,7 @@ def create_drive_reference(
     channel: str | None,
     processed_files: dict[str, Any],
     file_stats: dict[str, Any],
-) -> dict[str, Any] | None:
+) -> UploadResult | None:
     """Create a direct reference to an existing Google Drive file.
 
     Instead of downloading and re-uploading, this creates a reference to a
@@ -193,7 +194,7 @@ def create_drive_reference(
         file_stats: Statistics dict with upload counters (mutated in place).
 
     Returns:
-        Dict with drive reference details if successful, None otherwise.
+        UploadResult with drive reference details if successful, None otherwise.
     """
     try:
         file_id = file_obj.get("id", "unknown")
@@ -236,15 +237,15 @@ def create_drive_reference(
         # Update statistics
         file_stats["drive_uploads"] += 1
 
-        # Create the result format
-        drive_result: dict[str, Any] = {
-            "type": "drive",
-            "link": url_private,
-            "drive_id": drive_file_id,
-            "name": name,
-            "mime_type": file_obj.get("mimetype", "application/octet-stream"),
-            "is_reference": True,  # Flag to indicate this is a reference, not an upload
-        }
+        # Create the result
+        drive_result = UploadResult(
+            upload_type="drive",
+            url=url_private,
+            drive_id=drive_file_id,
+            name=name,
+            mime_type=file_obj.get("mimetype", "application/octet-stream"),
+            metadata={"is_reference": True},
+        )
 
         # Cache the result
         processed_files[file_id] = drive_result

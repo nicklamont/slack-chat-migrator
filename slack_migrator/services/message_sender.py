@@ -5,7 +5,6 @@ from __future__ import annotations
 import datetime
 import logging
 import time
-from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
@@ -18,7 +17,7 @@ from slack_migrator.services.message_builder import (
     _process_attachments,
 )
 from slack_migrator.services.reaction_processor import process_reactions_batch
-from slack_migrator.types import FailedMessage
+from slack_migrator.types import FailedMessage, MessageResult, SendResult
 from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.formatting import parse_slack_blocks
 from slack_migrator.utils.logging import (
@@ -28,14 +27,6 @@ from slack_migrator.utils.logging import (
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
-
-
-class MessageResult(str, Enum):
-    """Sentinel return values from send_message() for non-API outcomes."""
-
-    IGNORED_BOT = "IGNORED_BOT"
-    ALREADY_SENT = "ALREADY_SENT"
-    SKIPPED = "SKIPPED"
 
 
 def _should_skip_message(  # noqa: C901
@@ -50,7 +41,7 @@ def _should_skip_message(  # noqa: C901
     is_edited: bool,
     edited_ts: str,
     message_key: str,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, MessageResult | None]:
     """Check whether a message should be skipped before processing.
 
     Handles bot checks, update-mode deduplication, dry-run early return,
@@ -316,10 +307,14 @@ def _handle_send_error(
     message: dict[str, Any],
     ts: str,
     channel: str | None,
-) -> None:
-    """Log and record an ``HttpError`` that occurred while sending a message."""
+) -> SendResult:
+    """Log and record an ``HttpError`` that occurred while sending a message.
+
+    Returns a :class:`SendResult` encoding the error details.
+    """
     error_message = f"Failed to send message: {error}"
-    error_code = error.resp.status if hasattr(error, "resp") else "unknown"
+    status_code: int | None = error.resp.status if hasattr(error, "resp") else None
+    error_code_display = status_code if status_code is not None else "unknown"
     error_details = (
         error.content.decode("utf-8") if hasattr(error, "content") else str(error)
     )
@@ -329,7 +324,7 @@ def _handle_send_error(
         error_message,
         channel=channel,
         ts=ts,
-        error_code=error_code,
+        error_code=error_code_display,
         error_details=error_details[:500] + ("..." if len(error_details) > 500 else ""),
     )
 
@@ -337,11 +332,18 @@ def _handle_send_error(
     failed_msg = FailedMessage(
         channel=channel or "unknown",
         ts=ts,
-        error=f"{error_message} (Code: {error_code})",
+        error=f"{error_message} (Code: {error_code_display})",
         error_details=error_details,
         payload=message,
     )
     state.messages.failed_messages.append(failed_msg)
+
+    retryable = status_code is not None and (status_code == 429 or status_code >= 500)
+    return SendResult(
+        error=error_message,
+        error_code=status_code,
+        retryable=retryable,
+    )
 
 
 def _resolve_chat_service(
@@ -390,7 +392,7 @@ def send_message(
     attachment_processor: Any,
     space: str,
     message: dict[str, Any],
-) -> str | None:
+) -> SendResult:
     """Send a message to a Google Chat space.
 
     Args:
@@ -403,7 +405,7 @@ def send_message(
         message: The Slack message to convert and send.
 
     Returns:
-        The message name of the sent message, or None if there was an error.
+        A :class:`SendResult` encoding success, skip, or failure.
     """
     # Extract basic message info for logging
     ts = message.get("ts", "")
@@ -416,7 +418,7 @@ def send_message(
             "send_message called without current_channel set",
             ts=ts,
         )
-        return None
+        return SendResult(error="No current channel set")
 
     # Check for edited messages
     edited = message.get("edited", {})
@@ -443,7 +445,11 @@ def send_message(
         message_key,
     )
     if should_skip:
-        return skip_result
+        if skip_result is not None:
+            return SendResult(skipped=skip_result)
+        # None from _should_skip_message means dry-run or empty message —
+        # neither a real success nor an intentional skip with a named reason.
+        return SendResult()
 
     is_update_mode = ctx.update_mode
 
@@ -534,10 +540,9 @@ def send_message(
             is_thread_reply,
         )
 
-        return message_name
+        return SendResult(message_name=message_name)
     except HttpError as e:
-        _handle_send_error(state, e, message, ts, channel)
-        return None
+        return _handle_send_error(state, e, message, ts, channel)
 
 
 def track_message_stats(  # noqa: C901

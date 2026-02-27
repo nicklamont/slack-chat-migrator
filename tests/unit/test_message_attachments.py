@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 from slack_migrator.core.state import MigrationState
 from slack_migrator.services.message_attachments import MessageAttachmentProcessor
+from slack_migrator.types import UploadResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -153,11 +154,11 @@ class TestProcessMessageAttachmentsForwardedFiles:
     def test_collects_files_from_forwarded_attachments(self):
         """Files in forwarded/shared message attachments are included."""
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "drive",
-            "drive_id": "drv_123",
-            "name": "forwarded.txt",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="drive",
+            drive_id="drv_123",
+            name="forwarded.txt",
+        )
         processor = _make_processor(file_handler=handler)
 
         message = {
@@ -176,11 +177,11 @@ class TestProcessMessageAttachmentsForwardedFiles:
     def test_collects_files_from_msg_unfurl_attachments(self):
         """Files in is_msg_unfurl attachments are included."""
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "drive",
-            "drive_id": "drv_456",
-            "name": "unfurled.png",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="drive",
+            drive_id="drv_456",
+            name="unfurled.png",
+        )
         processor = _make_processor(file_handler=handler)
 
         message = {
@@ -217,11 +218,11 @@ class TestProcessMessageAttachmentsForwardedFiles:
         def upload_side_effect(file_obj, channel, space, user_service, sender_email):
             nonlocal call_count
             call_count += 1
-            return {
-                "type": "drive",
-                "drive_id": f"drv_{call_count}",
-                "name": file_obj.get("name", "unknown"),
-            }
+            return UploadResult(
+                upload_type="drive",
+                drive_id=f"drv_{call_count}",
+                name=file_obj.get("name", "unknown"),
+            )
 
         handler.upload_attachment.side_effect = upload_side_effect
         processor = _make_processor(file_handler=handler)
@@ -298,11 +299,11 @@ class TestProcessMessageAttachmentsDryRun:
 class TestProcessMessageAttachmentsDriveUpload:
     def test_drive_upload_with_drive_id(self):
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "drive",
-            "drive_id": "abc123",
-            "name": "file.txt",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="drive",
+            drive_id="abc123",
+            name="file.txt",
+        )
         processor = _make_processor(file_handler=handler)
         message = {"files": [{"id": "F1", "name": "file.txt"}]}
         result = processor.process_message_attachments(
@@ -311,44 +312,13 @@ class TestProcessMessageAttachmentsDriveUpload:
         assert len(result) == 1
         assert result[0] == {"driveDataRef": {"driveFileId": "abc123"}}
 
-    def test_drive_upload_with_ref_drive_file_id(self):
-        handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "drive",
-            "ref": {"driveFileId": "ref_xyz"},
-            "name": "file.txt",
-        }
-        processor = _make_processor(file_handler=handler)
-        message = {"files": [{"id": "F1", "name": "file.txt"}]}
-        result = processor.process_message_attachments(
-            message=message, channel="general"
-        )
-        assert len(result) == 1
-        assert result[0] == {"driveDataRef": {"driveFileId": "ref_xyz"}}
-
-    def test_drive_upload_ref_takes_precedence(self):
-        """When both ref.driveFileId and drive_id exist, ref takes precedence."""
-        handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "drive",
-            "ref": {"driveFileId": "from_ref"},
-            "drive_id": "from_old_format",
-            "name": "file.txt",
-        }
-        processor = _make_processor(file_handler=handler)
-        message = {"files": [{"id": "F1", "name": "file.txt"}]}
-        result = processor.process_message_attachments(
-            message=message, channel="general"
-        )
-        assert result[0]["driveDataRef"]["driveFileId"] == "from_ref"
-
     def test_drive_upload_missing_drive_id_returns_none(self):
-        """Drive upload with no drive_id or ref returns nothing."""
+        """Drive upload with no drive_id returns nothing."""
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "drive",
-            "name": "file.txt",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="drive",
+            name="file.txt",
+        )
         processor = _make_processor(file_handler=handler)
         message = {"files": [{"id": "F1", "name": "file.txt"}]}
         result = processor.process_message_attachments(
@@ -370,11 +340,11 @@ class TestProcessMessageAttachmentsDirectUpload:
             "contentName": "photo.jpg",
             "contentType": "image/jpeg",
         }
-        handler.upload_attachment.return_value = {
-            "type": "direct",
-            "ref": attachment_ref,
-            "name": "photo.jpg",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="direct",
+            attachment_ref=attachment_ref,
+            name="photo.jpg",
+        )
         processor = _make_processor(file_handler=handler)
         message = {"files": [{"id": "F1", "name": "photo.jpg"}]}
         result = processor.process_message_attachments(
@@ -385,10 +355,10 @@ class TestProcessMessageAttachmentsDirectUpload:
 
     def test_direct_upload_missing_ref(self):
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "direct",
-            "name": "photo.jpg",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="direct",
+            name="photo.jpg",
+        )
         processor = _make_processor(file_handler=handler)
         message = {"files": [{"id": "F1", "name": "photo.jpg"}]}
         result = processor.process_message_attachments(
@@ -398,11 +368,11 @@ class TestProcessMessageAttachmentsDirectUpload:
 
     def test_direct_upload_ref_not_a_dict(self):
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "direct",
-            "ref": "not_a_dict",
-            "name": "photo.jpg",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="direct",
+            attachment_ref="not_a_dict",
+            name="photo.jpg",
+        )
         processor = _make_processor(file_handler=handler)
         message = {"files": [{"id": "F1", "name": "photo.jpg"}]}
         result = processor.process_message_attachments(
@@ -419,11 +389,11 @@ class TestProcessMessageAttachmentsDirectUpload:
 class TestProcessMessageAttachmentsSkip:
     def test_skip_result_is_excluded(self):
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "skip",
-            "reason": "google_doc",
-            "name": "My Doc",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="skip",
+            skip_reason="google_doc",
+            name="My Doc",
+        )
         processor = _make_processor(file_handler=handler)
         message = {"files": [{"id": "F1", "name": "My Doc"}]}
         result = processor.process_message_attachments(
@@ -440,10 +410,10 @@ class TestProcessMessageAttachmentsSkip:
 class TestProcessMessageAttachmentsUnknownType:
     def test_unknown_type_returns_nothing(self):
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "something_new",
-            "name": "file.bin",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="something_new",
+            name="file.bin",
+        )
         processor = _make_processor(file_handler=handler)
         message = {"files": [{"id": "F1", "name": "file.bin"}]}
         result = processor.process_message_attachments(
@@ -458,9 +428,9 @@ class TestProcessMessageAttachmentsUnknownType:
 
 
 class TestProcessMessageAttachmentsFailures:
-    def test_upload_returns_none(self):
+    def test_upload_returns_error_result(self):
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = None
+        handler.upload_attachment.return_value = UploadResult(error="Upload failed")
         processor = _make_processor(file_handler=handler)
         message = {"files": [{"id": "F1", "name": "fail.txt"}]}
         result = processor.process_message_attachments(
@@ -473,7 +443,7 @@ class TestProcessMessageAttachmentsFailures:
         handler = _make_file_handler()
         handler.upload_attachment.side_effect = [
             RuntimeError("network error"),
-            {"type": "drive", "drive_id": "ok_file", "name": "second.txt"},
+            UploadResult(upload_type="drive", drive_id="ok_file", name="second.txt"),
         ]
         processor = _make_processor(file_handler=handler)
         message = {
@@ -509,11 +479,11 @@ class TestProcessMessageAttachmentsFailures:
 class TestProcessMessageAttachmentsUserId:
     def test_sets_user_on_file_when_missing(self):
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "drive",
-            "drive_id": "d1",
-            "name": "f.txt",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="drive",
+            drive_id="d1",
+            name="f.txt",
+        )
         processor = _make_processor(file_handler=handler)
         file_obj = {"id": "F1", "name": "f.txt"}
         message = {"files": [file_obj]}
@@ -524,11 +494,11 @@ class TestProcessMessageAttachmentsUserId:
 
     def test_does_not_override_existing_user(self):
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "drive",
-            "drive_id": "d1",
-            "name": "f.txt",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="drive",
+            drive_id="d1",
+            name="f.txt",
+        )
         processor = _make_processor(file_handler=handler)
         file_obj = {"id": "F1", "name": "f.txt", "user": "U111"}
         message = {"files": [file_obj]}
@@ -539,11 +509,11 @@ class TestProcessMessageAttachmentsUserId:
 
     def test_no_user_id_does_not_set_user(self):
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "drive",
-            "drive_id": "d1",
-            "name": "f.txt",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="drive",
+            drive_id="d1",
+            name="f.txt",
+        )
         processor = _make_processor(file_handler=handler)
         file_obj = {"id": "F1", "name": "f.txt"}
         message = {"files": [file_obj]}
@@ -561,11 +531,11 @@ class TestProcessMessageAttachmentsUserId:
 class TestProcessMessageAttachmentsUploadArgs:
     def test_forwards_space_user_service_and_email(self):
         handler = _make_file_handler()
-        handler.upload_attachment.return_value = {
-            "type": "drive",
-            "drive_id": "d1",
-            "name": "f.txt",
-        }
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="drive",
+            drive_id="d1",
+            name="f.txt",
+        )
         processor = _make_processor(file_handler=handler)
         user_svc = MagicMock()
         message = {"files": [{"id": "F1", "name": "f.txt"}]}
@@ -591,31 +561,48 @@ class TestProcessMessageAttachmentsUploadArgs:
 
 
 class TestCreateAttachmentFromResult:
-    def test_none_result(self):
-        processor = _make_processor()
-        assert processor._create_attachment_from_result(None) is None
-
-    def test_non_dict_result(self):
-        processor = _make_processor()
-        assert processor._create_attachment_from_result("string_result") is None
-
-    def test_empty_dict_result(self):
-        processor = _make_processor()
-        assert processor._create_attachment_from_result({}) is None
-
-    def test_drive_with_non_dict_ref(self):
+    def test_drive_with_drive_id(self):
         processor = _make_processor()
         result = processor._create_attachment_from_result(
-            {"type": "drive", "ref": "not_a_dict", "drive_id": "fallback_id"}
+            UploadResult(upload_type="drive", drive_id="abc123")
         )
-        assert result == {"driveDataRef": {"driveFileId": "fallback_id"}}
+        assert result == {"driveDataRef": {"driveFileId": "abc123"}}
 
-    def test_drive_with_empty_ref_uses_drive_id_fallback(self):
+    def test_drive_without_drive_id_returns_none(self):
         processor = _make_processor()
         result = processor._create_attachment_from_result(
-            {"type": "drive", "ref": {}, "drive_id": "fallback_id"}
+            UploadResult(upload_type="drive")
         )
-        assert result == {"driveDataRef": {"driveFileId": "fallback_id"}}
+        assert result is None
+
+    def test_direct_with_attachment_ref(self):
+        processor = _make_processor()
+        ref = {"attachmentDataRef": {"resourceName": "media/12345"}}
+        result = processor._create_attachment_from_result(
+            UploadResult(upload_type="direct", attachment_ref=ref)
+        )
+        assert result is ref
+
+    def test_direct_without_attachment_ref_returns_none(self):
+        processor = _make_processor()
+        result = processor._create_attachment_from_result(
+            UploadResult(upload_type="direct")
+        )
+        assert result is None
+
+    def test_direct_with_non_dict_ref_returns_none(self):
+        processor = _make_processor()
+        result = processor._create_attachment_from_result(
+            UploadResult(upload_type="direct", attachment_ref="not_a_dict")
+        )
+        assert result is None
+
+    def test_unknown_type_returns_none(self):
+        processor = _make_processor()
+        result = processor._create_attachment_from_result(
+            UploadResult(upload_type="unknown")
+        )
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -630,11 +617,11 @@ class TestMultipleFiles:
 
         def upload_side_effect(file_obj, channel, space, user_service, sender_email):
             counter["n"] += 1
-            return {
-                "type": "drive",
-                "drive_id": f"drv_{counter['n']}",
-                "name": file_obj["name"],
-            }
+            return UploadResult(
+                upload_type="drive",
+                drive_id=f"drv_{counter['n']}",
+                name=file_obj["name"],
+            )
 
         handler.upload_attachment.side_effect = upload_side_effect
         processor = _make_processor(file_handler=handler)

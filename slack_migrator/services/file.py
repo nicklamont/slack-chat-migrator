@@ -32,6 +32,7 @@ from slack_migrator.services.file_permissions import (
 from slack_migrator.services.file_permissions import (
     transfer_file_ownership,
 )
+from slack_migrator.types import UploadResult
 from slack_migrator.utils.api import escape_drive_query_value
 from slack_migrator.utils.logging import log_with_context
 
@@ -350,7 +351,7 @@ class FileHandler:
         space: str | None = None,
         user_service: Any = None,
         sender_email: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> UploadResult:
         """Upload a file using the most appropriate method based on file type.
 
         Determines whether to use direct upload to Chat or Google Drive
@@ -364,8 +365,8 @@ class FileHandler:
             sender_email: Email address of the message sender (for permissions handling)
 
         Returns:
-            Dict with upload details if successful, None otherwise.
-            Format: ``{'type': 'direct'|'drive'|'skip', 'ref': ..., 'link': ..., 'name': ...}``
+            UploadResult with upload details. Check ``.success``, ``.skipped``,
+            or ``.error`` to determine outcome.
         """
         self._sync_channel_context()
 
@@ -387,12 +388,13 @@ class FileHandler:
             )
 
             found, cached = self._check_attachment_cache(file_id, name, channel)
-            if found:
+            if found and cached is not None:
+                cached.cached = True
                 return cached
 
             file_content = self._download_file_content(file_obj, name, channel, file_id)
             if file_content is None:
-                return None
+                return UploadResult(error="Download failed", name=name)
 
             # Handle sentinel values from _download_file
             handled, sentinel_result = self._handle_download_sentinel(
@@ -437,7 +439,7 @@ class FileHandler:
                 return direct_result
 
             # Fall back to Drive upload
-            return self._try_drive_upload(
+            drive_result = self._try_drive_upload(
                 file_obj,
                 file_content,
                 channel,
@@ -445,6 +447,10 @@ class FileHandler:
                 file_id,
                 name,
             )
+            if drive_result:
+                return drive_result
+
+            return UploadResult(error="Upload failed", name=name)
 
         except (HttpError, requests.RequestException, OSError) as e:
             self.file_stats["failed_uploads"] += 1
@@ -455,7 +461,7 @@ class FileHandler:
                 file_id=file_obj.get("id", "unknown"),
                 error=str(e),
             )
-            return None
+            return UploadResult(error=str(e), name=file_obj.get("name"))
 
     def _sync_channel_context(self) -> None:
         """Propagate current channel to sub-uploaders for logging context."""
@@ -479,13 +485,13 @@ class FileHandler:
 
     def _check_attachment_cache(
         self, file_id: str, name: str, channel: str | None
-    ) -> tuple[bool, dict[str, Any] | None]:
+    ) -> tuple[bool, UploadResult | None]:
         """Check if this file was already processed.
 
         Returns (found, cached_result). If found is False, cached_result is None.
         """
         if file_id in self.processed_files:
-            cached_result: dict[str, Any] | None = self.processed_files[file_id]
+            cached_result: UploadResult | None = self.processed_files[file_id]
             log_with_context(
                 logging.DEBUG,
                 f"File {name} already processed, using cached result",
@@ -523,7 +529,7 @@ class FileHandler:
         name: str,
         channel: str | None,
         file_id: str,
-    ) -> tuple[bool, dict[str, Any] | None]:
+    ) -> tuple[bool, UploadResult]:
         """Handle special sentinel values returned by _download_file.
 
         Returns (handled, result). If handled is False, content should be uploaded normally.
@@ -535,12 +541,12 @@ class FileHandler:
                 channel=channel,
                 file_id=file_id,
             )
-            return True, {
-                "type": "skip",
-                "reason": "google_docs_link",
-                "name": name,
-                "url": file_obj.get("url_private", ""),
-            }
+            return True, UploadResult(
+                upload_type="skip",
+                skip_reason="google_docs_link",
+                name=name,
+                url=file_obj.get("url_private", ""),
+            )
 
         if file_content == b"__GOOGLE_DRIVE_FILE__":
             log_with_context(
@@ -549,9 +555,14 @@ class FileHandler:
                 channel=channel,
                 file_id=file_id,
             )
-            return True, self._create_drive_reference(file_obj, channel)
+            ref_result = self._create_drive_reference(file_obj, channel)
+            if ref_result:
+                return True, ref_result
+            return True, UploadResult(
+                error="Failed to create Drive reference", name=name
+            )
 
-        return False, None
+        return False, UploadResult()  # placeholder, not used when handled=False
 
     def _try_direct_upload(
         self,
@@ -564,10 +575,10 @@ class FileHandler:
         sender_email: str | None,
         file_id: str,
         name: str,
-    ) -> dict[str, Any] | None:
+    ) -> UploadResult | None:
         """Attempt direct Chat upload for eligible small images.
 
-        Returns the upload result if successful, None to fall through to Drive.
+        Returns the UploadResult if successful, None to fall through to Drive.
         """
         actual_size = len(file_content)
         use_direct = (
@@ -610,7 +621,7 @@ class FileHandler:
         sender_email: str | None,
         file_id: str,
         name: str,
-    ) -> dict[str, Any] | None:
+    ) -> UploadResult | None:
         """Upload file to Google Drive and cache the result."""
         actual_size = len(file_content)
         log_with_context(
@@ -628,10 +639,10 @@ class FileHandler:
             self.file_stats["drive_uploads"] += 1
             log_with_context(
                 logging.DEBUG,
-                f"Successfully uploaded file {name} to Drive: {drive_result.get('link')}",
+                f"Successfully uploaded file {name} to Drive: {drive_result.url}",
                 channel=channel,
                 file_id=file_id,
-                drive_file_id=drive_result.get("drive_id"),
+                drive_file_id=drive_result.drive_id,
             )
             return drive_result
 
@@ -661,8 +672,8 @@ class FileHandler:
         """
         try:
             result = self.upload_attachment(file_obj, channel)
-            if result and isinstance(result, dict) and result.get("type") == "drive":
-                return result.get("drive_id")
+            if result.upload_type == "drive":
+                return result.drive_id
             return None
 
         except (HttpError, requests.RequestException, OSError) as e:
@@ -683,7 +694,7 @@ class FileHandler:
         space: str | None = None,
         user_service: Any = None,
         sender_email: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> UploadResult | None:
         """Upload a file directly to Google Chat API.
 
         Args:
@@ -693,10 +704,9 @@ class FileHandler:
             space: Optional space ID where the file will be used (e.g., "spaces/AAAAy2-BTIA")
             user_service: Optional user-specific Chat service to use for upload
             sender_email: Email address of the message sender (for permissions handling)
-            user_service: Optional user-specific Chat service to use for upload
 
         Returns:
-            Dict with upload details if successful, None otherwise
+            UploadResult with direct upload details if successful, None otherwise
         """
         try:
             file_id = file_obj.get("id", "unknown")
@@ -744,14 +754,16 @@ class FileHandler:
                         upload_response, attachment_metadata
                     )
 
-                    result = {
-                        "type": "direct",
-                        "ref": attachment_ref,
-                        "name": name,
-                        "mime_type": mime_type,
-                        "upload_response": upload_response,
-                        "metadata": attachment_metadata,
-                    }
+                    result = UploadResult(
+                        upload_type="direct",
+                        attachment_ref=attachment_ref,
+                        name=name,
+                        mime_type=mime_type,
+                        metadata={
+                            "upload_response": upload_response,
+                            "attachment_metadata": attachment_metadata,
+                        },
+                    )
 
                     log_with_context(
                         logging.DEBUG,
@@ -797,7 +809,7 @@ class FileHandler:
         file_content: bytes,
         channel: str | None = None,
         sender_email: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> UploadResult | None:
         """Upload a file to Google Drive.
 
         Args:
@@ -807,7 +819,7 @@ class FileHandler:
             sender_email: Email address of the message sender (for permissions handling)
 
         Returns:
-            Dict with upload details if successful, None otherwise
+            UploadResult with drive upload details if successful, None otherwise
         """
         try:
             file_id = file_obj.get("id", "unknown")
@@ -971,10 +983,10 @@ class FileHandler:
         file_id: str,
         user_email: str | None,
         sender_email: str | None,
-    ) -> dict[str, Any] | None:
+    ) -> UploadResult | None:
         """Write content to a temp file, upload to Drive, and handle permissions.
 
-        Returns the drive result dict or None on failure.
+        Returns the UploadResult or None on failure.
         """
         with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{name}") as temp_file:
             temp_file.write(file_content)
@@ -1033,14 +1045,14 @@ class FileHandler:
                 drive_file_id=drive_file_id,
             )
 
-            return {
-                "type": "drive",
-                "link": public_url
+            return UploadResult(
+                upload_type="drive",
+                url=public_url
                 or f"https://drive.google.com/file/d/{drive_file_id}/view",
-                "drive_id": drive_file_id,
-                "name": name,
-                "mime_type": mime_type,
-            }
+                drive_id=drive_file_id,
+                name=name,
+                mime_type=mime_type,
+            )
 
         finally:
             try:
@@ -1144,7 +1156,7 @@ class FileHandler:
 
     def _create_drive_reference(
         self, file_obj: dict[str, Any], channel: str | None = None
-    ) -> dict[str, Any] | None:
+    ) -> UploadResult | None:
         """Create a direct reference to an existing Google Drive file.
 
         Delegates to :func:`file_download.create_drive_reference`.

@@ -11,12 +11,12 @@ from slack_migrator.core.context import MigrationContext
 from slack_migrator.core.state import MigrationState, _default_migration_summary
 from slack_migrator.services.discovery import log_space_mapping_conflicts
 from slack_migrator.services.message_sender import (
-    MessageResult,
     send_intro,
     send_message,
     track_message_stats,
 )
 from slack_migrator.services.reaction_processor import process_reactions_batch
+from slack_migrator.types import MessageResult
 
 
 def _make_ctx(
@@ -262,18 +262,19 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == "spaces/SPACE1/messages/MSG001"
+        assert result.message_name == "spaces/SPACE1/messages/MSG001"
+        assert result.success is True
         assert state.progress.migration_summary["messages_created"] == 1
         chat.spaces.return_value.messages.return_value.create.assert_called_once()
 
-    def test_dry_run_returns_none_and_does_not_call_api(self):
-        """In dry run mode, no API call is made and None is returned."""
+    def test_dry_run_returns_non_success_and_does_not_call_api(self):
+        """In dry run mode, no API call is made and a non-success SendResult is returned."""
         ctx, state, chat, ur, ap = _make_send_deps(dry_run=True)
         msg = {"ts": "1700000000.000001", "user": "U001", "text": "Hello"}
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result is None
+        assert result.success is False
         # messages_created should NOT be incremented in dry run (handled elsewhere)
         assert state.progress.migration_summary["messages_created"] == 0
         chat.spaces.return_value.messages.return_value.create.return_value.execute.assert_not_called()
@@ -290,7 +291,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == MessageResult.IGNORED_BOT
+        assert result.skipped == MessageResult.IGNORED_BOT
 
     def test_skips_app_message_subtype_when_ignore_bots(self):
         """Messages with app_message subtype are skipped when ignore_bots is True."""
@@ -305,7 +306,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == MessageResult.IGNORED_BOT
+        assert result.skipped == MessageResult.IGNORED_BOT
 
     def test_skips_bot_user_when_ignore_bots(self):
         """Messages from a bot user (is_bot flag) are skipped when ignore_bots is True."""
@@ -318,7 +319,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == MessageResult.IGNORED_BOT
+        assert result.skipped == MessageResult.IGNORED_BOT
 
     def test_skips_channel_join_leave(self):
         """Channel join/leave system messages return SKIPPED."""
@@ -333,25 +334,27 @@ class TestSendMessage:
 
             result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-            assert result == MessageResult.SKIPPED
+            assert result.skipped == MessageResult.SKIPPED
 
     def test_skips_empty_message(self):
-        """Messages with no text and no files return None."""
+        """Messages with no text and no files are treated as failures."""
         ctx, state, chat, ur, ap = _make_send_deps()
         msg = {"ts": "1700000000.000001", "user": "U001", "text": ""}
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result is None
+        assert result.failed is True
+        assert result.success is False
 
-    def test_message_with_only_whitespace_and_no_files_returns_none(self):
-        """Messages with only whitespace text and no files return None."""
+    def test_message_with_only_whitespace_and_no_files_returns_failed(self):
+        """Messages with only whitespace text and no files are treated as failures."""
         ctx, state, chat, ur, ap = _make_send_deps()
         msg = {"ts": "1700000000.000001", "user": "U001", "text": "   \n  "}
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result is None
+        assert result.failed is True
+        assert result.success is False
 
     def test_thread_reply_uses_existing_thread_name(self):
         """Thread replies use the stored thread name from thread_map."""
@@ -368,7 +371,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == "spaces/SPACE1/messages/MSG001"
+        assert result.message_name == "spaces/SPACE1/messages/MSG001"
         # Verify the create call included thread info
         call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
         assert (
@@ -393,7 +396,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == "spaces/SPACE1/messages/MSG001"
+        assert result.message_name == "spaces/SPACE1/messages/MSG001"
         call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
         assert call_kwargs[1]["body"]["thread"]["thread_key"] == "1700000000.000001"
 
@@ -430,7 +433,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == "spaces/SPACE1/messages/MSG001"
+        assert result.message_name == "spaces/SPACE1/messages/MSG001"
         ur.handle_unmapped_user_message.assert_called_once()
         call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
         assert call_kwargs[1]["body"]["text"] == "[Unknown User U099] Hello"
@@ -450,7 +453,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == "spaces/SPACE1/messages/MSG001"
+        assert result.message_name == "spaces/SPACE1/messages/MSG001"
         call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
         assert call_kwargs[1]["body"]["sender"]["name"] == "users/admin@example.com"
 
@@ -466,7 +469,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == "spaces/SPACE1/messages/MSG001"
+        assert result.message_name == "spaces/SPACE1/messages/MSG001"
         call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
         assert "_(edited at " in call_kwargs[1]["body"]["text"]
 
@@ -503,7 +506,7 @@ class TestSendMessage:
         ) as mock_prb:
             result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-            assert result == "spaces/SPACE1/messages/MSG001"
+            assert result.message_name == "spaces/SPACE1/messages/MSG001"
             mock_prb.assert_called_once()
             call_args = mock_prb.call_args
             assert call_args[0][0] is ctx
@@ -513,8 +516,8 @@ class TestSendMessage:
             assert call_args[0][4] == "spaces/SPACE1/messages/MSG001"
             assert call_args[0][5] == msg["reactions"]
 
-    def test_http_error_returns_none_and_records_failure(self):
-        """HttpError from the API is caught, logged, and returns None."""
+    def test_http_error_returns_failed_result_and_records_failure(self):
+        """HttpError from the API is caught, logged, and returns a failed SendResult."""
         ctx, state, chat, ur, ap = _make_send_deps()
         http_error = _make_http_error(status=500, content=b"Internal Server Error")
         (
@@ -524,7 +527,10 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result is None
+        assert result.failed is True
+        assert result.error is not None
+        assert result.error_code == 500
+        assert result.retryable is True
         assert len(state.messages.failed_messages) == 1
         assert state.messages.failed_messages[0]["channel"] == "general"
         assert state.messages.failed_messages[0]["ts"] == "1700000000.000001"
@@ -537,7 +543,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == MessageResult.ALREADY_SENT
+        assert result.skipped == MessageResult.ALREADY_SENT
 
     def test_update_mode_skips_old_messages_via_timestamp(self):
         """Update mode skips messages older than last_processed_timestamps."""
@@ -552,7 +558,7 @@ class TestSendMessage:
 
             result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == MessageResult.ALREADY_SENT
+        assert result.skipped == MessageResult.ALREADY_SENT
 
     def test_marks_sent_message_in_sent_messages_set(self):
         """Successfully sent messages are tracked in sent_messages."""
@@ -593,8 +599,9 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        # Should not be None — it should be sent
-        assert result == "spaces/SPACE1/messages/MSG001"
+        # Should be sent successfully
+        assert result.message_name == "spaces/SPACE1/messages/MSG001"
+        assert result.success is True
 
     def test_message_with_forwarded_files_is_not_skipped(self):
         """Messages with files in forwarded attachments are not skipped."""
@@ -610,7 +617,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result == "spaces/SPACE1/messages/MSG001"
+        assert result.message_name == "spaces/SPACE1/messages/MSG001"
 
     def test_drive_attachments_appended_as_links(self):
         """Drive file attachments are converted to links in message text."""
@@ -657,7 +664,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result is None
+        assert result.success is False
 
 
 # ---------------------------------------------------------------------------
