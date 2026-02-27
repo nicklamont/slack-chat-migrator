@@ -22,7 +22,7 @@ from slack_migrator.constants import (
     HTTP_SERVER_ERROR_MIN,
     SPACE_NAME_PREFIX,
 )
-from slack_migrator.services.membership_manager import add_regular_members
+from slack_migrator.services.regular_membership import add_regular_members
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:

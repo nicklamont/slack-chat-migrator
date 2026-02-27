@@ -88,8 +88,8 @@ class TestCheckPermissionsCommand:
         result = runner.invoke(cli, ["check-permissions"])
         assert result.exit_code != 0
 
-    @patch("slack_migrator.cli.commands.check_permissions_standalone")
-    @patch("slack_migrator.cli.commands.load_config")
+    @patch("slack_migrator.cli.permissions_cmd.check_permissions_standalone")
+    @patch("slack_migrator.cli.permissions_cmd.load_config")
     def test_invokes_standalone_function(self, mock_load_config, mock_check):
         mock_load_config.return_value = MigrationConfig()
         runner = CliRunner()
@@ -128,9 +128,9 @@ class TestValidateCommand:
         result = runner.invoke(cli, ["validate"])
         assert result.exit_code != 0
 
-    @patch("slack_migrator.cli.commands.MigrationOrchestrator")
-    @patch("slack_migrator.cli.commands.setup_logger")
-    @patch("slack_migrator.cli.commands.create_migration_output_directory")
+    @patch("slack_migrator.cli.validate_cmd.MigrationOrchestrator")
+    @patch("slack_migrator.cli.validate_cmd.setup_logger")
+    @patch("slack_migrator.cli.validate_cmd.create_migration_output_directory")
     def test_always_sets_dry_run_true(self, mock_outdir, mock_log, mock_orch_cls):
         """Validate always passes dry_run=True to the orchestrator."""
         mock_outdir.return_value = "/tmp/fake"
@@ -173,9 +173,9 @@ class TestCleanupCommand:
         result = runner.invoke(cli, ["cleanup"])
         assert result.exit_code != 0
 
-    @patch("slack_migrator.cli.commands.cleanup_import_mode_spaces")
-    @patch("slack_migrator.cli.commands.get_gcp_service")
-    @patch("slack_migrator.cli.commands.load_config")
+    @patch("slack_migrator.cli.cleanup_cmd.cleanup_import_mode_spaces")
+    @patch("slack_migrator.cli.cleanup_cmd.get_gcp_service")
+    @patch("slack_migrator.cli.cleanup_cmd.load_config")
     def test_invokes_standalone_cleanup(self, mock_config, mock_svc, mock_cleanup):
         mock_config.return_value = MigrationConfig()
         mock_chat = MagicMock()
@@ -196,9 +196,9 @@ class TestCleanupCommand:
         assert result.exit_code == 0
         mock_cleanup.assert_called_once_with(mock_chat)
 
-    @patch("slack_migrator.cli.commands.cleanup_import_mode_spaces")
-    @patch("slack_migrator.cli.commands.get_gcp_service")
-    @patch("slack_migrator.cli.commands.load_config")
+    @patch("slack_migrator.cli.cleanup_cmd.cleanup_import_mode_spaces")
+    @patch("slack_migrator.cli.cleanup_cmd.get_gcp_service")
+    @patch("slack_migrator.cli.cleanup_cmd.load_config")
     def test_prompts_for_confirmation_without_yes(
         self, mock_config, mock_svc, mock_cleanup
     ):
@@ -243,33 +243,33 @@ class TestBackwardsCompatibility:
 class TestHandleException:
     """Tests for handle_exception()."""
 
-    @patch("slack_migrator.cli.commands.log_with_context")
+    @patch("slack_migrator.cli.common.log_with_context")
     def test_handles_migrator_error(self, mock_log):
         handle_exception(MigratorError("test error"))
         mock_log.assert_called_once_with(logging.ERROR, "test error")
 
-    @patch("slack_migrator.cli.commands.log_with_context")
+    @patch("slack_migrator.cli.common.log_with_context")
     def test_handles_config_error(self, mock_log):
         handle_exception(ConfigError("bad config"))
         mock_log.assert_called_once_with(logging.ERROR, "bad config")
 
-    @patch("slack_migrator.cli.commands.log_with_context")
+    @patch("slack_migrator.cli.common.log_with_context")
     def test_handles_permission_check_error(self, mock_log):
         handle_exception(PermissionCheckError("missing scope"))
         mock_log.assert_called_once_with(logging.ERROR, "missing scope")
 
-    @patch("slack_migrator.cli.commands.log_with_context")
+    @patch("slack_migrator.cli.common.log_with_context")
     def test_handles_migration_aborted_error(self, mock_log):
         handle_exception(MigrationAbortedError("aborted"))
         mock_log.assert_called_once_with(logging.ERROR, "aborted")
 
-    @patch("slack_migrator.cli.commands.log_with_context")
+    @patch("slack_migrator.cli.common.log_with_context")
     def test_handles_file_not_found(self, mock_log):
         handle_exception(FileNotFoundError("missing.json"))
         assert mock_log.call_count == 2
         assert "missing.json" in str(mock_log.call_args_list[0])
 
-    @patch("slack_migrator.cli.commands.log_with_context")
+    @patch("slack_migrator.cli.common.log_with_context")
     def test_handles_generic_exception(self, mock_log):
         handle_exception(RuntimeError("unexpected"))
         mock_log.assert_called_once_with(
@@ -280,10 +280,10 @@ class TestHandleException:
 class TestMigrateExceptionPaths:
     """Tests for exception paths in the migrate command."""
 
-    @patch("slack_migrator.cli.commands.show_security_warning")
-    @patch("slack_migrator.cli.commands.create_migration_output_directory")
-    @patch("slack_migrator.cli.commands.setup_logger")
-    @patch("slack_migrator.cli.commands.MigrationOrchestrator")
+    @patch("slack_migrator.cli.migrate_cmd.show_security_warning")
+    @patch("slack_migrator.cli.migrate_cmd.create_migration_output_directory")
+    @patch("slack_migrator.cli.migrate_cmd.setup_logger")
+    @patch("slack_migrator.cli.migrate_cmd.MigrationOrchestrator")
     def test_config_error_exits_with_code_1(
         self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
     ):
@@ -307,10 +307,10 @@ class TestMigrateExceptionPaths:
         )
         assert result.exit_code == 1
 
-    @patch("slack_migrator.cli.commands.show_security_warning")
-    @patch("slack_migrator.cli.commands.create_migration_output_directory")
-    @patch("slack_migrator.cli.commands.setup_logger")
-    @patch("slack_migrator.cli.commands.MigrationOrchestrator")
+    @patch("slack_migrator.cli.migrate_cmd.show_security_warning")
+    @patch("slack_migrator.cli.migrate_cmd.create_migration_output_directory")
+    @patch("slack_migrator.cli.migrate_cmd.setup_logger")
+    @patch("slack_migrator.cli.migrate_cmd.MigrationOrchestrator")
     def test_migration_aborted_exits_with_code_1(
         self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
     ):

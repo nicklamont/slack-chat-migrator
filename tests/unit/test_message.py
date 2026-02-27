@@ -10,7 +10,7 @@ from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.context import MigrationContext
 from slack_migrator.core.state import MigrationState, _default_migration_summary
 from slack_migrator.services.discovery import log_space_mapping_conflicts
-from slack_migrator.services.message import (
+from slack_migrator.services.message_sender import (
     MessageResult,
     send_intro,
     send_message,
@@ -499,7 +499,7 @@ class TestSendMessage:
         }
 
         with patch(
-            "slack_migrator.services.message.process_reactions_batch"
+            "slack_migrator.services.message_sender.process_reactions_batch"
         ) as mock_prb:
             result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
@@ -545,7 +545,7 @@ class TestSendMessage:
         state.progress.last_processed_timestamps = {"general": 1700000010.0}
 
         with patch(
-            "slack_migrator.services.message.should_process_message",
+            "slack_migrator.services.message_sender.should_process_message",
             return_value=False,
         ):
             msg = {"ts": "1700000000.000001", "user": "U001", "text": "Old message"}
@@ -870,7 +870,7 @@ class TestSendIntro:
         chat = MagicMock()
         return ctx, state, chat
 
-    @patch("slack_migrator.services.message.time")
+    @patch("slack_migrator.services.message_sender.time")
     def test_sends_intro_message(self, mock_time):
         """send_intro creates a message via the API."""
         mock_time.time.return_value = 1700000000
@@ -881,7 +881,7 @@ class TestSendIntro:
         chat.spaces.return_value.messages.return_value.create.assert_called_once()
         assert state.progress.migration_summary["messages_created"] == 1
 
-    @patch("slack_migrator.services.message.time")
+    @patch("slack_migrator.services.message_sender.time")
     def test_dry_run_sends_via_noop_service(self, mock_time):
         """In dry run, intro message is sent (handled by DryRunChatService)."""
         mock_time.time.return_value = 1700000000
@@ -901,7 +901,7 @@ class TestSendIntro:
         chat.spaces.return_value.messages.return_value.create.return_value.execute.assert_not_called()
         assert state.progress.migration_summary["messages_created"] == 0
 
-    @patch("slack_migrator.services.message.time")
+    @patch("slack_migrator.services.message_sender.time")
     def test_api_error_is_caught(self, mock_time):
         """API errors during intro send are caught and do not raise."""
         mock_time.time.return_value = 1700000000
@@ -913,7 +913,7 @@ class TestSendIntro:
         # Should not raise
         send_intro(ctx, state, chat, "spaces/SPACE1", "general")
 
-    @patch("slack_migrator.services.message.time")
+    @patch("slack_migrator.services.message_sender.time")
     def test_missing_channel_metadata(self, mock_time):
         """Intro works when channel has no metadata."""
         mock_time.time.return_value = 1700000000
