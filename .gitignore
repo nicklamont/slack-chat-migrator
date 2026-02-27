@@ -40,5 +40,8 @@ config.yaml
 migration_logs/
 test_output/
 
+# Worktrees
+.worktrees/
+
 # System files
 .DS_Store
