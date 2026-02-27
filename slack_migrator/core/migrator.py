@@ -15,6 +15,13 @@ from typing import Any
 
 from slack_migrator.constants import SPACE_NAME_PREFIX
 from slack_migrator.core.channel_processor import ChannelProcessor
+from slack_migrator.core.checkpoint import (
+    CheckpointData,
+    _now_iso,
+    clear_checkpoint,
+    load_checkpoint,
+    save_checkpoint,
+)
 from slack_migrator.core.cleanup import cleanup_channel_handlers
 from slack_migrator.core.config import load_config, load_space_mapping
 from slack_migrator.core.context import MigrationContext
@@ -374,6 +381,20 @@ class SlackToChatMigrator:
             # Reset per-run state
             self.state.reset_for_run()
 
+            # Load or create checkpoint for resumable migrations
+            checkpoint_path = (
+                Path(self.state.context.output_dir or ".")
+                / ".migration_checkpoint.json"
+            )
+            checkpoint = load_checkpoint(checkpoint_path)
+            if checkpoint:
+                log_with_context(
+                    logging.INFO,
+                    f"Resuming migration from checkpoint: {len(checkpoint.completed_channels)} channels already completed",
+                )
+            else:
+                checkpoint = CheckpointData(started_at=_now_iso())
+
             # Report unmapped user issues before starting migration (if any detected during initialization)
             if (
                 hasattr(self, "unmapped_user_tracker")
@@ -423,9 +444,22 @@ class SlackToChatMigrator:
                 attachment_processor=self.attachment_processor,
             )
             for ch in all_channel_dirs:
-                should_abort = self.channel_processor.process_channel(ch)
+                channel_name = ch.name
+                if channel_name in checkpoint.completed_channels:
+                    log_with_context(
+                        logging.INFO,
+                        f"Skipping channel {channel_name} (already completed in previous run)",
+                    )
+                    continue
+
+                should_abort, had_errors = self.channel_processor.process_channel(ch)
                 if should_abort:
                     break
+
+                # Only checkpoint channels that completed without errors
+                if not had_errors:
+                    checkpoint.completed_channels[channel_name] = str(time.time())
+                    save_checkpoint(checkpoint_path, checkpoint)
 
             # Log any space mapping conflicts that should be added to config
             log_space_mapping_conflicts(self.state, self.ctx.dry_run)
@@ -468,6 +502,9 @@ class SlackToChatMigrator:
                 migration_duration,
                 getattr(self, "unmapped_user_tracker", None),
             )
+
+            # Migration succeeded — remove checkpoint so the next run starts fresh
+            clear_checkpoint(checkpoint_path)
 
             # Clean up channel handlers in success case (finally block will also run)
             cleanup_channel_handlers(self.state)

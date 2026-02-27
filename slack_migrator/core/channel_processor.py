@@ -53,7 +53,7 @@ class ChannelProcessor:
         self.file_handler = file_handler
         self.attachment_processor = attachment_processor
 
-    def process_channel(self, ch_dir: Path) -> bool:
+    def process_channel(self, ch_dir: Path) -> tuple[bool, bool]:
         """Process a single channel directory.
 
         Creates or reuses a space, imports messages, completes import mode,
@@ -63,7 +63,9 @@ class ChannelProcessor:
             ch_dir: Path to the channel's export directory.
 
         Returns:
-            True if the migration should abort (break the outer loop).
+            A tuple of (should_abort, channel_had_errors) where should_abort
+            is True if the migration should break the outer loop, and
+            channel_had_errors indicates whether the channel encountered errors.
         """
         channel = ch_dir.name
 
@@ -83,7 +85,7 @@ class ChannelProcessor:
                 f"Skipping channel {channel} based on configuration",
                 channel=channel,
             )
-            return False
+            return False, False
 
         # Check for unresolved space conflicts
         if channel in self.state.errors.channel_conflicts:
@@ -95,7 +97,7 @@ class ChannelProcessor:
             self.state.errors.migration_issues[channel] = (
                 "Skipped due to duplicate space conflict - requires disambiguation in config.yaml"
             )
-            return False
+            return False, True
 
         # Setup channel-specific logging
         self._setup_channel_logging(channel)
@@ -113,7 +115,7 @@ class ChannelProcessor:
                 f"Skipping channel {channel} due to space creation permission error",
                 channel=channel,
             )
-            return False
+            return False, True
 
         # Set current space
         self.state.context.current_space = space
@@ -178,13 +180,13 @@ class ChannelProcessor:
                 "Aborting import after first channel due to errors",
                 channel=channel,
             )
-            return True  # Signal to break the loop
+            return True, True  # Signal to break the loop
 
         # Delete space if errors
         if channel_had_errors and not self.ctx.dry_run and not self.ctx.update_mode:
             self._delete_space_if_errors(space, channel)
 
-        return False
+        return False, channel_had_errors
 
     def _setup_channel_logging(self, channel: str) -> None:
         """Set up channel-specific log handler."""

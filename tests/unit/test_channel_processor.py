@@ -116,7 +116,7 @@ class TestProcessChannel:
         mock_track,
         tmp_path,
     ):
-        """A successful channel process returns False (do not abort)."""
+        """A successful channel process returns (False, False) — no abort, no errors."""
         processor = _make_processor(export_root=tmp_path)
 
         ch_dir = tmp_path / "general"
@@ -130,9 +130,10 @@ class TestProcessChannel:
             patch.object(processor, "_setup_channel_logging"),
             patch.object(processor, "_discover_channel_resources"),
         ):
-            result = processor.process_channel(ch_dir)
+            should_abort, had_errors = processor.process_channel(ch_dir)
 
-        assert result is False
+        assert should_abort is False
+        assert had_errors is False
         assert (
             "general"
             in processor.state.progress.migration_summary["channels_processed"]
@@ -144,14 +145,15 @@ class TestProcessChannel:
         return_value=False,
     )
     def test_channel_skipped_by_config(self, mock_should, tmp_path):
-        """Channel filtered by config returns False without processing."""
+        """Channel filtered by config returns (False, False) without processing."""
         processor = _make_processor()
         ch_dir = tmp_path / "random"
         ch_dir.mkdir()
 
-        result = processor.process_channel(ch_dir)
+        should_abort, had_errors = processor.process_channel(ch_dir)
 
-        assert result is False
+        assert should_abort is False
+        assert had_errors is False
         mock_should.assert_called_once_with("random", processor.ctx.config)
 
     @patch(
@@ -159,16 +161,17 @@ class TestProcessChannel:
         return_value=True,
     )
     def test_channel_with_space_conflict(self, mock_should, tmp_path):
-        """Channel with unresolved space conflict is skipped."""
+        """Channel with unresolved space conflict is skipped with errors."""
         processor = _make_processor()
         processor.state.errors.channel_conflicts = {"general": ["spaces/A", "spaces/B"]}
 
         ch_dir = tmp_path / "general"
         ch_dir.mkdir()
 
-        result = processor.process_channel(ch_dir)
+        should_abort, had_errors = processor.process_channel(ch_dir)
 
-        assert result is False
+        assert should_abort is False
+        assert had_errors is True
         assert "general" in processor.state.errors.migration_issues
 
     @patch(
@@ -182,16 +185,17 @@ class TestProcessChannel:
     def test_permission_error_on_space_creation(
         self, mock_create, mock_should, tmp_path
     ):
-        """Permission error on space creation skips the channel."""
+        """Permission error on space creation skips the channel with errors."""
         processor = _make_processor(export_root=tmp_path)
 
         ch_dir = tmp_path / "general"
         ch_dir.mkdir()
 
         with patch.object(processor, "_setup_channel_logging"):
-            result = processor.process_channel(ch_dir)
+            should_abort, had_errors = processor.process_channel(ch_dir)
 
-        assert result is False
+        assert should_abort is False
+        assert had_errors is True
 
     @patch("slack_migrator.core.channel_processor.add_users_to_space")
     @patch("slack_migrator.core.channel_processor.add_regular_members")
@@ -206,7 +210,7 @@ class TestProcessChannel:
     def test_abort_on_error_returns_true(
         self, mock_should, mock_create, mock_add_reg, mock_add_hist, tmp_path
     ):
-        """When abort_on_error is True and there are failures, returns True."""
+        """When abort_on_error is True and there are failures, returns (True, True)."""
         processor = _make_processor(abort_on_error=True, export_root=tmp_path)
 
         ch_dir = tmp_path / "general"
@@ -223,9 +227,10 @@ class TestProcessChannel:
             patch.object(processor, "_add_members", return_value=True),
             patch.object(processor, "_should_abort_import", return_value=True),
         ):
-            result = processor.process_channel(ch_dir)
+            should_abort, had_errors = processor.process_channel(ch_dir)
 
-        assert result is True
+        assert should_abort is True
+        assert had_errors is True
 
     @patch("slack_migrator.core.channel_processor.add_users_to_space")
     @patch("slack_migrator.core.channel_processor.add_regular_members")
@@ -285,9 +290,10 @@ class TestProcessChannel:
             patch.object(processor, "_should_abort_import", return_value=False),
             patch.object(processor, "_delete_space_if_errors") as mock_delete,
         ):
-            result = processor.process_channel(ch_dir)
+            should_abort, had_errors = processor.process_channel(ch_dir)
 
-        assert result is False
+        assert should_abort is False
+        assert had_errors is True
         # In dry run mode, _delete_space_if_errors should NOT be called
         mock_delete.assert_not_called()
 
