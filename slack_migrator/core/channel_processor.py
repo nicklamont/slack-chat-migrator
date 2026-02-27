@@ -238,7 +238,7 @@ class ChannelProcessor:
             self.state.space_cache[channel] = space
             return space, True
 
-    def _process_messages(  # noqa: C901
+    def _process_messages(
         self, ch_dir: Path, space: str, channel_had_errors: bool
     ) -> tuple[int, int, bool]:
         """Load, deduplicate, and send messages for a channel.
@@ -253,7 +253,35 @@ class ChannelProcessor:
             channel=channel,
         )
 
-        # Load messages from JSON files
+        msgs = self._load_and_sort_messages(channel)
+        msgs = self._deduplicate_messages(msgs, channel)
+
+        if self.ctx.dry_run:
+            message_count = sum(1 for m in msgs if m.get("type") == "message")
+            log_with_context(
+                logging.INFO,
+                f"{self.ctx.log_prefix}Found {message_count} messages in channel {channel}",
+                channel=channel,
+            )
+            self.state.migration_summary["messages_created"] += message_count
+
+        if not self.ctx.dry_run or self.ctx.update_mode:
+            self._discover_channel_resources(channel)
+
+        processed_count, failed_count, channel_had_errors = self._send_messages_loop(
+            msgs, space, channel, channel_had_errors
+        )
+
+        log_with_context(
+            logging.INFO,
+            f"Channel {channel} message import: processed {processed_count}, failed {failed_count}",
+            channel=channel,
+        )
+
+        return processed_count, failed_count, channel_had_errors
+
+    def _load_and_sort_messages(self, channel: str) -> list[dict[str, Any]]:
+        """Load all messages from JSON files and sort by timestamp."""
         msg_dir = self.ctx.export_root / channel
         msgs: list[dict[str, Any]] = []
         for jf in sorted(msg_dir.glob("*.json")):
@@ -267,19 +295,21 @@ class ChannelProcessor:
                     channel=channel,
                 )
 
-        # Sort by timestamp
-        msgs = sorted(msgs, key=lambda m: float(m.get("ts", "0")))
+        return sorted(msgs, key=lambda m: float(m.get("ts", "0")))
 
-        # Deduplicate
+    def _deduplicate_messages(
+        self, msgs: list[dict[str, Any]], channel: str
+    ) -> list[dict[str, Any]]:
+        """Remove duplicate messages based on timestamp."""
         seen_timestamps: set[str] = set()
-        deduped_msgs: list[dict[str, Any]] = []
+        deduped: list[dict[str, Any]] = []
         duplicate_count = 0
 
         for msg in msgs:
             ts = msg.get("ts")
             if ts and ts not in seen_timestamps:
                 seen_timestamps.add(ts)
-                deduped_msgs.append(msg)
+                deduped.append(msg)
             elif ts:
                 duplicate_count += 1
                 log_with_context(
@@ -296,35 +326,25 @@ class ChannelProcessor:
                 channel=channel,
             )
 
-        msgs = deduped_msgs
+        return deduped
 
-        # Count messages in dry run mode
-        if self.ctx.dry_run:
-            message_count = sum(1 for m in msgs if m.get("type") == "message")
-            log_with_context(
-                logging.INFO,
-                f"{self.ctx.log_prefix}Found {message_count} messages in channel {channel}",
-                channel=channel,
-            )
-            self.state.migration_summary["messages_created"] += message_count
+    def _send_messages_loop(
+        self,
+        msgs: list[dict[str, Any]],
+        space: str,
+        channel: str,
+        channel_had_errors: bool,
+    ) -> tuple[int, int, bool]:
+        """Iterate over messages, sending each and tracking results.
 
-        # Load previously processed messages and thread mappings
+        Returns (processed_count, failed_count, channel_had_errors).
+        """
         processed_ts: list[str] = []
-
-        # Discover existing resources (find the last message timestamp) from Google Chat
-        if not self.ctx.dry_run or self.ctx.update_mode:
-            self._discover_channel_resources(channel)
-
         processed_count = 0
         failed_count = 0
-
-        # Get failure threshold configuration
         max_failure_percentage = self.ctx.config.max_failure_percentage
-
-        # Track failures for this channel
         channel_failures: list[str] = []
 
-        # Create progress bar
         progress_desc = f"{self.ctx.log_prefix}Adding messages to {channel}"
         pbar = tqdm(msgs, desc=progress_desc)
         for m in pbar:
@@ -333,12 +353,10 @@ class ChannelProcessor:
 
             ts = m["ts"]
 
-            # Skip already processed messages (only in non-dry run mode)
             if ts in processed_ts and not self.ctx.dry_run:
                 processed_count += 1
                 continue
 
-            # Track statistics for this message
             track_message_stats(
                 self.ctx,
                 self.state,
@@ -350,7 +368,6 @@ class ChannelProcessor:
             if self.ctx.dry_run:
                 continue
 
-            # Send message using the new method
             result = send_message(
                 self.ctx,
                 self.state,
@@ -363,15 +380,13 @@ class ChannelProcessor:
 
             if result:
                 if result != MessageResult.SKIPPED:
-                    # Message was sent successfully
                     processed_ts.append(ts)
                     processed_count += 1
             else:
                 failed_count += 1
                 channel_failures.append(ts)
 
-                # Check if we've exceeded our failure threshold
-                if processed_count > 0:  # Avoid division by zero
+                if processed_count > 0:
                     failure_percentage = (
                         failed_count / (processed_count + failed_count)
                     ) * 100
@@ -381,25 +396,16 @@ class ChannelProcessor:
                             f"Failure rate {failure_percentage:.1f}% exceeds threshold {max_failure_percentage}% for channel {channel}",
                             channel=channel,
                         )
-                        # Flag the channel as having a high error rate
                         channel_had_errors = True
                         self.state.high_failure_rate_channels[channel] = (
                             failure_percentage
                         )
 
-            # Add a small delay between messages to avoid rate limits
             time.sleep(0.05)
 
-        # Record failures for reporting
         if channel_failures:
             self.state.failed_messages_by_channel[channel] = channel_failures
             channel_had_errors = True
-
-        log_with_context(
-            logging.INFO,
-            f"Channel {channel} message import: processed {processed_count}, failed {failed_count}",
-            channel=channel,
-        )
 
         return processed_count, failed_count, channel_had_errors
 

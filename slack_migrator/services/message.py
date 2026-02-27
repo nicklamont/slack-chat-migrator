@@ -645,6 +645,44 @@ def _handle_send_error(
     state.failed_messages.append(failed_msg)
 
 
+def _resolve_chat_service(
+    chat: Any,
+    user_resolver: Any,
+    user_email: str | None,
+    channel: str,
+    ts: str,
+    user_id: str,
+) -> Any:
+    """Return the appropriate Chat service for sending a message.
+
+    Uses impersonation when available for the user, otherwise falls back
+    to the admin service.
+    """
+    if not user_email or user_resolver.is_external_user(user_email):
+        return chat
+
+    chat_service = user_resolver.get_delegate(user_email)
+
+    if chat_service != chat:
+        log_with_context(
+            logging.DEBUG,
+            f"Using impersonated service for user {user_email}",
+            channel=channel,
+            ts=ts,
+            user_id=user_id,
+        )
+    else:
+        log_with_context(
+            logging.DEBUG,
+            f"Using admin service for user {user_email} (impersonation not available)",
+            channel=channel,
+            ts=ts,
+            user_id=user_id,
+        )
+
+    return chat_service
+
+
 def send_message(
     ctx: MigrationContext,
     state: MigrationState,
@@ -739,30 +777,9 @@ def send_message(
     )
 
     try:
-        # Get the appropriate service for this user (impersonation)
-        chat_service = chat  # Default to admin service
-
-        # If we have a valid user email, try to use impersonation
-        if user_email and not user_resolver.is_external_user(user_email):
-            chat_service = user_resolver.get_delegate(user_email)
-
-            # Log whether we're using impersonation or falling back to admin
-            if chat_service != chat:
-                log_with_context(
-                    logging.DEBUG,
-                    f"Using impersonated service for user {user_email}",
-                    channel=channel,
-                    ts=ts,
-                    user_id=user_id,
-                )
-            else:
-                log_with_context(
-                    logging.DEBUG,
-                    f"Using admin service for user {user_email} (impersonation not available)",
-                    channel=channel,
-                    ts=ts,
-                    user_id=user_id,
-                )
+        chat_service = _resolve_chat_service(
+            chat, user_resolver, user_email, channel, ts, user_id
+        )
 
         message_id = _generate_message_id(ts, is_edited, edited_ts)
 
