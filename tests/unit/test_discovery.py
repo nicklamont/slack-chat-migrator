@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
@@ -9,8 +10,12 @@ from slack_migrator.core.state import MigrationState
 from slack_migrator.services.discovery import (
     discover_existing_spaces,
     get_last_message_timestamp,
+    load_existing_space_mappings,
+    load_space_mappings,
+    log_space_mapping_conflicts,
     should_process_message,
 )
+from tests.unit.conftest import _make_ctx
 
 
 def _make_space(
@@ -605,3 +610,290 @@ class TestShouldProcessMessage:
         """Only the integer part of the Slack timestamp is used for comparison."""
         # 1609459200.999999 -> integer part 1609459200, which is not > 1609459200
         assert should_process_message(1609459200.0, "1609459200.999999") is False
+
+
+# ---------------------------------------------------------------------------
+# load_existing_space_mappings
+# ---------------------------------------------------------------------------
+
+
+def _http_error(status=500, reason="Server Error"):
+    """Create an HttpError for testing."""
+    resp = Response({"status": status})
+    resp.reason = reason
+    return HttpError(resp, b"error")
+
+
+class TestLoadExistingSpaceMappings:
+    """Tests for load_existing_space_mappings()."""
+
+    def test_import_mode_is_noop(self):
+        """In import mode (update_mode=False), the function returns immediately."""
+        ctx = _make_ctx(update_mode=False)
+        state = MigrationState()
+        chat = MagicMock()
+
+        load_existing_space_mappings(ctx, state, chat)
+
+        # Chat API should never be called
+        chat.spaces.assert_not_called()
+        assert state.channel_to_space == {}
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_update_mode_discovers_spaces(self, mock_discover):
+        """In update mode, discovers spaces and populates state."""
+        mock_discover.return_value = (
+            {"general": "spaces/abc123"},
+            {},
+        )
+        ctx = _make_ctx(
+            update_mode=True,
+            channel_name_to_id={"general": "C001"},
+        )
+        state = MigrationState()
+        chat = MagicMock()
+
+        load_existing_space_mappings(ctx, state, chat)
+
+        assert state.channel_to_space["general"] == "spaces/abc123"
+        assert state.channel_id_to_space_id["C001"] == "abc123"
+        assert state.created_spaces["general"] == "spaces/abc123"
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_no_spaces_found(self, mock_discover):
+        """When no spaces are discovered, state remains empty."""
+        mock_discover.return_value = ({}, {})
+        ctx = _make_ctx(update_mode=True)
+        state = MigrationState()
+        chat = MagicMock()
+
+        load_existing_space_mappings(ctx, state, chat)
+
+        assert state.channel_to_space == {}
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_http_error_propagates(self, mock_discover):
+        """HttpError from discover_existing_spaces is re-raised."""
+        mock_discover.side_effect = _http_error(500)
+        ctx = _make_ctx(update_mode=True)
+        state = MigrationState()
+        chat = MagicMock()
+
+        with pytest.raises(HttpError):
+            load_existing_space_mappings(ctx, state, chat)
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_duplicate_spaces_resolved_by_config(self, mock_discover):
+        """Duplicate spaces are resolved by space_mapping config."""
+        mock_discover.return_value = (
+            {},
+            {
+                "general": [
+                    {
+                        "space_id": "abc",
+                        "space_name": "spaces/abc",
+                        "display_name": "Slack #general (1)",
+                        "member_count": 10,
+                        "create_time": "2024-01-01",
+                    },
+                    {
+                        "space_id": "def",
+                        "space_name": "spaces/def",
+                        "display_name": "Slack #general (2)",
+                        "member_count": 5,
+                        "create_time": "2024-02-01",
+                    },
+                ],
+            },
+        )
+        ctx = _make_ctx(
+            update_mode=True,
+            channel_name_to_id={"general": "C001"},
+        )
+        state = MigrationState()
+        state.space_mapping = {"general": "abc"}
+        chat = MagicMock()
+
+        load_existing_space_mappings(ctx, state, chat)
+
+        assert state.channel_to_space["general"] == "spaces/abc"
+        assert "general" not in state.channel_conflicts
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_duplicate_spaces_unresolved(self, mock_discover):
+        """Duplicate spaces without config produce conflicts."""
+        mock_discover.return_value = (
+            {},
+            {
+                "general": [
+                    {
+                        "space_id": "abc",
+                        "space_name": "spaces/abc",
+                        "display_name": "Slack #general (1)",
+                        "member_count": 10,
+                        "create_time": "2024-01-01",
+                    },
+                    {
+                        "space_id": "def",
+                        "space_name": "spaces/def",
+                        "display_name": "Slack #general (2)",
+                        "member_count": 5,
+                        "create_time": "2024-02-01",
+                    },
+                ],
+            },
+        )
+        ctx = _make_ctx(update_mode=True)
+        state = MigrationState()
+        chat = MagicMock()
+
+        load_existing_space_mappings(ctx, state, chat)
+
+        assert "general" in state.channel_conflicts
+        assert "general" in state.migration_issues
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_duplicate_config_id_not_matching(self, mock_discover):
+        """Config space_id that doesn't match any discovered space."""
+        mock_discover.return_value = (
+            {},
+            {
+                "general": [
+                    {
+                        "space_id": "abc",
+                        "space_name": "spaces/abc",
+                        "display_name": "Slack #general",
+                        "member_count": 10,
+                        "create_time": "2024-01-01",
+                    },
+                ],
+            },
+        )
+        ctx = _make_ctx(update_mode=True)
+        state = MigrationState()
+        state.space_mapping = {"general": "nonexistent"}
+        chat = MagicMock()
+
+        load_existing_space_mappings(ctx, state, chat)
+
+        assert "general" in state.channel_conflicts
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_space_name_without_prefix_handled(self, mock_discover):
+        """Space name without 'spaces/' prefix is used as-is for space_id."""
+        mock_discover.return_value = ({"general": "abc123"}, {})
+        ctx = _make_ctx(
+            update_mode=True,
+            channel_name_to_id={"general": "C001"},
+        )
+        state = MigrationState()
+        chat = MagicMock()
+
+        load_existing_space_mappings(ctx, state, chat)
+
+        assert state.channel_id_to_space_id["C001"] == "abc123"
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_channel_without_id_skips_id_mapping(self, mock_discover):
+        """Channel not in channel_name_to_id skips ID mapping."""
+        mock_discover.return_value = ({"orphan": "spaces/xyz"}, {})
+        ctx = _make_ctx(update_mode=True, channel_name_to_id={})
+        state = MigrationState()
+        chat = MagicMock()
+
+        load_existing_space_mappings(ctx, state, chat)
+
+        assert state.channel_to_space["orphan"] == "spaces/xyz"
+        assert state.channel_id_to_space_id == {}
+
+
+# ---------------------------------------------------------------------------
+# load_space_mappings
+# ---------------------------------------------------------------------------
+
+
+class TestLoadSpaceMappings:
+    """Tests for load_space_mappings()."""
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_returns_discovered_spaces(self, mock_discover):
+        """Returns the discovered spaces dict."""
+        mock_discover.return_value = ({"general": "spaces/abc"}, {})
+        chat = MagicMock()
+        state = MigrationState()
+
+        result = load_space_mappings(chat, {"general": "C001"}, state)
+
+        assert result == {"general": "spaces/abc"}
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_no_spaces_returns_empty(self, mock_discover):
+        """Returns empty dict when no spaces found."""
+        mock_discover.return_value = ({}, {})
+        chat = MagicMock()
+        state = MigrationState()
+
+        result = load_space_mappings(chat, {}, state)
+
+        assert result == {}
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_http_error_returns_empty(self, mock_discover):
+        """HttpError returns empty dict instead of raising."""
+        mock_discover.side_effect = _http_error(500)
+        chat = MagicMock()
+        state = MigrationState()
+
+        result = load_space_mappings(chat, {}, state)
+
+        assert result == {}
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_config_overrides_applied(self, mock_discover):
+        """Space mapping from config overrides discovered values."""
+        mock_discover.return_value = ({"general": "spaces/old"}, {})
+        chat = MagicMock()
+        state = MigrationState()
+        state.space_mapping = {"general": "newid"}
+
+        result = load_space_mappings(chat, {"general": "C001"}, state)
+
+        assert result["general"] == "spaces/newid"
+        assert state.channel_id_to_space_id["C001"] == "newid"
+
+    @patch("slack_migrator.services.discovery.discover_existing_spaces")
+    def test_config_override_unknown_channel(self, mock_discover):
+        """Config override for channel not in workspace logs warning."""
+        mock_discover.return_value = ({}, {})
+        chat = MagicMock()
+        state = MigrationState()
+        state.space_mapping = {"unknown": "someid"}
+
+        result = load_space_mappings(chat, {}, state)
+
+        # unknown channel should not appear in results (no discovered base)
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# log_space_mapping_conflicts
+# ---------------------------------------------------------------------------
+
+
+class TestLogSpaceMappingConflicts:
+    """Tests for log_space_mapping_conflicts()."""
+
+    def test_no_conflicts_does_nothing(self):
+        """No conflicts means no logging."""
+        state = MigrationState()
+        # Should not raise
+        log_space_mapping_conflicts(state)
+
+    def test_conflicts_logged(self):
+        """Conflicts produce log output."""
+        state = MigrationState()
+        state.channel_conflicts.add("general")
+        state.channel_conflicts.add("random")
+
+        # Should not raise; just logs
+        log_space_mapping_conflicts(state)
