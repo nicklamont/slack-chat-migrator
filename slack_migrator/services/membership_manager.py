@@ -48,7 +48,7 @@ def _collect_user_membership_data(  # noqa: C901
     user membership events (join/leave times, first message times). Then
     augments with the definitive member list from channel metadata.
 
-    Also stores the active user set on ``state.active_users_by_channel``
+    Also stores the active user set on ``state.progress.active_users_by_channel``
     for later use by :func:`add_regular_members`.
 
     Args:
@@ -157,7 +157,7 @@ def _collect_user_membership_data(  # noqa: C901
         f"Identified {len(active_users)} active users for channel {channel}",
         channel=channel,
     )
-    state.active_users_by_channel[channel] = active_users
+    state.progress.active_users_by_channel[channel] = active_users
 
     return user_membership, active_users
 
@@ -346,7 +346,7 @@ def _add_historical_members_batch(
                 user_email=user_email,
                 channel=channel,
             )
-            state.external_users.add(user_email)
+            state.users.external_users.add(user_email)
 
         try:
             # Create historical membership for this user
@@ -400,7 +400,7 @@ def _add_historical_members_batch(
                 f"Unexpected error adding user {internal_email} to space {space}: {e}",
                 user_email=internal_email,
                 space=space,
-                channel=state.current_channel,
+                channel=state.context.current_channel,
             )
             failed_count += 1
 
@@ -621,7 +621,7 @@ def _add_regular_members_batch(
                 user_email=user_email,
                 channel=channel,
             )
-            state.external_users.add(user_email)
+            state.users.external_users.add(user_email)
 
         try:
             # Log which user we're trying to add
@@ -966,7 +966,7 @@ def add_regular_members(
         channel: Slack channel name used for log context and data lookup.
     """
     # Get the list of active users we saved during add_users_to_space
-    if channel not in state.active_users_by_channel:
+    if channel not in state.progress.active_users_by_channel:
         # If we don't have active users for this channel, try to get them from the channel directory
         log_with_context(
             logging.WARNING,
@@ -992,7 +992,7 @@ def add_regular_members(
                             f"Found {len(members)} members for channel {channel} in channels.json",
                             channel=channel,
                         )
-                        state.active_users_by_channel[channel] = members
+                        state.progress.active_users_by_channel[channel] = members
                         break
         except (OSError, json.JSONDecodeError) as e:
             log_with_context(
@@ -1002,7 +1002,7 @@ def add_regular_members(
             )
 
     # If we still don't have active users, we can't proceed
-    if channel not in state.active_users_by_channel:
+    if channel not in state.progress.active_users_by_channel:
         log_with_context(
             logging.ERROR,
             f"No active users found for channel {channel}, can't add regular members",
@@ -1010,7 +1010,7 @@ def add_regular_members(
         )
         return
 
-    active_users = state.active_users_by_channel[channel]
+    active_users = state.progress.active_users_by_channel[channel]
     log_with_context(
         logging.DEBUG,
         f"{ctx.log_prefix}Adding {len(active_users)} regular members to space {space} for channel {channel}",

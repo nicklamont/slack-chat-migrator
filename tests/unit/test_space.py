@@ -75,10 +75,10 @@ def _make_membership_deps(
         workspace_admin=workspace_admin,
     )
     state = MigrationState()
-    state.migration_summary = _default_migration_summary()
-    state.created_spaces = {}
-    state.external_users = set()
-    state.current_channel = "general"
+    state.progress.migration_summary = _default_migration_summary()
+    state.spaces.created_spaces = {}
+    state.users.external_users = set()
+    state.context.current_channel = "general"
     chat = MagicMock()
     user_resolver = MagicMock()
     return ctx, state, chat, user_resolver
@@ -237,7 +237,7 @@ class TestCreateSpace:
             user_map=user_map or {},
         )
         state = MigrationState()
-        state.migration_summary = _default_migration_summary()
+        state.progress.migration_summary = _default_migration_summary()
         chat = MagicMock()
         user_resolver = MagicMock()
         user_resolver.is_external_user.return_value = False
@@ -253,8 +253,8 @@ class TestCreateSpace:
         result = create_space(ctx, state, chat, user_resolver, "general")
 
         assert result == "spaces/general"
-        assert state.migration_summary["spaces_created"] == 1
-        assert state.created_spaces["general"] == "spaces/general"
+        assert state.progress.migration_summary["spaces_created"] == 1
+        assert state.spaces.created_spaces["general"] == "spaces/general"
         # chat.spaces().create() should NOT be called in dry run
         chat.spaces().create.assert_not_called()
 
@@ -279,8 +279,8 @@ class TestCreateSpace:
         result = create_space(ctx, state, chat, user_resolver, "dev")
 
         assert result == "spaces/abc123"
-        assert state.migration_summary["spaces_created"] == 1
-        assert state.created_spaces["dev"] == "spaces/abc123"
+        assert state.progress.migration_summary["spaces_created"] == 1
+        assert state.spaces.created_spaces["dev"] == "spaces/abc123"
 
     def test_space_body_has_import_mode(self):
         """The API request body includes importMode and threading state."""
@@ -424,7 +424,7 @@ class TestCreateSpace:
 
         create_space(ctx, state, chat, user_resolver, "dev")
 
-        assert state.spaces_with_external_users["spaces/dev"] is False
+        assert state.progress.spaces_with_external_users["spaces/dev"] is False
 
     def test_general_channel_display_name_in_api(self):
         """General channel gets '(General)' suffix in the API call."""
@@ -673,7 +673,7 @@ class TestAddUsersToSpace:
         "slack_migrator.services.membership_manager.tqdm", side_effect=lambda x, **kw: x
     )
     def test_external_user_tracked(self, mock_tqdm, mock_sleep, tmp_path):
-        """External users are added to state.external_users."""
+        """External users are added to state.users.external_users."""
         msgs = [{"type": "message", "user": "U001", "ts": "1700000000.000000"}]
         self._setup_channel_dir(tmp_path, "dev", msgs)
 
@@ -687,7 +687,7 @@ class TestAddUsersToSpace:
 
         add_users_to_space(ctx, state, chat, ur, "spaces/dev", "dev")
 
-        assert "ext@other.com" in state.external_users
+        assert "ext@other.com" in state.users.external_users
 
     def test_active_users_stored_on_state(self, tmp_path):
         """Active users from metadata are stored on state for later use."""
@@ -703,7 +703,7 @@ class TestAddUsersToSpace:
 
         add_users_to_space(ctx, state, chat, ur, "spaces/dev", "dev")
 
-        assert "U001" in state.active_users_by_channel["dev"]
+        assert "U001" in state.progress.active_users_by_channel["dev"]
 
     @patch("slack_migrator.services.membership_manager.time.sleep")
     @patch(
@@ -765,7 +765,7 @@ class TestAddRegularMembers:
             user_map={"U001": "alice@example.com"},
             dry_run=True,
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "alice@example.com"
         ur.is_external_user.return_value = False
         # Mock the members list for _verify_and_handle_admin
@@ -787,7 +787,7 @@ class TestAddRegularMembers:
         ctx, state, chat, ur = _make_membership_deps(
             user_map={"U001": "alice@example.com"},
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "alice@example.com"
         ur.is_external_user.return_value = False
         # Members list for verification
@@ -813,7 +813,7 @@ class TestAddRegularMembers:
     def test_unmapped_user_skipped(self, mock_tqdm, mock_sleep):
         """Users with no email mapping are skipped."""
         ctx, state, chat, ur = _make_membership_deps()
-        state.active_users_by_channel = {"dev": {"U999"}}
+        state.progress.active_users_by_channel = {"dev": {"U999"}}
         chat.spaces().members().list.return_value.execute.return_value = {
             "memberships": []
         }
@@ -831,7 +831,7 @@ class TestAddRegularMembers:
         ctx, state, chat, ur = _make_membership_deps(
             user_map={"U001": "alice@example.com"},
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "alice@example.com"
         ur.is_external_user.return_value = False
 
@@ -853,7 +853,7 @@ class TestAddRegularMembers:
         ctx, state, chat, ur = _make_membership_deps(
             user_map={"U001": "alice@example.com"},
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "alice@example.com"
         ur.is_external_user.return_value = False
 
@@ -875,7 +875,7 @@ class TestAddRegularMembers:
         ctx, state, chat, ur = _make_membership_deps(
             user_map={"U001": "alice@example.com"},
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "alice@example.com"
         ur.is_external_user.return_value = False
 
@@ -897,7 +897,7 @@ class TestAddRegularMembers:
         ctx, state, chat, ur = _make_membership_deps(
             user_map={"U001": "alice@example.com"},
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "alice@example.com"
         ur.is_external_user.return_value = False
 
@@ -916,7 +916,7 @@ class TestAddRegularMembers:
         ctx, state, chat, ur = _make_membership_deps(
             export_root=Path("/nonexistent"),
         )
-        state.active_users_by_channel = {}
+        state.progress.active_users_by_channel = {}
 
         add_regular_members(ctx, state, chat, ur, None, "spaces/dev", "dev")
 
@@ -932,14 +932,14 @@ class TestAddRegularMembers:
             export_root=tmp_path,
             dry_run=True,
         )
-        state.active_users_by_channel = {}
+        state.progress.active_users_by_channel = {}
         ur.get_internal_email.side_effect = lambda uid, email: email
         ur.is_external_user.return_value = False
 
         add_regular_members(ctx, state, chat, ur, None, "spaces/dev", "dev")
 
         # Verify the fallback loaded the members
-        assert state.active_users_by_channel["dev"] == ["U001", "U002"]
+        assert state.progress.active_users_by_channel["dev"] == ["U001", "U002"]
 
     @patch("slack_migrator.services.membership_manager.time.sleep")
     @patch(
@@ -954,7 +954,7 @@ class TestAddRegularMembers:
             },
             workspace_admin="admin@example.com",
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "alice@example.com"
         ur.is_external_user.return_value = False
 
@@ -987,7 +987,7 @@ class TestAddRegularMembers:
             workspace_admin="admin@example.com",
         )
         # Admin (U_ADMIN) IS in active users
-        state.active_users_by_channel = {"dev": {"U001", "U_ADMIN"}}
+        state.progress.active_users_by_channel = {"dev": {"U001", "U_ADMIN"}}
         ur.get_internal_email.side_effect = lambda uid, email: email
         ur.is_external_user.return_value = False
 
@@ -1014,7 +1014,7 @@ class TestAddRegularMembers:
         ctx, state, chat, ur = _make_membership_deps(
             user_map={"U001": "ext@other.com"},
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "ext@other.com"
         ur.is_external_user.return_value = True
 
@@ -1036,11 +1036,11 @@ class TestAddRegularMembers:
         "slack_migrator.services.membership_manager.tqdm", side_effect=lambda x, **kw: x
     )
     def test_external_user_tracked_in_external_users_set(self, mock_tqdm, mock_sleep):
-        """External users are added to state.external_users."""
+        """External users are added to state.users.external_users."""
         ctx, state, chat, ur = _make_membership_deps(
             user_map={"U001": "ext@other.com"},
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "ext@other.com"
         ur.is_external_user.return_value = True
 
@@ -1053,7 +1053,7 @@ class TestAddRegularMembers:
 
         add_regular_members(ctx, state, chat, ur, None, "spaces/dev", "dev")
 
-        assert "ext@other.com" in state.external_users
+        assert "ext@other.com" in state.users.external_users
 
     @patch("slack_migrator.services.membership_manager.time.sleep")
     @patch(
@@ -1064,7 +1064,7 @@ class TestAddRegularMembers:
         ctx, state, chat, ur = _make_membership_deps(
             user_map={"U001": "alice@example.com"},
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "alice@example.com"
         ur.is_external_user.return_value = False
         chat.spaces().members().list.return_value.execute.return_value = {
@@ -1088,7 +1088,7 @@ class TestAddRegularMembers:
         ctx, state, chat, ur = _make_membership_deps(
             user_map={"U001": "alice@example.com"},
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "alice@example.com"
         ur.is_external_user.return_value = False
 
@@ -1113,7 +1113,7 @@ class TestAddRegularMembers:
             },
             workspace_admin="admin@example.com",
         )
-        state.active_users_by_channel = {"dev": {"U001"}}
+        state.progress.active_users_by_channel = {"dev": {"U001"}}
         ur.get_internal_email.return_value = "alice@example.com"
         ur.is_external_user.return_value = False
 

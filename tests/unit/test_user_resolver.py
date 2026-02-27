@@ -29,7 +29,7 @@ def _make_resolver(
     """Create a UserResolver with explicit dependencies for testing."""
     if state is None:
         state = MigrationState()
-    state.current_channel = channel
+    state.context.current_channel = channel
 
     if config is None:
         config = MigrationConfig(
@@ -92,16 +92,16 @@ class TestGetDelegate:
             retry_delay=resolver.config.retry_delay,
         )
         mock_service.spaces.return_value.list.return_value.execute.assert_called_once()
-        assert resolver.state.valid_users["user@example.com"] is True
-        assert resolver.state.chat_delegates["user@example.com"] is mock_service
+        assert resolver.state.users.valid_users["user@example.com"] is True
+        assert resolver.state.users.chat_delegates["user@example.com"] is mock_service
         assert result is mock_service
 
     @patch("slack_migrator.services.user_resolver.get_gcp_service")
     def test_valid_email_already_cached_returns_from_cache(self, mock_get_service):
         resolver = _make_resolver()
         cached_service = MagicMock(name="cached_service")
-        resolver.state.valid_users["user@example.com"] = True
-        resolver.state.chat_delegates["user@example.com"] = cached_service
+        resolver.state.users.valid_users["user@example.com"] = True
+        resolver.state.users.chat_delegates["user@example.com"] = cached_service
 
         result = resolver.get_delegate("user@example.com")
 
@@ -122,7 +122,7 @@ class TestGetDelegate:
         result = resolver.get_delegate("bad@example.com")
 
         assert result is resolver.chat
-        assert resolver.state.valid_users["bad@example.com"] is False
+        assert resolver.state.users.valid_users["bad@example.com"] is False
 
     @patch("slack_migrator.services.user_resolver.get_gcp_service")
     def test_refresh_error_falls_back_to_admin_chat(self, mock_get_service):
@@ -133,13 +133,13 @@ class TestGetDelegate:
         result = resolver.get_delegate("expired@example.com")
 
         assert result is resolver.chat
-        assert resolver.state.valid_users["expired@example.com"] is False
+        assert resolver.state.users.valid_users["expired@example.com"] is False
 
     @patch("slack_migrator.services.user_resolver.get_gcp_service")
     def test_invalid_user_cached_returns_admin_chat(self, mock_get_service):
         """Second call for a previously-failed user returns admin chat without retrying."""
         resolver = _make_resolver()
-        resolver.state.valid_users["bad@example.com"] = False
+        resolver.state.users.valid_users["bad@example.com"] = False
 
         result = resolver.get_delegate("bad@example.com")
 
@@ -431,8 +431,8 @@ class TestHandleUnmappedUserReaction:
 
         resolver.handle_unmapped_user_reaction("U001", "thumbsup", "1234567890.123456")
 
-        assert len(resolver.state.skipped_reactions) == 1
-        entry = resolver.state.skipped_reactions[0]
+        assert len(resolver.state.users.skipped_reactions) == 1
+        entry = resolver.state.users.skipped_reactions[0]
         assert entry["user_id"] == "U001"
         assert entry["reaction"] == "thumbsup"
         assert entry["message_ts"] == "1234567890.123456"

@@ -165,7 +165,7 @@ class FileHandler:
 
     def _get_current_channel(self) -> str | None:
         """Return the current channel name for logging context."""
-        return self.state.current_channel
+        return self.state.context.current_channel
 
     @property
     def shared_drive_id(self) -> str | None:
@@ -454,7 +454,7 @@ class FileHandler:
 
     def _sync_channel_context(self) -> None:
         """Propagate current channel to sub-uploaders for logging context."""
-        current_ch = self.state.current_channel
+        current_ch = self.state.context.current_channel
         self.drive_uploader.current_channel = current_ch
         self.chat_uploader.current_channel = current_ch
 
@@ -715,7 +715,9 @@ class FileHandler:
                         user_service, dry_run=self.dry_run
                     )
                     # Set channel context for logging
-                    user_chat_uploader.current_channel = self.state.current_channel
+                    user_chat_uploader.current_channel = (
+                        self.state.context.current_channel
+                    )
                     upload_response, attachment_metadata = (
                         user_chat_uploader.upload_file_to_chat(
                             temp_file_path, name, space
@@ -1450,7 +1452,7 @@ class FileHandler:
                     continue
 
             # If we're here, the file is not in a channel folder, so we need to set individual permissions
-            if channel not in self.state.active_users_by_channel:
+            if channel not in self.state.progress.active_users_by_channel:
                 log_with_context(
                     logging.WARNING,
                     f"No active users tracked for channel {channel}, can't share file",
@@ -1458,7 +1460,7 @@ class FileHandler:
                 )
                 return False
 
-            active_users = self.state.active_users_by_channel[channel]
+            active_users = self.state.progress.active_users_by_channel[channel]
             emails_to_share = []
 
             # Get emails for all active users (INCLUDING external users for channel folder access)

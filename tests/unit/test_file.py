@@ -19,7 +19,7 @@ from slack_migrator.services.file import FileHandler
 def _make_deps(**overrides):
     """Create explicit dependency values for FileHandler construction."""
     state = MigrationState()
-    state.current_channel = overrides.pop("current_channel", "general")
+    state.context.current_channel = overrides.pop("current_channel", "general")
 
     config = overrides.pop(
         "config",
@@ -1704,7 +1704,7 @@ class TestShareFileWithMembers:
             {"parents": ["some_folder"]},  # file info
             {"name": "other"},  # folder info - does not match channel
         ]
-        handler.state.active_users_by_channel = {}
+        handler.state.progress.active_users_by_channel = {}
 
         result = handler.share_file_with_members("file123", "general")
 
@@ -1721,7 +1721,7 @@ class TestShareFileWithMembers:
             {"parents": ["some_folder"]},
             {"name": "other_folder"},
         ]
-        handler.state.active_users_by_channel = {"general": {"U1", "U2"}}
+        handler.state.progress.active_users_by_channel = {"general": {"U1", "U2"}}
         handler.drive_service.permissions().create().execute.return_value = {}
 
         result = handler.share_file_with_members("file123", "general")
@@ -1736,7 +1736,7 @@ class TestShareFileWithMembers:
             {"parents": ["some_folder"]},
             {"name": "other"},
         ]
-        handler.state.active_users_by_channel = {"general": {"U999"}}
+        handler.state.progress.active_users_by_channel = {"general": {"U999"}}
 
         result = handler.share_file_with_members("file123", "general")
 
@@ -1752,7 +1752,7 @@ class TestShareFileWithMembers:
             {"parents": ["some_folder"]},
             {"name": "other"},
         ]
-        handler.state.active_users_by_channel = {"general": {"U1", "U2"}}
+        handler.state.progress.active_users_by_channel = {"general": {"U1", "U2"}}
         # Permissions create raises for one user but succeeds overall
         handler.drive_service.permissions().create().execute.side_effect = [
             HttpError(Response({"status": "403"}), b"forbidden"),
@@ -1787,7 +1787,7 @@ class TestShareFileWithMembers:
             {"parents": ["folder1"]},
             HttpError(Response({"status": "404"}), b"not found"),
         ]
-        handler.state.active_users_by_channel = {"general": {"U1"}}
+        handler.state.progress.active_users_by_channel = {"general": {"U1"}}
         handler.drive_service.permissions().create().execute.return_value = {}
 
         result = handler.share_file_with_members("file123", "general")
@@ -1801,7 +1801,7 @@ class TestShareFileWithMembers:
         )
         handler._shared_drive_id = None
         handler.drive_service.files().get().execute.return_value = {"parents": []}
-        handler.state.active_users_by_channel = {"general": {"U1"}}
+        handler.state.progress.active_users_by_channel = {"general": {"U1"}}
         handler.drive_service.permissions().create().execute.return_value = {}
 
         result = handler.share_file_with_members("file123", "general")
@@ -1818,7 +1818,7 @@ class TestShareFileWithMembers:
             {"parents": ["some_folder"]},
             {"name": "other"},
         ]
-        handler.state.active_users_by_channel = {"general": {"U1"}}
+        handler.state.progress.active_users_by_channel = {"general": {"U1"}}
         handler.drive_service.permissions().create().execute.return_value = {}
 
         result = handler.share_file_with_members("file123", "general")

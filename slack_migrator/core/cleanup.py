@@ -36,12 +36,12 @@ def cleanup_channel_handlers(state: MigrationState) -> None:
     Args:
         state: The migration state holding channel handlers.
     """
-    if not state.channel_handlers:
+    if not state.spaces.channel_handlers:
         return
 
     logger = logging.getLogger("slack_migrator")
 
-    for channel_name, handler in list(state.channel_handlers.items()):
+    for channel_name, handler in list(state.spaces.channel_handlers.items()):
         try:
             handler.flush()
             handler.close()
@@ -56,7 +56,7 @@ def cleanup_channel_handlers(state: MigrationState) -> None:
                 f" for channel {channel_name}: {e}"
             )
 
-    state.channel_handlers.clear()
+    state.spaces.channel_handlers.clear()
 
 
 def run_cleanup(  # noqa: C901
@@ -81,7 +81,7 @@ def run_cleanup(  # noqa: C901
         file_handler: File handler for drive operations, or None.
     """
     # Clear current_channel so cleanup operations don't get tagged with channel context
-    state.current_channel = None
+    state.context.current_channel = None
 
     if ctx.dry_run:
         log_with_context(logging.INFO, "[DRY RUN] Would perform post-migration cleanup")
@@ -224,11 +224,11 @@ def _complete_import_mode_spaces(
 
     log_with_context(
         logging.INFO,
-        f"Current channel_to_space mapping: {state.channel_to_space}",
+        f"Current channel_to_space mapping: {state.spaces.channel_to_space}",
     )
     log_with_context(
         logging.INFO,
-        f"Current created_spaces mapping: {state.created_spaces}",
+        f"Current created_spaces mapping: {state.spaces.created_spaces}",
     )
 
     pbar = tqdm(import_mode_spaces, desc="Completing import mode for spaces")
@@ -294,7 +294,9 @@ def _complete_single_space(
     external_users_allowed = space_info.get("externalUserAllowed", False)
 
     if not external_users_allowed:
-        external_users_allowed = state.spaces_with_external_users.get(space_name, False)
+        external_users_allowed = state.progress.spaces_with_external_users.get(
+            space_name, False
+        )
         if external_users_allowed:
             log_with_context(
                 logging.INFO,
@@ -441,7 +443,7 @@ def _resolve_channel_name(
         The channel name if found, or ``None``.
     """
     # Try channel_to_space mapping first
-    for ch, sp in state.channel_to_space.items():
+    for ch, sp in state.spaces.channel_to_space.items():
         if sp == space_name:
             log_with_context(
                 logging.INFO,

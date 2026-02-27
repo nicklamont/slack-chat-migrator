@@ -40,15 +40,15 @@ def _collect_statistics(
     if unmapped_user_tracker is not None and unmapped_user_tracker.has_unmapped_users():
         unmapped_users = unmapped_user_tracker.get_unmapped_count()
 
-    summary = state.migration_summary
+    summary = state.progress.migration_summary
     return {
         "channels_processed": len(summary["channels_processed"]),
         "spaces_created": summary["spaces_created"],
         "messages_created": summary["messages_created"],
         "reactions_created": summary["reactions_created"],
         "files_created": summary["files_created"],
-        "channels_with_errors": len(state.channels_with_errors),
-        "incomplete_imports": len(state.incomplete_import_spaces),
+        "channels_with_errors": len(state.errors.channels_with_errors),
+        "incomplete_imports": len(state.errors.incomplete_import_spaces),
         "unmapped_users": unmapped_users,
     }
 
@@ -238,7 +238,7 @@ def log_migration_failure(
     is_interrupt = isinstance(exception, KeyboardInterrupt)
     is_dry_run = dry_run
 
-    summary = state.migration_summary
+    summary = state.progress.migration_summary
     channels_processed = len(summary["channels_processed"])
     spaces_created = summary["spaces_created"]
     messages_created = summary["messages_created"]

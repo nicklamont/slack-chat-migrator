@@ -98,8 +98,8 @@ def _should_skip_message(  # noqa: C901
 
     # --- Update-mode deduplication ---
     # First, check if this message is older than the last processed timestamp
-    if is_update_mode and state.last_processed_timestamps:
-        last_timestamp = state.last_processed_timestamps.get(channel, 0)
+    if is_update_mode and state.progress.last_processed_timestamps:
+        last_timestamp = state.progress.last_processed_timestamps.get(channel, 0)
         if last_timestamp > 0:
             if not should_process_message(last_timestamp, ts):
                 log_with_context(
@@ -113,7 +113,7 @@ def _should_skip_message(  # noqa: C901
                 return True, MessageResult.ALREADY_SENT
 
     # Also check the sent_messages set for additional protection
-    if is_update_mode and message_key in state.sent_messages:
+    if is_update_mode and message_key in state.messages.sent_messages:
         log_with_context(
             logging.INFO,
             f"[UPDATE MODE] Skipping already sent message TS={ts} from user={user_id}",
@@ -127,7 +127,7 @@ def _should_skip_message(  # noqa: C901
     # Only increment the message count in non-dry run mode
     # In dry run mode, this is handled in the migrate method
     if not ctx.dry_run:
-        state.migration_summary["messages_created"] += 1
+        state.progress.migration_summary["messages_created"] += 1
 
     if ctx.dry_run:
         log_with_context(
@@ -213,7 +213,7 @@ def _build_message_payload(
             user_map_with_overrides[slack_user_id] = internal_email
 
     # Set current message context for enhanced user tracking
-    state.current_message_ts = ts
+    state.context.current_message_ts = ts
 
     # Convert Slack formatting to Google Chat formatting using the correct mapping
     formatted_text = convert_formatting(
@@ -293,7 +293,7 @@ def _build_message_payload(
         thread_ts_str = str(thread_ts)
 
         # Check if we have the thread name from a previous message
-        existing_thread_name = state.thread_map.get(thread_ts_str)
+        existing_thread_name = state.messages.thread_map.get(thread_ts_str)
 
         log_with_context(
             logging.DEBUG,
@@ -502,7 +502,7 @@ def _handle_send_result(
         # For edited messages, store with a special key that includes the edit timestamp
         if is_edited:
             edit_key = f"{ts}:edited:{edited_ts}"
-            state.message_id_map[edit_key] = message_name
+            state.messages.message_id_map[edit_key] = message_name
             log_with_context(
                 logging.DEBUG,
                 f"Stored message ID mapping for edited message: {edit_key} -> {message_name}",
@@ -511,7 +511,7 @@ def _handle_send_result(
                 edited_ts=edited_ts,
             )
         else:
-            state.message_id_map[ts] = message_name
+            state.messages.message_id_map[ts] = message_name
 
     # Store thread mapping for both parent messages and thread replies
     if message_name:
@@ -528,7 +528,7 @@ def _handle_send_result(
         if thread_name:
             if not is_thread_reply:
                 # For new thread starters, store the mapping using their own timestamp
-                state.thread_map[str(ts)] = thread_name
+                state.messages.thread_map[str(ts)] = thread_name
                 log_with_context(
                     logging.DEBUG,
                     f"Stored new thread mapping: {ts} -> {thread_name}",
@@ -538,9 +538,9 @@ def _handle_send_result(
             else:
                 # For thread replies, ensure the original thread timestamp mapping exists
                 thread_ts_str = str(thread_ts)
-                if thread_ts_str not in state.thread_map:
+                if thread_ts_str not in state.messages.thread_map:
                     # Store the mapping using the original thread timestamp
-                    state.thread_map[thread_ts_str] = thread_name
+                    state.messages.thread_map[thread_ts_str] = thread_name
                     log_with_context(
                         logging.DEBUG,
                         f"Stored thread mapping from reply: {thread_ts_str} -> {thread_name}",
@@ -550,7 +550,7 @@ def _handle_send_result(
                     )
                 else:
                     # Verify the mapping is consistent
-                    existing_thread_name = state.thread_map[thread_ts_str]
+                    existing_thread_name = state.messages.thread_map[thread_ts_str]
                     if existing_thread_name != thread_name:
                         log_with_context(
                             logging.WARNING,
@@ -578,7 +578,7 @@ def _handle_send_result(
     # Process reactions if any
     if "reactions" in message and message_name:
         # Store the current message timestamp for context in reaction processing
-        state.current_message_ts = ts
+        state.context.current_message_ts = ts
 
         # The message_id for reactions should be the final segment of the message_name
         final_message_id = message_name.split("/")[-1]
@@ -608,7 +608,7 @@ def _handle_send_result(
     )
 
     # Mark this message as successfully sent to avoid duplicates
-    state.sent_messages.add(message_key)
+    state.messages.sent_messages.add(message_key)
 
 
 def _handle_send_error(
@@ -642,7 +642,7 @@ def _handle_send_error(
         error_details=error_details,
         payload=message,
     )
-    state.failed_messages.append(failed_msg)
+    state.messages.failed_messages.append(failed_msg)
 
 
 def _resolve_chat_service(
@@ -710,7 +710,7 @@ def send_message(
     ts = message.get("ts", "")
     user_id = message.get("user", "")
     thread_ts = message.get("thread_ts")
-    channel = state.current_channel
+    channel = state.context.current_channel
     if channel is None:
         log_with_context(
             logging.ERROR,
@@ -858,7 +858,7 @@ def track_message_stats(  # noqa: C901
         m: A single Slack message dictionary.
     """
     # Get the current channel being processed
-    channel = state.current_channel
+    channel = state.context.current_channel
     if channel is None:
         return
     ts = m.get("ts", "")
@@ -895,8 +895,8 @@ def track_message_stats(  # noqa: C901
     # Check if we're in update mode
     is_update_mode = ctx.update_mode
 
-    if channel not in state.channel_stats:
-        state.channel_stats[channel] = {
+    if channel not in state.progress.channel_stats:
+        state.progress.channel_stats[channel] = {
             "message_count": 0,
             "reaction_count": 0,
             "file_count": 0,
@@ -912,7 +912,7 @@ def track_message_stats(  # noqa: C901
             message_key = f"{channel}:{ts}:edited:{edited_ts}"
 
         # If this message has already been sent in a previous run, don't count it
-        if message_key in state.sent_messages:
+        if message_key in state.messages.sent_messages:
             log_with_context(
                 logging.DEBUG,
                 f"[UPDATE MODE] Skipping stats for already sent message {ts}",
@@ -922,7 +922,7 @@ def track_message_stats(  # noqa: C901
             return
 
     # Increment message count for this channel
-    state.channel_stats[channel]["message_count"] += 1
+    state.progress.channel_stats[channel]["message_count"] += 1
 
     # Track reactions
     reaction_count = 0
@@ -937,12 +937,12 @@ def track_message_stats(  # noqa: C901
                         continue
                 reaction_count += 1
 
-        state.channel_stats[channel]["reaction_count"] += reaction_count
+        state.progress.channel_stats[channel]["reaction_count"] += reaction_count
 
         # Also increment the global reaction count in dry run mode
         # (in normal mode this is done by process_reactions_batch)
         if ctx.dry_run:
-            state.migration_summary["reactions_created"] += reaction_count
+            state.progress.migration_summary["reactions_created"] += reaction_count
 
             log_with_context(
                 logging.DEBUG,
@@ -964,10 +964,10 @@ def track_message_stats(  # noqa: C901
             channel=channel,
             ts=ts,
         )
-        state.channel_stats[channel]["file_count"] += file_count
+        state.progress.channel_stats[channel]["file_count"] += file_count
 
         # Also increment the global file count
-        state.migration_summary["files_created"] += file_count
+        state.progress.migration_summary["files_created"] += file_count
 
     # We don't need to process files here - they are handled in send_message
 
@@ -1045,7 +1045,7 @@ def send_intro(
         # Send the message
         (chat.spaces().messages().create(parent=space, body=message_body).execute())
         # Increment the counter
-        state.migration_summary["messages_created"] += 1
+        state.progress.migration_summary["messages_created"] += 1
 
         log_with_context(
             logging.INFO, f"Sent intro message to space {space}", channel=channel

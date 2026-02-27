@@ -45,7 +45,7 @@ def process_reactions_batch(
         ctx, state, user_resolver, reactions, message_id
     )
 
-    state.migration_summary["reactions_created"] += reaction_count
+    state.progress.migration_summary["reactions_created"] += reaction_count
 
     if ctx.dry_run:
         log_with_context(
@@ -53,7 +53,7 @@ def process_reactions_batch(
             f"{ctx.log_prefix}Would add {reaction_count} reactions from"
             f" {len(requests_by_user)} users to message {message_id}",
             message_id=message_id,
-            channel=state.current_channel,
+            channel=state.context.current_channel,
         )
         return
 
@@ -62,7 +62,7 @@ def process_reactions_batch(
         f"Adding {reaction_count} reactions from"
         f" {len(requests_by_user)} users to message {message_id}",
         message_id=message_id,
-        channel=state.current_channel,
+        channel=state.context.current_channel,
     )
 
     user_batches = _build_user_batches(
@@ -92,7 +92,7 @@ def _group_and_filter_reactions(
         logging.DEBUG,
         f"Processing {len(reactions)} reaction types for message {message_id}",
         message_id=message_id,
-        channel=state.current_channel,
+        channel=state.context.current_channel,
     )
 
     for react in reactions:
@@ -108,7 +108,7 @@ def _group_and_filter_reactions(
                 f"Processing emoji :{emoji_name}: with {len(emoji_users)} users",
                 message_id=message_id,
                 emoji=emoji_name,
-                channel=state.current_channel,
+                channel=state.context.current_channel,
             )
 
             for uid in emoji_users:
@@ -125,7 +125,7 @@ def _group_and_filter_reactions(
                         reaction_count += 1
                 else:
                     reaction_name = react.get("name", "unknown")
-                    message_ts = state.current_message_ts or "unknown"
+                    message_ts = state.context.current_message_ts or "unknown"
                     user_resolver.handle_unmapped_user_reaction(
                         uid, reaction_name, message_ts
                     )
@@ -135,7 +135,7 @@ def _group_and_filter_reactions(
                 f"Failed to process reaction {react.get('name')}: {e!s}",
                 message_id=message_id,
                 error=str(e),
-                channel=state.current_channel,
+                channel=state.context.current_channel,
             )
 
     return requests_by_user, reaction_count
@@ -162,7 +162,7 @@ def _should_skip_bot_reaction(
             message_id=message_id,
             emoji=emoji_name,
             user_id=uid,
-            channel=state.current_channel,
+            channel=state.context.current_channel,
         )
         return True
     return False
@@ -196,7 +196,7 @@ def _build_user_batches(
                 error=str(exception),
                 message_id=message_id,
                 request_id=request_id,
-                channel=state.current_channel,
+                channel=state.context.current_channel,
             )
         else:
             log_with_context(
@@ -204,7 +204,7 @@ def _build_user_batches(
                 "Successfully added reaction in batch",
                 message_id=message_id,
                 request_id=request_id,
-                channel=state.current_channel,
+                channel=state.context.current_channel,
             )
 
     for email, emojis in requests_by_user.items():
@@ -215,7 +215,7 @@ def _build_user_batches(
                 f" {email} to avoid admin attribution",
                 message_id=message_id,
                 user=email,
-                channel=state.current_channel,
+                channel=state.context.current_channel,
             )
             continue
 
@@ -232,7 +232,7 @@ def _build_user_batches(
             f"Creating batch request for user {email} with {len(emojis)} reactions",
             message_id=message_id,
             user=email,
-            channel=state.current_channel,
+            channel=state.context.current_channel,
         )
 
         if email not in user_batches:
@@ -259,7 +259,7 @@ def _process_admin_reactions(
         f"Using admin account for user {email} (impersonation not available)",
         message_id=message_id,
         user=email,
-        channel=state.current_channel,
+        channel=state.context.current_channel,
     )
 
     for emo in emojis:
@@ -279,7 +279,7 @@ def _process_admin_reactions(
                 error_code=e.resp.status,
                 user=email,
                 message_id=message_id,
-                channel=state.current_channel,
+                channel=state.context.current_channel,
             )
 
 
@@ -312,7 +312,7 @@ def _add_reactions_to_batch(
                 message_id=message_id,
                 user=email,
                 emoji=emo,
-                channel=state.current_channel,
+                channel=state.context.current_channel,
             )
             try:
                 (
@@ -345,7 +345,7 @@ def _execute_reaction_batches(
                 f"Executing batch request for user {email}",
                 message_id=message_id,
                 user=email,
-                channel=state.current_channel,
+                channel=state.context.current_channel,
             )
             batch.execute()
         except HttpError as e:
@@ -354,6 +354,6 @@ def _execute_reaction_batches(
                 f"Reaction batch execution failed for user {email}: {e}",
                 message_id=message_id,
                 user=email,
-                channel=state.current_channel,
+                channel=state.context.current_channel,
                 error=str(e),
             )

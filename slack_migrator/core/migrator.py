@@ -106,7 +106,7 @@ class SlackToChatMigrator:
         self.config = load_config(self.config_path)
 
         # Load space_mapping overrides from config YAML into state
-        self.state.space_mapping = load_space_mapping(self.config_path)
+        self.state.spaces.space_mapping = load_space_mapping(self.config_path)
 
         # Generate user mapping from users.json
         self.user_map, self.users_without_email = generate_user_map(
@@ -246,8 +246,8 @@ class SlackToChatMigrator:
         )
 
         # Reset mutable state for this run
-        self.state.created_spaces.clear()
-        self.state.current_channel = None
+        self.state.spaces.created_spaces.clear()
+        self.state.context.current_channel = None
 
         # Permission validation is now handled by the CLI layer to avoid duplicates
         # The CLI will call validate_permissions() unless --skip_permission_check is used
@@ -360,16 +360,16 @@ class SlackToChatMigrator:
             self._initialize_api_services()
 
             # Output directory should already be set up by CLI, but provide a sensible default
-            if not self.state.output_dir:
+            if not self.state.context.output_dir:
                 # Create default output directory with timestamp
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.state.output_dir = f"migration_logs/run_{timestamp}"
+                self.state.context.output_dir = f"migration_logs/run_{timestamp}"
                 log_with_context(
                     logging.INFO,
-                    f"Using default output directory: {self.state.output_dir}",
+                    f"Using default output directory: {self.state.context.output_dir}",
                 )
                 # Create the directory
-                os.makedirs(self.state.output_dir, exist_ok=True)
+                os.makedirs(self.state.context.output_dir, exist_ok=True)
 
             # Reset per-run state
             self.state.reset_for_run()
@@ -399,7 +399,7 @@ class SlackToChatMigrator:
                         logging.INFO,
                         f"[UPDATE MODE] Discovered {len(discovered_spaces)} existing spaces via API",
                     )
-                    self.state.created_spaces = discovered_spaces
+                    self.state.spaces.created_spaces = discovered_spaces
                 else:
                     log_with_context(
                         logging.WARNING,

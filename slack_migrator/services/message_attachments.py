@@ -28,7 +28,7 @@ class MessageAttachmentProcessor:
 
     def _get_current_channel(self) -> str | None:
         """Return the current channel name for logging context."""
-        return self.file_handler.state.current_channel
+        return self.file_handler.state.context.current_channel
 
     def process_message_attachments(
         self,

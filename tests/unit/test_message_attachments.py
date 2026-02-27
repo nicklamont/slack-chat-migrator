@@ -57,7 +57,7 @@ class TestInit:
 class TestGetCurrentChannel:
     def test_returns_channel_when_available(self):
         handler = _make_file_handler()
-        handler.state.current_channel = "random"
+        handler.state.context.current_channel = "random"
         processor = _make_processor(file_handler=handler)
         assert processor._get_current_channel() == "random"
 

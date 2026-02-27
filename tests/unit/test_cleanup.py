@@ -91,15 +91,15 @@ class TestCleanupChannelHandlers:
 
     def test_empty_handlers_is_noop(self, fresh_state: MigrationState) -> None:
         """An empty handlers dict does nothing."""
-        assert fresh_state.channel_handlers == {}
+        assert fresh_state.spaces.channel_handlers == {}
         cleanup_channel_handlers(fresh_state)
-        assert fresh_state.channel_handlers == {}
+        assert fresh_state.spaces.channel_handlers == {}
 
     def test_multiple_handlers_cleaned_up(self, fresh_state: MigrationState) -> None:
         """All handlers are flushed, closed, and removed from the logger."""
         h1 = MagicMock()
         h2 = MagicMock()
-        fresh_state.channel_handlers = {"general": h1, "random": h2}
+        fresh_state.spaces.channel_handlers = {"general": h1, "random": h2}
 
         cleanup_channel_handlers(fresh_state)
 
@@ -115,7 +115,10 @@ class TestCleanupChannelHandlers:
         bad_handler = MagicMock()
         bad_handler.close.side_effect = OSError("disk full")
         good_handler = MagicMock()
-        fresh_state.channel_handlers = {"broken": bad_handler, "ok": good_handler}
+        fresh_state.spaces.channel_handlers = {
+            "broken": bad_handler,
+            "ok": good_handler,
+        }
 
         cleanup_channel_handlers(fresh_state)
 
@@ -133,16 +136,16 @@ class TestCleanupChannelHandlers:
         """The handlers dict is empty after cleanup even if errors occur."""
         h1 = MagicMock()
         h1.flush.side_effect = OSError("flush fail")
-        fresh_state.channel_handlers = {"ch": h1}
+        fresh_state.spaces.channel_handlers = {"ch": h1}
 
         cleanup_channel_handlers(fresh_state)
 
-        assert fresh_state.channel_handlers == {}
+        assert fresh_state.spaces.channel_handlers == {}
 
     def test_handler_removed_from_logger(self, fresh_state: MigrationState) -> None:
         """Each handler is removed from the slack_migrator logger."""
         handler = MagicMock()
-        fresh_state.channel_handlers = {"general": handler}
+        fresh_state.spaces.channel_handlers = {"general": handler}
         logger = logging.getLogger("slack_migrator")
 
         # Ensure the handler is "in" the logger so removeHandler is meaningful
@@ -169,11 +172,11 @@ class TestRunCleanup:
         """In dry_run mode, cleanup returns immediately without API calls."""
         ctx = _make_ctx(dry_run=True)
         state = MigrationState()
-        state.current_channel = "leftover"
+        state.context.current_channel = "leftover"
 
         run_cleanup(ctx, state, chat=MagicMock(), user_resolver=None, file_handler=None)
 
-        assert state.current_channel is None
+        assert state.context.current_channel is None
         mock_members.assert_not_called()
 
     def test_chat_is_none_logs_error(
@@ -385,15 +388,15 @@ class TestRunCleanup:
     def test_current_channel_cleared(
         self, mock_members: MagicMock, mock_tqdm: MagicMock
     ) -> None:
-        """run_cleanup always clears state.current_channel."""
+        """run_cleanup always clears state.context.current_channel."""
         ctx = _make_ctx()
         state = MigrationState()
-        state.current_channel = "leftover-channel"
+        state.context.current_channel = "leftover-channel"
 
         chat = _mock_chat(spaces_list=[])
         run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
 
-        assert state.current_channel is None
+        assert state.context.current_channel is None
 
     def test_space_without_name_skipped(
         self, mock_members: MagicMock, mock_tqdm: MagicMock
@@ -609,7 +612,7 @@ class TestCompleteSingleSpace:
         """Successful import completion, no external users, resolves channel, adds members."""
         ctx = _make_ctx()
         state = MigrationState()
-        state.channel_to_space = {"general": "spaces/abc"}
+        state.spaces.channel_to_space = {"general": "spaces/abc"}
         chat = _mock_chat()
         user_resolver = MagicMock()
         file_handler = MagicMock()
@@ -711,7 +714,7 @@ class TestCompleteSingleSpace:
         """When externalUserAllowed is True in space_info, patch is called."""
         ctx = _make_ctx()
         state = MigrationState()
-        state.channel_to_space = {"general": "spaces/abc"}
+        state.spaces.channel_to_space = {"general": "spaces/abc"}
         chat = _mock_chat()
         space_info = {
             "name": "spaces/abc",
@@ -730,11 +733,11 @@ class TestCompleteSingleSpace:
         )
 
     def test_external_users_from_state_tracking(self, mock_members: MagicMock) -> None:
-        """External users flag from state.spaces_with_external_users is used."""
+        """External users flag from state.progress.spaces_with_external_users is used."""
         ctx = _make_ctx()
         state = MigrationState()
-        state.channel_to_space = {"general": "spaces/abc"}
-        state.spaces_with_external_users = {"spaces/abc": True}
+        state.spaces.channel_to_space = {"general": "spaces/abc"}
+        state.progress.spaces_with_external_users = {"spaces/abc": True}
         chat = _mock_chat()
         space_info = {
             "name": "spaces/abc",
@@ -758,7 +761,7 @@ class TestCompleteSingleSpace:
         """HttpError patching external user access doesn't stop member addition."""
         ctx = _make_ctx()
         state = MigrationState()
-        state.channel_to_space = {"general": "spaces/abc"}
+        state.spaces.channel_to_space = {"general": "spaces/abc"}
         chat = _mock_chat(patch_side_effect=_http_error(500, "Internal Server Error"))
         space_info = {
             "name": "spaces/abc",
@@ -779,7 +782,7 @@ class TestCompleteSingleSpace:
         """RefreshError patching external user access continues to add members."""
         ctx = _make_ctx()
         state = MigrationState()
-        state.channel_to_space = {"general": "spaces/abc"}
+        state.spaces.channel_to_space = {"general": "spaces/abc"}
         chat = _mock_chat(patch_side_effect=RefreshError("expired"))
         space_info = {
             "name": "spaces/abc",
@@ -825,7 +828,7 @@ class TestCompleteSingleSpace:
         """An exception from add_regular_members is caught and logged."""
         ctx = _make_ctx()
         state = MigrationState()
-        state.channel_to_space = {"general": "spaces/abc"}
+        state.spaces.channel_to_space = {"general": "spaces/abc"}
         chat = _mock_chat()
         space_info = {
             "name": "spaces/abc",
@@ -859,7 +862,7 @@ class TestCompleteSingleSpace:
         """When externalUserAllowed is absent from both space_info and state, patch is not called."""
         ctx = _make_ctx()
         state = MigrationState()
-        state.channel_to_space = {"general": "spaces/abc"}
+        state.spaces.channel_to_space = {"general": "spaces/abc"}
         chat = _mock_chat()
         # No externalUserAllowed key at all
         space_info = {"name": "spaces/abc", "displayName": "Slack #general"}
@@ -883,7 +886,10 @@ class TestResolveChannelName:
     def test_exact_match_in_channel_to_space(self) -> None:
         """Finds channel via channel_to_space mapping."""
         state = MigrationState()
-        state.channel_to_space = {"general": "spaces/abc", "random": "spaces/def"}
+        state.spaces.channel_to_space = {
+            "general": "spaces/abc",
+            "random": "spaces/def",
+        }
         export_root = Path("/fake/export")
 
         result = _resolve_channel_name(
@@ -943,7 +949,7 @@ class TestResolveChannelName:
     def test_channel_to_space_checked_first(self, tmp_path: Path) -> None:
         """channel_to_space mapping takes priority over display name matching."""
         state = MigrationState()
-        state.channel_to_space = {"mapped-channel": "spaces/abc"}
+        state.spaces.channel_to_space = {"mapped-channel": "spaces/abc"}
         # Also create a dir that would match display name
         (tmp_path / "general").mkdir()
 

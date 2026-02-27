@@ -76,20 +76,20 @@ class UserResolver:
         if not email:
             return self.chat
 
-        if email not in self.state.valid_users:
+        if email not in self.state.users.valid_users:
             try:
                 test_service = get_gcp_service(
                     str(self.creds_path),
                     email,
                     "chat",
                     "v1",
-                    self.state.current_channel,
+                    self.state.context.current_channel,
                     max_retries=self.config.max_retries,
                     retry_delay=self.config.retry_delay,
                 )
                 test_service.spaces().list(pageSize=1).execute()
-                self.state.valid_users[email] = True
-                self.state.chat_delegates[email] = test_service
+                self.state.users.valid_users[email] = True
+                self.state.users.chat_delegates[email] = test_service
             except (HttpError, RefreshError, TransportError) as e:
                 error_code = e.resp.status if isinstance(e, HttpError) else "N/A"
                 log_with_context(
@@ -98,10 +98,10 @@ class UserResolver:
                     user=email,
                     error_code=error_code,
                 )
-                self.state.valid_users[email] = False
+                self.state.users.valid_users[email] = False
                 return self.chat
 
-        return self.state.chat_delegates.get(email, self.chat)
+        return self.state.users.chat_delegates.get(email, self.chat)
 
     def get_internal_email(
         self, user_id: str, user_email: str | None = None
@@ -123,21 +123,21 @@ class UserResolver:
                     logging.DEBUG,
                     f"Ignoring bot user {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
                     user_id=user_id,
-                    channel=self.state.current_channel or "unknown",
+                    channel=self.state.context.current_channel or "unknown",
                 )
                 return None
 
         if user_email is None:
             user_email = self.user_map.get(user_id)
             if not user_email:
-                current_channel = self.state.current_channel or "unknown"
+                current_channel = self.state.context.current_channel or "unknown"
                 self.unmapped_user_tracker.add_unmapped_user(user_id, current_channel)
 
                 log_with_context(
                     logging.DEBUG,
                     f"No email mapping found for user {user_id}",
                     user_id=user_id,
-                    channel=self.state.current_channel or "unknown",
+                    channel=self.state.context.current_channel or "unknown",
                 )
                 return None
 
@@ -179,7 +179,7 @@ class UserResolver:
         Returns:
             Tuple of (sender_email, modified_message_text)
         """
-        current_channel = self.state.current_channel or "unknown"
+        current_channel = self.state.context.current_channel or "unknown"
         self.unmapped_user_tracker.add_unmapped_user(
             user_id, f"message_sender:{current_channel}"
         )
@@ -211,7 +211,7 @@ class UserResolver:
             logging.WARNING,
             f"Sending message from unmapped user {user_id} via workspace admin {admin_email}",
             user_id=user_id,
-            channel=self.state.current_channel or "unknown",
+            channel=self.state.context.current_channel or "unknown",
             attribution=attribution,
         )
 
@@ -230,7 +230,7 @@ class UserResolver:
         Returns:
             False to indicate the reaction should be skipped
         """
-        current_channel = self.state.current_channel or "unknown"
+        current_channel = self.state.context.current_channel or "unknown"
         self.unmapped_user_tracker.add_unmapped_user(
             user_id, f"reaction:{current_channel}"
         )
@@ -244,12 +244,12 @@ class UserResolver:
             channel=current_channel,
         )
 
-        self.state.skipped_reactions.append(
+        self.state.users.skipped_reactions.append(
             {
                 "user_id": user_id,
                 "reaction": reaction,
                 "message_ts": message_ts,
-                "channel": self.state.current_channel or "unknown",
+                "channel": self.state.context.current_channel or "unknown",
             }
         )
 

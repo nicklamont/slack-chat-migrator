@@ -69,14 +69,14 @@ class ChannelProcessor:
         """
         channel = ch_dir.name
 
-        self.state.current_channel = channel
+        self.state.context.current_channel = channel
 
         log_with_context(
             logging.INFO,
             f"{self.ctx.log_prefix}Processing channel: {channel}",
             channel=channel,
         )
-        self.state.migration_summary["channels_processed"].append(channel)
+        self.state.progress.migration_summary["channels_processed"].append(channel)
 
         # Check if channel should be processed
         if not should_process_channel(channel, self.ctx.config):
@@ -88,13 +88,13 @@ class ChannelProcessor:
             return False
 
         # Check for unresolved space conflicts
-        if channel in self.state.channel_conflicts:
+        if channel in self.state.errors.channel_conflicts:
             log_with_context(
                 logging.ERROR,
                 f"Skipping channel {channel} due to unresolved duplicate space conflict",
                 channel=channel,
             )
-            self.state.migration_issues[channel] = (
+            self.state.errors.migration_issues[channel] = (
                 "Skipped due to duplicate space conflict - requires disambiguation in config.yaml"
             )
             return False
@@ -118,9 +118,9 @@ class ChannelProcessor:
             return False
 
         # Set current space
-        self.state.current_space = space
-        self.state.channel_to_space[channel] = space
-        self.state.created_spaces[channel] = space
+        self.state.context.current_space = space
+        self.state.spaces.channel_to_space[channel] = space
+        self.state.spaces.created_spaces[channel] = space
 
         log_with_context(
             logging.DEBUG,
@@ -190,15 +190,15 @@ class ChannelProcessor:
 
     def _setup_channel_logging(self, channel: str) -> None:
         """Set up channel-specific log handler."""
-        if self.state.output_dir is None:
+        if self.state.context.output_dir is None:
             raise RuntimeError("Output directory not set")
         channel_handler = setup_channel_logger(
-            self.state.output_dir,
+            self.state.context.output_dir,
             channel,
             self.ctx.verbose,
             is_debug_api_enabled(),
         )
-        self.state.channel_handlers[channel] = channel_handler
+        self.state.spaces.channel_handlers[channel] = channel_handler
 
     def _create_or_reuse_space(self, ch_dir: Path) -> tuple[str, bool]:
         """Create a new space or reuse an existing one.
@@ -207,15 +207,15 @@ class ChannelProcessor:
         """
         channel = ch_dir.name
 
-        if self.ctx.update_mode and channel in self.state.created_spaces:
-            space = self.state.created_spaces[channel]
+        if self.ctx.update_mode and channel in self.state.spaces.created_spaces:
+            space = self.state.spaces.created_spaces[channel]
             space_id = space.split("/")[-1] if space.startswith("spaces/") else space
             log_with_context(
                 logging.INFO,
                 f"[UPDATE MODE] Using existing space {space_id} for channel {channel}",
                 channel=channel,
             )
-            self.state.space_cache[channel] = space
+            self.state.spaces.space_cache[channel] = space
             return space, False
         else:
             action_desc = (
@@ -228,14 +228,14 @@ class ChannelProcessor:
                 f"{self.ctx.log_prefix}Step 1/6: {action_desc} for {channel}",
                 channel=channel,
             )
-            space = self.state.space_cache.get(channel) or create_space(
+            space = self.state.spaces.space_cache.get(channel) or create_space(
                 self.ctx,
                 self.state,
                 self.chat,
                 self.user_resolver,
                 channel,
             )
-            self.state.space_cache[channel] = space
+            self.state.spaces.space_cache[channel] = space
             return space, True
 
     def _process_messages(
@@ -263,7 +263,7 @@ class ChannelProcessor:
                 f"{self.ctx.log_prefix}Found {message_count} messages in channel {channel}",
                 channel=channel,
             )
-            self.state.migration_summary["messages_created"] += message_count
+            self.state.progress.migration_summary["messages_created"] += message_count
 
         if not self.ctx.dry_run or self.ctx.update_mode:
             self._discover_channel_resources(channel)
@@ -397,14 +397,14 @@ class ChannelProcessor:
                             channel=channel,
                         )
                         channel_had_errors = True
-                        self.state.high_failure_rate_channels[channel] = (
+                        self.state.errors.high_failure_rate_channels[channel] = (
                             failure_percentage
                         )
 
             time.sleep(0.05)  # Throttle to avoid Chat API rate limits
 
         if channel_failures:
-            self.state.failed_messages_by_channel[channel] = channel_failures
+            self.state.messages.failed_messages_by_channel[channel] = channel_failures
             channel_had_errors = True
 
         return processed_count, failed_count, channel_had_errors
@@ -454,14 +454,14 @@ class ChannelProcessor:
                     channel=channel,
                 )
                 channel_had_errors = True
-                self.state.incomplete_import_spaces.append((space, channel))
+                self.state.errors.incomplete_import_spaces.append((space, channel))
         elif channel_had_errors:
             log_with_context(
                 logging.WARNING,
                 f"Skipping import completion for space {space} due to errors (strategy: {completion_strategy})",
                 channel=channel,
             )
-            self.state.incomplete_import_spaces.append((space, channel))
+            self.state.errors.incomplete_import_spaces.append((space, channel))
 
         return channel_had_errors
 
@@ -600,11 +600,11 @@ class ChannelProcessor:
             )
 
             # Remove from created_spaces
-            if channel in self.state.created_spaces:
-                del self.state.created_spaces[channel]
+            if channel in self.state.spaces.created_spaces:
+                del self.state.spaces.created_spaces[channel]
 
             # Decrement space count
-            self.state.migration_summary["spaces_created"] -= 1
+            self.state.progress.migration_summary["spaces_created"] -= 1
         except (HttpError, RefreshError, TransportError) as e:
             log_with_context(
                 logging.ERROR,
@@ -617,7 +617,7 @@ class ChannelProcessor:
     def _discover_channel_resources(self, channel: str) -> None:
         """Find the last message timestamp in a space to determine where to resume."""
         # Check if we have a space for this channel
-        space_name = self.state.channel_to_space.get(channel)
+        space_name = self.state.spaces.channel_to_space.get(channel)
         if not space_name:
             log_with_context(
                 logging.WARNING,
@@ -637,11 +637,11 @@ class ChannelProcessor:
             )
 
             # Store the last timestamp for this channel
-            self.state.last_processed_timestamps[channel] = last_timestamp
+            self.state.progress.last_processed_timestamps[channel] = last_timestamp
 
             # Initialize an empty thread_map so we don't try to load it again
-            if self.state.thread_map is None:
-                self.state.thread_map = {}
+            if self.state.messages.thread_map is None:
+                self.state.messages.thread_map = {}
         else:
             # If no messages were found, log it but don't set a last timestamp
             # This will cause all messages to be imported
