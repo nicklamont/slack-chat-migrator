@@ -19,6 +19,7 @@ from slack_migrator.services.space_creator import (
     channel_has_external_users,
     create_space,
 )
+from tests.unit.conftest import _build_mock_migrator
 
 
 def _make_migrator(
@@ -30,8 +31,6 @@ def _make_migrator(
     workspace_admin="admin@example.com",
 ):
     """Create a mock migrator with common attributes for space tests."""
-    from tests.unit.conftest import _build_mock_migrator
-
     kwargs = dict(
         user_map=user_map or {},
         workspace_domain=workspace_domain,

@@ -10,12 +10,11 @@ from slack_migrator.services.discovery import (
     get_last_message_timestamp,
     should_process_message,
 )
+from tests.unit.conftest import _build_mock_migrator
 
 
 def _make_migrator(channel_name_to_id=None, channel_id_to_space_id=None):
     """Create a mock migrator with common attributes for discovery tests."""
-    from tests.unit.conftest import _build_mock_migrator
-
     kwargs = {"channel_name_to_id": channel_name_to_id or {}}
     if channel_id_to_space_id is not None:
         kwargs["channel_id_to_space_id"] = channel_id_to_space_id

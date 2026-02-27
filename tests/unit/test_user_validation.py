@@ -17,6 +17,7 @@ from slack_migrator.utils.user_validation import (
     log_unmapped_user_summary_for_dry_run,
     scan_channel_members_for_unmapped_users,
 )
+from tests.unit.conftest import _build_mock_migrator
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -31,8 +32,6 @@ def _make_migrator(
     has_tracker: bool = True,
 ) -> MagicMock:
     """Build a lightweight MagicMock standing in for SlackToChatMigrator."""
-    from tests.unit.conftest import _build_mock_migrator
-
     migrator = _build_mock_migrator(
         export_root=export_root,
         user_map=user_map or {},

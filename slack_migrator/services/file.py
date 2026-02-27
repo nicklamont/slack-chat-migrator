@@ -25,6 +25,7 @@ from slack_migrator.services.drive import (
     FolderManager,
     SharedDriveManager,
 )
+from slack_migrator.utils.api import escape_drive_query_value
 from slack_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_migrator")
@@ -284,7 +285,8 @@ class FileHandler:
             # This is important for migrations that are being resumed
             try:
                 # Query for all folders under the root folder
-                query = f"'{self._root_folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+                safe_root = escape_drive_query_value(self._root_folder_id)
+                query = f"'{safe_root}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
 
                 params = {"q": query, "fields": "files(id,name)", "pageSize": 1000}
 

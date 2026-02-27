@@ -14,12 +14,11 @@ from slack_migrator.services.message import (
     track_message_stats,
 )
 from slack_migrator.services.reaction_processor import process_reactions_batch
+from tests.unit.conftest import _build_mock_migrator
 
 
 def _make_migrator(dry_run=False, channel="general", ignore_bots=False):
     """Create a mock migrator for message testing."""
-    from tests.unit.conftest import _build_mock_migrator
-
     migrator = _build_mock_migrator(
         dry_run=dry_run,
         current_channel=channel,

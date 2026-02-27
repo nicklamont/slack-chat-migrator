@@ -9,6 +9,7 @@ from httplib2 import Response
 
 from slack_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_migrator.services.file import FileHandler
+from tests.unit.conftest import _build_mock_migrator
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -17,8 +18,6 @@ from slack_migrator.services.file import FileHandler
 
 def _make_migrator(**overrides):
     """Create a mock migrator with reasonable defaults for file tests."""
-    from tests.unit.conftest import _build_mock_migrator
-
     defaults = dict(
         config=MigrationConfig(
             shared_drive=SharedDriveConfig(name="Test Drive", id=None),

@@ -9,6 +9,7 @@ from googleapiclient.errors import HttpError
 
 from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.config import ImportCompletionStrategy, MigrationConfig
+from tests.unit.conftest import _build_mock_migrator
 
 
 def _make_migrator(
@@ -20,8 +21,6 @@ def _make_migrator(
     max_failure_percentage=10,
 ):
     """Create a mock migrator for channel processor testing."""
-    from tests.unit.conftest import _build_mock_migrator
-
     migrator = _build_mock_migrator(
         dry_run=dry_run,
         update_mode=update_mode,

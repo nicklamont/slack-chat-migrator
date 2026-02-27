@@ -10,6 +10,7 @@ import yaml
 from slack_migrator.cli.report import generate_report, print_dry_run_summary
 from slack_migrator.core.state import _default_migration_summary
 from slack_migrator.types import FailedMessage, MigrationSummary
+from tests.unit.conftest import _build_mock_migrator
 
 
 def _make_summary(**overrides: object) -> MigrationSummary:
@@ -38,8 +39,6 @@ def _make_failed(
 
 def _make_migrator(**overrides):
     """Build a MagicMock that behaves like SlackToChatMigrator for report tests."""
-    from tests.unit.conftest import _build_mock_migrator
-
     defaults: dict = dict(
         migration_summary=_make_summary(
             channels_processed=["general", "random"],
