@@ -267,7 +267,7 @@ class TestGetUserData:
 
         # First call loads data
         result1 = resolver.get_user_data("U001")
-        assert result1 is not None
+        assert result1 == {"id": "U001", "real_name": "Alice"}
 
         # Modify the file on disk — should not affect cached data
         users_file.write_text(json.dumps([{"id": "U002", "real_name": "Bob"}]))
@@ -382,10 +382,7 @@ class TestHandleUnmappedUserMessage:
 
         result = resolver.handle_unmapped_user_message("U001", "message body")
 
-        assert isinstance(result, tuple)
-        assert len(result) == 2
-        assert result[0] == "admin@example.com"
-        assert result[1] == "*[From: U001]*\nmessage body"
+        assert result == ("admin@example.com", "*[From: U001]*\nmessage body")
 
     def test_tracks_unmapped_user(self, tmp_path):
         users_file = tmp_path / "users.json"

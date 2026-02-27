@@ -430,6 +430,8 @@ class TestUploadStrategy:
         result = handler.upload_attachment(file_obj, channel="general")
         assert result is not None
         assert result["type"] == "drive"
+        assert result["drive_id"] == "d1"
+        assert result["name"] == "huge.png"
 
     def test_drive_upload_failure_returns_none(self):
         handler = self._make_ready_handler()
@@ -494,6 +496,9 @@ class TestUploadStrategy:
         }
         result = handler.upload_attachment(file_obj, channel="general")
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "d1"
+        assert result["name"] == "file.json"
 
     def test_channel_file_count_tracking(self):
         handler = self._make_ready_handler()
@@ -709,7 +714,9 @@ class TestCreateDriveReference:
         }
         result = handler._create_drive_reference(file_obj, channel="general")
         assert result is not None
+        assert result["type"] == "drive"
         assert result["drive_id"] == "XYZ789"
+        assert result["is_reference"] is True
 
     def test_unrecognized_url_returns_none(self):
         handler = _make_handler()
@@ -1101,6 +1108,7 @@ class TestUploadDirectToChat:
 
         assert result is not None
         assert result["type"] == "direct"
+        assert result["name"] == "pic.png"
 
     def test_upload_returns_none_on_empty_response(self):
         """Returns None when upload_file_to_chat returns (None, None)."""
@@ -1232,7 +1240,9 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data")
 
         assert result is not None
+        assert result["type"] == "drive"
         assert result["drive_id"] == "file_id"
+        assert result["link"] == "https://drive.google.com/file/d/file_id/view"
         handler.folder_manager.get_or_create_channel_folder.assert_not_called()
 
     def test_no_folder_id_returns_none(self):
@@ -1272,6 +1282,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data", channel="general")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert handler.file_stats["ownership_transferred"] == 1
 
     def test_ownership_transfer_failure_increments_stat(self):
@@ -1303,6 +1315,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data", channel="general")
 
         assert result is not None  # upload succeeded, just ownership transfer failed
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert handler.file_stats["ownership_transfer_failed"] == 1
 
     def test_external_user_skips_ownership_transfer(self):
@@ -1330,6 +1344,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data", channel="general")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert handler.file_stats["ownership_transferred"] == 0
 
     def test_shared_drive_skips_ownership_transfer(self):
@@ -1357,6 +1373,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data", channel="general")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert handler.file_stats["ownership_transferred"] == 0
 
     def test_google_docs_url_sets_mime_type(self):
@@ -1377,6 +1395,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert result["mime_type"] == "application/vnd.google-apps.document"
 
     def test_google_sheets_url_sets_mime_type(self):
@@ -1397,6 +1417,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert result["mime_type"] == "application/vnd.google-apps.spreadsheet"
 
     def test_google_presentation_url_sets_mime_type(self):
@@ -1417,6 +1439,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert result["mime_type"] == "application/vnd.google-apps.presentation"
 
     def test_sheets_google_url_sets_mime_type(self):
@@ -1437,6 +1461,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert result["mime_type"] == "application/vnd.google-apps.spreadsheet"
 
     def test_drive_google_url_guesses_mime_type(self):
@@ -1457,6 +1483,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert result["mime_type"] == "application/pdf"
 
     def test_drive_google_url_no_extension_defaults_to_document(self):
@@ -1477,6 +1505,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert result["mime_type"] == "application/vnd.google-apps.document"
 
     def test_null_mime_type_guessed(self):
@@ -1496,6 +1526,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert result["mime_type"] == "application/json"
 
     def test_empty_mime_type_guessed(self):
@@ -1515,6 +1547,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert result["mime_type"] == "text/plain"
 
     def test_http_error_returns_none(self):
@@ -1562,6 +1596,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert result["link"] == "https://drive.google.com/file/d/file_id/view"
 
     def test_sender_email_takes_priority_over_user_email(self):
@@ -1616,6 +1652,8 @@ class TestUploadToDrive:
         result = handler._upload_to_drive(file_obj, b"data")
 
         assert result is not None
+        assert result["type"] == "drive"
+        assert result["drive_id"] == "file_id"
         assert handler.file_stats["ownership_transferred"] == 0
 
 

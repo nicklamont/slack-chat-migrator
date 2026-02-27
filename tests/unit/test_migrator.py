@@ -435,6 +435,8 @@ class TestExportPathValidation:
             )
         assert any("channels.json not found" in r.message for r in caplog.records)
         assert m is not None
+        assert m.export_root == tmp_path
+        assert m.workspace_admin == "admin@b.com"
 
     def test_channel_dir_without_json_warns(self, tmp_path, caplog):
         """Channel directory with no JSON files should log a warning."""
@@ -881,7 +883,9 @@ class TestGetUserData:
         m = _make_migrator(tmp_path, users=users)
         data = m.user_resolver.get_user_data("U001")
         assert data is not None
+        assert data["id"] == "U001"
         assert data["name"] == "alice"
+        assert data["profile"]["email"] == "alice@example.com"
 
     def test_nonexistent_user(self, tmp_path):
         m = _make_migrator(tmp_path)
@@ -892,6 +896,8 @@ class TestGetUserData:
         m = _make_migrator(tmp_path)
         m.user_resolver.get_user_data("U001")
         assert m.user_resolver._users_data is not None
+        assert "U001" in m.user_resolver._users_data
+        assert m.user_resolver._users_data["U001"]["name"] == "alice"
         # Second call should use cache
         m.user_resolver.get_user_data("U001")
 

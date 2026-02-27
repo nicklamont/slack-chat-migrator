@@ -573,9 +573,8 @@ class TestExtractRequestDetails:
         wrapper = RetryWrapper(MagicMock())
         # Should not raise, should return something
         details = wrapper._extract_request_details(execute_method)
-        assert details is not None
-        assert "method" in details
-        assert "uri" in details
+        assert isinstance(details, dict)
+        assert set(details.keys()) == {"method", "uri", "body"}
 
 
 # ---------------------------------------------------------------------------
