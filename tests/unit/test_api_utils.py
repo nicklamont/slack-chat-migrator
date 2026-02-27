@@ -11,6 +11,7 @@ from googleapiclient.errors import HttpError
 from slack_migrator.utils.api import (
     RetryWrapper,
     _service_cache,
+    escape_drive_query_value,
     get_gcp_service,
     slack_ts_to_rfc3339,
 )
@@ -1000,3 +1001,35 @@ class TestGetGcpService:
         assert isinstance(result, RetryWrapper)
         # channel defaults to None
         assert result._channel_context_getter() is None
+
+
+# ---------------------------------------------------------------------------
+# escape_drive_query_value
+# ---------------------------------------------------------------------------
+
+
+class TestEscapeDriveQueryValue:
+    """Tests for escape_drive_query_value()."""
+
+    def test_clean_name_passthrough(self):
+        assert escape_drive_query_value("general") == "general"
+
+    def test_single_quote_escaped(self):
+        assert escape_drive_query_value("team's channel") == "team\\'s channel"
+
+    def test_backslash_escaped(self):
+        assert escape_drive_query_value("path\\folder") == "path\\\\folder"
+
+    def test_combined_backslash_and_quote(self):
+        result = escape_drive_query_value("it\\'s")
+        assert result == "it\\\\\\'s"
+
+    def test_empty_string(self):
+        assert escape_drive_query_value("") == ""
+
+    def test_multiple_quotes(self):
+        assert escape_drive_query_value("a'b'c") == "a\\'b\\'c"
+
+    def test_no_mutation_of_safe_characters(self):
+        safe = "channel-name_123 (archived)"
+        assert escape_drive_query_value(safe) == safe

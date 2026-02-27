@@ -9,6 +9,7 @@ from typing import Any
 
 from googleapiclient.errors import HttpError
 
+from slack_migrator.utils.api import escape_drive_query_value
 from slack_migrator.utils.logging import (
     log_with_context,
 )
@@ -52,7 +53,8 @@ class FolderManager:
 
         try:
             # Check if folder already exists in shared drive
-            query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            safe_name = escape_drive_query_value(folder_name)
+            query = f"name = '{safe_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
 
             log_with_context(
                 logging.DEBUG,
@@ -127,7 +129,8 @@ class FolderManager:
 
         try:
             # Search for existing folder
-            query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            safe_name = escape_drive_query_value(folder_name)
+            query = f"name = '{safe_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
 
             log_with_context(
                 logging.DEBUG,
@@ -224,7 +227,9 @@ class FolderManager:
 
         try:
             # Search for existing channel folder
-            query = f"name = '{channel}' and mimeType = 'application/vnd.google-apps.folder' and '{parent_folder_id}' in parents and trashed = false"
+            safe_channel = escape_drive_query_value(channel)
+            safe_parent = escape_drive_query_value(parent_folder_id)
+            query = f"name = '{safe_channel}' and mimeType = 'application/vnd.google-apps.folder' and '{safe_parent}' in parents and trashed = false"
 
             log_with_context(
                 logging.DEBUG,
@@ -355,7 +360,9 @@ class FolderManager:
             folder_name = self._sanitize_folder_name(channel)
 
             # First, search for folder in the parent folder
-            q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and '{parent_folder_id}' in parents"
+            safe_name = escape_drive_query_value(folder_name)
+            safe_parent = escape_drive_query_value(parent_folder_id)
+            q = f"name = '{safe_name}' and mimeType = 'application/vnd.google-apps.folder' and '{safe_parent}' in parents"
             if shared_drive_id:
                 response = (
                     self.drive_service.files()

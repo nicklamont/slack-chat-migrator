@@ -19,6 +19,23 @@ from slack_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_migrator")
 
+
+def escape_drive_query_value(value: str) -> str:
+    """Escape a string value for use in a Drive API query parameter.
+
+    The Drive API ``q`` parameter uses single-quoted string literals.
+    Backslashes and single quotes inside the value must be escaped to
+    prevent query injection.
+
+    Args:
+        value: Raw string to embed in a Drive query.
+
+    Returns:
+        The escaped string safe for interpolation into ``q='...'``.
+    """
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/chat.import",
     "https://www.googleapis.com/auth/chat.spaces",
