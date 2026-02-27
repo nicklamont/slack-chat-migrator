@@ -438,6 +438,22 @@ class RetryWrapper:
             pass
 
 
+def escape_drive_query_value(value: str) -> str:
+    """Escape a value for safe interpolation into a Drive API query string.
+
+    The Drive API query language uses single quotes to delimit string values.
+    Backslashes and single quotes within values must be escaped to prevent
+    query injection.
+
+    Args:
+        value: The raw string value to escape.
+
+    Returns:
+        The escaped string, safe for use inside single quotes in a Drive query.
+    """
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def slack_ts_to_rfc3339(ts: str) -> str:
     """Convert Slack timestamp to RFC3339 format.
 

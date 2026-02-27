@@ -11,6 +11,7 @@ from googleapiclient.errors import HttpError
 from slack_migrator.utils.api import (
     RetryWrapper,
     _service_cache,
+    escape_drive_query_value,
     get_gcp_service,
     slack_ts_to_rfc3339,
 )
@@ -1000,3 +1001,49 @@ class TestGetGcpService:
         assert isinstance(result, RetryWrapper)
         # channel defaults to None
         assert result._channel_context_getter() is None
+
+
+# ---------------------------------------------------------------------------
+# escape_drive_query_value — Drive API query string escaping
+# ---------------------------------------------------------------------------
+
+
+class TestEscapeDriveQueryValue:
+    """Tests for the Drive API query escaping function."""
+
+    def test_clean_name_passthrough(self):
+        assert escape_drive_query_value("general") == "general"
+
+    def test_single_quote_escaped(self):
+        assert escape_drive_query_value("it's-a-channel") == "it\\'s-a-channel"
+
+    def test_backslash_escaped(self):
+        assert escape_drive_query_value("path\\to") == "path\\\\to"
+
+    def test_combined_backslash_and_quote(self):
+        # Backslash must be escaped first, then quote
+        assert escape_drive_query_value("it\\'s") == "it\\\\\\'s"
+
+    def test_empty_string(self):
+        assert escape_drive_query_value("") == ""
+
+    def test_multiple_quotes(self):
+        assert escape_drive_query_value("a'b'c") == "a\\'b\\'c"
+
+    def test_injection_attempt(self):
+        # A malicious channel name trying to break out of the query
+        malicious = "test' or name = '"
+        escaped = escape_drive_query_value(malicious)
+        assert "'" not in escaped.replace("\\'", "")
+
+    @pytest.mark.parametrize(
+        "input_val,expected",
+        [
+            ("hello world", "hello world"),
+            ("café", "café"),
+            ("channel-123", "channel-123"),
+            ("under_score", "under_score"),
+        ],
+    )
+    def test_safe_strings_unchanged(self, input_val, expected):
+        assert escape_drive_query_value(input_val) == expected

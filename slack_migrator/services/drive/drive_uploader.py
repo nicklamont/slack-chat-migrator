@@ -17,6 +17,7 @@ from googleapiclient.http import MediaFileUpload
 if TYPE_CHECKING:
     from slack_migrator.core.migrator import SlackToChatMigrator
 
+from slack_migrator.utils.api import escape_drive_query_value
 from slack_migrator.utils.logging import (
     log_with_context,
 )
@@ -120,7 +121,8 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            query = f"'{folder_id}' in parents and trashed=false"
+            safe_folder = escape_drive_query_value(folder_id)
+            query = f"'{safe_folder}' in parents and trashed=false"
             page_token = None
             files_cached = 0
 
@@ -227,11 +229,13 @@ class DriveFileUploader:
                     self.file_hash_cache.pop(file_hash, None)
 
             # Search for files with matching MD5 hash in the folder
-            query = f"md5Checksum='{file_hash}' and trashed=false"
+            safe_hash = escape_drive_query_value(file_hash)
+            query = f"md5Checksum='{safe_hash}' and trashed=false"
 
             # Add folder constraint if specified
             if folder_id:
-                query += f" and '{folder_id}' in parents"
+                safe_folder = escape_drive_query_value(folder_id)
+                query += f" and '{safe_folder}' in parents"
 
             log_with_context(
                 logging.DEBUG,
