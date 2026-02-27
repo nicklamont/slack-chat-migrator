@@ -359,7 +359,8 @@ class FileHandler:
             sender_email: Email address of the message sender (for permissions handling)
 
         Returns:
-            Dict with upload details if successful, None otherwise
+            Dict with upload details if successful, None otherwise.
+            Format: ``{'type': 'direct'|'drive'|'skip', 'ref': ..., 'link': ..., 'name': ...}``
         """
         self._sync_channel_context()
 
@@ -384,7 +385,7 @@ class FileHandler:
             if found:
                 return cached
 
-            file_content = self._download_and_validate(file_obj, name, channel, file_id)
+            file_content = self._download_file_content(file_obj, name, channel, file_id)
             if file_content is None:
                 return None
 
@@ -489,7 +490,7 @@ class FileHandler:
             return True, cached_result
         return False, None
 
-    def _download_and_validate(
+    def _download_file_content(
         self,
         file_obj: dict[str, Any],
         name: str,

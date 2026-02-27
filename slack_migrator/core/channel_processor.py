@@ -401,7 +401,7 @@ class ChannelProcessor:
                             failure_percentage
                         )
 
-            time.sleep(0.05)
+            time.sleep(0.05)  # Throttle to avoid Chat API rate limits
 
         if channel_failures:
             self.state.failed_messages_by_channel[channel] = channel_failures
