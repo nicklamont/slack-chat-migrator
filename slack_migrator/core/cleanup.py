@@ -59,7 +59,77 @@ def cleanup_channel_handlers(state: MigrationState) -> None:
     state.spaces.channel_handlers.clear()
 
 
-def run_cleanup(  # noqa: C901
+def _list_spaces_in_import_mode(
+    chat: Any,
+) -> list[tuple[str, dict]] | None:
+    """List all spaces and filter to those still in import mode.
+
+    Returns a list of (space_name, space_info) tuples, or None if the
+    space listing itself failed (caller should abort cleanup).
+    """
+    log_with_context(logging.DEBUG, "Listing all spaces to check for import mode...")
+    try:
+        if chat is None:
+            raise RuntimeError("Chat API service not initialized")
+        spaces = chat.spaces().list().execute().get("spaces", [])
+    except HttpError as http_e:
+        log_with_context(
+            logging.ERROR,
+            f"HTTP error listing spaces during cleanup: {http_e}"
+            f" (Status: {http_e.resp.status})",
+            error_code=http_e.resp.status,
+        )
+        if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
+            log_with_context(
+                logging.WARNING,
+                "Server error listing spaces"
+                " - this might be a temporary issue, skipping cleanup",
+            )
+        return None
+    except (RefreshError, TransportError) as list_e:
+        log_with_context(
+            logging.ERROR,
+            f"Failed to list spaces during cleanup: {list_e}",
+        )
+        return None
+
+    import_mode_spaces: list[tuple[str, dict]] = []
+    for space in spaces:
+        space_name = space.get("name", "")
+        if not space_name:
+            continue
+
+        try:
+            if chat is None:
+                raise RuntimeError("Chat API service not initialized")
+            space_info = chat.spaces().get(name=space_name).execute()
+            if space_info.get("importMode"):
+                import_mode_spaces.append((space_name, space_info))
+        except HttpError as http_e:
+            log_with_context(
+                logging.WARNING,
+                f"HTTP error checking space status during cleanup: {http_e}"
+                f" (Status: {http_e.resp.status})",
+                space_name=space_name,
+                error_code=http_e.resp.status,
+            )
+            if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
+                log_with_context(
+                    logging.WARNING,
+                    "Server error checking space - this might be a temporary issue",
+                    space_name=space_name,
+                )
+        except (RefreshError, TransportError) as e:
+            log_with_context(
+                logging.WARNING,
+                f"Failed to get space info during cleanup: {e}",
+                space_name=space_name,
+            )
+
+    return import_mode_spaces
+
+
+def run_cleanup(
     ctx: MigrationContext,
     state: MigrationState,
     chat: Any,
@@ -80,7 +150,6 @@ def run_cleanup(  # noqa: C901
         user_resolver: User identity resolver.
         file_handler: File handler for drive operations, or None.
     """
-    # Clear current_channel so cleanup operations don't get tagged with channel context
     state.context.current_channel = None
 
     if ctx.dry_run:
@@ -90,67 +159,9 @@ def run_cleanup(  # noqa: C901
     log_with_context(logging.INFO, "Performing post-migration cleanup")
 
     try:
-        log_with_context(
-            logging.DEBUG, "Listing all spaces to check for import mode..."
-        )
-        try:
-            if chat is None:
-                raise RuntimeError("Chat API service not initialized")
-            spaces = chat.spaces().list().execute().get("spaces", [])
-        except HttpError as http_e:
-            log_with_context(
-                logging.ERROR,
-                f"HTTP error listing spaces during cleanup: {http_e}"
-                f" (Status: {http_e.resp.status})",
-                error_code=http_e.resp.status,
-            )
-            if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
-                log_with_context(
-                    logging.WARNING,
-                    "Server error listing spaces"
-                    " - this might be a temporary issue, skipping cleanup",
-                )
+        import_mode_spaces = _list_spaces_in_import_mode(chat)
+        if import_mode_spaces is None:
             return
-        except (RefreshError, TransportError) as list_e:
-            log_with_context(
-                logging.ERROR,
-                f"Failed to list spaces during cleanup: {list_e}",
-            )
-            return
-
-        import_mode_spaces = []
-
-        for space in spaces:
-            space_name = space.get("name", "")
-            if not space_name:
-                continue
-
-            try:
-                if chat is None:
-                    raise RuntimeError("Chat API service not initialized")
-                space_info = chat.spaces().get(name=space_name).execute()
-                if space_info.get("importMode"):
-                    import_mode_spaces.append((space_name, space_info))
-            except HttpError as http_e:
-                log_with_context(
-                    logging.WARNING,
-                    f"HTTP error checking space status during cleanup: {http_e}"
-                    f" (Status: {http_e.resp.status})",
-                    space_name=space_name,
-                    error_code=http_e.resp.status,
-                )
-                if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
-                    log_with_context(
-                        logging.WARNING,
-                        "Server error checking space - this might be a temporary issue",
-                        space_name=space_name,
-                    )
-            except (RefreshError, TransportError) as e:
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to get space info during cleanup: {e}",
-                    space_name=space_name,
-                )
 
         if import_mode_spaces:
             _complete_import_mode_spaces(
