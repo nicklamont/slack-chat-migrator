@@ -29,7 +29,121 @@ if TYPE_CHECKING:
     from slack_migrator.core.state import MigrationState
 
 
-def _should_skip_message(  # noqa: C901
+def _is_bot_message(
+    config: Any,
+    user_resolver: Any,
+    message: dict[str, Any],
+    user_id: str,
+    channel: str,
+    ts: str,
+) -> bool:
+    """Return True if the message is from a bot and bots should be ignored."""
+    if not config.ignore_bots:
+        return False
+
+    # Check for bot messages by subtype (system bots like USLACKBOT)
+    if message.get("subtype") in BOT_SUBTYPES:
+        bot_name = message.get("username", user_id or "Unknown Bot")
+        log_with_context(
+            logging.DEBUG,
+            f"Skipping bot message from {bot_name} (subtype: {message.get('subtype')}) - ignore_bots enabled",
+            channel=channel,
+            ts=ts,
+            user_id=user_id,
+            bot_name=bot_name,
+        )
+        return True
+
+    # Check for user-based bots (bots in users.json)
+    if user_id:
+        user_data = user_resolver.get_user_data(user_id)
+        if user_data and user_data.get("is_bot", False):
+            log_with_context(
+                logging.DEBUG,
+                f"Skipping message from bot user {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
+                channel=channel,
+                ts=ts,
+                user_id=user_id,
+            )
+            return True
+
+    return False
+
+
+def _is_already_sent_in_update_mode(
+    state: MigrationState,
+    is_update_mode: bool,
+    message_key: str,
+    channel: str,
+    ts: str,
+    user_id: str,
+) -> bool:
+    """Return True if this message was already sent in a previous update-mode run."""
+    if not is_update_mode:
+        return False
+
+    # Check if older than last processed timestamp
+    if state.progress.last_processed_timestamps:
+        last_timestamp = state.progress.last_processed_timestamps.get(channel, 0)
+        if last_timestamp > 0 and not should_process_message(last_timestamp, ts):
+            log_with_context(
+                logging.INFO,
+                f"[UPDATE MODE] Skipping message TS={ts} from user={user_id} (older than last processed timestamp)",
+                channel=channel,
+                ts=ts,
+                user_id=user_id,
+                last_timestamp=last_timestamp,
+            )
+            return True
+
+    # Check the sent_messages set for additional protection
+    if message_key in state.messages.sent_messages:
+        log_with_context(
+            logging.INFO,
+            f"[UPDATE MODE] Skipping already sent message TS={ts} from user={user_id}",
+            channel=channel,
+            ts=ts,
+            user_id=user_id,
+        )
+        return True
+
+    return False
+
+
+def _is_empty_message(message: dict[str, Any]) -> bool:
+    """Return True if the message has no text content and no file attachments."""
+    text = parse_slack_blocks(message)
+
+    has_files = "files" in message
+    if not has_files:
+        for attachment in message.get("attachments", []):
+            if (
+                attachment.get("is_share") or attachment.get("is_msg_unfurl")
+            ) and "files" in attachment:
+                has_files = True
+                break
+
+    return not text.strip() and not has_files
+
+
+def _count_reactions_excluding_bots(
+    config: Any,
+    user_resolver: Any,
+    message: dict[str, Any],
+) -> int:
+    """Count reactions on a message, excluding bot reactions when configured."""
+    count = 0
+    for reaction in message.get("reactions", []):
+        for uid in reaction.get("users", []):
+            if config.ignore_bots:
+                user_data = user_resolver.get_user_data(uid)
+                if user_data and user_data.get("is_bot", False):
+                    continue
+            count += 1
+    return count
+
+
+def _should_skip_message(
     ctx: MigrationContext,
     state: MigrationState,
     user_resolver: Any,
@@ -53,66 +167,15 @@ def _should_skip_message(  # noqa: C901
         A ``(should_skip, return_value)`` tuple.  When *should_skip* is
         ``True``, the caller should return *return_value* immediately.
     """
-    is_update_mode = ctx.update_mode
+    if _is_bot_message(ctx.config, user_resolver, message, user_id, channel, ts):
+        return True, MessageResult.IGNORED_BOT
 
-    # --- Bot check ---
-    if ctx.config.ignore_bots:
-        # Check for bot messages by subtype (covers system bots like USLACKBOT that aren't in users.json)
-        if message.get("subtype") in BOT_SUBTYPES:
-            bot_name = message.get("username", user_id or "Unknown Bot")
-            log_with_context(
-                logging.DEBUG,
-                f"Skipping bot message from {bot_name} (subtype: {message.get('subtype')}) - ignore_bots enabled",
-                channel=channel,
-                ts=ts,
-                user_id=user_id,
-                bot_name=bot_name,
-            )
-            return True, MessageResult.IGNORED_BOT
-
-        # Also check for user-based bots (bots that are in users.json)
-        if user_id:
-            user_data = user_resolver.get_user_data(user_id)
-            if user_data and user_data.get("is_bot", False):
-                log_with_context(
-                    logging.DEBUG,
-                    f"Skipping message from bot user {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
-                    channel=channel,
-                    ts=ts,
-                    user_id=user_id,
-                )
-                return True, MessageResult.IGNORED_BOT
-
-    # --- Update-mode deduplication ---
-    # First, check if this message is older than the last processed timestamp
-    if is_update_mode and state.progress.last_processed_timestamps:
-        last_timestamp = state.progress.last_processed_timestamps.get(channel, 0)
-        if last_timestamp > 0:
-            if not should_process_message(last_timestamp, ts):
-                log_with_context(
-                    logging.INFO,
-                    f"[UPDATE MODE] Skipping message TS={ts} from user={user_id} (older than last processed timestamp)",
-                    channel=channel,
-                    ts=ts,
-                    user_id=user_id,
-                    last_timestamp=last_timestamp,
-                )
-                return True, MessageResult.ALREADY_SENT
-
-    # Also check the sent_messages set for additional protection
-    if is_update_mode and message_key in state.messages.sent_messages:
-        log_with_context(
-            logging.INFO,
-            f"[UPDATE MODE] Skipping already sent message TS={ts} from user={user_id}",
-            channel=channel,
-            ts=ts,
-            user_id=user_id,
-        )
+    if _is_already_sent_in_update_mode(
+        state, ctx.update_mode, message_key, channel, ts, user_id
+    ):
         return True, MessageResult.ALREADY_SENT
 
-    # --- Message counter & dry-run ---
-    # Only increment the message count in non-dry run mode
-    # In dry run mode, this is handled in the migrate method
+    # Increment message count (non-dry-run only; dry-run counts in migrate())
     if not ctx.dry_run:
         state.progress.migration_summary["messages_created"] += 1
 
@@ -127,7 +190,7 @@ def _should_skip_message(  # noqa: C901
         )
         return True, None
 
-    # --- System subtype skip ---
+    # System subtype skip
     if message.get("subtype") in SYSTEM_SUBTYPES:
         log_with_context(
             logging.DEBUG,
@@ -138,22 +201,7 @@ def _should_skip_message(  # noqa: C901
         )
         return True, MessageResult.SKIPPED
 
-    # --- Empty message skip ---
-    text = parse_slack_blocks(message)
-
-    # Check for files in main message and forwarded messages
-    has_files = "files" in message
-    if not has_files:
-        # Also check for files in forwarded message attachments
-        attachments = message.get("attachments", [])
-        for attachment in attachments:
-            if (
-                attachment.get("is_share") or attachment.get("is_msg_unfurl")
-            ) and "files" in attachment:
-                has_files = True
-                break
-
-    if not text.strip() and not has_files:
+    if _is_empty_message(message):
         log_with_context(
             logging.DEBUG,
             f"Skipping empty message from {user_id}",
@@ -545,7 +593,7 @@ def send_message(
         return _handle_send_error(state, e, message, ts, channel)
 
 
-def track_message_stats(  # noqa: C901
+def track_message_stats(
     ctx: MigrationContext,
     state: MigrationState,
     user_resolver: Any,
@@ -561,43 +609,14 @@ def track_message_stats(  # noqa: C901
         attachment_processor: Processor for counting message files.
         m: A single Slack message dictionary.
     """
-    # Get the current channel being processed
     channel = state.context.current_channel
     if channel is None:
         return
     ts = m.get("ts", "")
     user_id = m.get("user", "")
 
-    # Check if this message is from a bot and bots should be ignored
-    if ctx.config.ignore_bots:
-        # Check for bot messages by subtype (covers system bots like USLACKBOT that aren't in users.json)
-        if m.get("subtype") in BOT_SUBTYPES:
-            bot_name = m.get("username", user_id or "Unknown Bot")
-            log_with_context(
-                logging.DEBUG,
-                f"Skipping stats tracking for bot message from {bot_name} (subtype: {m.get('subtype')}) - ignore_bots enabled",
-                channel=channel,
-                ts=ts,
-                user_id=user_id,
-                bot_name=bot_name,
-            )
-            return
-
-        # Also check for user-based bots (bots that are in users.json)
-        if user_id:
-            user_data = user_resolver.get_user_data(user_id)
-            if user_data and user_data.get("is_bot", False):
-                log_with_context(
-                    logging.DEBUG,
-                    f"Skipping stats tracking for bot message from {user_id} ({user_data.get('real_name', 'Unknown')}) - ignore_bots enabled",
-                    channel=channel,
-                    ts=ts,
-                    user_id=user_id,
-                )
-                return
-
-    # Check if we're in update mode
-    is_update_mode = ctx.update_mode
+    if _is_bot_message(ctx.config, user_resolver, m, user_id, channel, ts):
+        return
 
     if channel not in state.progress.channel_stats:
         state.progress.channel_stats[channel] = {
@@ -606,16 +625,14 @@ def track_message_stats(  # noqa: C901
             "file_count": 0,
         }
 
-    # In update mode, we might need to skip stats tracking for messages
-    # that have already been processed
-    if is_update_mode:
+    # Skip stats for already-sent messages in update mode
+    if ctx.update_mode:
         message_key = f"{channel}:{ts}"
         edited = m.get("edited", {})
         edited_ts = edited.get("ts", "") if edited else ""
         if edited_ts:
             message_key = f"{channel}:{ts}:edited:{edited_ts}"
 
-        # If this message has already been sent in a previous run, don't count it
         if message_key in state.messages.sent_messages:
             log_with_context(
                 logging.DEBUG,
@@ -625,29 +642,15 @@ def track_message_stats(  # noqa: C901
             )
             return
 
-    # Increment message count for this channel
     state.progress.channel_stats[channel]["message_count"] += 1
 
     # Track reactions
-    reaction_count = 0
     if "reactions" in m:
-        # Count reactions excluding bots if ignore_bots is enabled
-        for reaction in m["reactions"]:
-            for user_id in reaction.get("users", []):
-                # Skip bot reactions if ignore_bots is enabled
-                if ctx.config.ignore_bots:
-                    user_data = user_resolver.get_user_data(user_id)
-                    if user_data and user_data.get("is_bot", False):
-                        continue
-                reaction_count += 1
-
+        reaction_count = _count_reactions_excluding_bots(ctx.config, user_resolver, m)
         state.progress.channel_stats[channel]["reaction_count"] += reaction_count
 
-        # Also increment the global reaction count in dry run mode
-        # (in normal mode this is done by process_reactions_batch)
         if ctx.dry_run:
             state.progress.migration_summary["reactions_created"] += reaction_count
-
             log_with_context(
                 logging.DEBUG,
                 f"{ctx.log_prefix}Counted {reaction_count} reactions for message {ts}",
@@ -655,13 +658,10 @@ def track_message_stats(  # noqa: C901
                 ts=ts,
             )
 
-    # Track files using attachment processor
+    # Track files
     file_count = attachment_processor.count_message_files(m)
     if file_count > 0:
-        mode_prefix = ""
-        if is_update_mode:
-            mode_prefix = "[UPDATE MODE] "
-
+        mode_prefix = "[UPDATE MODE] " if ctx.update_mode else ""
         log_with_context(
             logging.DEBUG,
             f"{mode_prefix}Found {file_count} files to process in message {ts}",
@@ -669,11 +669,7 @@ def track_message_stats(  # noqa: C901
             ts=ts,
         )
         state.progress.channel_stats[channel]["file_count"] += file_count
-
-        # Also increment the global file count
         state.progress.migration_summary["files_created"] += file_count
-
-    # We don't need to process files here - they are handled in send_message
 
 
 def send_intro(
