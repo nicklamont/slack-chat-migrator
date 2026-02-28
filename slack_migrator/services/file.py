@@ -35,6 +35,7 @@ from slack_migrator.services.file_permissions import (
 from slack_migrator.types import UploadResult
 from slack_migrator.utils.api import escape_drive_query_value
 from slack_migrator.utils.logging import log_with_context
+from slack_migrator.utils.mime import resolve_drive_mime_type
 
 logger = logging.getLogger("slack_migrator")
 
@@ -190,71 +191,41 @@ class FileHandler:
         )
 
     def _initialize_shared_drive_and_folder(self) -> None:
-        """Initialize the shared drive and root folder for attachments."""
+        """Initialize the shared drive and root folder for attachments.
+
+        Delegates shared drive creation/validation to :class:`SharedDriveManager`
+        (single source of truth), then sets the root folder ID and pre-caches
+        file hashes for deduplication.
+        """
         try:
-            # Get shared drive configuration
-            shared_drive_name = self.config.shared_drive.name
-            shared_drive_id: str | None = self.config.shared_drive.id
+            # SharedDriveManager handles: validate configured ID → find by
+            # name → create new drive.  No need to duplicate that here.
+            self._shared_drive_id = (
+                self.shared_drive_manager.get_or_create_shared_drive()
+            )
 
-            # If no shared drive specified, use default name
-            if not shared_drive_name and not shared_drive_id:
-                shared_drive_name = "Imported Slack Attachments"
-
-            # Step 1: Find or create the shared drive using SharedDriveManager
-            if shared_drive_id:
-                # Use specified shared drive ID
-                try:
-                    # Validate the shared drive exists and is accessible
-                    self.drive_service.drives().get(driveId=shared_drive_id).execute()
-                    self._shared_drive_id = shared_drive_id
-                    log_with_context(
-                        logging.INFO,
-                        f"Using configured shared drive ID: {shared_drive_id}",
-                    )
-                except HttpError as e:
-                    log_with_context(
-                        logging.ERROR,
-                        f"Configured shared drive ID {shared_drive_id} not accessible: {e}. Will create new one.",
-                    )
-                    shared_drive_id = None
-
-            if not shared_drive_id and shared_drive_name:
-                # Find existing shared drive by name or create new one
-                self._shared_drive_id = (
-                    self.shared_drive_manager.get_or_create_shared_drive()
-                )
-
-            # Step 2: Set the shared drive as the root folder
             if self._shared_drive_id:
-                # Use the shared drive root directly - no need for an extra folder layer
                 self._root_folder_id = self._shared_drive_id
                 log_with_context(
                     logging.DEBUG,
                     f"Using shared drive root as attachment folder: {self._shared_drive_id}",
                 )
-
-                # Pre-cache file hashes from root folder to improve deduplication
-                self._pre_cache_root_folder()
             else:
-                # Fallback to regular Drive folder
                 log_with_context(
                     logging.WARNING,
                     "Could not set up shared drive, falling back to regular Drive folder",
                 )
-                # For regular Drive, still create a root folder for organization
                 self._root_folder_id = self.folder_manager.create_regular_drive_folder(
                     "Imported Slack Attachments"
                 )
 
-                # Pre-cache file hashes from root folder to improve deduplication
-                self._pre_cache_root_folder()
+            self._pre_cache_root_folder()
 
         except HttpError as e:
             log_with_context(
                 logging.ERROR,
                 f"Failed to initialize shared drive and folder: {e}. Using fallback.",
             )
-            # Final fallback
             self._root_folder_id = self.folder_manager.create_regular_drive_folder(
                 "Slack Attachments Fallback"
             )
@@ -826,7 +797,7 @@ class FileHandler:
             name = file_obj.get("name", f"file_{file_id}")
             user_id = file_obj.get("user")
 
-            mime_type = self._resolve_drive_mime_type(file_obj, name, channel, file_id)
+            mime_type = resolve_drive_mime_type(file_obj, name, channel, file_id)
 
             log_with_context(
                 logging.DEBUG,
@@ -861,71 +832,6 @@ class FileHandler:
                 error=str(e),
             )
             return None
-
-    def _resolve_drive_mime_type(
-        self,
-        file_obj: dict[str, Any],
-        name: str,
-        channel: str | None,
-        file_id: str,
-    ) -> str:
-        """Determine the correct MIME type for a file being uploaded to Drive.
-
-        Handles Google Docs/Sheets/Slides links specially and falls back
-        to guessing from filename for regular files.
-        """
-        mime_type: str = file_obj.get("mimetype", "application/octet-stream")
-        url_private: str = file_obj.get("url_private", "")
-
-        is_google_docs_link = (
-            "docs.google.com" in url_private
-            or "drive.google.com" in url_private
-            or "sheets.google.com" in url_private
-            or "slides.google.com" in url_private
-        )
-
-        if is_google_docs_link:
-            mime_type = self._resolve_google_docs_mime_type(
-                url_private, mime_type, name
-            )
-            log_with_context(
-                logging.DEBUG,
-                f"Detected Google Docs link, using MIME type {mime_type} for file {name}",
-                channel=channel,
-                file_id=file_id,
-                url=url_private[:100],
-            )
-        elif not mime_type or mime_type == "null":
-            guessed_type, _ = mimetypes.guess_type(name)
-            mime_type = guessed_type if guessed_type else "application/octet-stream"
-            log_with_context(
-                logging.DEBUG,
-                f"Using guessed MIME type {mime_type} for file {name}",
-                channel=channel,
-                file_id=file_id,
-            )
-
-        return mime_type
-
-    @staticmethod
-    def _resolve_google_docs_mime_type(
-        url_private: str, current_mime: str, name: str
-    ) -> str:
-        """Map a Google Docs/Drive URL to its correct MIME type."""
-        if "docs.google.com/document" in url_private:
-            return "application/vnd.google-apps.document"
-        if (
-            "docs.google.com/spreadsheets" in url_private
-            or "sheets.google.com" in url_private
-        ):
-            return "application/vnd.google-apps.spreadsheet"
-        if "docs.google.com/presentation" in url_private:
-            return "application/vnd.google-apps.presentation"
-        if "drive.google.com" in url_private:
-            if not current_mime or current_mime == "application/octet-stream":
-                guessed_type, _ = mimetypes.guess_type(name)
-                return guessed_type or "application/vnd.google-apps.document"
-        return current_mime
 
     def _resolve_upload_folder(self, channel: str | None, file_id: str) -> str | None:
         """Get or create the target Drive folder for an upload.

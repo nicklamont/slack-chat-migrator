@@ -842,12 +842,14 @@ class TestInitializeSharedDriveAndFolder:
     """Tests for _initialize_shared_drive_and_folder."""
 
     def test_uses_configured_shared_drive_id(self):
-        """When config has a shared drive ID, validate and use it."""
+        """When SharedDriveManager returns a drive ID, use it as root folder."""
         config = MigrationConfig(
             shared_drive=SharedDriveConfig(name="Test Drive", id="drive123"),
         )
         handler = _make_handler(config=config)
-        handler.drive_service.drives().get().execute.return_value = {"id": "drive123"}
+        handler.shared_drive_manager.get_or_create_shared_drive.return_value = (
+            "drive123"
+        )
         handler._pre_cache_root_folder = MagicMock()
 
         handler._initialize_shared_drive_and_folder()
@@ -855,16 +857,14 @@ class TestInitializeSharedDriveAndFolder:
         assert handler._shared_drive_id == "drive123"
         assert handler._root_folder_id == "drive123"
         handler._pre_cache_root_folder.assert_called_once()
+        handler.shared_drive_manager.get_or_create_shared_drive.assert_called_once()
 
-    def test_configured_drive_id_not_accessible_falls_back_to_create(self):
-        """When configured drive ID is not accessible, fall back to creating one."""
+    def test_shared_drive_manager_returns_fallback_drive(self):
+        """When SharedDriveManager falls back to a new drive, use its ID."""
         config = MigrationConfig(
             shared_drive=SharedDriveConfig(name="Test Drive", id="bad_id"),
         )
         handler = _make_handler(config=config)
-        handler.drive_service.drives().get().execute.side_effect = HttpError(
-            Response({"status": "404"}), b"not found"
-        )
         handler.shared_drive_manager.get_or_create_shared_drive.return_value = (
             "new_drive_id"
         )
