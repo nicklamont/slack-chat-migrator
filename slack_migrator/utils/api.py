@@ -108,41 +108,90 @@ class RetryWrapper:
 
         return attr
 
-    def _wrap_execute(self, execute_method: Any) -> Any:  # noqa: C901
+    def _build_request_log_context(
+        self, execute_method: Any
+    ) -> tuple[str | None, dict[str, str], dict[str, str | None] | None]:
+        """Build channel context and log kwargs for a retry-wrapped execute call.
+
+        Returns:
+            (channel_context, log_kwargs, request_details) tuple.
+        """
+        channel_context = None
+        if self._channel_context_getter and callable(self._channel_context_getter):
+            try:
+                channel_context = self._channel_context_getter()
+            except Exception:
+                logger.debug("Failed to get channel context", exc_info=True)
+
+        log_kwargs: dict[str, str] = {"component": "http"}
+        if channel_context and isinstance(channel_context, str):
+            log_kwargs["channel"] = channel_context
+
+        request_details = self._extract_request_details(execute_method)
+        if request_details:
+            self._log_api_request(request_details, channel_context)
+
+        return channel_context, log_kwargs, request_details
+
+    def _handle_retryable_error(
+        self,
+        error: Exception,
+        attempt: int,
+        max_retries: int,
+        delay: float,
+        backoff_factor: float,
+        max_delay: float,
+        log_kwargs: dict[str, str],
+    ) -> None:
+        """Log a retryable error and sleep, or re-raise on final attempt."""
+        if isinstance(error, HttpError):
+            log_with_context(
+                logging.WARNING,
+                f"Encountered {error.resp.status} {error.resp.reason}",
+                **log_kwargs,
+            )
+        else:
+            log_with_context(
+                logging.WARNING,
+                f"API client error: {error}",
+                **log_kwargs,
+            )
+
+        if attempt < max_retries:
+            sleep_time = min(delay * (backoff_factor**attempt), max_delay)
+            log_with_context(
+                logging.INFO,
+                f"Retrying in {sleep_time:.1f} seconds...",
+                **log_kwargs,
+            )
+            time.sleep(sleep_time)
+        else:
+            log_with_context(
+                logging.ERROR,
+                f"Max retries reached. Last error: {error}",
+                **log_kwargs,
+            )
+            raise
+
+    def _wrap_execute(self, execute_method: Any) -> Any:
         """Wrap an execute method with retry logic and automatic API logging."""
 
         @functools.wraps(execute_method)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:  # noqa: C901
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
             """Execute the API call with exponential-backoff retry.
 
             Returns:
                 The result of the underlying ``execute()`` call.
             """
             max_retries = self._max_retries
-            initial_delay = self._retry_delay
+            delay = self._retry_delay
             max_delay = 60
             backoff_factor = 2.0
 
-            # Try to get channel context
-            channel_context = None
-            if self._channel_context_getter and callable(self._channel_context_getter):
-                try:
-                    channel_context = self._channel_context_getter()
-                except Exception:
-                    logger.debug("Failed to get channel context", exc_info=True)
+            channel_context, log_kwargs, request_details = (
+                self._build_request_log_context(execute_method)
+            )
 
-            log_kwargs = {"component": "http"}
-            if channel_context and isinstance(channel_context, str):
-                log_kwargs["channel"] = channel_context
-
-            # Extract request details for automatic API logging
-            request_details = self._extract_request_details(execute_method)
-
-            # Log API request automatically if debug mode is enabled
-            if request_details:
-                self._log_api_request(request_details, channel_context)
-
-            delay = initial_delay
             last_exception = None
             request_logged = False
 
@@ -150,9 +199,7 @@ class RetryWrapper:
                 try:
                     result = execute_method(*args, **kwargs)
 
-                    # Log successful API response automatically if debug mode is enabled (only on final success)
                     if request_details and not request_logged:
-                        # Extract actual status code from the response
                         status_code = self._extract_status_code(execute_method, result)
                         self._log_api_response(
                             status_code, request_details, result, channel_context
@@ -161,8 +208,6 @@ class RetryWrapper:
                     return result
                 except HttpError as e:
                     last_exception = e
-
-                    # Log failed API response automatically if debug mode is enabled (only on final failure)
                     if (
                         request_details
                         and not request_logged
@@ -171,7 +216,6 @@ class RetryWrapper:
                         self._log_api_response(
                             e.resp.status, request_details, None, channel_context
                         )
-
                     # Don't retry client errors (4xx) except rate limits (429)
                     if e.resp.status // 100 == 4 and e.resp.status != HTTP_RATE_LIMIT:
                         log_with_context(
@@ -180,74 +224,39 @@ class RetryWrapper:
                             **log_kwargs,
                         )
                         raise
-
-                    log_with_context(
-                        logging.WARNING,
-                        f"Encountered {e.resp.status} {e.resp.reason}",
-                        **log_kwargs,
+                    self._handle_retryable_error(
+                        e,
+                        attempt,
+                        max_retries,
+                        delay,
+                        backoff_factor,
+                        max_delay,
+                        log_kwargs,
                     )
-
-                    if attempt < max_retries:
-                        sleep_time = min(delay * (backoff_factor**attempt), max_delay)
-                        log_with_context(
-                            logging.INFO,
-                            f"Retrying in {sleep_time:.1f} seconds...",
-                            **log_kwargs,
-                        )
-                        time.sleep(sleep_time)
-                    else:
-                        log_with_context(
-                            logging.ERROR,
-                            f"Max retries reached. Last error: {e}",
-                            **log_kwargs,
-                        )
-                        raise
                 except AttributeError as e:
-                    # Special handling for 'Resource' object has no attribute 'create'
                     last_exception = e
-                    if "has no attribute 'create'" in str(e):
-                        log_with_context(
-                            logging.WARNING,
-                            f"API client error: {e}",
-                            **log_kwargs,
-                        )
-                        if attempt < max_retries:
-                            sleep_time = min(
-                                delay * (backoff_factor**attempt), max_delay
-                            )
-                            log_with_context(
-                                logging.INFO,
-                                f"Retrying in {sleep_time:.1f} seconds...",
-                                **log_kwargs,
-                            )
-                            time.sleep(sleep_time)
-                        else:
-                            log_with_context(
-                                logging.ERROR,
-                                f"Max retries reached. Last error: {e}",
-                                **log_kwargs,
-                            )
-                            raise
-                    else:
-                        # Re-raise other attribute errors
+                    if "has no attribute 'create'" not in str(e):
                         raise
+                    self._handle_retryable_error(
+                        e,
+                        attempt,
+                        max_retries,
+                        delay,
+                        backoff_factor,
+                        max_delay,
+                        log_kwargs,
+                    )
                 except Exception as e:
                     last_exception = e
-                    if attempt < max_retries:
-                        sleep_time = min(delay * (backoff_factor**attempt), max_delay)
-                        log_with_context(
-                            logging.INFO,
-                            f"Retrying in {sleep_time:.1f} seconds...",
-                            **log_kwargs,
-                        )
-                        time.sleep(sleep_time)
-                    else:
-                        log_with_context(
-                            logging.ERROR,
-                            f"Max retries reached. Last error: {e}",
-                            **log_kwargs,
-                        )
-                        raise
+                    self._handle_retryable_error(
+                        e,
+                        attempt,
+                        max_retries,
+                        delay,
+                        backoff_factor,
+                        max_delay,
+                        log_kwargs,
+                    )
 
             if last_exception:
                 raise last_exception
@@ -320,68 +329,64 @@ class RetryWrapper:
                 "body": None,
             }
 
-    def _extract_status_code(self, execute_method: Any, result: Any) -> int:  # noqa: C901
+    @staticmethod
+    def _try_status_from_response(method_self: Any, result: Any) -> int | None:
+        """Try to extract a status code from response object attributes.
+
+        Returns the status code if found, or ``None``.
+        """
+        if hasattr(method_self, "_response") and method_self._response:
+            if hasattr(method_self._response, "status"):
+                return int(method_self._response.status)
+            if hasattr(method_self._response, "status_code"):
+                return int(method_self._response.status_code)
+
+        if hasattr(method_self, "response") and method_self.response:
+            if hasattr(method_self.response, "status"):
+                return int(method_self.response.status)
+            if (
+                isinstance(method_self.response, tuple)
+                and len(method_self.response) > 0
+            ):
+                resp = method_self.response[0]
+                if hasattr(resp, "status"):
+                    return int(resp.status)
+
+        if isinstance(result, dict) and "status" in result:
+            status = result["status"]
+            if isinstance(status, (int, str)) and str(status).isdigit():
+                return int(status)
+
+        return None
+
+    @staticmethod
+    def _infer_status_from_http_verb(method_self: Any) -> int:
+        """Infer a conventional HTTP status code from the request method.
+
+        Falls back to 200 when the HTTP verb cannot be determined.
+        """
+        _VERB_TO_STATUS = {"POST": 201, "DELETE": 204}
+        if not (hasattr(method_self, "method") or hasattr(method_self, "_method")):
+            return 200
+        method = getattr(method_self, "method", getattr(method_self, "_method", "POST"))
+        method = method.upper() if method else "POST"
+        return _VERB_TO_STATUS.get(method, 200)
+
+    def _extract_status_code(self, execute_method: Any, result: Any) -> int:
         """Extract the actual HTTP status code from the response."""
         try:
-            # Try to get the status code from the underlying HTTP response
             method_self = (
                 execute_method.__self__ if hasattr(execute_method, "__self__") else None
             )
-
             if method_self:
-                # Look for common attributes that contain status information
-                # Google API client libraries sometimes store this in different places
-                if hasattr(method_self, "_response") and method_self._response:
-                    if hasattr(method_self._response, "status"):
-                        return int(method_self._response.status)
-                    elif hasattr(method_self._response, "status_code"):
-                        return int(method_self._response.status_code)
-
-                # Some clients store it in the httplib2 response object
-                if hasattr(method_self, "response") and method_self.response:
-                    if hasattr(method_self.response, "status"):
-                        return int(method_self.response.status)
-                    elif (
-                        isinstance(method_self.response, tuple)
-                        and len(method_self.response) > 0
-                    ):
-                        # httplib2 returns (response, content) tuple
-                        resp = method_self.response[0]
-                        if hasattr(resp, "status"):
-                            return int(resp.status)
-
-                # Check if the result itself contains status information
-                if isinstance(result, dict) and "status" in result:
-                    status = result["status"]
-                    if isinstance(status, (int, str)) and str(status).isdigit():
-                        return int(status)
-
-            # If we can't extract the actual status code, infer from the HTTP method
-            # This is a reasonable fallback based on REST conventions
-            if hasattr(method_self, "method") or hasattr(method_self, "_method"):
-                method = getattr(
-                    method_self, "method", getattr(method_self, "_method", "POST")
-                )
-                method = method.upper() if method else "POST"
-
-                # Standard HTTP status codes for successful operations
-                if method == "POST":
-                    return 201  # Created
-                elif method == "PUT":
-                    return 200  # OK
-                elif method == "DELETE":
-                    return 204  # No Content
-                elif method == "PATCH":
-                    return 200  # OK
-                else:  # GET and others
-                    return 200  # OK
-
+                status = self._try_status_from_response(method_self, result)
+                if status is not None:
+                    return status
+                return self._infer_status_from_http_verb(method_self)
         except (ValueError, TypeError, AttributeError):
             logging.debug(
                 "Could not extract status code from response, defaulting to 200"
             )
-
-        # Final fallback - assume 200 OK for successful responses
         return 200
 
     def _log_api_request(
