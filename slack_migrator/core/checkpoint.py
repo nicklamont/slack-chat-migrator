@@ -25,7 +25,7 @@ class CheckpointData:
     last_updated: str | None = None
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -61,7 +61,7 @@ def load_checkpoint(path: Path) -> CheckpointData | None:
 
 def save_checkpoint(path: Path, data: CheckpointData) -> None:
     """Atomically save checkpoint to disk (write .tmp + rename)."""
-    data.last_updated = _now_iso()
+    data.last_updated = now_iso()
     tmp = path.with_suffix(".tmp")
     try:
         tmp.write_text(json.dumps(asdict(data), indent=2) + "\n")

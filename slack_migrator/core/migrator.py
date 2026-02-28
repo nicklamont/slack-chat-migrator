@@ -17,9 +17,9 @@ from slack_migrator.constants import SPACE_NAME_PREFIX
 from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.checkpoint import (
     CheckpointData,
-    _now_iso,
     clear_checkpoint,
     load_checkpoint,
+    now_iso,
     save_checkpoint,
 )
 from slack_migrator.core.cleanup import cleanup_channel_handlers
@@ -393,7 +393,7 @@ class SlackToChatMigrator:
                     f"Resuming migration from checkpoint: {len(checkpoint.completed_channels)} channels already completed",
                 )
             else:
-                checkpoint = CheckpointData(started_at=_now_iso())
+                checkpoint = CheckpointData(started_at=now_iso())
 
             # Report unmapped user issues before starting migration (if any detected during initialization)
             if (
@@ -452,12 +452,12 @@ class SlackToChatMigrator:
                     )
                     continue
 
-                should_abort, had_errors = self.channel_processor.process_channel(ch)
-                if should_abort:
+                result = self.channel_processor.process_channel(ch)
+                if result.should_abort:
                     break
 
                 # Only checkpoint channels that completed without errors
-                if not had_errors:
+                if not result.had_errors:
                     checkpoint.completed_channels[channel_name] = str(time.time())
                     save_checkpoint(checkpoint_path, checkpoint)
 

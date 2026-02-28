@@ -7,7 +7,7 @@ import logging
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
@@ -34,6 +34,13 @@ from slack_migrator.utils.logging import (
 )
 
 
+class ChannelResult(NamedTuple):
+    """Result of processing a single channel."""
+
+    should_abort: bool
+    had_errors: bool
+
+
 class ChannelProcessor:
     """Handles per-channel processing during migration."""
 
@@ -53,7 +60,7 @@ class ChannelProcessor:
         self.file_handler = file_handler
         self.attachment_processor = attachment_processor
 
-    def process_channel(self, ch_dir: Path) -> tuple[bool, bool]:
+    def process_channel(self, ch_dir: Path) -> ChannelResult:
         """Process a single channel directory.
 
         Creates or reuses a space, imports messages, completes import mode,
@@ -63,9 +70,7 @@ class ChannelProcessor:
             ch_dir: Path to the channel's export directory.
 
         Returns:
-            A tuple of (should_abort, channel_had_errors) where should_abort
-            is True if the migration should break the outer loop, and
-            channel_had_errors indicates whether the channel encountered errors.
+            ChannelResult with should_abort and had_errors fields.
         """
         channel = ch_dir.name
 
@@ -85,7 +90,7 @@ class ChannelProcessor:
                 f"Skipping channel {channel} based on configuration",
                 channel=channel,
             )
-            return False, False
+            return ChannelResult(should_abort=False, had_errors=False)
 
         # Check for unresolved space conflicts
         if channel in self.state.errors.channel_conflicts:
@@ -97,7 +102,7 @@ class ChannelProcessor:
             self.state.errors.migration_issues[channel] = (
                 "Skipped due to duplicate space conflict - requires disambiguation in config.yaml"
             )
-            return False, True
+            return ChannelResult(should_abort=False, had_errors=True)
 
         # Setup channel-specific logging
         self._setup_channel_logging(channel)
@@ -115,7 +120,7 @@ class ChannelProcessor:
                 f"Skipping channel {channel} due to space creation permission error",
                 channel=channel,
             )
-            return False, True
+            return ChannelResult(should_abort=False, had_errors=True)
 
         # Set current space
         self.state.context.current_space = space
@@ -180,13 +185,13 @@ class ChannelProcessor:
                 "Aborting import after first channel due to errors",
                 channel=channel,
             )
-            return True, True  # Signal to break the loop
+            return ChannelResult(should_abort=True, had_errors=True)
 
         # Delete space if errors
         if channel_had_errors and not self.ctx.dry_run and not self.ctx.update_mode:
             self._delete_space_if_errors(space, channel)
 
-        return False, channel_had_errors
+        return ChannelResult(should_abort=False, had_errors=channel_had_errors)
 
     def _setup_channel_logging(self, channel: str) -> None:
         """Set up channel-specific log handler."""
