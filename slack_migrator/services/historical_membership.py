@@ -28,34 +28,17 @@ if TYPE_CHECKING:
     from slack_migrator.core.state import MigrationState
 
 
-def _collect_user_membership_data(  # noqa: C901
-    ctx: MigrationContext, state: MigrationState, channel: str
+def _scan_message_files_for_membership(
+    ch_dir: Any,
+    channel: str,
 ) -> tuple[dict[str, dict[str, Any]], set[str]]:
-    """Collect user participation data from message files and channel metadata.
+    """Scan all JSON message files to build user join/leave/message history.
 
-    Scans all JSON message files in the channel directory to build a map of
-    user membership events (join/leave times, first message times). Then
-    augments with the definitive member list from channel metadata.
-
-    Also stores the active user set on ``state.progress.active_users_by_channel``
-    for later use by :func:`add_regular_members`.
-
-    Args:
-        ctx: Immutable migration context.
-        state: Mutable migration state.
-        channel: Slack channel name.
-
-    Returns:
-        A tuple of ``(user_membership, active_users)`` where *user_membership*
-        maps Slack user IDs to dicts with ``join_time``, ``leave_time``,
-        ``active``, and ``first_message_time`` keys, and *active_users* is
-        the set of user IDs considered currently active.
+    Returns (user_membership, active_users) populated from message data only.
     """
     user_membership: dict[str, dict[str, Any]] = {}
     active_users: set[str] = set()
-    ch_dir = ctx.export_root / channel
 
-    # First pass: identify all users and their join/leave events
     for jf in sorted(ch_dir.glob("*.json")):
         try:
             with open(jf) as f:
@@ -64,7 +47,6 @@ def _collect_user_membership_data(  # noqa: C901
                 if m.get("type") != "message":
                     continue
 
-                # Track users who sent messages (all message types)
                 user_id = m.get("user")
                 if user_id:
                     timestamp = slack_ts_to_rfc3339(m["ts"])
@@ -81,7 +63,6 @@ def _collect_user_membership_data(  # noqa: C901
                     ):
                         user_membership[user_id]["first_message_time"] = timestamp
 
-                # Check for join/leave messages
                 subtype = m.get("subtype")
                 if subtype == CHANNEL_JOIN_SUBTYPE and "user" in m:
                     user_id = m["user"]
@@ -121,26 +102,61 @@ def _collect_user_membership_data(  # noqa: C901
                 channel=channel,
             )
 
-    # The channel metadata (channels.json) is the most reliable and definitive source for active members
-    # Reset active_users to ensure only the members from channels.json are considered active
-    active_users = set()  # Clear any users previously marked as active from messages
+    return user_membership, active_users
 
-    meta = ctx.channels_meta.get(channel, {})
+
+def _apply_channel_metadata_members(
+    meta: dict[str, Any],
+    user_membership: dict[str, dict[str, Any]],
+) -> set[str]:
+    """Override active_users with the definitive member list from channels.json.
+
+    Returns the authoritative active_users set.
+    """
+    active_users: set[str] = set()
     if "members" in meta and isinstance(meta["members"], list):
         for user_id in meta["members"]:
-            active_users.add(user_id)  # These users are definitely active now
+            active_users.add(user_id)
             if user_id not in user_membership:
-                # If user is in metadata but not seen in messages, add them with default times
                 user_membership[user_id] = {
                     "join_time": DEFAULT_FALLBACK_JOIN_TIME,
                     "leave_time": None,
                     "active": True,
                     "first_message_time": None,
                 }
+    return active_users
 
-    # Store active users to add back after import completes
-    # We'll use this for both regular membership and file permissions
-    # Log active user counts for debugging
+
+def _collect_user_membership_data(
+    ctx: MigrationContext, state: MigrationState, channel: str
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """Collect user participation data from message files and channel metadata.
+
+    Scans all JSON message files in the channel directory to build a map of
+    user membership events (join/leave times, first message times). Then
+    augments with the definitive member list from channel metadata.
+
+    Also stores the active user set on ``state.progress.active_users_by_channel``
+    for later use by :func:`add_regular_members`.
+
+    Args:
+        ctx: Immutable migration context.
+        state: Mutable migration state.
+        channel: Slack channel name.
+
+    Returns:
+        A tuple of ``(user_membership, active_users)`` where *user_membership*
+        maps Slack user IDs to dicts with ``join_time``, ``leave_time``,
+        ``active``, and ``first_message_time`` keys, and *active_users* is
+        the set of user IDs considered currently active.
+    """
+    ch_dir = ctx.export_root / channel
+    user_membership, _ = _scan_message_files_for_membership(ch_dir, channel)
+
+    # Channel metadata is the authoritative source for active members
+    meta = ctx.channels_meta.get(channel, {})
+    active_users = _apply_channel_metadata_members(meta, user_membership)
+
     log_with_context(
         logging.DEBUG,
         f"Identified {len(active_users)} active users for channel {channel}",
