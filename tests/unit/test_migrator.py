@@ -635,17 +635,18 @@ class TestDeleteSpaceIfErrors:
     def test_no_delete_when_cleanup_disabled(self):
         p = _make_channel_processor(config=MigrationConfig(cleanup_on_error=False))
         p._delete_space_if_errors("spaces/abc123", "general")
-        p.chat.spaces().delete.assert_not_called()
+        p.chat.delete_space.assert_not_called()
 
     def test_delete_when_cleanup_enabled(self):
         mock_chat = MagicMock()
+        mock_chat.delete_space.return_value = {}
         p = _make_channel_processor(
             config=MigrationConfig(cleanup_on_error=True), chat=mock_chat
         )
         p.state.spaces.created_spaces = {"general": "spaces/abc123"}
         p.state.progress.migration_summary = _make_summary(spaces_created=1)
         p._delete_space_if_errors("spaces/abc123", "general")
-        mock_chat.spaces().delete.assert_called_once_with(name="spaces/abc123")
+        mock_chat.delete_space.assert_called_once_with("spaces/abc123")
         assert "general" not in p.state.spaces.created_spaces
         assert p.state.progress.migration_summary["spaces_created"] == 0
 
@@ -653,7 +654,7 @@ class TestDeleteSpaceIfErrors:
         from google.auth.exceptions import RefreshError
 
         mock_chat = MagicMock()
-        mock_chat.spaces().delete().execute.side_effect = RefreshError("API error")
+        mock_chat.delete_space.side_effect = RefreshError("API error")
         p = _make_channel_processor(
             config=MigrationConfig(cleanup_on_error=True), chat=mock_chat
         )
@@ -666,7 +667,7 @@ class TestDeleteSpaceIfErrors:
         from google.auth.exceptions import TransportError
 
         mock_chat = MagicMock()
-        mock_chat.spaces().delete().execute.side_effect = TransportError("network down")
+        mock_chat.delete_space.side_effect = TransportError("network down")
         p = _make_channel_processor(
             config=MigrationConfig(cleanup_on_error=True), chat=mock_chat
         )
@@ -681,7 +682,7 @@ class TestDeleteSpaceIfErrors:
         mock_chat = MagicMock()
         resp = MagicMock()
         resp.status = 500
-        mock_chat.spaces().delete().execute.side_effect = HttpError(
+        mock_chat.delete_space.side_effect = HttpError(
             resp=resp, content=b"Server Error"
         )
         p = _make_channel_processor(
@@ -696,9 +697,7 @@ class TestDeleteSpaceIfErrors:
 
     def test_delete_propagates_unexpected_error(self):
         mock_chat = MagicMock()
-        mock_chat.spaces().delete().execute.side_effect = RuntimeError(
-            "truly unexpected"
-        )
+        mock_chat.delete_space.side_effect = RuntimeError("truly unexpected")
         p = _make_channel_processor(
             config=MigrationConfig(cleanup_on_error=True), chat=mock_chat
         )
@@ -728,13 +727,17 @@ class TestInitializeApiServices:
         with patch.object(m, "_initialize_dependent_services"):
             m._initialize_api_services()
 
-        assert m.chat is mock_chat
+        from slack_migrator.services.chat_adapter import ChatAdapter
+
+        assert isinstance(m.chat, ChatAdapter)
+        assert m.chat._svc is mock_chat
         assert m.drive is mock_drive
         assert m._api_services_initialized is True
 
     def test_dry_run_uses_noop_services(self, tmp_path):
-        """In dry-run mode, DryRunChatService and DryRunDriveService are injected."""
+        """In dry-run mode, DryRunChatService wrapped in ChatAdapter is injected."""
         from slack_migrator.services.chat.dry_run_service import DryRunChatService
+        from slack_migrator.services.chat_adapter import ChatAdapter
         from slack_migrator.services.drive.dry_run_service import DryRunDriveService
 
         m = _make_migrator(tmp_path, dry_run=True)
@@ -742,7 +745,8 @@ class TestInitializeApiServices:
         with patch.object(m, "_initialize_dependent_services"):
             m._initialize_api_services()
 
-        assert isinstance(m.chat, DryRunChatService)
+        assert isinstance(m.chat, ChatAdapter)
+        assert isinstance(m.chat._svc, DryRunChatService)
         assert isinstance(m.drive, DryRunDriveService)
         assert m._api_services_initialized is True
 
@@ -1124,7 +1128,7 @@ class TestListAllSpaces:
 
     def test_single_page(self):
         chat_service = MagicMock()
-        chat_service.spaces().list().execute.return_value = {
+        chat_service.list_spaces.return_value = {
             "spaces": [{"name": "spaces/abc"}, {"name": "spaces/def"}],
         }
         result = _list_all_spaces(chat_service)
@@ -1135,7 +1139,7 @@ class TestListAllSpaces:
         chat_service = MagicMock()
         # First call returns page with nextPageToken
         # Second call returns last page
-        chat_service.spaces().list().execute.side_effect = [
+        chat_service.list_spaces.side_effect = [
             {
                 "spaces": [{"name": "spaces/abc"}],
                 "nextPageToken": "page2",
@@ -1149,7 +1153,7 @@ class TestListAllSpaces:
 
     def test_empty_response(self):
         chat_service = MagicMock()
-        chat_service.spaces().list().execute.return_value = {}
+        chat_service.list_spaces.return_value = {}
         result = _list_all_spaces(chat_service)
         assert result == []
 
@@ -1160,7 +1164,7 @@ class TestListAllSpaces:
         resp.status = 500
 
         chat_service = MagicMock()
-        chat_service.spaces().list().execute.side_effect = HttpError(
+        chat_service.list_spaces.side_effect = HttpError(
             resp=resp, content=b"Server Error"
         )
         result = _list_all_spaces(chat_service)
@@ -1170,7 +1174,7 @@ class TestListAllSpaces:
         from google.auth.exceptions import RefreshError
 
         chat_service = MagicMock()
-        chat_service.spaces().list().execute.side_effect = RefreshError("network error")
+        chat_service.list_spaces.side_effect = RefreshError("network error")
         result = _list_all_spaces(chat_service)
         assert result == []
 
@@ -1178,13 +1182,13 @@ class TestListAllSpaces:
         from google.auth.exceptions import TransportError
 
         chat_service = MagicMock()
-        chat_service.spaces().list().execute.side_effect = TransportError("DNS failure")
+        chat_service.list_spaces.side_effect = TransportError("DNS failure")
         result = _list_all_spaces(chat_service)
         assert result == []
 
     def test_connection_error_propagates(self):
         chat_service = MagicMock()
-        chat_service.spaces().list().execute.side_effect = ConnectionError("refused")
+        chat_service.list_spaces.side_effect = ConnectionError("refused")
         with pytest.raises(ConnectionError):
             _list_all_spaces(chat_service)
 
@@ -1208,35 +1212,35 @@ class TestCleanupImportModeSpaces:
     def test_no_spaces_in_import_mode(self, mock_list):
         mock_list.return_value = [{"name": "spaces/abc"}]
         chat_service = MagicMock()
-        # get() returns space NOT in import mode
-        chat_service.spaces().get().execute.return_value = {"importMode": False}
+        # get_space() returns space NOT in import mode
+        chat_service.get_space.return_value = {"importMode": False}
         cleanup_import_mode_spaces(chat_service)
-        chat_service.spaces().completeImport.assert_not_called()
+        chat_service.complete_import.assert_not_called()
 
     @patch("slack_migrator.services.space_creator._list_all_spaces")
     def test_completes_import_mode_spaces(self, mock_list):
         mock_list.return_value = [{"name": "spaces/abc"}]
         chat_service = MagicMock()
-        chat_service.spaces().get().execute.return_value = {
+        chat_service.get_space.return_value = {
             "importMode": True,
             "externalUserAllowed": False,
         }
         cleanup_import_mode_spaces(chat_service)
-        chat_service.spaces().completeImport.assert_called_once_with(name="spaces/abc")
+        chat_service.complete_import.assert_called_once_with("spaces/abc")
 
     @patch("slack_migrator.services.space_creator._list_all_spaces")
     def test_preserves_external_user_access(self, mock_list):
         mock_list.return_value = [{"name": "spaces/xyz"}]
         chat_service = MagicMock()
-        chat_service.spaces().get().execute.return_value = {
+        chat_service.get_space.return_value = {
             "importMode": True,
             "externalUserAllowed": True,
         }
         cleanup_import_mode_spaces(chat_service)
-        chat_service.spaces().completeImport.assert_called_once()
-        chat_service.spaces().patch.assert_called_once_with(
+        chat_service.complete_import.assert_called_once()
+        chat_service.patch_space.assert_called_once_with(
             name="spaces/xyz",
-            updateMask="externalUserAllowed",
+            update_mask="externalUserAllowed",
             body={"externalUserAllowed": True},
         )
 
@@ -1246,13 +1250,13 @@ class TestCleanupImportModeSpaces:
 
         mock_list.return_value = [{"name": "spaces/fail"}]
         chat_service = MagicMock()
-        chat_service.spaces().get().execute.return_value = {
+        chat_service.get_space.return_value = {
             "importMode": True,
             "externalUserAllowed": False,
         }
         resp = MagicMock()
         resp.status = 500
-        chat_service.spaces().completeImport().execute.side_effect = HttpError(
+        chat_service.complete_import.side_effect = HttpError(
             resp=resp, content=b"Server Error"
         )
         # Should not raise
@@ -1262,15 +1266,13 @@ class TestCleanupImportModeSpaces:
     def test_handles_complete_import_refresh_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/fail"}]
         chat_service = MagicMock()
-        chat_service.spaces().get().execute.return_value = {
+        chat_service.get_space.return_value = {
             "importMode": True,
             "externalUserAllowed": False,
         }
         from google.auth.exceptions import RefreshError
 
-        chat_service.spaces().completeImport().execute.side_effect = RefreshError(
-            "boom"
-        )
+        chat_service.complete_import.side_effect = RefreshError("boom")
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
@@ -1278,15 +1280,13 @@ class TestCleanupImportModeSpaces:
     def test_handles_complete_import_transport_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/fail"}]
         chat_service = MagicMock()
-        chat_service.spaces().get().execute.return_value = {
+        chat_service.get_space.return_value = {
             "importMode": True,
             "externalUserAllowed": False,
         }
         from google.auth.exceptions import TransportError
 
-        chat_service.spaces().completeImport().execute.side_effect = TransportError(
-            "network timeout"
-        )
+        chat_service.complete_import.side_effect = TransportError("network timeout")
         # Should not raise — TransportError is caught
         cleanup_import_mode_spaces(chat_service)
 
@@ -1294,13 +1294,13 @@ class TestCleanupImportModeSpaces:
     def test_skips_spaces_with_empty_name(self, mock_list):
         mock_list.return_value = [{"name": ""}, {"name": "spaces/ok"}]
         chat_service = MagicMock()
-        chat_service.spaces().get().execute.return_value = {
+        chat_service.get_space.return_value = {
             "importMode": True,
             "externalUserAllowed": False,
         }
         cleanup_import_mode_spaces(chat_service)
         # Only the "spaces/ok" space should be checked
-        chat_service.spaces().get.assert_called()
+        chat_service.get_space.assert_called()
 
     @patch("slack_migrator.services.space_creator._list_all_spaces")
     def test_handles_get_exception(self, mock_list):
@@ -1308,7 +1308,7 @@ class TestCleanupImportModeSpaces:
         chat_service = MagicMock()
         from google.auth.exceptions import RefreshError
 
-        chat_service.spaces().get().execute.side_effect = RefreshError("get failed")
+        chat_service.get_space.side_effect = RefreshError("get failed")
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
@@ -1318,7 +1318,7 @@ class TestCleanupImportModeSpaces:
         chat_service = MagicMock()
         from google.auth.exceptions import TransportError
 
-        chat_service.spaces().get().execute.side_effect = TransportError("DNS timeout")
+        chat_service.get_space.side_effect = TransportError("DNS timeout")
         # Should not raise — TransportError is caught
         cleanup_import_mode_spaces(chat_service)
 
@@ -1326,13 +1326,13 @@ class TestCleanupImportModeSpaces:
     def test_handles_patch_exception(self, mock_list):
         mock_list.return_value = [{"name": "spaces/ok"}]
         chat_service = MagicMock()
-        chat_service.spaces().get().execute.return_value = {
+        chat_service.get_space.return_value = {
             "importMode": True,
             "externalUserAllowed": True,
         }
         from google.auth.exceptions import RefreshError
 
-        chat_service.spaces().patch().execute.side_effect = RefreshError("patch failed")
+        chat_service.patch_space.side_effect = RefreshError("patch failed")
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
@@ -1340,15 +1340,13 @@ class TestCleanupImportModeSpaces:
     def test_handles_patch_transport_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/ok"}]
         chat_service = MagicMock()
-        chat_service.spaces().get().execute.return_value = {
+        chat_service.get_space.return_value = {
             "importMode": True,
             "externalUserAllowed": True,
         }
         from google.auth.exceptions import TransportError
 
-        chat_service.spaces().patch().execute.side_effect = TransportError(
-            "connection reset"
-        )
+        chat_service.patch_space.side_effect = TransportError("connection reset")
         # Should not raise — TransportError is caught
         cleanup_import_mode_spaces(chat_service)
 

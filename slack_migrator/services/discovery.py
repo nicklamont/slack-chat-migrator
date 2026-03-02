@@ -17,10 +17,11 @@ from slack_migrator.utils.logging import log_with_context
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.chat_adapter import ChatAdapter
 
 
 def _fetch_all_migration_spaces(
-    chat: Any,
+    chat: ChatAdapter,
     channel_name_to_id: dict[str, str],
     state: MigrationState,
 ) -> dict[str, list[dict[str, Any]]]:
@@ -42,8 +43,7 @@ def _fetch_all_migration_spaces(
 
     page_token = None
     while True:
-        request = chat.spaces().list(pageSize=SPACES_PAGE_SIZE, pageToken=page_token)
-        response = request.execute()
+        response = chat.list_spaces(page_size=SPACES_PAGE_SIZE, page_token=page_token)
 
         for space in response.get("spaces", []):
             display_name = space.get("displayName", "")
@@ -84,7 +84,7 @@ def _fetch_all_migration_spaces(
 
 
 def _resolve_duplicate_spaces(
-    chat: Any,
+    chat: ChatAdapter,
     channel_name_to_id: dict[str, str],
     state: MigrationState,
     all_spaces_by_channel: dict[str, list[dict[str, Any]]],
@@ -117,11 +117,8 @@ def _resolve_duplicate_spaces(
         duplicate_spaces[channel_name] = spaces
         for space_info in spaces:
             try:
-                members_response = (
-                    chat.spaces()
-                    .members()
-                    .list(parent=space_info["space_name"], pageSize=1)
-                    .execute()
+                members_response = chat.list_memberships(
+                    parent=space_info["space_name"], page_size=1
                 )
                 if "memberships" in members_response:
                     count = len(members_response.get("memberships", []))
@@ -176,7 +173,7 @@ def _log_duplicate_spaces(
 
 
 def discover_existing_spaces(
-    chat: Any,
+    chat: ChatAdapter,
     channel_name_to_id: dict[str, str],
     state: MigrationState,
 ) -> tuple[dict[str, str], dict[str, list[dict[str, Any]]]]:
@@ -232,7 +229,7 @@ def discover_existing_spaces(
     return space_mappings, duplicate_spaces
 
 
-def get_last_message_timestamp(chat: Any, channel: str, space: str) -> float:
+def get_last_message_timestamp(chat: ChatAdapter, channel: str, space: str) -> float:
     """
     Query Google Chat API to get the timestamp of the last message in a space.
 
@@ -257,12 +254,9 @@ def get_last_message_timestamp(chat: Any, channel: str, space: str) -> float:
 
     try:
         # We only need the most recent message, so limit to 1 result sorted by createTime desc
-        request = (
-            chat.spaces()
-            .messages()
-            .list(parent=space, pageSize=1, orderBy="createTime desc")
+        response = chat.list_messages(
+            parent=space, page_size=1, order_by="createTime desc"
         )
-        response = request.execute()
 
         messages = response.get("messages", [])
         if messages:
@@ -507,7 +501,7 @@ def _apply_discovered_spaces_to_state(
 
 
 def load_existing_space_mappings(
-    ctx: MigrationContext, state: MigrationState, chat: Any
+    ctx: MigrationContext, state: MigrationState, chat: ChatAdapter
 ) -> None:
     """Load existing space mappings from Google Chat API into migrator state.
 
@@ -557,7 +551,7 @@ def load_existing_space_mappings(
 
 
 def load_space_mappings(
-    chat: Any, channel_name_to_id: dict[str, str], state: MigrationState
+    chat: ChatAdapter, channel_name_to_id: dict[str, str], state: MigrationState
 ) -> dict[str, str]:
     """Load space mappings for update mode.
 

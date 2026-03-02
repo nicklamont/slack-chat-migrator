@@ -109,7 +109,7 @@ class PermissionValidator:
                 "importMode": True,
                 "createTime": space_create_time,
             }
-            result = self.migrator.chat.spaces().create(body=test_space).execute()
+            result = self.migrator.chat.create_space(test_space)
             space_name = result.get("name")
             self.test_resources["space"] = space_name
             self.test_resources["space_create_time"] = space_create_time
@@ -122,7 +122,7 @@ class PermissionValidator:
         # Test 2: Space listing
         log_with_context(logging.INFO, "  • Testing space listing...")
         try:
-            self.migrator.chat.spaces().list(pageSize=1).execute()
+            self.migrator.chat.list_spaces(page_size=1)
             log_with_context(logging.INFO, "    ✓ Space listing: PASSED")
         except HttpError as e:
             self.permission_errors.append(f"Space listing failed: {e}")
@@ -159,9 +159,7 @@ class PermissionValidator:
         # Test 5: Member listing (may be limited in import mode but still testable for permissions)
         log_with_context(logging.INFO, "  • Testing member listing...")
         try:
-            self.migrator.chat.spaces().members().list(
-                parent=self.test_resources["space"]
-            ).execute()
+            self.migrator.chat.list_memberships(parent=self.test_resources["space"])
             log_with_context(logging.INFO, "    ✓ Member listing: PASSED")
         except HttpError as e:
             if "insufficient authentication scopes" in str(e).lower():
@@ -227,11 +225,8 @@ class PermissionValidator:
                 "createTime": past_create_time,
                 "deleteTime": past_delete_time,
             }
-            member_result = (
-                self.migrator.chat.spaces()
-                .members()
-                .create(parent=self.test_resources["space"], body=member_body)
-                .execute()
+            member_result = self.migrator.chat.create_membership(
+                parent=self.test_resources["space"], body=member_body
             )
             self.test_resources["member"] = member_result.get("name")
             log_with_context(
@@ -266,11 +261,8 @@ class PermissionValidator:
         log_with_context(logging.INFO, "  • Testing message creation...")
         try:
             message_body = {"text": "Permission test message - will be cleaned up"}
-            message_result = (
-                self.migrator.chat.spaces()
-                .messages()
-                .create(parent=self.test_resources["space"], body=message_body)
-                .execute()
+            message_result = self.migrator.chat.create_message(
+                parent=self.test_resources["space"], body=message_body
             )
             self.test_resources["message"] = message_result.get("name")
             log_with_context(logging.INFO, "    ✓ Message creation: PASSED")
@@ -339,9 +331,7 @@ class PermissionValidator:
         if "space" in self.test_resources:
             try:
                 # Try to delete the space directly
-                self.migrator.chat.spaces().delete(
-                    name=self.test_resources["space"]
-                ).execute()
+                self.migrator.chat.delete_space(name=self.test_resources["space"])
                 log_with_context(logging.DEBUG, "Cleaned up test space")
             except Exception as e:
                 # Import mode spaces often cannot be deleted, which is expected

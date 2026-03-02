@@ -19,12 +19,13 @@ from slack_migrator.utils.logging import log_with_context
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.chat_adapter import ChatAdapter
 
 
 def process_reactions_batch(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     message_name: str,
     reactions: list[dict[str, Any]],
@@ -170,7 +171,7 @@ def _should_skip_bot_reaction(
 
 def _build_user_batches(
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     requests_by_user: dict[str, list[str]],
     message_name: str,
@@ -247,7 +248,7 @@ def _build_user_batches(
 
 def _process_admin_reactions(
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     message_name: str,
     message_id: str,
     email: str,
@@ -265,13 +266,7 @@ def _process_admin_reactions(
     for emo in emojis:
         try:
             reaction_body = {"emoji": {"unicode": emo}}
-            (
-                chat.spaces()
-                .messages()
-                .reactions()
-                .create(parent=message_name, body=reaction_body)
-                .execute()
-            )
+            chat.create_reaction(parent=message_name, body=reaction_body)
         except HttpError as e:
             log_with_context(
                 logging.WARNING,
@@ -285,7 +280,7 @@ def _process_admin_reactions(
 
 def _add_reactions_to_batch(
     state: MigrationState,
-    svc: Any,
+    svc: ChatAdapter,
     batch: BatchHttpRequest,
     message_name: str,
     message_id: str,
@@ -297,11 +292,8 @@ def _add_reactions_to_batch(
         reaction_body = {"emoji": {"unicode": emo}}
 
         try:
-            request = (
-                svc.spaces()
-                .messages()
-                .reactions()
-                .create(parent=message_name, body=reaction_body)
+            request = svc.build_create_reaction_request(
+                parent=message_name, body=reaction_body
             )
             batch.add(request)
         except AttributeError as e:
@@ -315,13 +307,7 @@ def _add_reactions_to_batch(
                 channel=state.context.current_channel,
             )
             try:
-                (
-                    svc.spaces()
-                    .messages()
-                    .reactions()
-                    .create(parent=message_name, body=reaction_body)
-                    .execute()
-                )
+                svc.create_reaction(parent=message_name, body=reaction_body)
             except HttpError as inner_e:
                 log_with_context(
                     logging.WARNING,

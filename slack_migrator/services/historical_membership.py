@@ -26,6 +26,7 @@ from slack_migrator.utils.logging import log_with_context
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.chat_adapter import ChatAdapter
 
 
 def _scan_message_files_for_membership(
@@ -298,7 +299,7 @@ def _compute_membership_times(
 def _add_historical_members_batch(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     space: str,
     channel: str,
@@ -371,7 +372,7 @@ def _add_historical_members_batch(
             )
 
             # Use the admin user for adding members
-            chat.spaces().members().create(parent=space, body=membership_body).execute()
+            chat.create_membership(parent=space, body=membership_body)
 
             added_count += 1
             log_with_context(
@@ -429,7 +430,7 @@ def _add_historical_members_batch(
 def add_users_to_space(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     space: str,
     channel: str,

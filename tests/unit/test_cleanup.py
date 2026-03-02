@@ -43,40 +43,38 @@ def _mock_chat(
     complete_import_side_effect: BaseException | None = None,
     patch_side_effect: BaseException | None = None,
 ) -> MagicMock:
-    """Build a mock Google Chat API service.
+    """Build a mock ChatAdapter.
 
     By default, returns empty spaces list and a non-import-mode space.
     """
     chat = MagicMock()
 
-    # spaces().list().execute()
+    # chat.list_spaces()
     if list_side_effect:
-        chat.spaces().list().execute.side_effect = list_side_effect
+        chat.list_spaces.side_effect = list_side_effect
     else:
-        chat.spaces().list().execute.return_value = {"spaces": spaces_list or []}
+        chat.list_spaces.return_value = {"spaces": spaces_list or []}
 
-    # spaces().get(name=...).execute()
+    # chat.get_space(name)
     if get_side_effect:
-        chat.spaces().get.return_value.execute.side_effect = get_side_effect
+        chat.get_space.side_effect = get_side_effect
     else:
-        chat.spaces().get.return_value.execute.return_value = space_get or {
+        chat.get_space.return_value = space_get or {
             "name": "spaces/abc",
             "importMode": False,
         }
 
-    # spaces().completeImport(name=...).execute()
+    # chat.complete_import(name)
     if complete_import_side_effect:
-        (
-            chat.spaces().completeImport.return_value.execute.side_effect
-        ) = complete_import_side_effect
+        chat.complete_import.side_effect = complete_import_side_effect
     else:
-        chat.spaces().completeImport.return_value.execute.return_value = {}
+        chat.complete_import.return_value = {}
 
-    # spaces().patch(name=..., ...).execute()
+    # chat.patch_space(name=..., update_mask=..., body=...)
     if patch_side_effect:
-        chat.spaces().patch.return_value.execute.side_effect = patch_side_effect
+        chat.patch_space.side_effect = patch_side_effect
     else:
-        chat.spaces().patch.return_value.execute.return_value = {}
+        chat.patch_space.return_value = {}
 
     return chat
 
@@ -255,14 +253,14 @@ class TestRunCleanup:
         state = MigrationState()
 
         chat = MagicMock()
-        chat.spaces().list().execute.return_value = {"spaces": [{"name": "spaces/abc"}]}
-        chat.spaces().get.return_value.execute.return_value = {
+        chat.list_spaces.return_value = {"spaces": [{"name": "spaces/abc"}]}
+        chat.get_space.return_value = {
             "name": "spaces/abc",
             "displayName": "Slack #general",
             "importMode": True,
         }
-        chat.spaces().completeImport.return_value.execute.return_value = {}
-        chat.spaces().patch.return_value.execute.return_value = {}
+        chat.complete_import.return_value = {}
+        chat.patch_space.return_value = {}
 
         with patch(
             "slack_migrator.core.cleanup._complete_import_mode_spaces"
@@ -283,11 +281,11 @@ class TestRunCleanup:
         state = MigrationState()
 
         chat = MagicMock()
-        chat.spaces().list().execute.return_value = {
+        chat.list_spaces.return_value = {
             "spaces": [{"name": "spaces/a"}, {"name": "spaces/b"}]
         }
-        # First get() raises, second succeeds with no importMode
-        chat.spaces().get.return_value.execute.side_effect = [
+        # First get_space() raises, second succeeds with no importMode
+        chat.get_space.side_effect = [
             _http_error(404, "Not Found"),
             {"name": "spaces/b", "importMode": False},
         ]
@@ -310,7 +308,7 @@ class TestRunCleanup:
         state = MigrationState()
 
         chat = MagicMock()
-        chat.spaces().list().execute.return_value = {"spaces": []}
+        chat.list_spaces.return_value = {"spaces": []}
 
         # Force the outer try to raise
         with patch(
@@ -319,10 +317,8 @@ class TestRunCleanup:
         ):
             # Need import_mode_spaces to be non-empty so _complete is called
             chat2 = MagicMock()
-            chat2.spaces().list().execute.return_value = {
-                "spaces": [{"name": "spaces/x"}]
-            }
-            chat2.spaces().get.return_value.execute.return_value = {
+            chat2.list_spaces.return_value = {"spaces": [{"name": "spaces/x"}]}
+            chat2.get_space.return_value = {
                 "name": "spaces/x",
                 "importMode": True,
             }
@@ -343,8 +339,8 @@ class TestRunCleanup:
         state = MigrationState()
 
         chat = MagicMock()
-        chat.spaces().list().execute.return_value = {"spaces": [{"name": "spaces/x"}]}
-        chat.spaces().get.return_value.execute.return_value = {
+        chat.list_spaces.return_value = {"spaces": [{"name": "spaces/x"}]}
+        chat.get_space.return_value = {
             "name": "spaces/x",
             "importMode": True,
         }
@@ -369,8 +365,8 @@ class TestRunCleanup:
         state = MigrationState()
 
         chat = MagicMock()
-        chat.spaces().list().execute.return_value = {"spaces": [{"name": "spaces/x"}]}
-        chat.spaces().get.return_value.execute.return_value = {
+        chat.list_spaces.return_value = {"spaces": [{"name": "spaces/x"}]}
+        chat.get_space.return_value = {
             "name": "spaces/x",
             "importMode": True,
         }
@@ -406,7 +402,7 @@ class TestRunCleanup:
         state = MigrationState()
 
         chat = MagicMock()
-        chat.spaces().list().execute.return_value = {"spaces": [{"name": ""}, {}]}
+        chat.list_spaces.return_value = {"spaces": [{"name": ""}, {}]}
 
         with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
             run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
@@ -422,7 +418,7 @@ class TestRunCleanup:
         state = MigrationState()
 
         chat = MagicMock()
-        chat.spaces().list().execute.side_effect = ValueError("unexpected")
+        chat.list_spaces.side_effect = ValueError("unexpected")
 
         with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
             run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
@@ -438,10 +434,8 @@ class TestRunCleanup:
         state = MigrationState()
 
         chat = MagicMock()
-        chat.spaces().list().execute.return_value = {"spaces": [{"name": "spaces/a"}]}
-        chat.spaces().get.return_value.execute.side_effect = RefreshError(
-            "token expired"
-        )
+        chat.list_spaces.return_value = {"spaces": [{"name": "spaces/a"}]}
+        chat.get_space.side_effect = RefreshError("token expired")
 
         with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
             run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
@@ -626,9 +620,9 @@ class TestCompleteSingleSpace:
             ctx, state, chat, user_resolver, file_handler, "spaces/abc", space_info
         )
 
-        chat.spaces().completeImport.assert_called_once()
-        # patch() should NOT be called since no external users
-        chat.spaces().patch.assert_not_called()
+        chat.complete_import.assert_called_once()
+        # patch_space() should NOT be called since no external users
+        chat.patch_space.assert_not_called()
         mock_members.assert_called_once_with(
             ctx, state, chat, user_resolver, file_handler, "spaces/abc", "general"
         )
@@ -726,9 +720,9 @@ class TestCompleteSingleSpace:
             ctx, state, chat, MagicMock(), None, "spaces/abc", space_info
         )
 
-        chat.spaces().patch.assert_called_once_with(
+        chat.patch_space.assert_called_once_with(
             name="spaces/abc",
-            updateMask="externalUserAllowed",
+            update_mask="externalUserAllowed",
             body={"externalUserAllowed": True},
         )
 
@@ -749,9 +743,9 @@ class TestCompleteSingleSpace:
             ctx, state, chat, MagicMock(), None, "spaces/abc", space_info
         )
 
-        chat.spaces().patch.assert_called_once_with(
+        chat.patch_space.assert_called_once_with(
             name="spaces/abc",
-            updateMask="externalUserAllowed",
+            update_mask="externalUserAllowed",
             body={"externalUserAllowed": True},
         )
 
@@ -845,15 +839,15 @@ class TestCompleteSingleSpace:
             assert any("Error adding regular members" in msg for msg in log_messages)
 
     def test_chat_none_during_complete_import(self, mock_members: MagicMock) -> None:
-        """RuntimeError is raised when chat is None during completeImport."""
+        """AttributeError is raised when chat is None during complete_import."""
         ctx = _make_ctx()
         state = MigrationState()
         space_info = {"name": "spaces/abc"}
 
-        # chat=None should trigger RuntimeError which is NOT caught by
-        # the HttpError/RefreshError/TransportError handlers, so it will
-        # propagate up to the caller (_complete_import_mode_spaces)
-        with pytest.raises(RuntimeError, match="Chat API service not initialized"):
+        # chat=None will raise AttributeError on None.complete_import()
+        # which is NOT caught by the HttpError/RefreshError/TransportError
+        # handlers, so it propagates to the caller (_complete_import_mode_spaces)
+        with pytest.raises(AttributeError):
             _complete_single_space(
                 ctx, state, None, MagicMock(), None, "spaces/abc", space_info
             )
@@ -871,7 +865,7 @@ class TestCompleteSingleSpace:
             ctx, state, chat, MagicMock(), None, "spaces/abc", space_info
         )
 
-        chat.spaces().patch.assert_not_called()
+        chat.patch_space.assert_not_called()
         mock_members.assert_called_once()
 
 

@@ -8,6 +8,7 @@ from googleapiclient.errors import HttpError
 
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.state import MigrationState
+from slack_migrator.services.chat_adapter import ChatAdapter
 from slack_migrator.services.user_resolver import UserResolver
 from slack_migrator.utils.user_validation import UnmappedUserTracker
 
@@ -93,8 +94,12 @@ class TestGetDelegate:
         )
         mock_service.spaces.return_value.list.return_value.execute.assert_called_once()
         assert resolver.state.users.valid_users["user@example.com"] is True
-        assert resolver.state.users.chat_delegates["user@example.com"] is mock_service
-        assert result is mock_service
+        # Delegate is now wrapped in ChatAdapter
+        cached = resolver.state.users.chat_delegates["user@example.com"]
+        assert isinstance(cached, ChatAdapter)
+        assert cached._svc is mock_service
+        assert isinstance(result, ChatAdapter)
+        assert result._svc is mock_service
 
     @patch("slack_migrator.services.user_resolver.get_gcp_service")
     def test_valid_email_already_cached_returns_from_cache(self, mock_get_service):

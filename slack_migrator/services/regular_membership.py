@@ -23,11 +23,12 @@ from slack_migrator.utils.logging import log_with_context
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.chat_adapter import ChatAdapter
 
 
 def _collect_active_user_emails(
     ctx: MigrationContext,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     space: str,
     channel: str,
@@ -76,16 +77,14 @@ def _collect_active_user_emails(
 
         try:
             # Get current space settings
-            space_info = chat.spaces().get(name=space).execute()
+            space_info = chat.get_space(space)
             external_users_allowed = space_info.get("externalUserAllowed", False)
 
             # If external users are not allowed, update the space
             if not external_users_allowed:
                 update_body = {"externalUserAllowed": True}
                 update_mask = "externalUserAllowed"
-                chat.spaces().patch(
-                    name=space, updateMask=update_mask, body=update_body
-                ).execute()
+                chat.patch_space(name=space, update_mask=update_mask, body=update_body)
                 log_with_context(
                     logging.INFO,
                     f"Successfully enabled external user access for space {space}",
@@ -104,7 +103,7 @@ def _collect_active_user_emails(
 def _add_regular_members_batch(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     space: str,
     channel: str,
@@ -186,7 +185,7 @@ def _add_regular_members_batch(
 
             # API request details are already logged by API utilities
             # Use the admin user for adding members
-            chat.spaces().members().create(parent=space, body=membership_body).execute()
+            chat.create_membership(parent=space, body=membership_body)
 
             added_count += 1
             log_with_context(
@@ -320,7 +319,7 @@ def _find_admin_membership(
 
 def _verify_and_handle_admin(
     ctx: MigrationContext,
-    chat: Any,
+    chat: ChatAdapter,
     space: str,
     channel: str,
     active_users: set[str] | list[str],
@@ -346,7 +345,7 @@ def _verify_and_handle_admin(
             logging.DEBUG, f"Verifying members added to space {space}", channel=channel
         )
 
-        members_result = chat.spaces().members().list(parent=space).execute()
+        members_result = chat.list_memberships(parent=space)
         members = members_result.get("memberships", [])
 
         log_with_context(
@@ -400,7 +399,7 @@ def _verify_and_handle_admin(
             channel=channel,
         )
         try:
-            chat.spaces().members().delete(name=admin_membership).execute()
+            chat.delete_membership(name=admin_membership)
             log_with_context(
                 logging.INFO,
                 f"Successfully removed workspace admin from space {space}",
@@ -481,7 +480,7 @@ def _update_folder_permissions(
 def add_regular_members(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     file_handler: Any,
     space: str,

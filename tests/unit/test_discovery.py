@@ -32,15 +32,13 @@ def _make_space(
 
 def _setup_list_response(chat, pages):
     """
-    Configure chat.spaces().list().execute() to return pages in sequence.
+    Configure chat.list_spaces() to return pages in sequence.
 
     Args:
-        chat: The mock Chat API service.
+        chat: The mock ChatAdapter.
         pages: A list of dicts, each representing a page response.
     """
-    list_mock = MagicMock()
-    list_mock.execute = MagicMock(side_effect=[p for p in pages])
-    chat.spaces.return_value.list.return_value = list_mock
+    chat.list_spaces = MagicMock(side_effect=[p for p in pages])
 
 
 class TestDiscoverExistingSpaces:
@@ -189,7 +187,9 @@ class TestDiscoverExistingSpaces:
         members_mock.execute.return_value = {
             "memberships": [{"name": "m1"}, {"name": "m2"}]
         }
-        chat.spaces.return_value.members.return_value.list.return_value = members_mock
+        chat.list_memberships = MagicMock(
+            return_value=members_mock.execute.return_value
+        )
 
         _setup_list_response(
             chat,
@@ -235,7 +235,9 @@ class TestDiscoverExistingSpaces:
             "memberships": [{"name": "m1"}],
             "nextPageToken": "more",
         }
-        chat.spaces.return_value.members.return_value.list.return_value = members_mock
+        chat.list_memberships = MagicMock(
+            return_value=members_mock.execute.return_value
+        )
 
         _setup_list_response(
             chat,
@@ -262,11 +264,9 @@ class TestDiscoverExistingSpaces:
         state = MigrationState()
         channel_name_to_id = {"general": "C001"}
 
-        members_mock = MagicMock()
-        members_mock.execute.side_effect = HttpError(
-            Response({"status": "500"}), b"API error"
+        chat.list_memberships = MagicMock(
+            side_effect=HttpError(Response({"status": "500"}), b"API error")
         )
-        chat.spaces.return_value.members.return_value.list.return_value = members_mock
 
         _setup_list_response(
             chat,
@@ -298,9 +298,7 @@ class TestDiscoverExistingSpaces:
             resp=MagicMock(status=403),
             content=b"Forbidden",
         )
-        list_mock = MagicMock()
-        list_mock.execute.side_effect = http_error
-        chat.spaces.return_value.list.return_value = list_mock
+        chat.list_spaces = MagicMock(side_effect=http_error)
 
         space_mappings, duplicate_spaces = discover_existing_spaces(chat, {}, state)
 
@@ -443,7 +441,9 @@ class TestDiscoverExistingSpaces:
         # Members mock for duplicate disambiguation
         members_mock = MagicMock()
         members_mock.execute.return_value = {"memberships": []}
-        chat.spaces.return_value.members.return_value.list.return_value = members_mock
+        chat.list_memberships = MagicMock(
+            return_value=members_mock.execute.return_value
+        )
 
         _setup_list_response(
             chat,
@@ -472,11 +472,9 @@ class TestGetLastMessageTimestamp:
     """Tests for get_last_message_timestamp()."""
 
     def _make_chat(self, execute_return):
-        """Create a mock chat service with messages().list() configured."""
+        """Create a mock ChatAdapter with list_messages() configured."""
         chat = MagicMock()
-        messages_mock = MagicMock()
-        messages_mock.execute.return_value = execute_return
-        chat.spaces.return_value.messages.return_value.list.return_value = messages_mock
+        chat.list_messages = MagicMock(return_value=execute_return)
         return chat
 
     def test_returns_timestamp_with_z_suffix(self):
@@ -550,9 +548,7 @@ class TestGetLastMessageTimestamp:
             resp=MagicMock(status=404),
             content=b"Not Found",
         )
-        messages_mock = MagicMock()
-        messages_mock.execute.side_effect = http_error
-        chat.spaces.return_value.messages.return_value.list.return_value = messages_mock
+        chat.list_messages = MagicMock(side_effect=http_error)
 
         result = get_last_message_timestamp(chat, "general", "spaces/abc")
 
@@ -635,8 +631,8 @@ class TestLoadExistingSpaceMappings:
 
         load_existing_space_mappings(ctx, state, chat)
 
-        # Chat API should never be called
-        chat.spaces.assert_not_called()
+        # ChatAdapter methods should never be called
+        chat.list_spaces.assert_not_called()
         assert state.spaces.channel_to_space == {}
 
     @patch("slack_migrator.services.discovery.discover_existing_spaces")

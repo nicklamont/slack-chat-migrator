@@ -12,6 +12,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from slack_migrator.services.chat_adapter import ChatAdapter
+
 if TYPE_CHECKING:
     from slack_migrator.core.config import MigrationConfig
     from slack_migrator.core.state import MigrationState
@@ -32,7 +34,7 @@ class UserResolver:
         *,
         config: MigrationConfig,
         state: MigrationState,
-        chat: Any,
+        chat: ChatAdapter,
         creds_path: str,
         user_map: dict[str, str],
         unmapped_user_tracker: UnmappedUserTracker,
@@ -64,21 +66,22 @@ class UserResolver:
         self.workspace_domain = workspace_domain
         self._users_data: dict[str, dict[str, Any]] | None = None
 
-    def get_delegate(self, email: str) -> Any:
+    def get_delegate(self, email: str) -> ChatAdapter:
         """Get a Google Chat API service with user impersonation.
 
         Args:
             email: The Google Workspace email to impersonate.
 
         Returns:
-            An impersonated Chat API service, or the admin service on failure.
+            A ChatAdapter wrapping an impersonated service, or the admin
+            adapter on failure.
         """
         if not email:
             return self.chat
 
         if email not in self.state.users.valid_users:
             try:
-                test_service = get_gcp_service(
+                raw_service = get_gcp_service(
                     str(self.creds_path),
                     email,
                     "chat",
@@ -87,9 +90,10 @@ class UserResolver:
                     max_retries=self.config.max_retries,
                     retry_delay=self.config.retry_delay,
                 )
-                test_service.spaces().list(pageSize=1).execute()
+                # Validate impersonation with a lightweight API call
+                raw_service.spaces().list(pageSize=1).execute()
                 self.state.users.valid_users[email] = True
-                self.state.users.chat_delegates[email] = test_service
+                self.state.users.chat_delegates[email] = ChatAdapter(raw_service)
             except (HttpError, RefreshError, TransportError) as e:
                 error_code = e.resp.status if isinstance(e, HttpError) else "N/A"
                 log_with_context(

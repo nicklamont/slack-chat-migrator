@@ -537,23 +537,17 @@ class TestCompleteImportMode:
     def test_success(self):
         """Successfully completes import mode."""
         processor = _make_processor()
-        (
-            processor.chat.spaces.return_value.completeImport.return_value.execute.return_value
-        ) = {}
+        processor.chat.complete_import.return_value = {}
 
         result = processor._complete_import_mode("spaces/S1", "general", False)
 
         assert result is False
-        processor.chat.spaces.return_value.completeImport.assert_called_once_with(
-            name="spaces/S1"
-        )
+        processor.chat.complete_import.assert_called_once_with("spaces/S1")
 
     def test_api_error(self):
         """API error during completion sets channel_had_errors to True."""
         processor = _make_processor()
-        processor.chat.spaces.return_value.completeImport.return_value.execute.side_effect = RefreshError(
-            "token expired"
-        )
+        processor.chat.complete_import.side_effect = RefreshError("token expired")
 
         result = processor._complete_import_mode("spaces/S1", "general", False)
 
@@ -567,7 +561,7 @@ class TestCompleteImportMode:
         """HttpError during completion sets channel_had_errors to True."""
         processor = _make_processor()
         http_error = HttpError(resp=MagicMock(status=403), content=b"Forbidden")
-        processor.chat.spaces.return_value.completeImport.return_value.execute.side_effect = http_error
+        processor.chat.complete_import.side_effect = http_error
 
         result = processor._complete_import_mode("spaces/S1", "general", False)
 
@@ -585,8 +579,8 @@ class TestCompleteImportMode:
 
         result = processor._complete_import_mode("spaces/S1", "general", True)
 
-        # Should not attempt to call completeImport
-        processor.chat.spaces.return_value.completeImport.assert_not_called()
+        # Should not attempt to call complete_import
+        processor.chat.complete_import.assert_not_called()
         assert result is True
         assert (
             "spaces/S1",
@@ -598,15 +592,11 @@ class TestCompleteImportMode:
         processor = _make_processor(
             import_completion_strategy=ImportCompletionStrategy.FORCE_COMPLETE,
         )
-        (
-            processor.chat.spaces.return_value.completeImport.return_value.execute.return_value
-        ) = {}
+        processor.chat.complete_import.return_value = {}
 
         result = processor._complete_import_mode("spaces/S1", "general", True)
 
-        processor.chat.spaces.return_value.completeImport.assert_called_once_with(
-            name="spaces/S1"
-        )
+        processor.chat.complete_import.assert_called_once_with("spaces/S1")
         # channel_had_errors was True going in, but completion succeeded
         # The method returns the (potentially unchanged) value
         assert result is True  # still True because it was True going in
@@ -614,15 +604,11 @@ class TestCompleteImportMode:
     def test_dry_run_calls_completion_via_noop_service(self):
         """Dry run mode calls completeImport (handled by DryRunChatService)."""
         processor = _make_processor(dry_run=True)
-        (
-            processor.chat.spaces.return_value.completeImport.return_value.execute.return_value
-        ) = {}
+        processor.chat.complete_import.return_value = {}
 
         result = processor._complete_import_mode("spaces/S1", "general", False)
 
-        processor.chat.spaces.return_value.completeImport.assert_called_once_with(
-            name="spaces/S1"
-        )
+        processor.chat.complete_import.assert_called_once_with("spaces/S1")
         assert result is False
 
 
@@ -755,13 +741,11 @@ class TestDeleteSpaceIfErrors:
         processor = _make_processor(cleanup_on_error=True)
         processor.state.spaces.created_spaces["general"] = "spaces/S1"
         processor.state.progress.migration_summary["spaces_created"] = 1
-        processor.chat.spaces.return_value.delete.return_value.execute.return_value = {}
+        processor.chat.delete_space.return_value = {}
 
         processor._delete_space_if_errors("spaces/S1", "general")
 
-        processor.chat.spaces.return_value.delete.assert_called_once_with(
-            name="spaces/S1"
-        )
+        processor.chat.delete_space.assert_called_once_with("spaces/S1")
         assert "general" not in processor.state.spaces.created_spaces
         assert processor.state.progress.migration_summary["spaces_created"] == 0
 
@@ -771,15 +755,15 @@ class TestDeleteSpaceIfErrors:
 
         processor._delete_space_if_errors("spaces/S1", "general")
 
-        processor.chat.spaces.return_value.delete.assert_not_called()
+        processor.chat.delete_space.assert_not_called()
 
     def test_api_error_during_delete(self):
         """API error during space deletion is caught and logged."""
         processor = _make_processor(cleanup_on_error=True)
         processor.state.spaces.created_spaces["general"] = "spaces/S1"
         processor.state.progress.migration_summary["spaces_created"] = 1
-        processor.chat.spaces.return_value.delete.return_value.execute.side_effect = (
-            HttpError(resp=MagicMock(status=404), content=b"Not found")
+        processor.chat.delete_space.side_effect = HttpError(
+            resp=MagicMock(status=404), content=b"Not found"
         )
 
         # Should not raise

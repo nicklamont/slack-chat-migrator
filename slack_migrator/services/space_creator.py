@@ -29,6 +29,7 @@ from slack_migrator.utils.logging import log_with_context
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.chat_adapter import ChatAdapter
 
 
 def channel_has_external_users(
@@ -108,7 +109,7 @@ def channel_has_external_users(
 def create_space(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     channel: str,
 ) -> str:
@@ -191,7 +192,7 @@ def create_space(
     else:
         try:
             # Create the space in import mode
-            space = chat.spaces().create(body=body).execute()
+            space = chat.create_space(body)
             space_name = space["name"]
 
             # Increment the spaces created counter
@@ -233,11 +234,11 @@ def create_space(
 
                         update_mask = "spaceDetails"
 
-                        chat.spaces().patch(
+                        chat.patch_space(
                             name=space_name,
-                            updateMask=update_mask,
+                            update_mask=update_mask,
                             body=space_details,
-                        ).execute()
+                        )
 
                         log_with_context(
                             logging.INFO,
@@ -270,7 +271,7 @@ def create_space(
     return space_name
 
 
-def _list_all_spaces(chat_service: Any) -> list[dict[str, Any]]:
+def _list_all_spaces(chat_service: ChatAdapter) -> list[dict[str, Any]]:
     """Paginate through ``spaces().list()`` and return every space.
 
     Args:
@@ -283,10 +284,8 @@ def _list_all_spaces(chat_service: Any) -> list[dict[str, Any]]:
     page_token = None
     while True:
         try:
-            response = (
-                chat_service.spaces()
-                .list(pageSize=SPACES_PAGE_SIZE, pageToken=page_token)
-                .execute()
+            response = chat_service.list_spaces(
+                page_size=SPACES_PAGE_SIZE, page_token=page_token
             )
             spaces.extend(response.get("spaces", []))
             page_token = response.get("nextPageToken")
@@ -305,7 +304,7 @@ def _list_all_spaces(chat_service: Any) -> list[dict[str, Any]]:
     return spaces
 
 
-def cleanup_import_mode_spaces(chat_service: Any) -> None:
+def cleanup_import_mode_spaces(chat_service: ChatAdapter) -> None:
     """Complete import mode on any spaces still stuck in import mode.
 
     This is a standalone version of the cleanup logic that only requires a
@@ -331,7 +330,7 @@ def cleanup_import_mode_spaces(chat_service: Any) -> None:
         if not space_name:
             continue
         try:
-            space_info = chat_service.spaces().get(name=space_name).execute()
+            space_info = chat_service.get_space(space_name)
             if space_info.get("importMode"):
                 import_mode_spaces.append((space_name, space_info))
         except (HttpError, RefreshError, TransportError) as e:
@@ -351,7 +350,7 @@ def cleanup_import_mode_spaces(chat_service: Any) -> None:
 
     for space_name, space_info in import_mode_spaces:
         try:
-            chat_service.spaces().completeImport(name=space_name).execute()
+            chat_service.complete_import(space_name)
             log_with_context(
                 logging.INFO,
                 f"Completed import mode for space: {space_name}",
@@ -360,11 +359,11 @@ def cleanup_import_mode_spaces(chat_service: Any) -> None:
             # Preserve external user access if it was set
             if space_info.get("externalUserAllowed"):
                 try:
-                    chat_service.spaces().patch(
+                    chat_service.patch_space(
                         name=space_name,
-                        updateMask="externalUserAllowed",
+                        update_mask="externalUserAllowed",
                         body={"externalUserAllowed": True},
-                    ).execute()
+                    )
                     log_with_context(
                         logging.INFO,
                         f"Preserved external user access for: {space_name}",

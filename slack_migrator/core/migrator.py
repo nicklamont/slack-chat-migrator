@@ -31,6 +31,7 @@ from slack_migrator.core.migration_logging import (
 )
 from slack_migrator.core.state import MigrationState
 from slack_migrator.services.chat.dry_run_service import DryRunChatService
+from slack_migrator.services.chat_adapter import ChatAdapter
 from slack_migrator.services.discovery import (
     load_existing_space_mappings,
     load_space_mappings,
@@ -185,7 +186,10 @@ class SlackToChatMigrator:
                 logging.INFO,
                 "Dry-run mode: using no-op Chat and Drive services",
             )
-            self.chat = DryRunChatService(self.state)
+            raw_chat = DryRunChatService(self.state)
+            self.chat = ChatAdapter(raw_chat)
+            # Raw service kept for media uploads (ChatFileUploader)
+            self._raw_chat = raw_chat
             self.drive = DryRunDriveService()
         else:
             log_with_context(
@@ -193,7 +197,7 @@ class SlackToChatMigrator:
                 "Initializing Google Chat and Drive API services...",
             )
             creds_path_str = str(self.creds_path)
-            self.chat = get_gcp_service(
+            raw_chat = get_gcp_service(
                 creds_path_str,
                 self.workspace_admin,
                 "chat",
@@ -201,6 +205,9 @@ class SlackToChatMigrator:
                 max_retries=self.config.max_retries,
                 retry_delay=self.config.retry_delay,
             )
+            self.chat = ChatAdapter(raw_chat)
+            # Raw service kept for media uploads (ChatFileUploader)
+            self._raw_chat = raw_chat
             self.drive = get_gcp_service(
                 creds_path_str,
                 self.workspace_admin,
@@ -234,9 +241,11 @@ class SlackToChatMigrator:
     def _initialize_dependent_services(self) -> None:
         """Initialize services that depend on API clients."""
         # Initialize file handler with explicit deps (no migrator back-reference)
+        # FileHandler uses the raw chat service for media uploads
+        # (ChatFileUploader needs .media().upload()), not ChatAdapter
         self.file_handler = FileHandler(
             self.drive,
-            self.chat,
+            self._raw_chat,
             folder_id=None,
             config=self.config,
             workspace_domain=self.workspace_domain,

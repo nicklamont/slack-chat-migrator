@@ -82,14 +82,12 @@ def _make_send_deps(
     attachment_processor.process_message_attachments.return_value = []
     attachment_processor.count_message_files.return_value = 0
 
-    # Chat service mock — create chain: spaces().messages().create().execute()
+    # Chat adapter mock — set return value on the adapter method directly
     mock_result = {
         "name": "spaces/SPACE1/messages/MSG001",
         "thread": {"name": "spaces/SPACE1/threads/THREAD001"},
     }
-    (
-        chat.spaces.return_value.messages.return_value.create.return_value.execute.return_value
-    ) = mock_result
+    chat.create_message.return_value = mock_result
 
     return ctx, state, chat, user_resolver, attachment_processor
 
@@ -265,7 +263,7 @@ class TestSendMessage:
         assert result.message_name == "spaces/SPACE1/messages/MSG001"
         assert result.success is True
         assert state.progress.migration_summary["messages_created"] == 1
-        chat.spaces.return_value.messages.return_value.create.assert_called_once()
+        chat.create_message.assert_called_once()
 
     def test_dry_run_returns_non_success_and_does_not_call_api(self):
         """In dry run mode, no API call is made and a non-success SendResult is returned."""
@@ -277,7 +275,7 @@ class TestSendMessage:
         assert result.success is False
         # messages_created should NOT be incremented in dry run (handled elsewhere)
         assert state.progress.migration_summary["messages_created"] == 0
-        chat.spaces.return_value.messages.return_value.create.return_value.execute.assert_not_called()
+        chat.create_message.assert_not_called()
 
     def test_skips_bot_message_subtype_when_ignore_bots(self):
         """Messages with bot_message subtype are skipped when ignore_bots is True."""
@@ -372,14 +370,14 @@ class TestSendMessage:
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
         assert result.message_name == "spaces/SPACE1/messages/MSG001"
-        # Verify the create call included thread info
-        call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
+        # Verify the create_message call included thread info
+        call_kwargs = chat.create_message.call_args
         assert (
             call_kwargs[1]["body"]["thread"]["name"]
             == "spaces/SPACE1/threads/THREAD001"
         )
         assert (
-            call_kwargs[1]["messageReplyOption"]
+            call_kwargs[1]["message_reply_option"]
             == "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
         )
 
@@ -397,7 +395,7 @@ class TestSendMessage:
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
         assert result.message_name == "spaces/SPACE1/messages/MSG001"
-        call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
+        call_kwargs = chat.create_message.call_args
         assert call_kwargs[1]["body"]["thread"]["thread_key"] == "1700000000.000001"
 
     def test_new_thread_starter_uses_own_ts_as_thread_key(self):
@@ -407,7 +405,7 @@ class TestSendMessage:
 
         send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
+        call_kwargs = chat.create_message.call_args
         assert call_kwargs[1]["body"]["thread"]["thread_key"] == "1700000000.000001"
 
     def test_new_thread_stores_thread_mapping(self):
@@ -435,7 +433,7 @@ class TestSendMessage:
 
         assert result.message_name == "spaces/SPACE1/messages/MSG001"
         ur.handle_unmapped_user_message.assert_called_once()
-        call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
+        call_kwargs = chat.create_message.call_args
         assert call_kwargs[1]["body"]["text"] == "[Unknown User U099] Hello"
         assert call_kwargs[1]["body"]["sender"]["name"] == "users/admin@example.com"
 
@@ -454,7 +452,7 @@ class TestSendMessage:
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
         assert result.message_name == "spaces/SPACE1/messages/MSG001"
-        call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
+        call_kwargs = chat.create_message.call_args
         assert call_kwargs[1]["body"]["sender"]["name"] == "users/admin@example.com"
 
     def test_edited_message_adds_edit_indicator(self):
@@ -470,7 +468,7 @@ class TestSendMessage:
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
         assert result.message_name == "spaces/SPACE1/messages/MSG001"
-        call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
+        call_kwargs = chat.create_message.call_args
         assert "_(edited at " in call_kwargs[1]["body"]["text"]
 
     def test_edited_message_stores_mapping_with_edit_key(self):
@@ -520,9 +518,7 @@ class TestSendMessage:
         """HttpError from the API is caught, logged, and returns a failed SendResult."""
         ctx, state, chat, ur, ap = _make_send_deps()
         http_error = _make_http_error(status=500, content=b"Internal Server Error")
-        (
-            chat.spaces.return_value.messages.return_value.create.return_value.execute.side_effect
-        ) = http_error
+        chat.create_message.side_effect = http_error
         msg = {"ts": "1700000000.000001", "user": "U001", "text": "Hello"}
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
@@ -629,7 +625,7 @@ class TestSendMessage:
 
         send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
+        call_kwargs = chat.create_message.call_args
         body_text = call_kwargs[1]["body"]["text"]
         assert "https://drive.google.com/file/d/abc123/view" in body_text
 
@@ -644,7 +640,7 @@ class TestSendMessage:
 
         send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
+        call_kwargs = chat.create_message.call_args
         assert call_kwargs[1]["body"]["attachment"] == [non_drive_attachment]
 
     def test_no_user_id_message_has_no_sender(self):
@@ -654,7 +650,7 @@ class TestSendMessage:
 
         send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        call_kwargs = chat.spaces.return_value.messages.return_value.create.call_args
+        call_kwargs = chat.create_message.call_args
         assert "sender" not in call_kwargs[1]["body"]
 
     def test_dry_run_in_update_mode_log_prefix(self):
@@ -788,8 +784,8 @@ class TestProcessReactionsBatch:
             ctx, state, chat, ur, "spaces/S1/messages/M1", reactions, "M1"
         )
 
-        # Verify synchronous create was called via admin service
-        chat.spaces.return_value.messages.return_value.reactions.return_value.create.assert_called()
+        # Verify synchronous create_reaction was called via admin service
+        chat.create_reaction.assert_called()
 
     def test_batch_execution_error_is_caught(self):
         """HttpError during batch.execute() is logged and does not raise."""
@@ -885,7 +881,7 @@ class TestSendIntro:
 
         send_intro(ctx, state, chat, "spaces/SPACE1", "general")
 
-        chat.spaces.return_value.messages.return_value.create.assert_called_once()
+        chat.create_message.assert_called_once()
         assert state.progress.migration_summary["messages_created"] == 1
 
     @patch("slack_migrator.services.message_sender.time")
@@ -897,7 +893,7 @@ class TestSendIntro:
         send_intro(ctx, state, chat, "spaces/SPACE1", "general")
 
         assert state.progress.migration_summary["messages_created"] == 1
-        chat.spaces.return_value.messages.return_value.create.assert_called_once()
+        chat.create_message.assert_called_once()
 
     def test_update_mode_skips_intro(self):
         """In update mode, intro messages are not resent."""
@@ -905,7 +901,7 @@ class TestSendIntro:
 
         send_intro(ctx, state, chat, "spaces/SPACE1", "general")
 
-        chat.spaces.return_value.messages.return_value.create.return_value.execute.assert_not_called()
+        chat.create_message.assert_not_called()
         assert state.progress.migration_summary["messages_created"] == 0
 
     @patch("slack_migrator.services.message_sender.time")
@@ -913,9 +909,9 @@ class TestSendIntro:
         """API errors during intro send are caught and do not raise."""
         mock_time.time.return_value = 1700000000
         ctx, state, chat = self._setup()
-        (
-            chat.spaces.return_value.messages.return_value.create.return_value.execute.side_effect
-        ) = HttpError(Response({"status": "500"}), b"API Error")
+        chat.create_message.side_effect = HttpError(
+            Response({"status": "500"}), b"API Error"
+        )
 
         # Should not raise
         send_intro(ctx, state, chat, "spaces/SPACE1", "general")
@@ -928,7 +924,7 @@ class TestSendIntro:
 
         send_intro(ctx, state, chat, "spaces/SPACE1", "general")
 
-        chat.spaces.return_value.messages.return_value.create.assert_called_once()
+        chat.create_message.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

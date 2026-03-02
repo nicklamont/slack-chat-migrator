@@ -27,6 +27,7 @@ from slack_migrator.utils.logging import (
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.chat_adapter import ChatAdapter
 
 
 def _is_bot_message(
@@ -217,7 +218,7 @@ def _should_skip_message(
 def _handle_send_result(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     result: dict[str, Any],
     message: dict[str, Any],
@@ -395,13 +396,13 @@ def _handle_send_error(
 
 
 def _resolve_chat_service(
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     user_email: str | None,
     channel: str,
     ts: str,
     user_id: str,
-) -> Any:
+) -> ChatAdapter:
     """Return the appropriate Chat service for sending a message.
 
     Uses impersonation when available for the user, otherwise falls back
@@ -435,7 +436,7 @@ def _resolve_chat_service(
 def send_message(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     attachment_processor: Any,
     space: str,
@@ -549,18 +550,6 @@ def send_message(
             ts,
         )
 
-        # Create a new message with the Google Chat API
-        # In import mode, we create separate messages for edits
-        request_params = {
-            "parent": space,
-            "body": payload,
-            "messageId": message_id,
-        }
-
-        # Add messageReplyOption if needed
-        if message_reply_option:
-            request_params["messageReplyOption"] = message_reply_option
-
         # Send the message using the appropriate service
         log_with_context(
             logging.DEBUG,
@@ -568,7 +557,12 @@ def send_message(
             channel=channel,
             ts=ts,
         )
-        result = chat_service.spaces().messages().create(**request_params).execute()
+        result = chat_service.create_message(
+            parent=space,
+            body=payload,
+            message_id=message_id,
+            message_reply_option=message_reply_option,
+        )
         message_name: str | None = result.get("name")
 
         _handle_send_result(
@@ -675,7 +669,7 @@ def track_message_stats(
 def send_intro(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     space: str,
     channel: str,
 ) -> None:
@@ -743,7 +737,7 @@ def send_intro(
         }
 
         # Send the message
-        (chat.spaces().messages().create(parent=space, body=message_body).execute())
+        chat.create_message(parent=space, body=message_body)
         # Increment the counter
         state.progress.migration_summary["messages_created"] += 1
 

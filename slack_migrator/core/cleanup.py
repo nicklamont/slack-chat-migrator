@@ -28,6 +28,7 @@ from slack_migrator.utils.logging import log_with_context
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.chat_adapter import ChatAdapter
 
 
 def cleanup_channel_handlers(state: MigrationState) -> None:
@@ -60,7 +61,7 @@ def cleanup_channel_handlers(state: MigrationState) -> None:
 
 
 def _list_spaces_in_import_mode(
-    chat: Any,
+    chat: ChatAdapter,
 ) -> list[tuple[str, dict]] | None:
     """List all spaces and filter to those still in import mode.
 
@@ -69,9 +70,7 @@ def _list_spaces_in_import_mode(
     """
     log_with_context(logging.DEBUG, "Listing all spaces to check for import mode...")
     try:
-        if chat is None:
-            raise RuntimeError("Chat API service not initialized")
-        spaces = chat.spaces().list().execute().get("spaces", [])
+        spaces = chat.list_spaces().get("spaces", [])
     except HttpError as http_e:
         log_with_context(
             logging.ERROR,
@@ -100,9 +99,7 @@ def _list_spaces_in_import_mode(
             continue
 
         try:
-            if chat is None:
-                raise RuntimeError("Chat API service not initialized")
-            space_info = chat.spaces().get(name=space_name).execute()
+            space_info = chat.get_space(space_name)
             if space_info.get("importMode"):
                 import_mode_spaces.append((space_name, space_info))
         except HttpError as http_e:
@@ -132,7 +129,7 @@ def _list_spaces_in_import_mode(
 def run_cleanup(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     file_handler: Any | None,
 ) -> None:
@@ -212,7 +209,7 @@ def run_cleanup(
 def _complete_import_mode_spaces(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     file_handler: Any | None,
     import_mode_spaces: list[tuple[str, dict]],
@@ -285,7 +282,7 @@ def _complete_import_mode_spaces(
 def _complete_single_space(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     file_handler: Any | None,
     space_name: str,
@@ -323,9 +320,7 @@ def _complete_single_space(
 
     # --- Complete import mode ---------------------------------------------
     try:
-        if chat is None:
-            raise RuntimeError("Chat API service not initialized")
-        chat.spaces().completeImport(name=space_name).execute()
+        chat.complete_import(space_name)
         log_with_context(
             logging.DEBUG,
             f"Successfully completed import mode for space: {space_name}",
@@ -357,13 +352,11 @@ def _complete_single_space(
     # --- Preserve external user access ------------------------------------
     if external_users_allowed:
         try:
-            if chat is None:
-                raise RuntimeError("Chat API service not initialized")
-            chat.spaces().patch(
+            chat.patch_space(
                 name=space_name,
-                updateMask="externalUserAllowed",
+                update_mask="externalUserAllowed",
                 body={"externalUserAllowed": True},
-            ).execute()
+            )
             log_with_context(
                 logging.INFO,
                 f"Preserved external user access for space: {space_name}",

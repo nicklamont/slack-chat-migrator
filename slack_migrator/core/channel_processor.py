@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.chat_adapter import ChatAdapter
 
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
@@ -48,7 +49,7 @@ class ChannelProcessor:
         self,
         ctx: MigrationContext,
         state: MigrationState,
-        chat: Any,
+        chat: ChatAdapter,
         user_resolver: Any,
         file_handler: Any | None,
         attachment_processor: Any,
@@ -441,9 +442,7 @@ class ChannelProcessor:
                     channel=channel,
                 )
 
-                if self.chat is None:
-                    raise RuntimeError("Chat API service not initialized")
-                self.chat.spaces().completeImport(name=space).execute()
+                self.chat.complete_import(space)
 
                 log_with_context(
                     logging.INFO,
@@ -594,9 +593,7 @@ class ChannelProcessor:
                 f"Deleting space {space_name} due to errors",
                 space_name=space_name,
             )
-            if self.chat is None:
-                raise RuntimeError("Chat API service not initialized")
-            self.chat.spaces().delete(name=space_name).execute()
+            self.chat.delete_space(space_name)
             log_with_context(
                 logging.INFO,
                 f"Successfully deleted space {space_name}",
