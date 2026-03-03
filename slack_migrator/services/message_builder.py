@@ -18,6 +18,8 @@ from slack_migrator.utils.logging import (
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.message_attachments import MessageAttachmentProcessor
+    from slack_migrator.services.user_resolver import UserResolver
 
 
 MESSAGE_ID_MAX_LENGTH = 63
@@ -27,7 +29,7 @@ CLIENT_EDIT_PREFIX = "client-slack-edit-"
 
 def build_user_map_with_overrides(
     ctx: MigrationContext,
-    user_resolver: Any,
+    user_resolver: UserResolver,
 ) -> dict[str, str]:
     """Build the user map with overrides applied for all users.
 
@@ -45,7 +47,7 @@ def build_user_map_with_overrides(
 def build_message_payload(
     ctx: MigrationContext,
     state: MigrationState,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     message: dict[str, Any],
     ts: str,
     user_id: str,
@@ -236,8 +238,8 @@ def generate_message_id(ts: str, is_edited: bool, edited_ts: str) -> str:
 
 
 def process_attachments(
-    user_resolver: Any,
-    attachment_processor: Any,
+    user_resolver: UserResolver,
+    attachment_processor: MessageAttachmentProcessor,
     message: dict[str, Any],
     channel: str,
     space: str,

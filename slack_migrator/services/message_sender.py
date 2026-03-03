@@ -26,15 +26,17 @@ from slack_migrator.utils.logging import (
 )
 
 if TYPE_CHECKING:
+    from slack_migrator.core.config import MigrationConfig
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
     from slack_migrator.services.chat_adapter import ChatAdapter
+    from slack_migrator.services.message_attachments import MessageAttachmentProcessor
     from slack_migrator.services.user_resolver import UserResolver
 
 
 def _is_bot_message(
-    config: Any,
-    user_resolver: Any,
+    config: MigrationConfig,
+    user_resolver: UserResolver,
     message: dict[str, Any],
     user_id: str,
     channel: str,
@@ -130,8 +132,8 @@ def _is_empty_message(message: dict[str, Any]) -> bool:
 
 
 def _count_reactions_excluding_bots(
-    config: Any,
-    user_resolver: Any,
+    config: MigrationConfig,
+    user_resolver: UserResolver,
     message: dict[str, Any],
 ) -> int:
     """Count reactions on a message, excluding bot reactions when configured."""
@@ -149,7 +151,7 @@ def _count_reactions_excluding_bots(
 def _should_skip_message(
     ctx: MigrationContext,
     state: MigrationState,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     message: dict[str, Any],
     ts: str,
     user_id: str,
@@ -215,7 +217,7 @@ def _handle_send_result(
     ctx: MigrationContext,
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     result: dict[str, Any],
     message: dict[str, Any],
     message_name: str | None,
@@ -435,8 +437,8 @@ def send_message(
     ctx: MigrationContext,
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
-    attachment_processor: Any,
+    user_resolver: UserResolver,
+    attachment_processor: MessageAttachmentProcessor,
     space: str,
     message: dict[str, Any],
     user_map_with_overrides: dict[str, str] | None = None,
@@ -595,8 +597,8 @@ def send_message(
 def track_message_stats(
     ctx: MigrationContext,
     state: MigrationState,
-    user_resolver: Any,
-    attachment_processor: Any,
+    user_resolver: UserResolver,
+    attachment_processor: MessageAttachmentProcessor,
     m: dict[str, Any],
 ) -> None:
     """Handle tracking message stats in both dry run and normal mode.

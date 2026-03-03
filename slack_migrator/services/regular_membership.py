@@ -25,12 +25,14 @@ if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
     from slack_migrator.services.chat_adapter import ChatAdapter
+    from slack_migrator.services.file import FileHandler
+    from slack_migrator.services.user_resolver import UserResolver
 
 
 def _collect_active_user_emails(
     ctx: MigrationContext,
     chat: ChatAdapter,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     space: str,
     channel: str,
     active_users: set[str] | list[str],
@@ -105,7 +107,7 @@ def _add_regular_members_batch(
     ctx: MigrationContext,
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     space: str,
     channel: str,
     active_users: set[str] | list[str],
@@ -421,7 +423,7 @@ def _verify_and_handle_admin(
 
 
 def _update_folder_permissions(
-    file_handler: Any,
+    file_handler: FileHandler | None,
     channel: str,
     active_user_emails: list[str],
 ) -> None:
@@ -482,8 +484,8 @@ def add_regular_members(
     ctx: MigrationContext,
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
-    file_handler: Any,
+    user_resolver: UserResolver,
+    file_handler: FileHandler | None,
     space: str,
     channel: str,
 ) -> None:

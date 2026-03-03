@@ -28,8 +28,8 @@ from slack_migrator.utils.logging import log_with_context
 class PermissionCheckContext:
     """Lightweight context carrying only what PermissionValidator needs."""
 
-    chat: Any
-    drive: Any
+    chat: ChatAdapter
+    drive: DriveAdapter
     workspace_admin: str
 
 
@@ -298,7 +298,7 @@ class PermissionValidator:
             test_file = self.migrator.drive.create_file(
                 body=file_metadata, media_body=media_body
             )
-            file_id = test_file.get("id")
+            file_id: str = test_file["id"]
             self.test_resources["drive_file"] = file_id
 
             # Test file sharing permissions

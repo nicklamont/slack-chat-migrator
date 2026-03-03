@@ -20,13 +20,14 @@ if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
     from slack_migrator.services.chat_adapter import ChatAdapter
+    from slack_migrator.services.user_resolver import UserResolver
 
 
 def process_reactions_batch(
     ctx: MigrationContext,
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     message_name: str,
     reactions: list[dict[str, Any]],
     message_id: str,
@@ -76,7 +77,7 @@ def process_reactions_batch(
 def _group_and_filter_reactions(
     ctx: MigrationContext,
     state: MigrationState,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     reactions: list[dict[str, Any]],
     message_id: str,
 ) -> tuple[dict[str, list[str]], int]:
@@ -144,7 +145,7 @@ def _group_and_filter_reactions(
 
 def _should_skip_bot_reaction(
     ctx: MigrationContext,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     uid: str,
     emoji_name: str,
     message_id: str,
@@ -172,7 +173,7 @@ def _should_skip_bot_reaction(
 def _build_user_batches(
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     requests_by_user: dict[str, list[str]],
     message_name: str,
     message_id: str,

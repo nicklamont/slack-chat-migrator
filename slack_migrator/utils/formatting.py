@@ -10,7 +10,11 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from slack_migrator.core.state import MigrationState
+    from slack_migrator.utils.user_validation import UnmappedUserTracker
 
 import emoji
 
@@ -392,8 +396,8 @@ def parse_slack_blocks(message: dict) -> str:
 def convert_formatting(
     text: str,
     user_map: dict[str, str],
-    state: Any = None,
-    unmapped_user_tracker: Any = None,
+    state: MigrationState | None = None,
+    unmapped_user_tracker: UnmappedUserTracker | None = None,
 ) -> str:
     """
     Convert Slack-specific markdown to Google Chat compatible format.
@@ -428,7 +432,7 @@ def convert_formatting(
             return f"<users/{gchat_user_id}>"
 
         # Enhanced logging and tracking for unmapped user mentions
-        if unmapped_user_tracker:
+        if unmapped_user_tracker and state is not None:
             current_channel = state.context.current_channel or "unknown"
             current_ts = state.context.current_message_ts or "unknown"
 

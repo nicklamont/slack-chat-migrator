@@ -13,6 +13,9 @@ if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
     from slack_migrator.services.chat_adapter import ChatAdapter
+    from slack_migrator.services.file import FileHandler
+    from slack_migrator.services.message_attachments import MessageAttachmentProcessor
+    from slack_migrator.services.user_resolver import UserResolver
 
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
@@ -53,9 +56,9 @@ class ChannelProcessor:
         ctx: MigrationContext,
         state: MigrationState,
         chat: ChatAdapter,
-        user_resolver: Any,
-        file_handler: Any | None,
-        attachment_processor: Any,
+        user_resolver: UserResolver,
+        file_handler: FileHandler | None,
+        attachment_processor: MessageAttachmentProcessor,
     ) -> None:
         self.ctx = ctx
         self.state = state

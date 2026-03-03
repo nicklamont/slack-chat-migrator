@@ -19,13 +19,15 @@ if TYPE_CHECKING:
     from slack_migrator.core.config import MigrationConfig
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.file import FileHandler
+    from slack_migrator.services.user_resolver import UserResolver
 
 
 def print_dry_run_summary(
     ctx: MigrationContext,
     state: MigrationState,
-    user_resolver: Any,
-    file_handler: Any | None = None,
+    user_resolver: UserResolver,
+    file_handler: FileHandler | None = None,
     report_file: str | None = None,
 ) -> None:
     """Print a summary of the dry run to the console.
@@ -233,7 +235,7 @@ def _build_recommendations(
 def _build_space_details(
     state: MigrationState,
     user_map: dict[str, str],
-    user_resolver: Any,
+    user_resolver: UserResolver,
     failed_by_channel: dict[str, list[FailedMessage]],
 ) -> tuple[dict[str, Any], list[str]]:
     """Build per-space stats and identify skipped channels.
@@ -291,7 +293,7 @@ def _build_space_details(
 
 def _build_user_section(
     user_map: dict[str, str],
-    user_resolver: Any,
+    user_resolver: UserResolver,
     users_without_email: list[dict[str, Any]],
     recommendations: list[dict[str, str]],
 ) -> tuple[dict[str, Any], dict[str, str]]:
@@ -362,8 +364,8 @@ def _build_user_section(
 def generate_report(
     ctx: MigrationContext,
     state: MigrationState,
-    user_resolver: Any,
-    file_handler: Any | None = None,
+    user_resolver: UserResolver,
+    file_handler: FileHandler | None = None,
 ) -> str:
     """Generate a detailed migration report.
 
