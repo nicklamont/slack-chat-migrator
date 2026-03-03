@@ -23,6 +23,7 @@ from slack_migrator.constants import (
     SPACE_TYPE,
     SPACES_PAGE_SIZE,
 )
+from slack_migrator.exceptions import SpacePermissionError
 from slack_migrator.utils.api import slack_ts_to_rfc3339
 from slack_migrator.utils.logging import log_with_context
 
@@ -30,10 +31,6 @@ if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
     from slack_migrator.services.chat_adapter import ChatAdapter
-
-
-class SpacePermissionError(Exception):
-    """Raised when space creation fails due to a 403 permission error."""
 
 
 def channel_has_external_users(

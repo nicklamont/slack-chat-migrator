@@ -13,7 +13,7 @@ from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.config import ImportCompletionStrategy, MigrationConfig
 from slack_migrator.core.context import MigrationContext
 from slack_migrator.core.state import MigrationState, _default_migration_summary
-from slack_migrator.services.space_creator import SpacePermissionError
+from slack_migrator.exceptions import SpacePermissionError
 from slack_migrator.types import SendResult
 
 # ---------------------------------------------------------------------------

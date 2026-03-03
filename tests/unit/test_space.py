@@ -17,6 +17,7 @@ from slack_migrator.constants import (
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.context import MigrationContext
 from slack_migrator.core.state import MigrationState, _default_migration_summary
+from slack_migrator.exceptions import SpacePermissionError
 from slack_migrator.services.historical_membership import add_users_to_space
 from slack_migrator.services.regular_membership import add_regular_members
 from slack_migrator.services.space_creator import (
@@ -361,8 +362,6 @@ class TestCreateSpace:
 
     def test_permission_denied_raises_space_permission_error(self):
         """403 PERMISSION_DENIED raises SpacePermissionError."""
-        from slack_migrator.services.space_creator import SpacePermissionError
-
         ctx, state, chat, user_resolver = self._setup(
             channels_meta={"dev": {"members": []}},
         )

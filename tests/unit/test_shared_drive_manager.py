@@ -76,7 +76,7 @@ class TestGetOrCreateSharedDrive:
 
         result = manager.get_or_create_shared_drive()
 
-        assert result is not None
+        assert result == "dry-run-placeholder"
         drive_service.get_drive.assert_not_called()
         drive_service.list_drives.assert_not_called()
 

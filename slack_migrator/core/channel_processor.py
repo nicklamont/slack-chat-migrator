@@ -20,6 +20,7 @@ from tqdm import tqdm
 
 from slack_migrator.constants import API_THROTTLE_MESSAGE_SECONDS
 from slack_migrator.core.config import ImportCompletionStrategy, should_process_channel
+from slack_migrator.exceptions import SpacePermissionError
 from slack_migrator.services.discovery import get_last_message_timestamp
 from slack_migrator.services.historical_membership import add_users_to_space
 from slack_migrator.services.message_builder import build_user_map_with_overrides
@@ -28,7 +29,7 @@ from slack_migrator.services.message_sender import (
     track_message_stats,
 )
 from slack_migrator.services.regular_membership import add_regular_members
-from slack_migrator.services.space_creator import SpacePermissionError, create_space
+from slack_migrator.services.space_creator import create_space
 from slack_migrator.types import MessageResult
 from slack_migrator.utils.logging import (
     is_debug_api_enabled,
