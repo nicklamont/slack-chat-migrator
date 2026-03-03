@@ -161,9 +161,9 @@ def _should_skip_message(
     """Check whether a message should be skipped before processing.
 
     Handles bot checks, update-mode deduplication, dry-run early return,
-    system subtype filtering, and empty message detection.  Also increments
-    the ``messages_created`` counter for non-dry-run messages that pass the
-    update-mode checks (preserving the original side-effect order).
+    system subtype filtering, and empty message detection.  Increments
+    ``messages_created`` only for non-dry-run messages that pass all
+    skip checks (bot, update-mode, system-subtype, empty).
 
     Returns:
         A ``(should_skip, return_value)`` tuple.  When *should_skip* is
@@ -176,10 +176,6 @@ def _should_skip_message(
         state, ctx.update_mode, message_key, channel, ts, user_id
     ):
         return True, MessageResult.ALREADY_SENT
-
-    # Increment message count (non-dry-run only; dry-run counts in migrate())
-    if not ctx.dry_run:
-        state.progress.migration_summary["messages_created"] += 1
 
     if ctx.dry_run:
         log_with_context(
@@ -212,6 +208,9 @@ def _should_skip_message(
             user_id=user_id,
         )
         return True, None
+
+    # Increment after all skip checks pass (dry-run counts separately in migrate())
+    state.progress.migration_summary["messages_created"] += 1
 
     return False, None
 

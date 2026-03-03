@@ -314,12 +314,9 @@ def should_process_message(last_timestamp: float, message_ts: str) -> bool:
         bool: True if the message should be processed, False otherwise
     """
     try:
-        # Convert Slack timestamp to float
-        message_time = float(message_ts.split(".")[0])
-
-        # Compare with last message timestamp
+        message_time = float(message_ts)
         return message_time > last_timestamp
-    except (ValueError, IndexError):
+    except ValueError:
         # If we can't parse the timestamp, process the message to be safe
         return True
 

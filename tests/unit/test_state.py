@@ -216,6 +216,51 @@ class TestResetForRun:
         state.reset_for_run()
         assert state.messages.sent_messages == {"msg1"}
 
+    def test_resets_channel_stats(self):
+        state = MigrationState(
+            progress=ProgressState(channel_stats={"ch1": {"msg": 5}})
+        )
+        state.reset_for_run()
+        assert state.progress.channel_stats == {}
+
+    def test_resets_active_users_by_channel(self):
+        state = MigrationState(
+            progress=ProgressState(active_users_by_channel={"ch1": {"U1"}})
+        )
+        state.reset_for_run()
+        assert state.progress.active_users_by_channel == {}
+
+    def test_resets_high_failure_rate_channels(self):
+        state = MigrationState(
+            errors=ErrorState(high_failure_rate_channels={"ch1": 50.0})
+        )
+        state.reset_for_run()
+        assert state.errors.high_failure_rate_channels == {}
+
+    def test_resets_incomplete_import_spaces(self):
+        state = MigrationState(
+            errors=ErrorState(incomplete_import_spaces=[("space1", "ch1")])
+        )
+        state.reset_for_run()
+        assert state.errors.incomplete_import_spaces == []
+
+    def test_resets_channel_conflicts(self):
+        state = MigrationState(errors=ErrorState(channel_conflicts={"ch1", "ch2"}))
+        state.reset_for_run()
+        assert state.errors.channel_conflicts == set()
+
+    def test_resets_migration_issues(self):
+        state = MigrationState(
+            errors=ErrorState(migration_issues={"issue1": "details"})
+        )
+        state.reset_for_run()
+        assert state.errors.migration_issues == {}
+
+    def test_resets_drive_files_cache(self):
+        state = MigrationState(drive_files_cache={"file1": "data"})
+        state.reset_for_run()
+        assert state.drive_files_cache == {}
+
     def test_complete_reset(self):
         """Verify all expected fields are reset when starting from dirty state."""
         state = MigrationState(
@@ -224,24 +269,38 @@ class TestResetForRun:
             progress=ProgressState(
                 migration_summary=_make_summary(
                     channels_processed=["x"], spaces_created=1
-                )
+                ),
+                channel_stats={"ch": {"msg": 5}},
+                active_users_by_channel={"ch": {"U1"}},
             ),
             errors=ErrorState(
                 migration_errors=["err"],
                 channels_with_errors=["ch"],
                 channel_error_count=2,
+                high_failure_rate_channels={"ch": 50.0},
+                incomplete_import_spaces=[("s", "ch")],
+                channel_conflicts={"ch"},
+                migration_issues={"issue": "detail"},
             ),
             context=ContextState(first_channel_processed=True),
+            drive_files_cache={"f": "d"},
         )
         state.reset_for_run()
         assert state.spaces.channel_handlers == {}
         assert state.messages.thread_map == {}
         assert state.progress.migration_summary["channels_processed"] == []
         assert state.progress.migration_summary["spaces_created"] == 0
+        assert state.progress.channel_stats == {}
+        assert state.progress.active_users_by_channel == {}
         assert state.errors.migration_errors == []
         assert state.errors.channels_with_errors == []
         assert state.errors.channel_error_count == 0
+        assert state.errors.high_failure_rate_channels == {}
+        assert state.errors.incomplete_import_spaces == []
+        assert state.errors.channel_conflicts == set()
+        assert state.errors.migration_issues == {}
         assert state.context.first_channel_processed is False
+        assert state.drive_files_cache == {}
 
 
 # ---------------------------------------------------------------------------

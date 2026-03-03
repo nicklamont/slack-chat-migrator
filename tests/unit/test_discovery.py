@@ -602,10 +602,19 @@ class TestShouldProcessMessage:
         """Slack timestamp without decimal part is handled."""
         assert should_process_message(1609459200.0, "1609459300") is True
 
-    def test_timestamp_uses_integer_part_only(self):
-        """Only the integer part of the Slack timestamp is used for comparison."""
-        # 1609459200.999999 -> integer part 1609459200, which is not > 1609459200
-        assert should_process_message(1609459200.0, "1609459200.999999") is False
+    def test_full_precision_distinguishes_same_second(self):
+        """Messages in the same second with different microseconds are distinguished."""
+        # 1609459200.999999 > 1609459200.0, so the message should be processed
+        assert should_process_message(1609459200.0, "1609459200.999999") is True
+
+    def test_same_full_precision_timestamp_skipped(self):
+        """Exact same timestamp (full precision) should not be reprocessed."""
+        assert should_process_message(1609459200.000100, "1609459200.000100") is False
+
+    def test_microsecond_ordering_within_same_second(self):
+        """Two messages in the same second: later microsecond is newer."""
+        assert should_process_message(1609459200.000100, "1609459200.000200") is True
+        assert should_process_message(1609459200.000200, "1609459200.000100") is False
 
 
 # ---------------------------------------------------------------------------

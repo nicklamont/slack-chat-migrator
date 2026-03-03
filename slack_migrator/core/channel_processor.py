@@ -269,6 +269,9 @@ class ChannelProcessor:
                 f"{self.ctx.log_prefix}Found {message_count} messages in channel {channel}",
                 channel=channel,
             )
+            # Intentional approximation: counts all messages without per-message
+            # skip checks (bot, system-subtype, empty).  Accurate counting would
+            # require running the full send pipeline, which dry-run avoids.
             self.state.progress.migration_summary["messages_created"] += message_count
 
         if not self.ctx.dry_run or self.ctx.update_mode:
