@@ -13,6 +13,7 @@ from slack_migrator.core.channel_processor import ChannelProcessor
 from slack_migrator.core.config import ImportCompletionStrategy, MigrationConfig
 from slack_migrator.core.context import MigrationContext
 from slack_migrator.core.state import MigrationState, _default_migration_summary
+from slack_migrator.services.space_creator import SpacePermissionError
 from slack_migrator.types import SendResult
 
 # ---------------------------------------------------------------------------
@@ -180,7 +181,7 @@ class TestProcessChannel:
     )
     @patch(
         "slack_migrator.core.channel_processor.create_space",
-        return_value="ERROR_NO_PERMISSION_general",
+        side_effect=SpacePermissionError("general"),
     )
     def test_permission_error_on_space_creation(
         self, mock_create, mock_should, tmp_path

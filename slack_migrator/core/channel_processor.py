@@ -28,7 +28,7 @@ from slack_migrator.services.message_sender import (
     track_message_stats,
 )
 from slack_migrator.services.regular_membership import add_regular_members
-from slack_migrator.services.space_creator import create_space
+from slack_migrator.services.space_creator import SpacePermissionError, create_space
 from slack_migrator.types import MessageResult
 from slack_migrator.utils.logging import (
     is_debug_api_enabled,
@@ -114,10 +114,9 @@ class ChannelProcessor:
         channel_had_errors = False
 
         # Create or reuse space
-        space, is_newly_created = self._create_or_reuse_space(ch_dir)
-
-        # Skip if permission error
-        if space and space.startswith("ERROR_NO_PERMISSION_"):
+        try:
+            space, is_newly_created = self._create_or_reuse_space(ch_dir)
+        except SpacePermissionError:
             log_with_context(
                 logging.WARNING,
                 f"Skipping channel {channel} due to space creation permission error",

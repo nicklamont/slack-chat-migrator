@@ -32,6 +32,10 @@ if TYPE_CHECKING:
     from slack_migrator.services.chat_adapter import ChatAdapter
 
 
+class SpacePermissionError(Exception):
+    """Raised when space creation fails due to a 403 permission error."""
+
+
 def channel_has_external_users(
     ctx: MigrationContext, user_resolver: Any, channel: str
 ) -> bool:
@@ -123,8 +127,10 @@ def create_space(
         channel: Slack channel name to create a space for.
 
     Returns:
-        The Google Chat space resource name (e.g. ``spaces/AAAA``),
-        or an ``ERROR_NO_PERMISSION_`` sentinel on 403 errors.
+        The Google Chat space resource name (e.g. ``spaces/AAAA``).
+
+    Raises:
+        SpacePermissionError: On 403 PERMISSION_DENIED errors.
     """
     # Get channel metadata
     meta = ctx.channels_meta.get(channel, {})
@@ -253,11 +259,10 @@ def create_space(
                         )
         except HttpError as e:
             if e.resp.status == HTTP_FORBIDDEN and PERMISSION_DENIED_ERROR in str(e):
-                # Log the error but don't raise an exception
                 log_with_context(
                     logging.WARNING, f"Error setting up channel {channel}: {e}"
                 )
-                return f"ERROR_NO_PERMISSION_{channel}"
+                raise SpacePermissionError(channel) from e
             else:
                 # For other errors, re-raise
                 raise

@@ -377,14 +377,14 @@ class FileHandler:
             if file_content is None:
                 return UploadResult(error="Download failed", name=name)
 
-            # Handle sentinel values from _download_file
-            handled, sentinel_result = self._handle_download_sentinel(
+            # Handle non-bytes download outcomes (Google Docs links, Drive files)
+            handled, outcome_result = self._handle_download_outcome(
                 file_content, file_obj, name, channel, file_id
             )
             if handled:
-                return sentinel_result
+                return outcome_result
 
-            # After sentinel handling, file_content is guaranteed to be bytes
+            # After outcome handling, file_content is guaranteed to be bytes
             assert isinstance(file_content, bytes)
 
             # Validate size and resolve MIME type
@@ -505,7 +505,7 @@ class FileHandler:
             return None
         return file_content
 
-    def _handle_download_sentinel(
+    def _handle_download_outcome(
         self,
         file_content: bytes | DownloadOutcome,
         file_obj: dict[str, Any],
@@ -513,7 +513,7 @@ class FileHandler:
         channel: str | None,
         file_id: str,
     ) -> tuple[bool, UploadResult]:
-        """Handle special sentinel values returned by _download_file.
+        """Handle non-bytes outcomes from download (Google Docs links, Drive files).
 
         Returns (handled, result). If handled is False, content should be uploaded normally.
         """

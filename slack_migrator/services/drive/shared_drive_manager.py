@@ -67,7 +67,11 @@ class SharedDriveManager:
             Shared drive ID if successful, None otherwise
         """
         if self.dry_run:
-            return "DRY_RUN_SHARED_DRIVE"
+            log_with_context(
+                logging.DEBUG,
+                "Dry run: skipping shared drive setup",
+            )
+            return "dry-run-placeholder"
 
         try:
             # Get shared drive configuration
