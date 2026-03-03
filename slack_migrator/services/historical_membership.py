@@ -6,6 +6,7 @@ import datetime
 import json
 import logging
 import time
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
@@ -108,7 +109,7 @@ def _scan_message_files_for_membership(
 
 
 def _apply_channel_metadata_members(
-    meta: dict[str, Any],
+    meta: Mapping[str, Any],
     user_membership: dict[str, dict[str, Any]],
 ) -> set[str]:
     """Override active_users with the definitive member list from channels.json.

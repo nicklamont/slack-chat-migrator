@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from slack_migrator.core.config import MigrationConfig
+from slack_migrator.types import SlackChannel
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,7 @@ class MigrationContext:
     users_without_email: list[dict[str, Any]]
 
     # Channel metadata (from channels.json)
-    channels_meta: dict[str, Any]  # channel_name -> channel data
+    channels_meta: dict[str, SlackChannel]  # channel_name -> channel data
     channel_id_to_name: dict[str, str]
     channel_name_to_id: dict[str, str]
 
