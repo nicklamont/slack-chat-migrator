@@ -9,6 +9,7 @@ State is organized into typed sub-state dataclasses by concern area.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -43,7 +44,7 @@ class SpaceState:
     created_spaces: dict[str, str] = field(default_factory=dict)
     channel_to_space: dict[str, str] = field(default_factory=dict)
     channel_id_to_space_id: dict[str, str] = field(default_factory=dict)
-    channel_handlers: dict[str, Any] = field(default_factory=dict)
+    channel_handlers: dict[str, logging.Handler] = field(default_factory=dict)
 
 
 @dataclass
@@ -87,7 +88,7 @@ class ErrorState:
     high_failure_rate_channels: dict[str, float] = field(default_factory=dict)
     incomplete_import_spaces: list[tuple[str, str]] = field(default_factory=list)
     channel_conflicts: set[str] = field(default_factory=set)
-    migration_issues: dict[str, Any] = field(default_factory=dict)
+    migration_issues: dict[str, str] = field(default_factory=dict)
     migration_errors: list[Any] = field(default_factory=list)
     channels_with_errors: list[str] = field(default_factory=list)
     channel_error_count: int = 0

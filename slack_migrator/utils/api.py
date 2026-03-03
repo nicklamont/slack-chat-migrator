@@ -421,9 +421,8 @@ class RetryWrapper:
                     data=request_data,
                     channel=channel_context,
                 )
-        except (ImportError, AttributeError, Exception):
-            # Silently ignore logging errors to not break API calls
-            pass
+        except Exception:
+            logger.debug("API logging failed", exc_info=True)
 
     def _log_api_response(
         self,
@@ -451,9 +450,8 @@ class RetryWrapper:
                     response_data=response_data,
                     channel=channel_context,
                 )
-        except (ImportError, AttributeError, Exception):
-            # Silently ignore logging errors to not break API calls
-            pass
+        except Exception:
+            logger.debug("API logging failed", exc_info=True)
 
 
 def slack_ts_to_rfc3339(ts: str) -> str:
