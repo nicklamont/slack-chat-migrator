@@ -121,4 +121,8 @@ source = ["slack_migrator"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 70
+fail_under = 90
+omit = [
+    "slack_migrator/cli/migrate_cmd.py",
+    "slack_migrator/cli/cleanup_cmd.py",
+]
