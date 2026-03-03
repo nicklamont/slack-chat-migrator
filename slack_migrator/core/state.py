@@ -10,9 +10,12 @@ State is organized into typed sub-state dataclasses by concern area.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from slack_migrator.types import FailedMessage, MigrationSummary, SkippedReaction
+
+if TYPE_CHECKING:
+    from slack_migrator.services.chat_adapter import ChatAdapter
 
 
 def _default_migration_summary() -> MigrationSummary:
@@ -58,7 +61,7 @@ class MessageState:
 class UserState:
     """User validation and delegation caching."""
 
-    chat_delegates: dict[str, Any] = field(default_factory=dict)
+    chat_delegates: dict[str, ChatAdapter] = field(default_factory=dict)
     valid_users: dict[str, bool] = field(default_factory=dict)
     external_users: set[str] = field(default_factory=set)
     skipped_reactions: list[SkippedReaction] = field(default_factory=list)

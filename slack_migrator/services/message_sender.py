@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
     from slack_migrator.services.chat_adapter import ChatAdapter
+    from slack_migrator.services.user_resolver import UserResolver
 
 
 def _is_bot_message(
@@ -397,7 +398,7 @@ def _handle_send_error(
 
 def _resolve_chat_service(
     chat: ChatAdapter,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     user_email: str | None,
     channel: str,
     ts: str,
