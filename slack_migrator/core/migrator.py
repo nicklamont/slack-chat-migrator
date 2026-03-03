@@ -355,21 +355,14 @@ class SlackToChatMigrator:
         def signal_handler(signum: int, frame: Any) -> None:
             """Handle SIGINT (Ctrl+C) gracefully.
 
+            Raises KeyboardInterrupt so the existing ``except BaseException``
+            block handles logging and cleanup in one place.
+
             Args:
                 signum: Signal number received.
                 frame: Current stack frame (unused).
             """
-            migration_duration = time.time() - migration_start_time
-            log_with_context(logging.WARNING, "")
-            log_with_context(logging.WARNING, "MIGRATION INTERRUPTED BY SIGNAL")
-            log_migration_failure(
-                self.state,
-                self.dry_run,
-                KeyboardInterrupt("Migration interrupted by signal"),
-                migration_duration,
-            )
-            # Exit with standard interrupted code
-            exit(130)
+            raise KeyboardInterrupt("Migration interrupted by signal")
 
         # Install the signal handler
         old_signal_handler = signal.signal(signal.SIGINT, signal_handler)

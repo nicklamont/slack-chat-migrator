@@ -7,6 +7,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import threading
 import time
 from typing import Any
 
@@ -46,8 +47,10 @@ REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/drive",  # Full Drive scope covers all drive.file permissions plus shared drives
 ]
 
-# Cache for service instances
-_service_cache: dict[str, Any] = {}
+# Cache for service instances: maps key → (service, created_at)
+_service_cache: dict[str, tuple[Any, float]] = {}
+_service_cache_lock = threading.Lock()
+_SERVICE_CACHE_TTL = 2700  # 45 minutes
 
 
 def clear_service_cache() -> None:
@@ -56,7 +59,8 @@ def clear_service_cache() -> None:
     Call this after authentication failures (401/403) to force
     re-creation of service objects on next use.
     """
-    _service_cache.clear()
+    with _service_cache_lock:
+        _service_cache.clear()
 
 
 class RetryWrapper:
@@ -221,6 +225,8 @@ class RetryWrapper:
                         request_logged = True
                     # Don't retry client errors (4xx) except rate limits (429)
                     if e.resp.status // 100 == 4 and e.resp.status != HTTP_RATE_LIMIT:
+                        if e.resp.status == 401:
+                            clear_service_cache()
                         log_with_context(
                             logging.WARNING,
                             f"Client error ({e.resp.status}) not retried: {e}",
@@ -494,14 +500,26 @@ def get_gcp_service(
         ValueError: If the credentials file has an invalid format.
     """
     cache_key = f"{creds_path}:{user_email}:{api}:{version}"
-    if cache_key in _service_cache:
-        log_with_context(
-            logging.DEBUG,
-            f"Using cached service for {api} as {user_email}",
-            channel=channel,
-        )
-        return _service_cache[cache_key]
+    with _service_cache_lock:
+        if cache_key in _service_cache:
+            cached_service, created_at = _service_cache[cache_key]
+            if time.time() - created_at > _SERVICE_CACHE_TTL:
+                del _service_cache[cache_key]
+                log_with_context(
+                    logging.DEBUG,
+                    f"Evicted stale cached service for {api} as {user_email}",
+                    channel=channel,
+                )
+            else:
+                log_with_context(
+                    logging.DEBUG,
+                    f"Using cached service for {api} as {user_email}",
+                    channel=channel,
+                )
+                return cached_service
 
+    # Credential creation intentionally happens outside the lock to avoid
+    # blocking other threads. Double-init is harmless (last writer wins).
     try:
         log_with_context(
             logging.DEBUG,
@@ -542,7 +560,8 @@ def get_gcp_service(
             service, get_channel_context, max_retries, retry_delay
         )
 
-        _service_cache[cache_key] = wrapped_service
+        with _service_cache_lock:
+            _service_cache[cache_key] = (wrapped_service, time.time())
         return wrapped_service
     except Exception as e:
         log_with_context(

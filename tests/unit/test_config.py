@@ -3,6 +3,7 @@
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from slack_migrator.core.config import (
@@ -67,8 +68,6 @@ def test_load_config_with_values():
 
 def test_invalid_import_completion_strategy_raises():
     """Invalid import_completion_strategy in YAML raises ValueError at load time."""
-    import pytest
-
     with tempfile.NamedTemporaryFile(suffix=".yaml") as temp_file:
         config_data = {"import_completion_strategy": "skip_on_eror"}  # typo
         with open(temp_file.name, "w") as f:
@@ -176,3 +175,59 @@ def test_load_config_invalid_yaml(tmp_path):
     # Should fall back to defaults
     assert config.max_retries == 3
     assert config.exclude_channels == []
+
+
+# ---------------------------------------------------------------------------
+# MigrationConfig __post_init__ validation
+# ---------------------------------------------------------------------------
+
+
+class TestMigrationConfigValidation:
+    """Tests for MigrationConfig.__post_init__ validation."""
+
+    def test_valid_defaults_accepted(self):
+        """Default values pass validation without error."""
+        config = MigrationConfig()
+        assert config.max_retries == 3
+        assert config.max_failure_percentage == 10
+        assert config.retry_delay == 2
+
+    def test_zero_values_accepted(self):
+        """Zero is a valid value for all validated fields."""
+        config = MigrationConfig(max_retries=0, max_failure_percentage=0, retry_delay=0)
+        assert config.max_retries == 0
+        assert config.max_failure_percentage == 0
+        assert config.retry_delay == 0
+
+    def test_max_failure_percentage_100_accepted(self):
+        """100 is a valid max_failure_percentage."""
+        config = MigrationConfig(max_failure_percentage=100)
+        assert config.max_failure_percentage == 100
+
+    def test_negative_max_retries_rejected(self):
+        """Negative max_retries raises ValueError."""
+        with pytest.raises(ValueError, match="max_retries must be >= 0"):
+            MigrationConfig(max_retries=-1)
+
+    def test_negative_retry_delay_rejected(self):
+        """Negative retry_delay raises ValueError."""
+        with pytest.raises(ValueError, match="retry_delay must be >= 0"):
+            MigrationConfig(retry_delay=-1)
+
+    def test_max_failure_percentage_below_zero_rejected(self):
+        """Negative max_failure_percentage raises ValueError."""
+        with pytest.raises(ValueError, match="max_failure_percentage must be between"):
+            MigrationConfig(max_failure_percentage=-1)
+
+    def test_max_failure_percentage_above_100_rejected(self):
+        """max_failure_percentage > 100 raises ValueError."""
+        with pytest.raises(ValueError, match="max_failure_percentage must be between"):
+            MigrationConfig(max_failure_percentage=101)
+
+    def test_invalid_config_from_yaml(self, tmp_path):
+        """Invalid values in YAML are rejected at load time."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.dump({"max_retries": -5}))
+
+        with pytest.raises(ValueError, match="max_retries must be >= 0"):
+            load_config(config_path)

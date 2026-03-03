@@ -14,6 +14,7 @@ from googleapiclient.errors import HttpError
 from slack_migrator.core.cleanup import (
     _complete_import_mode_spaces,
     _complete_single_space,
+    _list_spaces_in_import_mode,
     _resolve_channel_name,
     cleanup_channel_handlers,
     run_cleanup,
@@ -444,6 +445,96 @@ class TestRunCleanup:
             assert any(
                 "Failed to get space info during cleanup" in msg for msg in log_messages
             )
+
+
+# ===================================================================
+# TestListSpacesInImportModePagination
+# ===================================================================
+
+
+class TestListSpacesInImportModePagination:
+    """Tests that _list_spaces_in_import_mode paginates through all pages."""
+
+    def test_single_page(self) -> None:
+        """A single-page response returns all import-mode spaces."""
+        chat = MagicMock()
+        chat.list_spaces.return_value = {
+            "spaces": [{"name": "spaces/a"}],
+        }
+        chat.get_space.return_value = {
+            "name": "spaces/a",
+            "importMode": True,
+        }
+
+        result = _list_spaces_in_import_mode(chat)
+
+        assert result is not None
+        assert len(result) == 1
+        assert result[0][0] == "spaces/a"
+        chat.list_spaces.assert_called_once()
+
+    def test_multiple_pages(self) -> None:
+        """Spaces spread across multiple pages are all collected."""
+        chat = MagicMock()
+        chat.list_spaces.side_effect = [
+            {
+                "spaces": [{"name": "spaces/a"}],
+                "nextPageToken": "page2",
+            },
+            {
+                "spaces": [{"name": "spaces/b"}],
+                "nextPageToken": "page3",
+            },
+            {
+                "spaces": [{"name": "spaces/c"}],
+            },
+        ]
+        # All spaces are in import mode
+        chat.get_space.return_value = {"importMode": True}
+
+        result = _list_spaces_in_import_mode(chat)
+
+        assert result is not None
+        assert len(result) == 3
+        space_names = [name for name, _ in result]
+        assert space_names == ["spaces/a", "spaces/b", "spaces/c"]
+        assert chat.list_spaces.call_count == 3
+
+    def test_empty_pages(self) -> None:
+        """Multiple pages with no spaces in import mode returns empty list."""
+        chat = MagicMock()
+        chat.list_spaces.side_effect = [
+            {
+                "spaces": [{"name": "spaces/a"}],
+                "nextPageToken": "page2",
+            },
+            {
+                "spaces": [{"name": "spaces/b"}],
+            },
+        ]
+        # No spaces in import mode
+        chat.get_space.return_value = {"importMode": False}
+
+        result = _list_spaces_in_import_mode(chat)
+
+        assert result is not None
+        assert len(result) == 0
+        assert chat.list_spaces.call_count == 2
+
+    def test_http_error_during_pagination(self) -> None:
+        """An HttpError mid-pagination returns None."""
+        chat = MagicMock()
+        chat.list_spaces.side_effect = [
+            {
+                "spaces": [{"name": "spaces/a"}],
+                "nextPageToken": "page2",
+            },
+            _http_error(500, "Internal Server Error"),
+        ]
+
+        result = _list_spaces_in_import_mode(chat)
+
+        assert result is None
 
 
 # ===================================================================
