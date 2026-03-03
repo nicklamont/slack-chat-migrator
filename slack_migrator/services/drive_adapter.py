@@ -125,6 +125,18 @@ class DriveAdapter:
         result: dict[str, Any] = self._svc.files().get(**kwargs).execute()
         return result
 
+    def delete_file(self, file_id: str) -> dict[str, Any]:
+        """Delete a file.
+
+        Args:
+            file_id: Drive file ID.
+
+        Returns:
+            API response dict (typically empty on success).
+        """
+        result: dict[str, Any] = self._svc.files().delete(fileId=file_id).execute()
+        return result
+
     # -- Permissions ----------------------------------------------------------
 
     def create_permission(

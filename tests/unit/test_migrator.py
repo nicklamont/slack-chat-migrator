@@ -728,10 +728,12 @@ class TestInitializeApiServices:
             m._initialize_api_services()
 
         from slack_migrator.services.chat_adapter import ChatAdapter
+        from slack_migrator.services.drive_adapter import DriveAdapter
 
         assert isinstance(m.chat, ChatAdapter)
         assert m.chat._svc is mock_chat
-        assert m.drive is mock_drive
+        assert isinstance(m.drive, DriveAdapter)
+        assert m.drive._svc is mock_drive
         assert m._api_services_initialized is True
 
     def test_dry_run_uses_noop_services(self, tmp_path):
@@ -739,6 +741,7 @@ class TestInitializeApiServices:
         from slack_migrator.services.chat.dry_run_service import DryRunChatService
         from slack_migrator.services.chat_adapter import ChatAdapter
         from slack_migrator.services.drive.dry_run_service import DryRunDriveService
+        from slack_migrator.services.drive_adapter import DriveAdapter
 
         m = _make_migrator(tmp_path, dry_run=True)
 
@@ -747,7 +750,8 @@ class TestInitializeApiServices:
 
         assert isinstance(m.chat, ChatAdapter)
         assert isinstance(m.chat._svc, DryRunChatService)
-        assert isinstance(m.drive, DryRunDriveService)
+        assert isinstance(m.drive, DriveAdapter)
+        assert isinstance(m.drive._svc, DryRunDriveService)
         assert m._api_services_initialized is True
 
     @patch("slack_migrator.core.migrator.get_gcp_service")

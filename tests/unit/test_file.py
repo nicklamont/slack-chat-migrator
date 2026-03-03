@@ -769,14 +769,14 @@ class TestTransferFileOwnership:
 
     def test_successful_transfer(self):
         handler = _make_handler()
-        handler.drive_service.permissions().create().execute.return_value = {}
+        handler.drive_service.create_permission.return_value = {}
 
         result = handler._transfer_file_ownership("file1", "alice@example.com")
         assert result is True
 
     def test_failed_transfer(self):
         handler = _make_handler()
-        handler.drive_service.permissions().create().execute.side_effect = HttpError(
+        handler.drive_service.create_permission.side_effect = HttpError(
             Response({"status": "403"}), b"forbidden"
         )
 
@@ -974,7 +974,7 @@ class TestPreCacheRootFolder:
         handler._root_folder_id = "root123"
         handler._shared_drive_id = "drive123"
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 5
-        handler.drive_service.files().list().execute.return_value = {"files": []}
+        handler.drive_service.list_files.return_value = {"files": []}
 
         handler._pre_cache_root_folder()
 
@@ -992,7 +992,7 @@ class TestPreCacheRootFolder:
             2,  # subfolder 1
             4,  # subfolder 2
         ]
-        handler.drive_service.files().list().execute.return_value = {
+        handler.drive_service.list_files.return_value = {
             "files": [
                 {"id": "folder_a", "name": "general"},
                 {"id": "folder_b", "name": "random"},
@@ -1009,7 +1009,7 @@ class TestPreCacheRootFolder:
         handler._root_folder_id = "root123"
         handler._shared_drive_id = None
         handler.drive_uploader.pre_cache_folder_file_hashes.side_effect = [5, 2]
-        handler.drive_service.files().list().execute.return_value = {
+        handler.drive_service.list_files.return_value = {
             "files": [{"id": "sub1", "name": "general"}]
         }
 
@@ -1023,7 +1023,7 @@ class TestPreCacheRootFolder:
         handler._root_folder_id = "root123"
         handler._shared_drive_id = "drive123"
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 5
-        handler.drive_service.files().list().execute.side_effect = HttpError(
+        handler.drive_service.list_files.side_effect = HttpError(
             Response({"status": "500"}), b"error"
         )
 
@@ -1048,7 +1048,7 @@ class TestPreCacheRootFolder:
         handler._root_folder_id = "root123"
         handler._shared_drive_id = None
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 2
-        handler.drive_service.files().list().execute.return_value = {
+        handler.drive_service.list_files.return_value = {
             "files": [{"name": "no_id_folder"}]  # no "id" key
         }
 
@@ -1287,7 +1287,7 @@ class TestUploadToDrive:
             "file_id",
             "https://drive.google.com/file/d/file_id/view",
         )
-        handler.drive_service.permissions().create().execute.return_value = {}
+        handler.drive_service.create_permission.return_value = {}
 
         file_obj = {
             "id": "F1",
@@ -1690,7 +1690,7 @@ class TestShareFileWithMembers:
         """File already in correct channel folder should skip individual permissions."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = "drive123"
-        handler.drive_service.files().get().execute.side_effect = [
+        handler.drive_service.get_file.side_effect = [
             {"parents": ["channel_folder_id"]},  # file info
             {"name": "general"},  # folder info
         ]
@@ -1703,7 +1703,7 @@ class TestShareFileWithMembers:
         """File in shared drive root should skip individual permissions."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = "drive123"
-        handler.drive_service.files().get().execute.side_effect = [
+        handler.drive_service.get_file.side_effect = [
             {"parents": ["drive123"]},  # file info, parent is the shared drive itself
             {"name": "Imported Slack Attachments"},  # folder info
         ]
@@ -1716,7 +1716,7 @@ class TestShareFileWithMembers:
         """File info retrieval without shared drive."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_service.files().get().execute.side_effect = [
+        handler.drive_service.get_file.side_effect = [
             {"parents": ["some_folder"]},  # file info
             {"name": "other"},  # folder info - does not match channel
         ]
@@ -1733,12 +1733,12 @@ class TestShareFileWithMembers:
             user_map={"U1": "alice@example.com", "U2": "bob@example.com"},
         )
         handler._shared_drive_id = None
-        handler.drive_service.files().get().execute.side_effect = [
+        handler.drive_service.get_file.side_effect = [
             {"parents": ["some_folder"]},
             {"name": "other_folder"},
         ]
         handler.state.progress.active_users_by_channel = {"general": {"U1", "U2"}}
-        handler.drive_service.permissions().create().execute.return_value = {}
+        handler.drive_service.create_permission.return_value = {}
 
         result = handler.share_file_with_members("file123", "general")
 
@@ -1748,7 +1748,7 @@ class TestShareFileWithMembers:
         """Returns False when active users have no emails in user_map."""
         handler = self._make_ready_handler(user_map={})
         handler._shared_drive_id = None
-        handler.drive_service.files().get().execute.side_effect = [
+        handler.drive_service.get_file.side_effect = [
             {"parents": ["some_folder"]},
             {"name": "other"},
         ]
@@ -1764,13 +1764,13 @@ class TestShareFileWithMembers:
             user_map={"U1": "alice@example.com", "U2": "bob@example.com"},
         )
         handler._shared_drive_id = None
-        handler.drive_service.files().get().execute.side_effect = [
+        handler.drive_service.get_file.side_effect = [
             {"parents": ["some_folder"]},
             {"name": "other"},
         ]
         handler.state.progress.active_users_by_channel = {"general": {"U1", "U2"}}
         # Permissions create raises for one user but succeeds overall
-        handler.drive_service.permissions().create().execute.side_effect = [
+        handler.drive_service.create_permission.side_effect = [
             HttpError(Response({"status": "403"}), b"forbidden"),
             {},
         ]
@@ -1783,7 +1783,7 @@ class TestShareFileWithMembers:
         """HttpError when getting file info should re-raise."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_service.files().get().execute.side_effect = HttpError(
+        handler.drive_service.get_file.side_effect = HttpError(
             Response({"status": "500"}), b"error"
         )
 
@@ -1799,12 +1799,12 @@ class TestShareFileWithMembers:
 
         # First call: file info with parents
         # Second call: folder info - raises HttpError
-        handler.drive_service.files().get().execute.side_effect = [
+        handler.drive_service.get_file.side_effect = [
             {"parents": ["folder1"]},
             HttpError(Response({"status": "404"}), b"not found"),
         ]
         handler.state.progress.active_users_by_channel = {"general": {"U1"}}
-        handler.drive_service.permissions().create().execute.return_value = {}
+        handler.drive_service.create_permission.return_value = {}
 
         result = handler.share_file_with_members("file123", "general")
 
@@ -1816,9 +1816,9 @@ class TestShareFileWithMembers:
             user_map={"U1": "alice@example.com"},
         )
         handler._shared_drive_id = None
-        handler.drive_service.files().get().execute.return_value = {"parents": []}
+        handler.drive_service.get_file.return_value = {"parents": []}
         handler.state.progress.active_users_by_channel = {"general": {"U1"}}
-        handler.drive_service.permissions().create().execute.return_value = {}
+        handler.drive_service.create_permission.return_value = {}
 
         result = handler.share_file_with_members("file123", "general")
 
@@ -1830,12 +1830,12 @@ class TestShareFileWithMembers:
             user_map={"U1": "alice@example.com"},
         )
         handler._shared_drive_id = "drive123"
-        handler.drive_service.files().get().execute.side_effect = [
+        handler.drive_service.get_file.side_effect = [
             {"parents": ["some_folder"]},
             {"name": "other"},
         ]
         handler.state.progress.active_users_by_channel = {"general": {"U1"}}
-        handler.drive_service.permissions().create().execute.return_value = {}
+        handler.drive_service.create_permission.return_value = {}
 
         result = handler.share_file_with_members("file123", "general")
 

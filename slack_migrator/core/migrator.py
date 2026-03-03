@@ -38,6 +38,7 @@ from slack_migrator.services.discovery import (
     log_space_mapping_conflicts,
 )
 from slack_migrator.services.drive.dry_run_service import DryRunDriveService
+from slack_migrator.services.drive_adapter import DriveAdapter
 from slack_migrator.services.file import FileHandler
 from slack_migrator.services.message_attachments import MessageAttachmentProcessor
 from slack_migrator.services.user import generate_user_map
@@ -190,7 +191,7 @@ class SlackToChatMigrator:
             self.chat = ChatAdapter(raw_chat)
             # Raw service kept for media uploads (ChatFileUploader)
             self._raw_chat = raw_chat
-            self.drive = DryRunDriveService()
+            self.drive = DriveAdapter(DryRunDriveService())
         else:
             log_with_context(
                 logging.INFO,
@@ -208,13 +209,15 @@ class SlackToChatMigrator:
             self.chat = ChatAdapter(raw_chat)
             # Raw service kept for media uploads (ChatFileUploader)
             self._raw_chat = raw_chat
-            self.drive = get_gcp_service(
-                creds_path_str,
-                self.workspace_admin,
-                "drive",
-                "v3",
-                max_retries=self.config.max_retries,
-                retry_delay=self.config.retry_delay,
+            self.drive = DriveAdapter(
+                get_gcp_service(
+                    creds_path_str,
+                    self.workspace_admin,
+                    "drive",
+                    "v3",
+                    max_retries=self.config.max_retries,
+                    retry_delay=self.config.retry_delay,
+                )
             )
 
         # Create UserResolver now that chat is available — no two-phase init

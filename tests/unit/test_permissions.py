@@ -264,8 +264,8 @@ class TestDriveOperations:
         ctx = _make_context()
         validator = PermissionValidator(ctx)
 
-        ctx.drive.files().create().execute.return_value = {"id": "file123"}
-        ctx.drive.permissions().create().execute.return_value = {"id": "perm1"}
+        ctx.drive.create_file.return_value = {"id": "file123"}
+        ctx.drive.create_permission.return_value = {"id": "perm1"}
 
         validator._test_drive_operations()
 
@@ -277,7 +277,7 @@ class TestDriveOperations:
         ctx = _make_context()
         validator = PermissionValidator(ctx)
 
-        ctx.drive.files().create().execute.side_effect = _http_error(403, "Forbidden")
+        ctx.drive.create_file.side_effect = _http_error(403, "Forbidden")
 
         validator._test_drive_operations()
 
@@ -289,10 +289,8 @@ class TestDriveOperations:
         ctx = _make_context()
         validator = PermissionValidator(ctx)
 
-        ctx.drive.files().create().execute.return_value = {"id": "file123"}
-        ctx.drive.permissions().create().execute.side_effect = _http_error(
-            403, "Forbidden"
-        )
+        ctx.drive.create_file.return_value = {"id": "file123"}
+        ctx.drive.create_permission.side_effect = _http_error(403, "Forbidden")
 
         validator._test_drive_operations()
 
@@ -320,7 +318,7 @@ class TestCleanup:
         validator._cleanup_test_resources()
 
         ctx.chat.delete_space.assert_called_once()
-        ctx.drive.files().delete.assert_called_once()
+        ctx.drive.delete_file.assert_called_once()
 
     def test_handles_import_mode_deletion_errors(self):
         """Import mode deletion error logged gracefully."""
@@ -342,7 +340,7 @@ class TestCleanup:
         validator._cleanup_test_resources()
 
         ctx.chat.delete_space.assert_not_called()
-        ctx.drive.files().delete.assert_not_called()
+        ctx.drive.delete_file.assert_not_called()
 
     def test_partial_cleanup_one_fails_other_still_attempted(self):
         """When drive cleanup fails, space cleanup still attempted."""
@@ -353,7 +351,7 @@ class TestCleanup:
             "space": "spaces/test123",
         }
 
-        ctx.drive.files().delete().execute.side_effect = HttpError(
+        ctx.drive.delete_file.side_effect = HttpError(
             Response({"status": "500"}), b"drive error"
         )
 
@@ -418,8 +416,8 @@ class TestValidateAllPermissions:
         # Message ops
         ctx.chat.create_message.return_value = {"name": "spaces/test123/messages/msg1"}
         # Drive ops
-        ctx.drive.files().create().execute.return_value = {"id": "file123"}
-        ctx.drive.permissions().create().execute.return_value = {"id": "perm1"}
+        ctx.drive.create_file.return_value = {"id": "file123"}
+        ctx.drive.create_permission.return_value = {"id": "perm1"}
 
         validator = PermissionValidator(ctx)
         assert validator.validate_all_permissions() is True
@@ -451,8 +449,8 @@ class TestValidateAllPermissions:
         # Message ops
         ctx.chat.create_message.return_value = {"name": "spaces/test123/messages/msg1"}
         # Drive ops succeed
-        ctx.drive.files().create().execute.return_value = {"id": "file123"}
-        ctx.drive.permissions().create().execute.return_value = {"id": "perm1"}
+        ctx.drive.create_file.return_value = {"id": "file123"}
+        ctx.drive.create_permission.return_value = {"id": "perm1"}
 
         validator = PermissionValidator(ctx)
         with pytest.raises(PermissionCheckError):
@@ -483,8 +481,8 @@ class TestValidatePermissions:
         migrator.chat.list_memberships.return_value = {"memberships": []}
         migrator.chat.create_membership.return_value = {"name": "spaces/t/members/m"}
         migrator.chat.create_message.return_value = {"name": "spaces/t/messages/m"}
-        migrator.drive.files().create().execute.return_value = {"id": "f1"}
-        migrator.drive.permissions().create().execute.return_value = {"id": "p1"}
+        migrator.drive.create_file.return_value = {"id": "f1"}
+        migrator.drive.create_permission.return_value = {"id": "p1"}
 
         result = validate_permissions(migrator)
 
@@ -527,8 +525,8 @@ class TestCheckPermissionsStandalone:
         chat_service.list_memberships.return_value = {"memberships": []}
         chat_service.create_membership.return_value = {"name": "spaces/t/members/m"}
         chat_service.create_message.return_value = {"name": "spaces/t/messages/m"}
-        drive_service.files().create().execute.return_value = {"id": "f1"}
-        drive_service.permissions().create().execute.return_value = {"id": "p1"}
+        drive_service.create_file.return_value = {"id": "f1"}
+        drive_service.create_permission.return_value = {"id": "p1"}
 
         result = check_permissions_standalone(
             "/fake/creds.json", "admin@example.com", max_retries=3, retry_delay=1
@@ -549,8 +547,8 @@ class TestCheckPermissionsStandalone:
         chat_service.list_memberships.return_value = {"memberships": []}
         chat_service.create_membership.return_value = {"name": "spaces/t/members/m"}
         chat_service.create_message.return_value = {"name": "spaces/t/messages/m"}
-        drive_service.files().create().execute.return_value = {"id": "f1"}
-        drive_service.permissions().create().execute.return_value = {"id": "p1"}
+        drive_service.create_file.return_value = {"id": "f1"}
+        drive_service.create_permission.return_value = {"id": "p1"}
 
         check_permissions_standalone("/fake/creds.json", "admin@example.com")
 

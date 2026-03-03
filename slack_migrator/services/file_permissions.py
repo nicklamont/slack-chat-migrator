@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from slack_migrator.services.drive_adapter import DriveAdapter
 
 from googleapiclient.errors import HttpError
 
@@ -13,14 +16,14 @@ logger = logging.getLogger("slack_migrator")
 
 
 def transfer_file_ownership(
-    drive_service: Any,
+    drive_service: DriveAdapter,
     file_id: str,
     new_owner_email: str,
 ) -> bool:
     """Transfer ownership of a file to a new owner.
 
     Args:
-        drive_service: The Google Drive API service instance.
+        drive_service: Typed Drive API adapter.
         file_id: ID of the file to transfer.
         new_owner_email: Email of the new owner.
 
@@ -33,12 +36,12 @@ def transfer_file_ownership(
             "role": "owner",
             "emailAddress": new_owner_email,
         }
-        drive_service.permissions().create(
-            fileId=file_id,
+        drive_service.create_permission(
+            file_id=file_id,
             body=permission,
-            transferOwnership=True,
-            sendNotificationEmail=False,
-        ).execute()
+            transfer_ownership=True,
+            send_notification_email=False,
+        )
 
         log_with_context(
             logging.DEBUG,
@@ -53,7 +56,7 @@ def transfer_file_ownership(
 
 
 def share_file_with_members(
-    drive_service: Any,
+    drive_service: DriveAdapter,
     drive_file_id: str,
     channel: str,
     shared_drive_id: str | None,
@@ -66,7 +69,7 @@ def share_file_with_members(
     this function will skip setting individual permissions.
 
     Args:
-        drive_service: The Google Drive API service instance.
+        drive_service: Typed Drive API adapter.
         drive_file_id: The ID of the Drive file to share.
         channel: The channel name to get members from.
         shared_drive_id: The shared drive ID, or None if not using shared drives.
@@ -80,16 +83,15 @@ def share_file_with_members(
         # First check if this file is already in a shared folder
         if shared_drive_id:
             # For shared drives, check if file is in the shared drive
-            file_info = (
-                drive_service.files()
-                .get(fileId=drive_file_id, fields="parents", supportsAllDrives=True)
-                .execute()
+            file_info = drive_service.get_file(
+                file_id=drive_file_id,
+                fields="parents",
+                supports_all_drives=True,
             )
         else:
-            file_info = (
-                drive_service.files()
-                .get(fileId=drive_file_id, fields="parents")
-                .execute()
+            file_info = drive_service.get_file(
+                file_id=drive_file_id,
+                fields="parents",
             )
 
         parent_folders = file_info.get("parents", [])
@@ -98,16 +100,15 @@ def share_file_with_members(
         for parent_id in parent_folders:
             try:
                 if shared_drive_id:
-                    folder_info = (
-                        drive_service.files()
-                        .get(fileId=parent_id, fields="name", supportsAllDrives=True)
-                        .execute()
+                    folder_info = drive_service.get_file(
+                        file_id=parent_id,
+                        fields="name",
+                        supports_all_drives=True,
                     )
                 else:
-                    folder_info = (
-                        drive_service.files()
-                        .get(fileId=parent_id, fields="name")
-                        .execute()
+                    folder_info = drive_service.get_file(
+                        file_id=parent_id,
+                        fields="name",
                     )
 
                 folder_name = folder_info.get("name", "")
@@ -172,18 +173,18 @@ def share_file_with_members(
                     "emailAddress": email,
                 }
                 if shared_drive_id:
-                    drive_service.permissions().create(
-                        fileId=drive_file_id,
+                    drive_service.create_permission(
+                        file_id=drive_file_id,
                         body=permission,
-                        sendNotificationEmail=False,
-                        supportsAllDrives=True,
-                    ).execute()
+                        send_notification_email=False,
+                        supports_all_drives=True,
+                    )
                 else:
-                    drive_service.permissions().create(
-                        fileId=drive_file_id,
+                    drive_service.create_permission(
+                        file_id=drive_file_id,
                         body=permission,
-                        sendNotificationEmail=False,
-                    ).execute()
+                        send_notification_email=False,
+                    )
 
             except HttpError as e:
                 log_with_context(

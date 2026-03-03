@@ -18,6 +18,8 @@ from googleapiclient.http import MediaIoBaseUpload
 
 from slack_migrator.constants import HTTP_CONFLICT, SPACE_TYPE
 from slack_migrator.exceptions import PermissionCheckError
+from slack_migrator.services.chat_adapter import ChatAdapter
+from slack_migrator.services.drive_adapter import DriveAdapter
 from slack_migrator.utils.api import REQUIRED_SCOPES, get_gcp_service
 from slack_migrator.utils.logging import log_with_context
 
@@ -293,19 +295,15 @@ class PermissionValidator:
             media_body = MediaIoBaseUpload(
                 io.BytesIO(b"Permission test file content"), mimetype="text/plain"
             )
-            test_file = (
-                self.migrator.drive.files()
-                .create(body=file_metadata, media_body=media_body)
-                .execute()
+            test_file = self.migrator.drive.create_file(
+                body=file_metadata, media_body=media_body
             )
             file_id = test_file.get("id")
             self.test_resources["drive_file"] = file_id
 
             # Test file sharing permissions
             permission_body = {"role": "reader", "type": "anyone"}
-            self.migrator.drive.permissions().create(
-                fileId=file_id, body=permission_body
-            ).execute()
+            self.migrator.drive.create_permission(file_id=file_id, body=permission_body)
 
             log_with_context(logging.INFO, "    ✓ Drive operations: PASSED")
 
@@ -320,9 +318,9 @@ class PermissionValidator:
         # Clean up Drive file
         if "drive_file" in self.test_resources:
             try:
-                self.migrator.drive.files().delete(
-                    fileId=self.test_resources["drive_file"]
-                ).execute()
+                self.migrator.drive.delete_file(
+                    file_id=self.test_resources["drive_file"]
+                )
                 log_with_context(logging.DEBUG, "Cleaned up test Drive file")
             except HttpError as e:
                 log_with_context(logging.WARNING, f"Failed to clean up Drive file: {e}")
@@ -454,7 +452,9 @@ def check_permissions_standalone(
     )
 
     ctx = PermissionCheckContext(
-        chat=chat, drive=drive, workspace_admin=workspace_admin
+        chat=ChatAdapter(chat),
+        drive=DriveAdapter(drive),
+        workspace_admin=workspace_admin,
     )
 
     validator = PermissionValidator(ctx)

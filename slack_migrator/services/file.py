@@ -9,7 +9,7 @@ import logging
 import mimetypes
 import os
 import tempfile
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import requests
 from googleapiclient.errors import HttpError
@@ -37,6 +37,9 @@ from slack_migrator.utils.api import escape_drive_query_value
 from slack_migrator.utils.logging import log_with_context
 from slack_migrator.utils.mime import resolve_drive_mime_type
 
+if TYPE_CHECKING:
+    from slack_migrator.services.drive_adapter import DriveAdapter
+
 logger = logging.getLogger("slack_migrator")
 
 
@@ -58,7 +61,7 @@ class FileHandler:
 
     def __init__(
         self,
-        drive_service: Any,
+        drive_service: DriveAdapter,
         chat_service: Any,
         folder_id: str | None,
         config: MigrationConfig,
@@ -261,20 +264,23 @@ class FileHandler:
                 safe_root = escape_drive_query_value(self._root_folder_id)
                 query = f"'{safe_root}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
 
-                params = {"q": query, "fields": "files(id,name)", "pageSize": 1000}
+                list_kwargs: dict[str, Any] = {
+                    "q": query,
+                    "fields": "files(id,name)",
+                    "page_size": 1000,
+                }
 
                 if self._shared_drive_id:
-                    params.update(
+                    list_kwargs.update(
                         {
-                            "spaces": "drive",
                             "corpora": "drive",
-                            "driveId": self._shared_drive_id,
-                            "includeItemsFromAllDrives": True,
-                            "supportsAllDrives": True,
+                            "drive_id": self._shared_drive_id,
+                            "include_items_from_all_drives": True,
+                            "supports_all_drives": True,
                         }
                     )
 
-                response = self.drive_service.files().list(**params).execute()
+                response = self.drive_service.list_files(**list_kwargs)
                 folders = response.get("files", [])
 
                 total_subfolders = len(folders)
