@@ -18,6 +18,8 @@ from googleapiclient.http import MediaIoBaseUpload
 
 from slack_migrator.constants import HTTP_CONFLICT, SPACE_TYPE
 from slack_migrator.exceptions import PermissionCheckError
+from slack_migrator.services.chat_adapter import ChatAdapter
+from slack_migrator.services.drive_adapter import DriveAdapter
 from slack_migrator.utils.api import REQUIRED_SCOPES, get_gcp_service
 from slack_migrator.utils.logging import log_with_context
 
@@ -109,7 +111,7 @@ class PermissionValidator:
                 "importMode": True,
                 "createTime": space_create_time,
             }
-            result = self.migrator.chat.spaces().create(body=test_space).execute()
+            result = self.migrator.chat.create_space(test_space)
             space_name = result.get("name")
             self.test_resources["space"] = space_name
             self.test_resources["space_create_time"] = space_create_time
@@ -122,7 +124,7 @@ class PermissionValidator:
         # Test 2: Space listing
         log_with_context(logging.INFO, "  • Testing space listing...")
         try:
-            self.migrator.chat.spaces().list(pageSize=1).execute()
+            self.migrator.chat.list_spaces(page_size=1)
             log_with_context(logging.INFO, "    ✓ Space listing: PASSED")
         except HttpError as e:
             self.permission_errors.append(f"Space listing failed: {e}")
@@ -159,9 +161,7 @@ class PermissionValidator:
         # Test 5: Member listing (may be limited in import mode but still testable for permissions)
         log_with_context(logging.INFO, "  • Testing member listing...")
         try:
-            self.migrator.chat.spaces().members().list(
-                parent=self.test_resources["space"]
-            ).execute()
+            self.migrator.chat.list_memberships(parent=self.test_resources["space"])
             log_with_context(logging.INFO, "    ✓ Member listing: PASSED")
         except HttpError as e:
             if "insufficient authentication scopes" in str(e).lower():
@@ -227,11 +227,8 @@ class PermissionValidator:
                 "createTime": past_create_time,
                 "deleteTime": past_delete_time,
             }
-            member_result = (
-                self.migrator.chat.spaces()
-                .members()
-                .create(parent=self.test_resources["space"], body=member_body)
-                .execute()
+            member_result = self.migrator.chat.create_membership(
+                parent=self.test_resources["space"], body=member_body
             )
             self.test_resources["member"] = member_result.get("name")
             log_with_context(
@@ -266,11 +263,8 @@ class PermissionValidator:
         log_with_context(logging.INFO, "  • Testing message creation...")
         try:
             message_body = {"text": "Permission test message - will be cleaned up"}
-            message_result = (
-                self.migrator.chat.spaces()
-                .messages()
-                .create(parent=self.test_resources["space"], body=message_body)
-                .execute()
+            message_result = self.migrator.chat.create_message(
+                parent=self.test_resources["space"], body=message_body
             )
             self.test_resources["message"] = message_result.get("name")
             log_with_context(logging.INFO, "    ✓ Message creation: PASSED")
@@ -301,19 +295,15 @@ class PermissionValidator:
             media_body = MediaIoBaseUpload(
                 io.BytesIO(b"Permission test file content"), mimetype="text/plain"
             )
-            test_file = (
-                self.migrator.drive.files()
-                .create(body=file_metadata, media_body=media_body)
-                .execute()
+            test_file = self.migrator.drive.create_file(
+                body=file_metadata, media_body=media_body
             )
             file_id = test_file.get("id")
             self.test_resources["drive_file"] = file_id
 
             # Test file sharing permissions
             permission_body = {"role": "reader", "type": "anyone"}
-            self.migrator.drive.permissions().create(
-                fileId=file_id, body=permission_body
-            ).execute()
+            self.migrator.drive.create_permission(file_id=file_id, body=permission_body)
 
             log_with_context(logging.INFO, "    ✓ Drive operations: PASSED")
 
@@ -328,9 +318,9 @@ class PermissionValidator:
         # Clean up Drive file
         if "drive_file" in self.test_resources:
             try:
-                self.migrator.drive.files().delete(
-                    fileId=self.test_resources["drive_file"]
-                ).execute()
+                self.migrator.drive.delete_file(
+                    file_id=self.test_resources["drive_file"]
+                )
                 log_with_context(logging.DEBUG, "Cleaned up test Drive file")
             except HttpError as e:
                 log_with_context(logging.WARNING, f"Failed to clean up Drive file: {e}")
@@ -339,9 +329,7 @@ class PermissionValidator:
         if "space" in self.test_resources:
             try:
                 # Try to delete the space directly
-                self.migrator.chat.spaces().delete(
-                    name=self.test_resources["space"]
-                ).execute()
+                self.migrator.chat.delete_space(name=self.test_resources["space"])
                 log_with_context(logging.DEBUG, "Cleaned up test space")
             except Exception as e:
                 # Import mode spaces often cannot be deleted, which is expected
@@ -464,7 +452,9 @@ def check_permissions_standalone(
     )
 
     ctx = PermissionCheckContext(
-        chat=chat, drive=drive, workspace_admin=workspace_admin
+        chat=ChatAdapter(chat),
+        drive=DriveAdapter(drive),
+        workspace_admin=workspace_admin,
     )
 
     validator = PermissionValidator(ctx)

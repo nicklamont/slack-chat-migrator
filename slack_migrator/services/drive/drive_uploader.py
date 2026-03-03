@@ -7,13 +7,17 @@ from __future__ import annotations
 import hashlib
 import logging
 import mimetypes
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from slack_migrator.services.drive_adapter import DriveAdapter
 
 # Third-party imports
 # pylint: disable=import-error
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
+from slack_migrator.utils.api import escape_drive_query_value
 from slack_migrator.utils.logging import (
     log_with_context,
 )
@@ -26,7 +30,7 @@ class DriveFileUploader:
 
     def __init__(
         self,
-        drive_service: Any,
+        drive_service: DriveAdapter,
         workspace_domain: str | None = None,
         dry_run: bool = False,
         service_account_email: str | None = None,
@@ -34,7 +38,7 @@ class DriveFileUploader:
         """Initialize the DriveFileUploader.
 
         Args:
-            drive_service: Google Drive API service instance
+            drive_service: DriveAdapter instance wrapping the Google Drive API
             workspace_domain: The workspace domain for permissions
             dry_run: Whether to run in dry run mode
             service_account_email: The email of the service account to grant access to
@@ -107,34 +111,35 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            query = f"'{folder_id}' in parents and trashed=false"
+            safe_folder = escape_drive_query_value(folder_id)
+            query = f"'{safe_folder}' in parents and trashed=false"
             page_token = None
             files_cached = 0
 
             while True:
-                # Build request parameters
-                params: dict[str, Any] = {
+                # Build list_files call with explicit keyword args
+                list_kwargs: dict[str, Any] = {
                     "q": query,
                     "fields": "nextPageToken, files(id, name, md5Checksum, webViewLink)",
-                    "pageSize": 1000,  # Maximum allowed page size
+                    "page_size": 1000,  # Maximum allowed page size
                 }
 
                 if page_token:
-                    params["pageToken"] = page_token
+                    list_kwargs["page_token"] = page_token
 
                 # Add shared drive parameters if applicable
                 if shared_drive_id:
-                    params.update(
+                    list_kwargs.update(
                         {
                             "spaces": "drive",
                             "corpora": "drive",
-                            "driveId": shared_drive_id,
-                            "includeItemsFromAllDrives": True,
-                            "supportsAllDrives": True,
+                            "drive_id": shared_drive_id,
+                            "include_items_from_all_drives": True,
+                            "supports_all_drives": True,
                         }
                     )
 
-                response = self.drive_service.files().list(**params).execute()
+                response = self.drive_service.list_files(**list_kwargs)
                 files = response.get("files", [])
 
                 for file in files:
@@ -189,36 +194,40 @@ class DriveFileUploader:
             if file_hash in self.file_hash_cache:
                 cached_id, _cached_url = self.file_hash_cache[file_hash]
 
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found cached file ID for hash {file_hash}: {cached_id}",
-                    channel=self._get_current_channel(),
-                )
-
-                # Verify the file still exists
-                try:
-                    params: dict[str, Any] = {
-                        "fileId": cached_id,
-                        "fields": "id,webViewLink",
-                    }
-                    if shared_drive_id:
-                        params["supportsAllDrives"] = True
-
-                    file = self.drive_service.files().get(**params).execute()
-                    return cached_id, file.get("webViewLink")
-                except HttpError:
-                    logger.debug(
-                        "Cached file %s may have been deleted", cached_id, exc_info=True
-                    )
-                    # File might have been deleted, continue with search
+                if cached_id is None:
                     self.file_hash_cache.pop(file_hash, None)
+                else:
+                    log_with_context(
+                        logging.DEBUG,
+                        f"Found cached file ID for hash {file_hash}: {cached_id}",
+                        channel=self._get_current_channel(),
+                    )
+
+                    # Verify the file still exists
+                    try:
+                        file = self.drive_service.get_file(
+                            file_id=cached_id,
+                            fields="id,webViewLink",
+                            supports_all_drives=bool(shared_drive_id),
+                        )
+                        return cached_id, file.get("webViewLink")
+                    except HttpError:
+                        logger.debug(
+                            "Cached file %s may have been deleted",
+                            cached_id,
+                            exc_info=True,
+                        )
+                        # File might have been deleted, continue with search
+                        self.file_hash_cache.pop(file_hash, None)
 
             # Search for files with matching MD5 hash in the folder
-            query = f"md5Checksum='{file_hash}' and trashed=false"
+            safe_hash = escape_drive_query_value(file_hash)
+            query = f"md5Checksum='{safe_hash}' and trashed=false"
 
             # Add folder constraint if specified
             if folder_id:
-                query += f" and '{folder_id}' in parents"
+                safe_folder_id = escape_drive_query_value(folder_id)
+                query += f" and '{safe_folder_id}' in parents"
 
             log_with_context(
                 logging.DEBUG,
@@ -226,25 +235,25 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            # Build request parameters
-            search_params: dict[str, Any] = {
+            # Build list_files call with explicit keyword args
+            search_kwargs: dict[str, Any] = {
                 "q": query,
                 "fields": "files(id,name,webViewLink)",
             }
 
             # Add shared drive parameters if applicable
             if shared_drive_id:
-                search_params.update(
+                search_kwargs.update(
                     {
                         "spaces": "drive",
                         "corpora": "drive",
-                        "driveId": shared_drive_id,
-                        "includeItemsFromAllDrives": True,
-                        "supportsAllDrives": True,
+                        "drive_id": shared_drive_id,
+                        "include_items_from_all_drives": True,
+                        "supports_all_drives": True,
                     }
                 )
 
-            response = self.drive_service.files().list(**search_params).execute()
+            response = self.drive_service.list_files(**search_kwargs)
 
             files = response.get("files", [])
             if files:
@@ -356,25 +365,12 @@ class DriveFileUploader:
             media = MediaFileUpload(file_path, mimetype=mime_type)
 
             # Upload with appropriate parameters
-            if shared_drive_id:
-                file = (
-                    self.drive_service.files()
-                    .create(
-                        body=file_metadata,
-                        media_body=media,
-                        fields="id,webViewLink",
-                        supportsAllDrives=True,
-                    )
-                    .execute()
-                )
-            else:
-                file = (
-                    self.drive_service.files()
-                    .create(
-                        body=file_metadata, media_body=media, fields="id,webViewLink"
-                    )
-                    .execute()
-                )
+            file = self.drive_service.create_file(
+                body=file_metadata,
+                media_body=media,
+                fields="id,webViewLink",
+                supports_all_drives=bool(shared_drive_id),
+            )
 
             file_id = file.get("id")
             public_url = file.get("webViewLink")
@@ -430,21 +426,13 @@ class DriveFileUploader:
                 or "editor",  # 'writer' is used for shared drives
                 "emailAddress": message_poster_email,
             }
-            if shared_drive_id:
-                self.drive_service.permissions().create(
-                    fileId=file_id,
-                    body=permission,
-                    fields="id",
-                    sendNotificationEmail=False,
-                    supportsAllDrives=True,
-                ).execute()
-            else:
-                self.drive_service.permissions().create(
-                    fileId=file_id,
-                    body=permission,
-                    fields="id",
-                    sendNotificationEmail=False,
-                ).execute()
+            self.drive_service.create_permission(
+                file_id=file_id,
+                body=permission,
+                fields="id",
+                send_notification_email=False,
+                supports_all_drives=bool(shared_drive_id),
+            )
 
             log_with_context(
                 logging.DEBUG,
@@ -502,12 +490,12 @@ class DriveFileUploader:
                     )
 
                 permission = {"type": "user", "role": role, "emailAddress": email}
-                self.drive_service.permissions().create(
-                    fileId=file_id,
+                self.drive_service.create_permission(
+                    file_id=file_id,
                     body=permission,
                     fields="id",
-                    sendNotificationEmail=False,
-                ).execute()
+                    send_notification_email=False,
+                )
 
                 success_count += 1
 
@@ -537,12 +525,12 @@ class DriveFileUploader:
                     f"Adding separate editor permission for message poster {message_poster_email} for file {file_id}",
                     channel=self._get_current_channel(),
                 )
-                self.drive_service.permissions().create(
-                    fileId=file_id,
+                self.drive_service.create_permission(
+                    file_id=file_id,
                     body=permission,
                     fields="id",
-                    sendNotificationEmail=False,
-                ).execute()
+                    send_notification_email=False,
+                )
 
                 success_count += 1
 
@@ -568,12 +556,12 @@ class DriveFileUploader:
                     f"Adding editor permission for service account {self.service_account_email} for file {file_id}",
                     channel=self._get_current_channel(),
                 )
-                self.drive_service.permissions().create(
-                    fileId=file_id,
+                self.drive_service.create_permission(
+                    file_id=file_id,
                     body=permission,
                     fields="id",
-                    sendNotificationEmail=False,
-                ).execute()
+                    send_notification_email=False,
+                )
 
                 success_count += 1
 
@@ -617,12 +605,12 @@ class DriveFileUploader:
                 "role": "owner",
                 "emailAddress": new_owner_email,
             }
-            self.drive_service.permissions().create(
-                fileId=file_id,
+            self.drive_service.create_permission(
+                file_id=file_id,
                 body=permission,
-                transferOwnership=True,
-                sendNotificationEmail=False,
-            ).execute()
+                transfer_ownership=True,
+                send_notification_email=False,
+            )
 
             log_with_context(
                 logging.DEBUG,

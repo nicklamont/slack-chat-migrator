@@ -144,9 +144,8 @@ class TestUploadFileToChat:
             parent_space="spaces/XYZ",
         )
 
-        assert token is not None
         assert token == mock_response
-        assert metadata is not None
+        assert "attachmentDataRef" in token
         assert metadata["name"] == "test.jpg"
         assert metadata["mimeType"] == "image/jpeg"
         assert metadata["sizeBytes"] == "1024"
@@ -247,6 +246,8 @@ class TestGetSupportedMimeTypes:
         types = uploader.get_supported_mime_types()
         assert isinstance(types, list)
         assert len(types) > 0
+        assert all(isinstance(t, str) for t in types)
+        assert all("/" in t for t in types)  # MIME types contain a slash
 
 
 # ===========================================================================

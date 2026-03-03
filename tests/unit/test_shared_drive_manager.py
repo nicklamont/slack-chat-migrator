@@ -46,11 +46,11 @@ class TestValidateSharedDrive:
         result = manager.validate_shared_drive("some-drive-id")
 
         assert result is True
-        drive_service.drives.assert_not_called()
+        drive_service.get_drive.assert_not_called()
 
     def test_valid_drive_returns_true(self):
         manager, drive_service = _make_manager()
-        drive_service.drives().get().execute.return_value = {
+        drive_service.get_drive.return_value = {
             "id": "drive-123",
             "name": "My Drive",
         }
@@ -61,9 +61,7 @@ class TestValidateSharedDrive:
 
     def test_http_error_returns_false(self):
         manager, drive_service = _make_manager()
-        drive_service.drives().get().execute.side_effect = _make_http_error(
-            404, b"Not Found"
-        )
+        drive_service.get_drive.side_effect = _make_http_error(404, b"Not Found")
 
         result = manager.validate_shared_drive("bad-id")
 
@@ -79,13 +77,14 @@ class TestGetOrCreateSharedDrive:
         result = manager.get_or_create_shared_drive()
 
         assert result == "DRY_RUN_SHARED_DRIVE"
-        drive_service.drives.assert_not_called()
+        drive_service.get_drive.assert_not_called()
+        drive_service.list_drives.assert_not_called()
 
     def test_configured_drive_id_valid_returns_it(self):
         manager, drive_service = _make_manager(
             shared_drive_id="configured-id",
         )
-        drive_service.drives().get().execute.return_value = {
+        drive_service.get_drive.return_value = {
             "id": "configured-id",
             "name": "Existing Drive",
         }
@@ -100,11 +99,9 @@ class TestGetOrCreateSharedDrive:
             shared_drive_id="bad-id",
         )
         # First call: get by ID fails
-        drive_service.drives().get().execute.side_effect = _make_http_error(
-            404, b"Not Found"
-        )
+        drive_service.get_drive.side_effect = _make_http_error(404, b"Not Found")
         # Second call: list drives finds existing by name
-        drive_service.drives().list().execute.return_value = {
+        drive_service.list_drives.return_value = {
             "drives": [
                 {"id": "found-id", "name": "Fallback Drive"},
             ]
@@ -119,7 +116,7 @@ class TestGetOrCreateSharedDrive:
             shared_drive_name="Slack Attachments",
             shared_drive_id=None,
         )
-        drive_service.drives().list().execute.return_value = {
+        drive_service.list_drives.return_value = {
             "drives": [
                 {"id": "existing-id", "name": "Slack Attachments"},
             ]
@@ -134,8 +131,8 @@ class TestGetOrCreateSharedDrive:
             shared_drive_name="New Drive",
             shared_drive_id=None,
         )
-        drive_service.drives().list().execute.return_value = {"drives": []}
-        drive_service.drives().create().execute.return_value = {
+        drive_service.list_drives.return_value = {"drives": []}
+        drive_service.create_drive.return_value = {
             "id": "created-id",
             "name": "New Drive",
         }
@@ -155,7 +152,7 @@ class TestGetOrCreateSharedDrive:
             config=config,
             dry_run=False,
         )
-        drive_service.drives().list().execute.return_value = {
+        drive_service.list_drives.return_value = {
             "drives": [
                 {
                     "id": "default-id",
@@ -174,8 +171,8 @@ class TestGetOrCreateSharedDrive:
             shared_drive_id=None,
             shared_drive_name="Test Drive",
         )
-        # list() itself raises HttpError
-        drive_service.drives().list().execute.side_effect = _make_http_error(
+        # list_drives raises HttpError
+        drive_service.list_drives.side_effect = _make_http_error(
             500, b"Internal Server Error"
         )
 
@@ -189,7 +186,7 @@ class TestFindOrCreateSharedDrive:
 
     def test_finds_existing_drive_by_name(self):
         manager, drive_service = _make_manager()
-        drive_service.drives().list().execute.return_value = {
+        drive_service.list_drives.return_value = {
             "drives": [
                 {"id": "other-id", "name": "Other Drive"},
                 {"id": "target-id", "name": "Target Drive"},
@@ -202,12 +199,12 @@ class TestFindOrCreateSharedDrive:
 
     def test_creates_new_drive_when_not_found(self):
         manager, drive_service = _make_manager()
-        drive_service.drives().list().execute.return_value = {
+        drive_service.list_drives.return_value = {
             "drives": [
                 {"id": "other-id", "name": "Other Drive"},
             ]
         }
-        drive_service.drives().create().execute.return_value = {
+        drive_service.create_drive.return_value = {
             "id": "new-id",
             "name": "My New Drive",
         }
@@ -218,9 +215,7 @@ class TestFindOrCreateSharedDrive:
 
     def test_http_error_returns_none(self):
         manager, drive_service = _make_manager()
-        drive_service.drives().list().execute.side_effect = _make_http_error(
-            403, b"Forbidden"
-        )
+        drive_service.list_drives.side_effect = _make_http_error(403, b"Forbidden")
 
         result = manager._find_or_create_shared_drive("Some Drive")
 

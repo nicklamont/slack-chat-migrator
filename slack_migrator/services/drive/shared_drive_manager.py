@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING
 
 from googleapiclient.errors import HttpError
 
@@ -15,17 +15,23 @@ from slack_migrator.utils.logging import (
     log_with_context,
 )
 
+if TYPE_CHECKING:
+    from slack_migrator.services.drive_adapter import DriveAdapter
+
 
 class SharedDriveManager:
     """Manages Google Drive shared drives for the migration process."""
 
     def __init__(
-        self, drive_service: Any, config: MigrationConfig, dry_run: bool = False
+        self,
+        drive_service: DriveAdapter,
+        config: MigrationConfig,
+        dry_run: bool = False,
     ) -> None:
         """Initialize the SharedDriveManager.
 
         Args:
-            drive_service: Google Drive API service instance
+            drive_service: Typed Drive API adapter
             config: Migration configuration
             dry_run: Whether to run in dry run mode
         """
@@ -46,7 +52,7 @@ class SharedDriveManager:
             return True
 
         try:
-            self.drive_service.drives().get(driveId=shared_drive_id).execute()
+            self.drive_service.get_drive(drive_id=shared_drive_id)
             return True
         except HttpError as e:
             log_with_context(
@@ -75,11 +81,7 @@ class SharedDriveManager:
             # Try to use specified shared drive ID
             if shared_drive_id:
                 try:
-                    drive_info = (
-                        self.drive_service.drives()
-                        .get(driveId=shared_drive_id)
-                        .execute()
-                    )
+                    drive_info = self.drive_service.get_drive(drive_id=shared_drive_id)
                     log_with_context(
                         logging.INFO,
                         f"Using configured shared drive: {drive_info.get('name', 'Unknown')} (ID: {shared_drive_id})",
@@ -119,7 +121,7 @@ class SharedDriveManager:
                 logging.INFO, f"Searching for existing shared drive: {drive_name}"
             )
 
-            drives_list = self.drive_service.drives().list().execute()
+            drives_list = self.drive_service.list_drives()
             drives = drives_list.get("drives", [])
 
             for drive in drives:
@@ -139,10 +141,8 @@ class SharedDriveManager:
 
             drive_metadata = {"name": drive_name}
 
-            created_drive = (
-                self.drive_service.drives()
-                .create(body=drive_metadata, requestId=request_id)
-                .execute()
+            created_drive = self.drive_service.create_drive(
+                body=drive_metadata, request_id=request_id
             )
 
             created_drive_id: str | None = created_drive.get("id")

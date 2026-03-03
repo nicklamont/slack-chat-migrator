@@ -17,10 +17,11 @@ from slack_migrator.utils.logging import log_with_context
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.chat_adapter import ChatAdapter
 
 
 def _fetch_all_migration_spaces(
-    chat: Any,
+    chat: ChatAdapter,
     channel_name_to_id: dict[str, str],
     state: MigrationState,
 ) -> dict[str, list[dict[str, Any]]]:
@@ -42,8 +43,7 @@ def _fetch_all_migration_spaces(
 
     page_token = None
     while True:
-        request = chat.spaces().list(pageSize=SPACES_PAGE_SIZE, pageToken=page_token)
-        response = request.execute()
+        response = chat.list_spaces(page_size=SPACES_PAGE_SIZE, page_token=page_token)
 
         for space in response.get("spaces", []):
             display_name = space.get("displayName", "")
@@ -72,8 +72,8 @@ def _fetch_all_migration_spaces(
 
             # First-seen ID mapping
             channel_id = channel_name_to_id.get(channel_name, "")
-            if channel_id and channel_id not in state.channel_id_to_space_id:
-                state.channel_id_to_space_id[channel_id] = space_id
+            if channel_id and channel_id not in state.spaces.channel_id_to_space_id:
+                state.spaces.channel_id_to_space_id[channel_id] = space_id
 
         page_token = response.get("nextPageToken")
         if not page_token:
@@ -84,7 +84,7 @@ def _fetch_all_migration_spaces(
 
 
 def _resolve_duplicate_spaces(
-    chat: Any,
+    chat: ChatAdapter,
     channel_name_to_id: dict[str, str],
     state: MigrationState,
     all_spaces_by_channel: dict[str, list[dict[str, Any]]],
@@ -110,18 +110,15 @@ def _resolve_duplicate_spaces(
         if len(spaces) == 1:
             channel_id = channel_name_to_id.get(channel_name, "")
             if channel_id:
-                state.channel_id_to_space_id[channel_id] = spaces[0]["space_id"]
+                state.spaces.channel_id_to_space_id[channel_id] = spaces[0]["space_id"]
             continue
 
         # Duplicate — enrich with member counts for disambiguation
         duplicate_spaces[channel_name] = spaces
         for space_info in spaces:
             try:
-                members_response = (
-                    chat.spaces()
-                    .members()
-                    .list(parent=space_info["space_name"], pageSize=1)
-                    .execute()
+                members_response = chat.list_memberships(
+                    parent=space_info["space_name"], page_size=1
                 )
                 if "memberships" in members_response:
                     count = len(members_response.get("memberships", []))
@@ -136,12 +133,12 @@ def _resolve_duplicate_spaces(
 
         # Remove ambiguous ID mapping
         channel_id = channel_name_to_id.get(channel_name, "")
-        if channel_id and channel_id in state.channel_id_to_space_id:
+        if channel_id and channel_id in state.spaces.channel_id_to_space_id:
             log_with_context(
                 logging.WARNING,
                 f"Removing ambiguous ID mapping for channel {channel_name} (ID: {channel_id})",
             )
-            del state.channel_id_to_space_id[channel_id]
+            del state.spaces.channel_id_to_space_id[channel_id]
 
     return space_mappings, duplicate_spaces
 
@@ -176,7 +173,7 @@ def _log_duplicate_spaces(
 
 
 def discover_existing_spaces(
-    chat: Any,
+    chat: ChatAdapter,
     channel_name_to_id: dict[str, str],
     state: MigrationState,
 ) -> tuple[dict[str, str], dict[str, list[dict[str, Any]]]]:
@@ -219,7 +216,7 @@ def discover_existing_spaces(
         )
         log_with_context(
             logging.INFO,
-            f"Created {len(state.channel_id_to_space_id)} channel ID to space ID mappings",
+            f"Created {len(state.spaces.channel_id_to_space_id)} channel ID to space ID mappings",
         )
 
     except HttpError as e:
@@ -232,7 +229,7 @@ def discover_existing_spaces(
     return space_mappings, duplicate_spaces
 
 
-def get_last_message_timestamp(chat: Any, channel: str, space: str) -> float:
+def get_last_message_timestamp(chat: ChatAdapter, channel: str, space: str) -> float:
     """
     Query Google Chat API to get the timestamp of the last message in a space.
 
@@ -257,12 +254,9 @@ def get_last_message_timestamp(chat: Any, channel: str, space: str) -> float:
 
     try:
         # We only need the most recent message, so limit to 1 result sorted by createTime desc
-        request = (
-            chat.spaces()
-            .messages()
-            .list(parent=space, pageSize=1, orderBy="createTime desc")
+        response = chat.list_messages(
+            parent=space, page_size=1, order_by="createTime desc"
         )
-        response = request.execute()
 
         messages = response.get("messages", [])
         if messages:
@@ -341,30 +335,178 @@ def log_space_mapping_conflicts(state: MigrationState, dry_run: bool = False) ->
         log_with_context(logging.INFO, "[DRY RUN] Checking for space mapping conflicts")
 
     # Log any conflicts that should be added to config
-    if state.channel_conflicts:
+    if state.errors.channel_conflicts:
         log_with_context(
             logging.WARNING,
-            f"Found {len(state.channel_conflicts)} channels with duplicate space conflicts",
+            f"Found {len(state.errors.channel_conflicts)} channels with duplicate space conflicts",
         )
         log_with_context(
             logging.WARNING,
             "Add the following entries to your config.yaml to resolve conflicts:",
         )
         log_with_context(logging.WARNING, "space_mapping:")
-        for channel_name in state.channel_conflicts:
+        for channel_name in state.errors.channel_conflicts:
             log_with_context(
                 logging.WARNING,
                 f'  "{channel_name}": "<space_id>"  # Replace with the desired space ID',
             )
 
 
-def load_existing_space_mappings(  # noqa: C901
-    ctx: MigrationContext, state: MigrationState, chat: Any
+def _resolve_space_conflicts(
+    duplicate_spaces: dict[str, list[dict[str, Any]]],
+    space_mapping: dict[str, str] | None,
+    discovered_spaces: dict[str, str],
+    state: MigrationState,
+) -> tuple[list[str], list[str]]:
+    """Resolve duplicate-space conflicts using config overrides.
+
+    Returns (unresolved_channels, resolved_channels).
+    """
+    unresolved: list[str] = []
+    resolved: list[str] = []
+
+    for channel_name, spaces in duplicate_spaces.items():
+        if space_mapping and channel_name in space_mapping:
+            configured_space_id = space_mapping[channel_name]
+            matching_space = next(
+                (s for s in spaces if s["space_id"] == configured_space_id),
+                None,
+            )
+            if matching_space:
+                log_with_context(
+                    logging.INFO,
+                    f"Using configured space mapping for channel"
+                    f" '{channel_name}': {configured_space_id}",
+                )
+                discovered_spaces[channel_name] = matching_space["space_name"]
+                resolved.append(channel_name)
+            else:
+                unresolved.append(channel_name)
+                state.errors.channel_conflicts.add(channel_name)
+                log_with_context(
+                    logging.ERROR,
+                    f"Configured space ID for channel '{channel_name}'"
+                    f" ({configured_space_id}) doesn't match any"
+                    " discovered spaces",
+                )
+        else:
+            unresolved.append(channel_name)
+            state.errors.channel_conflicts.add(channel_name)
+            log_with_context(
+                logging.ERROR,
+                f"Channel '{channel_name}' has {len(spaces)} duplicate"
+                " spaces and no mapping in config",
+            )
+            log_with_context(
+                logging.ERROR,
+                "Please add a space_mapping entry to config.yaml to disambiguate:",
+            )
+            log_with_context(logging.ERROR, "space_mapping:")
+            for space_info in spaces:
+                log_with_context(
+                    logging.ERROR,
+                    f"  # {space_info['display_name']}"
+                    f" (Members: {space_info['member_count']},"
+                    f" Created: {space_info['create_time']})",
+                )
+                log_with_context(
+                    logging.ERROR,
+                    f'  "{channel_name}": "{space_info["space_id"]}"',
+                )
+
+    return unresolved, resolved
+
+
+def _log_conflict_resolution_summary(
+    unresolved: list[str],
+    resolved: list[str],
+    state: MigrationState,
+) -> None:
+    """Log summary of conflict resolution and record issues in state."""
+    if unresolved:
+        for ch in unresolved:
+            state.errors.migration_issues[ch] = (
+                "Duplicate spaces found - requires disambiguation in config.yaml"
+            )
+        log_with_context(
+            logging.ERROR,
+            f"Found unresolved duplicate space conflicts for channels:"
+            f" {', '.join(unresolved)}."
+            " These channels will be marked as failed."
+            " Add space_mapping entries to config.yaml to resolve.",
+        )
+
+    if resolved:
+        log_with_context(
+            logging.INFO,
+            f"Successfully resolved space conflicts for channels:"
+            f" {', '.join(resolved)}",
+        )
+
+
+def _apply_discovered_spaces_to_state(
+    ctx: MigrationContext,
+    state: MigrationState,
+    discovered_spaces: dict[str, str],
+) -> None:
+    """Write discovered space mappings into mutable state."""
+    if not discovered_spaces:
+        log_with_context(logging.INFO, "No existing spaces found in Google Chat")
+        return
+
+    log_with_context(
+        logging.INFO,
+        f"Found {len(discovered_spaces)} existing spaces in Google Chat",
+    )
+
+    for channel_name, space_name in discovered_spaces.items():
+        space_id = (
+            space_name.split("/")[-1]
+            if space_name.startswith("spaces/")
+            else space_name
+        )
+        mode_info = "[UPDATE MODE] " if ctx.update_mode else ""
+        log_with_context(
+            logging.INFO,
+            f"{mode_info}Will use existing space {space_id}"
+            f" for channel '{channel_name}'",
+            channel=channel_name,
+        )
+
+    for channel_name, space_name in discovered_spaces.items():
+        state.spaces.channel_to_space[channel_name] = space_name
+
+        space_id = (
+            space_name.split("/")[-1]
+            if space_name.startswith("spaces/")
+            else space_name
+        )
+        channel_id = ctx.channel_name_to_id.get(channel_name, "")
+        if channel_id:
+            state.spaces.channel_id_to_space_id[channel_id] = space_id
+            log_with_context(
+                logging.DEBUG,
+                f"Mapped channel ID {channel_id} to space ID {space_id}",
+            )
+
+        if ctx.update_mode:
+            state.spaces.created_spaces[channel_name] = space_name
+
+    log_with_context(
+        logging.INFO,
+        f"Space discovery complete:"
+        f" {len(state.spaces.channel_to_space)} channels have"
+        " existing spaces, others will create new spaces",
+    )
+
+
+def load_existing_space_mappings(
+    ctx: MigrationContext, state: MigrationState, chat: ChatAdapter
 ) -> None:
     """Load existing space mappings from Google Chat API into migrator state.
 
     In update mode, discovers spaces via the API and resolves duplicate-space
-    conflicts using ``state.space_mapping`` overrides.  In regular import mode
+    conflicts using ``state.spaces.space_mapping`` overrides.  In regular import mode
     this is a no-op because we create new spaces rather than reusing existing ones.
 
     Args:
@@ -388,142 +530,20 @@ def load_existing_space_mappings(  # noqa: C901
             chat, ctx.channel_name_to_id, state
         )
 
-        # --- Resolve duplicate-space conflicts --------------------------------
         if duplicate_spaces:
-            space_mapping = state.space_mapping
-
             log_with_context(
                 logging.WARNING,
                 f"Found {len(duplicate_spaces)} channels with duplicate spaces",
             )
-
-            unresolved_conflicts: list[str] = []
-            resolved_conflicts: list[str] = []
-
-            for channel_name, spaces in duplicate_spaces.items():
-                if space_mapping and channel_name in space_mapping:
-                    configured_space_id = space_mapping[channel_name]
-
-                    matching_space = None
-                    for space_info in spaces:
-                        if space_info["space_id"] == configured_space_id:
-                            matching_space = space_info
-                            break
-
-                    if matching_space:
-                        log_with_context(
-                            logging.INFO,
-                            f"Using configured space mapping for channel"
-                            f" '{channel_name}': {configured_space_id}",
-                        )
-                        discovered_spaces[channel_name] = matching_space["space_name"]
-                        resolved_conflicts.append(channel_name)
-                    else:
-                        unresolved_conflicts.append(channel_name)
-                        state.channel_conflicts.add(channel_name)
-                        log_with_context(
-                            logging.ERROR,
-                            f"Configured space ID for channel '{channel_name}'"
-                            f" ({configured_space_id}) doesn't match any"
-                            " discovered spaces",
-                        )
-                else:
-                    unresolved_conflicts.append(channel_name)
-                    state.channel_conflicts.add(channel_name)
-                    log_with_context(
-                        logging.ERROR,
-                        f"Channel '{channel_name}' has {len(spaces)} duplicate"
-                        " spaces and no mapping in config",
-                    )
-                    log_with_context(
-                        logging.ERROR,
-                        "Please add a space_mapping entry to config.yaml"
-                        " to disambiguate:",
-                    )
-                    log_with_context(logging.ERROR, "space_mapping:")
-                    for space_info in spaces:
-                        log_with_context(
-                            logging.ERROR,
-                            f"  # {space_info['display_name']}"
-                            f" (Members: {space_info['member_count']},"
-                            f" Created: {space_info['create_time']})",
-                        )
-                        log_with_context(
-                            logging.ERROR,
-                            f'  "{channel_name}": "{space_info["space_id"]}"',
-                        )
-
-            if unresolved_conflicts:
-                for ch in unresolved_conflicts:
-                    state.migration_issues[ch] = (
-                        "Duplicate spaces found"
-                        " - requires disambiguation in config.yaml"
-                    )
-                log_with_context(
-                    logging.ERROR,
-                    f"Found unresolved duplicate space conflicts for channels:"
-                    f" {', '.join(unresolved_conflicts)}."
-                    " These channels will be marked as failed."
-                    " Add space_mapping entries to config.yaml to resolve.",
-                )
-
-            if resolved_conflicts:
-                log_with_context(
-                    logging.INFO,
-                    f"Successfully resolved space conflicts for channels:"
-                    f" {', '.join(resolved_conflicts)}",
-                )
-
-        # --- Apply discovered spaces to state ---------------------------------
-        if discovered_spaces:
-            log_with_context(
-                logging.INFO,
-                f"Found {len(discovered_spaces)} existing spaces in Google Chat",
+            unresolved, resolved = _resolve_space_conflicts(
+                duplicate_spaces,
+                state.spaces.space_mapping,
+                discovered_spaces,
+                state,
             )
+            _log_conflict_resolution_summary(unresolved, resolved, state)
 
-            for channel_name, space_name in discovered_spaces.items():
-                space_id = (
-                    space_name.split("/")[-1]
-                    if space_name.startswith("spaces/")
-                    else space_name
-                )
-
-                mode_info = "[UPDATE MODE] " if ctx.update_mode else ""
-                log_with_context(
-                    logging.INFO,
-                    f"{mode_info}Will use existing space {space_id}"
-                    f" for channel '{channel_name}'",
-                    channel=channel_name,
-                )
-
-            for channel_name, space_name in discovered_spaces.items():
-                state.channel_to_space[channel_name] = space_name
-
-                space_id = (
-                    space_name.split("/")[-1]
-                    if space_name.startswith("spaces/")
-                    else space_name
-                )
-
-                channel_id = ctx.channel_name_to_id.get(channel_name, "")
-                if channel_id:
-                    state.channel_id_to_space_id[channel_id] = space_id
-                    log_with_context(
-                        logging.DEBUG,
-                        f"Mapped channel ID {channel_id} to space ID {space_id}",
-                    )
-
-                if ctx.update_mode:
-                    state.created_spaces[channel_name] = space_name
-
-            log_with_context(
-                logging.INFO,
-                f"Space discovery complete:"
-                f" {len(state.channel_to_space)} channels have"
-                " existing spaces, others will create new spaces",
-            )
-        else:
-            log_with_context(logging.INFO, "No existing spaces found in Google Chat")
+        _apply_discovered_spaces_to_state(ctx, state, discovered_spaces)
 
     except HttpError as e:
         log_with_context(logging.ERROR, f"Failed to load existing space mappings: {e}")
@@ -531,7 +551,7 @@ def load_existing_space_mappings(  # noqa: C901
 
 
 def load_space_mappings(
-    chat: Any, channel_name_to_id: dict[str, str], state: MigrationState
+    chat: ChatAdapter, channel_name_to_id: dict[str, str], state: MigrationState
 ) -> dict[str, str]:
     """Load space mappings for update mode.
 
@@ -560,7 +580,7 @@ def load_space_mappings(
             )
 
         # Look for space_mapping overrides in state
-        space_mapping = state.space_mapping
+        space_mapping = state.spaces.space_mapping
         if space_mapping:
             log_with_context(
                 logging.INFO,
@@ -572,7 +592,7 @@ def load_space_mappings(
                 channel_id = channel_name_to_id.get(channel_name, "")
                 if channel_id:
                     # Override any discovered mapping with the config value
-                    state.channel_id_to_space_id[channel_id] = space_id
+                    state.spaces.channel_id_to_space_id[channel_id] = space_id
 
                     # Also update the name-based mapping for backward compatibility
                     discovered_spaces[channel_name] = f"spaces/{space_id}"

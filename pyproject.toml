@@ -71,7 +71,7 @@ ignore = ["E203", "E501", "S101", "S110", "S112"]
 max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S108"]
+"tests/**/*.py" = ["S106", "S108"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["slack_migrator"]
@@ -121,4 +121,8 @@ source = ["slack_migrator"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 70
+fail_under = 90
+omit = [
+    "slack_migrator/cli/migrate_cmd.py",
+    "slack_migrator/cli/cleanup_cmd.py",
+]

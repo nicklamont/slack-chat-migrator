@@ -5,13 +5,17 @@ Folder management for Google Drive integration.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
 from googleapiclient.errors import HttpError
 
+from slack_migrator.utils.api import escape_drive_query_value
 from slack_migrator.utils.logging import (
     log_with_context,
 )
+
+if TYPE_CHECKING:
+    from slack_migrator.services.drive_adapter import DriveAdapter
 
 
 class FolderManager:
@@ -19,14 +23,14 @@ class FolderManager:
 
     def __init__(
         self,
-        drive_service: Any,
+        drive_service: DriveAdapter,
         workspace_domain: str | None = None,
         dry_run: bool = False,
     ) -> None:
         """Initialize the FolderManager.
 
         Args:
-            drive_service: Google Drive API service instance
+            drive_service: DriveAdapter instance for Google Drive API calls
             workspace_domain: The workspace domain for permissions
             dry_run: Whether to run in dry run mode
         """
@@ -52,25 +56,21 @@ class FolderManager:
 
         try:
             # Check if folder already exists in shared drive
-            query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            safe_name = escape_drive_query_value(folder_name)
+            query = f"name = '{safe_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
 
             log_with_context(
                 logging.DEBUG,
                 f"Searching for existing folder {folder_name} in shared drive {shared_drive_id}",
             )
 
-            results = (
-                self.drive_service.files()
-                .list(
-                    q=query,
-                    spaces="drive",
-                    corpora="drive",
-                    driveId=shared_drive_id,
-                    includeItemsFromAllDrives=True,
-                    supportsAllDrives=True,
-                    fields="files(id, name)",
-                )
-                .execute()
+            results = self.drive_service.list_files(
+                q=query,
+                corpora="drive",
+                drive_id=shared_drive_id,
+                include_items_from_all_drives=True,
+                supports_all_drives=True,
+                fields="files(id, name)",
             )
 
             files = results.get("files", [])
@@ -93,10 +93,8 @@ class FolderManager:
                 "mimeType": "application/vnd.google-apps.folder",
                 "parents": [shared_drive_id],
             }
-            folder = (
-                self.drive_service.files()
-                .create(body=folder_metadata, fields="id", supportsAllDrives=True)
-                .execute()
+            folder = self.drive_service.create_file(
+                body=folder_metadata, fields="id", supports_all_drives=True
             )
 
             new_folder_id: str | None = folder.get("id")
@@ -127,18 +125,15 @@ class FolderManager:
 
         try:
             # Search for existing folder
-            query = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            safe_name = escape_drive_query_value(folder_name)
+            query = f"name = '{safe_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
 
             log_with_context(
                 logging.DEBUG,
                 f"Searching for existing regular Drive folder: {folder_name}",
             )
 
-            results = (
-                self.drive_service.files()
-                .list(q=query, spaces="drive", fields="files(id, name)")
-                .execute()
-            )
+            results = self.drive_service.list_files(q=query, fields="files(id, name)")
 
             files = results.get("files", [])
             if files:
@@ -161,11 +156,7 @@ class FolderManager:
                 "name": folder_name,
                 "mimeType": "application/vnd.google-apps.folder",
             }
-            folder = (
-                self.drive_service.files()
-                .create(body=folder_metadata, fields="id")
-                .execute()
-            )
+            folder = self.drive_service.create_file(body=folder_metadata, fields="id")
 
             new_folder_id: str | None = folder.get("id")
             # Note: No domain-wide permissions set to avoid org-wide access
@@ -208,11 +199,11 @@ class FolderManager:
             # Verify folder still exists
             try:
                 if shared_drive_id:
-                    self.drive_service.files().get(
-                        fileId=folder_id, supportsAllDrives=True
-                    ).execute()
+                    self.drive_service.get_file(
+                        file_id=folder_id, supports_all_drives=True
+                    )
                 else:
-                    self.drive_service.files().get(fileId=folder_id).execute()
+                    self.drive_service.get_file(file_id=folder_id)
                 return folder_id
             except HttpError as e:
                 log_with_context(
@@ -224,7 +215,9 @@ class FolderManager:
 
         try:
             # Search for existing channel folder
-            query = f"name = '{channel}' and mimeType = 'application/vnd.google-apps.folder' and '{parent_folder_id}' in parents and trashed = false"
+            safe_channel = escape_drive_query_value(channel)
+            safe_parent = escape_drive_query_value(parent_folder_id)
+            query = f"name = '{safe_channel}' and mimeType = 'application/vnd.google-apps.folder' and '{safe_parent}' in parents and trashed = false"
 
             log_with_context(
                 logging.DEBUG,
@@ -234,24 +227,17 @@ class FolderManager:
 
             # Use appropriate parameters based on shared drive
             if shared_drive_id:
-                results = (
-                    self.drive_service.files()
-                    .list(
-                        q=query,
-                        spaces="drive",
-                        corpora="drive",
-                        driveId=shared_drive_id,
-                        includeItemsFromAllDrives=True,
-                        supportsAllDrives=True,
-                        fields="files(id, name)",
-                    )
-                    .execute()
+                results = self.drive_service.list_files(
+                    q=query,
+                    corpora="drive",
+                    drive_id=shared_drive_id,
+                    include_items_from_all_drives=True,
+                    supports_all_drives=True,
+                    fields="files(id, name)",
                 )
             else:
-                results = (
-                    self.drive_service.files()
-                    .list(q=query, spaces="drive", fields="files(id, name)")
-                    .execute()
+                results = self.drive_service.list_files(
+                    q=query, fields="files(id, name)"
                 )
 
             items = results.get("files", [])
@@ -280,16 +266,12 @@ class FolderManager:
             }
             # Create folder with appropriate parameters
             if shared_drive_id:
-                folder = (
-                    self.drive_service.files()
-                    .create(body=folder_metadata, fields="id", supportsAllDrives=True)
-                    .execute()
+                folder = self.drive_service.create_file(
+                    body=folder_metadata, fields="id", supports_all_drives=True
                 )
             else:
-                folder = (
-                    self.drive_service.files()
-                    .create(body=folder_metadata, fields="id")
-                    .execute()
+                folder = self.drive_service.create_file(
+                    body=folder_metadata, fields="id"
                 )
 
             created_folder_id: str | None = folder.get("id")
@@ -355,27 +337,20 @@ class FolderManager:
             folder_name = self._sanitize_folder_name(channel)
 
             # First, search for folder in the parent folder
-            q = f"name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder' and '{parent_folder_id}' in parents"
+            safe_name = escape_drive_query_value(folder_name)
+            safe_parent = escape_drive_query_value(parent_folder_id)
+            q = f"name = '{safe_name}' and mimeType = 'application/vnd.google-apps.folder' and '{safe_parent}' in parents"
             if shared_drive_id:
-                response = (
-                    self.drive_service.files()
-                    .list(
-                        q=q,
-                        spaces="drive",
-                        fields="files(id, name)",
-                        corpora="drive",
-                        driveId=shared_drive_id,
-                        includeItemsFromAllDrives=True,
-                        supportsAllDrives=True,
-                    )
-                    .execute()
+                response = self.drive_service.list_files(
+                    q=q,
+                    fields="files(id, name)",
+                    corpora="drive",
+                    drive_id=shared_drive_id,
+                    include_items_from_all_drives=True,
+                    supports_all_drives=True,
                 )
             else:
-                response = (
-                    self.drive_service.files()
-                    .list(q=q, spaces="drive", fields="files(id, name)")
-                    .execute()
-                )
+                response = self.drive_service.list_files(q=q, fields="files(id, name)")
 
             files = response.get("files", [])
 
@@ -447,16 +422,18 @@ class FolderManager:
             try:
                 permission = {"type": "user", "role": "reader", "emailAddress": email}
                 if shared_drive_id:
-                    self.drive_service.permissions().create(
-                        fileId=folder_id,
+                    self.drive_service.create_permission(
+                        file_id=folder_id,
                         body=permission,
-                        sendNotificationEmail=False,
-                        supportsAllDrives=True,
-                    ).execute()
+                        send_notification_email=False,
+                        supports_all_drives=True,
+                    )
                 else:
-                    self.drive_service.permissions().create(
-                        fileId=folder_id, body=permission, sendNotificationEmail=False
-                    ).execute()
+                    self.drive_service.create_permission(
+                        file_id=folder_id,
+                        body=permission,
+                        send_notification_email=False,
+                    )
 
                 success_count += 1
 

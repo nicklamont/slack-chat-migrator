@@ -79,26 +79,48 @@ def _make_ctx(
 def _make_state(**overrides: Any) -> MigrationState:
     """Build a MigrationState with sensible test defaults."""
     state = MigrationState()
-    state.migration_summary = _make_summary(
+    state.progress.migration_summary = _make_summary(
         channels_processed=["general", "random"],
         spaces_created=2,
         messages_created=50,
         reactions_created=10,
         files_created=5,
     )
-    state.output_dir = None
-    state.failed_messages = []
-    state.created_spaces = {"general": "spaces/abc", "random": "spaces/def"}
-    state.channel_stats = {}
-    state.high_failure_rate_channels = {}
-    state.channel_conflicts = set()
-    state.migration_issues = {}
-    state.skipped_reactions = []
-    state.spaces_with_external_users = {}
-    state.active_users_by_channel = {}
+    state.context.output_dir = None
+    state.messages.failed_messages = []
+    state.spaces.created_spaces = {"general": "spaces/abc", "random": "spaces/def"}
+    state.progress.channel_stats = {}
+    state.errors.high_failure_rate_channels = {}
+    state.errors.channel_conflicts = set()
+    state.errors.migration_issues = {}
+    state.users.skipped_reactions = []
+    state.progress.spaces_with_external_users = {}
+    state.progress.active_users_by_channel = {}
     for key, value in overrides.items():
-        setattr(state, key, value)
+        _set_nested_attr(state, key, value)
     return state
+
+
+def _set_nested_attr(state: MigrationState, key: str, value: Any) -> None:
+    """Set a state attribute, routing to the correct sub-state."""
+    _routing: dict[str, tuple[object, str]] = {
+        "output_dir": (state.context, "output_dir"),
+        "failed_messages": (state.messages, "failed_messages"),
+        "created_spaces": (state.spaces, "created_spaces"),
+        "channel_stats": (state.progress, "channel_stats"),
+        "high_failure_rate_channels": (state.errors, "high_failure_rate_channels"),
+        "channel_conflicts": (state.errors, "channel_conflicts"),
+        "migration_issues": (state.errors, "migration_issues"),
+        "skipped_reactions": (state.users, "skipped_reactions"),
+        "spaces_with_external_users": (state.progress, "spaces_with_external_users"),
+        "active_users_by_channel": (state.progress, "active_users_by_channel"),
+        "migration_summary": (state.progress, "migration_summary"),
+    }
+    if key in _routing:
+        obj, attr = _routing[key]
+        setattr(obj, attr, value)
+    else:
+        setattr(state, key, value)
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +151,7 @@ class TestPrintDryRunSummary:
     def test_zero_stats(self, capsys):
         ctx = _make_ctx()
         state = _make_state()
-        state.migration_summary = _default_migration_summary()
+        state.progress.migration_summary = _default_migration_summary()
         user_resolver = MagicMock()
         user_resolver.is_external_user.return_value = False
         print_dry_run_summary(ctx, state, user_resolver)
@@ -330,7 +352,7 @@ class TestGenerateReport:
     def test_report_contains_spaces_section(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.channel_stats = {
+        state.progress.channel_stats = {
             "general": {"message_count": 30, "reaction_count": 5, "file_count": 2},
             "random": {"message_count": 20, "reaction_count": 5, "file_count": 3},
         }
@@ -352,7 +374,7 @@ class TestGenerateReport:
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
         # "random" is processed but has no created space
-        state.created_spaces = {"general": "spaces/abc"}
+        state.spaces.created_spaces = {"general": "spaces/abc"}
         user_resolver = MagicMock()
         user_resolver.is_external_user.return_value = False
         result = generate_report(ctx, state, user_resolver)
@@ -367,7 +389,7 @@ class TestGenerateReport:
     def test_failed_messages_grouped_by_channel(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.failed_messages = [
+        state.messages.failed_messages = [
             _make_failed(channel="general", ts="1234.56", error="timeout"),
             _make_failed(channel="general", ts="1234.57", error="rate limit"),
             _make_failed(channel="random", ts="1234.58", error="unknown"),
@@ -390,7 +412,7 @@ class TestGenerateReport:
     def test_failed_messages_writes_channel_logs(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.failed_messages = [
+        state.messages.failed_messages = [
             _make_failed(
                 channel="general",
                 ts="1234.56",
@@ -416,7 +438,7 @@ class TestGenerateReport:
     def test_failed_messages_with_no_payload(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.failed_messages = [
+        state.messages.failed_messages = [
             _make_failed(channel="general", ts="1234.56", error="timeout"),
         ]
         user_resolver = MagicMock()
@@ -436,7 +458,7 @@ class TestGenerateReport:
     def test_failed_messages_unlisted_channel(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.failed_messages = [
+        state.messages.failed_messages = [
             _make_failed(channel="unlisted", ts="1234.56", error="timeout"),
         ]
         user_resolver = MagicMock()
@@ -575,7 +597,7 @@ class TestGenerateReport:
         config.max_failure_percentage = 10
         ctx = _make_ctx(config=config)
         state = _make_state(output_dir=str(tmp_path))
-        state.high_failure_rate_channels = {
+        state.errors.high_failure_rate_channels = {
             "general": {"failure_rate": 25.0, "failed": 5, "total": 20}
         }
         user_resolver = MagicMock()
@@ -596,7 +618,7 @@ class TestGenerateReport:
     ):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.high_failure_rate_channels = {}
+        state.errors.high_failure_rate_channels = {}
         user_resolver = MagicMock()
         user_resolver.is_external_user.return_value = False
 
@@ -612,7 +634,7 @@ class TestGenerateReport:
     def test_channel_conflicts_recommendation(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.channel_conflicts = {"general", "random"}
+        state.errors.channel_conflicts = {"general", "random"}
         user_resolver = MagicMock()
         user_resolver.is_external_user.return_value = False
 
@@ -629,7 +651,7 @@ class TestGenerateReport:
     def test_no_channel_conflicts_no_recommendation(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.channel_conflicts = set()
+        state.errors.channel_conflicts = set()
         user_resolver = MagicMock()
         user_resolver.is_external_user.return_value = False
 
@@ -646,7 +668,7 @@ class TestGenerateReport:
     def test_skipped_reactions_recommendation(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.skipped_reactions = [
+        state.users.skipped_reactions = [
             {
                 "user_id": "U999",
                 "reaction": "thumbsup",
@@ -716,7 +738,7 @@ class TestGenerateReport:
             },
         )
         state = _make_state(output_dir=str(tmp_path))
-        state.active_users_by_channel = {
+        state.progress.active_users_by_channel = {
             "general": ["U001", "U002", "U003"],
         }
         user_resolver = MagicMock()
@@ -738,7 +760,7 @@ class TestGenerateReport:
     def test_active_users_unmapped_user_skipped(self, mock_log, tmp_path):
         ctx = _make_ctx(user_map={"U001": "alice@example.com"})
         state = _make_state(output_dir=str(tmp_path))
-        state.active_users_by_channel = {
+        state.progress.active_users_by_channel = {
             "general": ["U001", "U999"],  # U999 not in user_map
         }
         user_resolver = MagicMock()
@@ -759,7 +781,7 @@ class TestGenerateReport:
     def test_spaces_with_external_users_flag(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.spaces_with_external_users = {"spaces/abc": True}
+        state.progress.spaces_with_external_users = {"spaces/abc": True}
         user_resolver = MagicMock()
         user_resolver.is_external_user.return_value = False
 
@@ -775,7 +797,7 @@ class TestGenerateReport:
     def test_migration_issues_in_report(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.migration_issues = {"general": ["issue1", "issue2"]}
+        state.errors.migration_issues = {"general": ["issue1", "issue2"]}
         user_resolver = MagicMock()
         user_resolver.is_external_user.return_value = False
 
@@ -802,7 +824,7 @@ class TestGenerateReport:
     def test_empty_channels_processed(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.migration_summary["channels_processed"] = []
+        state.progress.migration_summary["channels_processed"] = []
         user_resolver = MagicMock()
         user_resolver.is_external_user.return_value = False
 
@@ -819,7 +841,7 @@ class TestGenerateReport:
         """When writing channel logs fails, it should log an error but not crash."""
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.failed_messages = [
+        state.messages.failed_messages = [
             _make_failed(channel="general", ts="1234.56", error="timeout"),
         ]
         user_resolver = MagicMock()
@@ -847,7 +869,7 @@ class TestGenerateReport:
             def __repr__(self):
                 return "<Unserializable>"
 
-        state.failed_messages = [
+        state.messages.failed_messages = [
             FailedMessage(
                 channel="general",
                 ts="1234.56",
@@ -870,7 +892,7 @@ class TestGenerateReport:
     def test_no_failed_messages_no_channel_logs(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
-        state.failed_messages = []
+        state.messages.failed_messages = []
         user_resolver = MagicMock()
         user_resolver.is_external_user.return_value = False
 
