@@ -38,16 +38,14 @@ def _http_error(status=400, reason="Bad Request", content=b"error"):
 
 def _setup_space_creation(chat, space_name="spaces/test123"):
     """Configure chat mock so space creation succeeds."""
-    chat.spaces().create().execute.return_value = {"name": space_name}
+    chat.create_space.return_value = {"name": space_name}
 
 
 def _setup_space_and_member(chat, space_name="spaces/test123"):
     """Configure chat mock so both space creation and member ops succeed."""
     _setup_space_creation(chat, space_name)
-    chat.spaces().members().list().execute.return_value = {"memberships": []}
-    chat.spaces().members().create().execute.return_value = {
-        "name": f"{space_name}/members/m1"
-    }
+    chat.list_memberships.return_value = {"memberships": []}
+    chat.create_membership.return_value = {"name": f"{space_name}/members/m1"}
 
 
 # -------------------------------------------------------------------
@@ -88,7 +86,7 @@ class TestSpaceOperations:
         """Space creation and listing both succeed."""
         ctx = _make_context()
         _setup_space_creation(ctx.chat)
-        ctx.chat.spaces().list().execute.return_value = {"spaces": []}
+        ctx.chat.list_spaces.return_value = {"spaces": []}
 
         validator = PermissionValidator(ctx)
         validator._test_space_operations()
@@ -99,7 +97,7 @@ class TestSpaceOperations:
     def test_creation_http_error(self):
         """Space creation HttpError logged, no crash, early return."""
         ctx = _make_context()
-        ctx.chat.spaces().create().execute.side_effect = _http_error(403, "Forbidden")
+        ctx.chat.create_space.side_effect = _http_error(403, "Forbidden")
 
         validator = PermissionValidator(ctx)
         validator._test_space_operations()
@@ -112,7 +110,7 @@ class TestSpaceOperations:
         """Space listing HttpError logged but doesn't prevent further tests."""
         ctx = _make_context()
         _setup_space_creation(ctx.chat)
-        ctx.chat.spaces().list().execute.side_effect = _http_error(403, "Forbidden")
+        ctx.chat.list_spaces.side_effect = _http_error(403, "Forbidden")
 
         validator = PermissionValidator(ctx)
         validator._test_space_operations()
@@ -138,10 +136,8 @@ class TestMemberOperations:
         validator.test_resources["space"] = "spaces/test123"
         validator.test_resources["space_create_time"] = "2024-01-01T00:00:00Z"
 
-        ctx.chat.spaces().members().list().execute.return_value = {"memberships": []}
-        ctx.chat.spaces().members().create().execute.return_value = {
-            "name": "spaces/test123/members/m1"
-        }
+        ctx.chat.list_memberships.return_value = {"memberships": []}
+        ctx.chat.create_membership.return_value = {"name": "spaces/test123/members/m1"}
 
         validator._test_member_operations()
 
@@ -156,7 +152,7 @@ class TestMemberOperations:
         validator._test_member_operations()
 
         assert validator.permission_errors == []
-        ctx.chat.spaces().members().list.assert_not_called()
+        ctx.chat.list_memberships.assert_not_called()
 
     def test_409_conflict_treated_as_success(self):
         """409 Already a member treated as success."""
@@ -165,10 +161,8 @@ class TestMemberOperations:
         validator.test_resources["space"] = "spaces/test123"
         validator.test_resources["space_create_time"] = "2024-01-01T00:00:00Z"
 
-        ctx.chat.spaces().members().list().execute.return_value = {"memberships": []}
-        ctx.chat.spaces().members().create().execute.side_effect = _http_error(
-            409, "Conflict"
-        )
+        ctx.chat.list_memberships.return_value = {"memberships": []}
+        ctx.chat.create_membership.side_effect = _http_error(409, "Conflict")
 
         validator._test_member_operations()
 
@@ -181,13 +175,13 @@ class TestMemberOperations:
         validator.test_resources["space"] = "spaces/test123"
         validator.test_resources["space_create_time"] = "2024-01-01T00:00:00Z"
 
-        ctx.chat.spaces().members().list().execute.return_value = {"memberships": []}
+        ctx.chat.list_memberships.return_value = {"memberships": []}
         err = _http_error(
             400,
             "Bad Request",
             b"Adding normal memberships isn't supported",
         )
-        ctx.chat.spaces().members().create().execute.side_effect = err
+        ctx.chat.create_membership.side_effect = err
 
         validator._test_member_operations()
 
@@ -205,7 +199,7 @@ class TestMemberOperations:
             "Forbidden",
             b"insufficient authentication scopes",
         )
-        ctx.chat.spaces().members().list().execute.side_effect = err
+        ctx.chat.list_memberships.side_effect = err
 
         validator._test_member_operations()
 
@@ -227,9 +221,7 @@ class TestMessageOperations:
         validator = PermissionValidator(ctx)
         validator.test_resources["space"] = "spaces/test123"
 
-        ctx.chat.spaces().messages().create().execute.return_value = {
-            "name": "spaces/test123/messages/msg1"
-        }
+        ctx.chat.create_message.return_value = {"name": "spaces/test123/messages/msg1"}
 
         validator._test_message_operations()
 
@@ -251,9 +243,7 @@ class TestMessageOperations:
         validator = PermissionValidator(ctx)
         validator.test_resources["space"] = "spaces/test123"
 
-        ctx.chat.spaces().messages().create().execute.side_effect = _http_error(
-            403, "Forbidden"
-        )
+        ctx.chat.create_message.side_effect = _http_error(403, "Forbidden")
 
         validator._test_message_operations()
 
@@ -274,8 +264,8 @@ class TestDriveOperations:
         ctx = _make_context()
         validator = PermissionValidator(ctx)
 
-        ctx.drive.files().create().execute.return_value = {"id": "file123"}
-        ctx.drive.permissions().create().execute.return_value = {"id": "perm1"}
+        ctx.drive.create_file.return_value = {"id": "file123"}
+        ctx.drive.create_permission.return_value = {"id": "perm1"}
 
         validator._test_drive_operations()
 
@@ -287,7 +277,7 @@ class TestDriveOperations:
         ctx = _make_context()
         validator = PermissionValidator(ctx)
 
-        ctx.drive.files().create().execute.side_effect = _http_error(403, "Forbidden")
+        ctx.drive.create_file.side_effect = _http_error(403, "Forbidden")
 
         validator._test_drive_operations()
 
@@ -299,10 +289,8 @@ class TestDriveOperations:
         ctx = _make_context()
         validator = PermissionValidator(ctx)
 
-        ctx.drive.files().create().execute.return_value = {"id": "file123"}
-        ctx.drive.permissions().create().execute.side_effect = _http_error(
-            403, "Forbidden"
-        )
+        ctx.drive.create_file.return_value = {"id": "file123"}
+        ctx.drive.create_permission.side_effect = _http_error(403, "Forbidden")
 
         validator._test_drive_operations()
 
@@ -329,8 +317,8 @@ class TestCleanup:
 
         validator._cleanup_test_resources()
 
-        ctx.chat.spaces().delete.assert_called_once()
-        ctx.drive.files().delete.assert_called_once()
+        ctx.chat.delete_space.assert_called_once()
+        ctx.drive.delete_file.assert_called_once()
 
     def test_handles_import_mode_deletion_errors(self):
         """Import mode deletion error logged gracefully."""
@@ -338,9 +326,7 @@ class TestCleanup:
         validator = PermissionValidator(ctx)
         validator.test_resources = {"space": "spaces/test123"}
 
-        ctx.chat.spaces().delete().execute.side_effect = Exception(
-            "import mode: cannot delete"
-        )
+        ctx.chat.delete_space.side_effect = Exception("import mode: cannot delete")
 
         # Should not raise
         validator._cleanup_test_resources()
@@ -353,8 +339,8 @@ class TestCleanup:
 
         validator._cleanup_test_resources()
 
-        ctx.chat.spaces().delete.assert_not_called()
-        ctx.drive.files().delete.assert_not_called()
+        ctx.chat.delete_space.assert_not_called()
+        ctx.drive.delete_file.assert_not_called()
 
     def test_partial_cleanup_one_fails_other_still_attempted(self):
         """When drive cleanup fails, space cleanup still attempted."""
@@ -365,14 +351,14 @@ class TestCleanup:
             "space": "spaces/test123",
         }
 
-        ctx.drive.files().delete().execute.side_effect = HttpError(
+        ctx.drive.delete_file.side_effect = HttpError(
             Response({"status": "500"}), b"drive error"
         )
 
         # Should not raise — space cleanup still attempted
         validator._cleanup_test_resources()
 
-        ctx.chat.spaces().delete.assert_called_once()
+        ctx.chat.delete_space.assert_called_once()
 
 
 # -------------------------------------------------------------------
@@ -423,19 +409,15 @@ class TestValidateAllPermissions:
         ctx = _make_context()
         # Space ops
         _setup_space_creation(ctx.chat)
-        ctx.chat.spaces().list().execute.return_value = {"spaces": []}
+        ctx.chat.list_spaces.return_value = {"spaces": []}
         # Member ops
-        ctx.chat.spaces().members().list().execute.return_value = {"memberships": []}
-        ctx.chat.spaces().members().create().execute.return_value = {
-            "name": "spaces/test123/members/m1"
-        }
+        ctx.chat.list_memberships.return_value = {"memberships": []}
+        ctx.chat.create_membership.return_value = {"name": "spaces/test123/members/m1"}
         # Message ops
-        ctx.chat.spaces().messages().create().execute.return_value = {
-            "name": "spaces/test123/messages/msg1"
-        }
+        ctx.chat.create_message.return_value = {"name": "spaces/test123/messages/msg1"}
         # Drive ops
-        ctx.drive.files().create().execute.return_value = {"id": "file123"}
-        ctx.drive.permissions().create().execute.return_value = {"id": "perm1"}
+        ctx.drive.create_file.return_value = {"id": "file123"}
+        ctx.drive.create_permission.return_value = {"id": "perm1"}
 
         validator = PermissionValidator(ctx)
         assert validator.validate_all_permissions() is True
@@ -443,7 +425,7 @@ class TestValidateAllPermissions:
     def test_critical_exception_caught_and_reported(self):
         """Unexpected exception during validation is caught and reported."""
         ctx = _make_context()
-        ctx.chat.spaces().create().execute.side_effect = RuntimeError("unexpected")
+        ctx.chat.create_space.side_effect = RuntimeError("unexpected")
 
         validator = PermissionValidator(ctx)
         with pytest.raises(PermissionCheckError):
@@ -457,27 +439,25 @@ class TestValidateAllPermissions:
         """Cleanup runs even when validation raises."""
         ctx = _make_context()
         _setup_space_creation(ctx.chat)
-        ctx.chat.spaces().list().execute.return_value = {"spaces": []}
+        ctx.chat.list_spaces.return_value = {"spaces": []}
         # Fail on member listing
-        ctx.chat.spaces().members().list().execute.side_effect = _http_error(
+        ctx.chat.list_memberships.side_effect = _http_error(
             403,
             "Forbidden",
             b"insufficient authentication scopes",
         )
-        # Message ops fail because member error
-        ctx.chat.spaces().messages().create().execute.return_value = {
-            "name": "spaces/test123/messages/msg1"
-        }
+        # Message ops
+        ctx.chat.create_message.return_value = {"name": "spaces/test123/messages/msg1"}
         # Drive ops succeed
-        ctx.drive.files().create().execute.return_value = {"id": "file123"}
-        ctx.drive.permissions().create().execute.return_value = {"id": "perm1"}
+        ctx.drive.create_file.return_value = {"id": "file123"}
+        ctx.drive.create_permission.return_value = {"id": "perm1"}
 
         validator = PermissionValidator(ctx)
         with pytest.raises(PermissionCheckError):
             validator.validate_all_permissions()
 
         # Space was created, so cleanup should have been called
-        ctx.chat.spaces().delete.assert_called()
+        ctx.chat.delete_space.assert_called()
 
 
 # -------------------------------------------------------------------
@@ -497,18 +477,12 @@ class TestValidatePermissions:
 
         # Make all ops succeed
         _setup_space_creation(migrator.chat)
-        migrator.chat.spaces().list().execute.return_value = {"spaces": []}
-        migrator.chat.spaces().members().list().execute.return_value = {
-            "memberships": []
-        }
-        migrator.chat.spaces().members().create().execute.return_value = {
-            "name": "spaces/t/members/m"
-        }
-        migrator.chat.spaces().messages().create().execute.return_value = {
-            "name": "spaces/t/messages/m"
-        }
-        migrator.drive.files().create().execute.return_value = {"id": "f1"}
-        migrator.drive.permissions().create().execute.return_value = {"id": "p1"}
+        migrator.chat.list_spaces.return_value = {"spaces": []}
+        migrator.chat.list_memberships.return_value = {"memberships": []}
+        migrator.chat.create_membership.return_value = {"name": "spaces/t/members/m"}
+        migrator.chat.create_message.return_value = {"name": "spaces/t/messages/m"}
+        migrator.drive.create_file.return_value = {"id": "f1"}
+        migrator.drive.create_permission.return_value = {"id": "p1"}
 
         result = validate_permissions(migrator)
 
@@ -522,9 +496,7 @@ class TestValidatePermissions:
         migrator.drive = MagicMock()
         migrator.workspace_admin = "admin@example.com"
 
-        migrator.chat.spaces().create().execute.side_effect = _http_error(
-            403, "Forbidden"
-        )
+        migrator.chat.create_space.side_effect = _http_error(403, "Forbidden")
 
         with pytest.raises(PermissionCheckError):
             validate_permissions(migrator)
@@ -549,18 +521,12 @@ class TestCheckPermissionsStandalone:
 
         # Make all ops pass
         _setup_space_creation(chat_service)
-        chat_service.spaces().list().execute.return_value = {"spaces": []}
-        chat_service.spaces().members().list().execute.return_value = {
-            "memberships": []
-        }
-        chat_service.spaces().members().create().execute.return_value = {
-            "name": "spaces/t/members/m"
-        }
-        chat_service.spaces().messages().create().execute.return_value = {
-            "name": "spaces/t/messages/m"
-        }
-        drive_service.files().create().execute.return_value = {"id": "f1"}
-        drive_service.permissions().create().execute.return_value = {"id": "p1"}
+        chat_service.list_spaces.return_value = {"spaces": []}
+        chat_service.list_memberships.return_value = {"memberships": []}
+        chat_service.create_membership.return_value = {"name": "spaces/t/members/m"}
+        chat_service.create_message.return_value = {"name": "spaces/t/messages/m"}
+        drive_service.create_file.return_value = {"id": "f1"}
+        drive_service.create_permission.return_value = {"id": "p1"}
 
         result = check_permissions_standalone(
             "/fake/creds.json", "admin@example.com", max_retries=3, retry_delay=1
@@ -577,18 +543,12 @@ class TestCheckPermissionsStandalone:
         mock_get_service.side_effect = [chat_service, drive_service]
 
         _setup_space_creation(chat_service)
-        chat_service.spaces().list().execute.return_value = {"spaces": []}
-        chat_service.spaces().members().list().execute.return_value = {
-            "memberships": []
-        }
-        chat_service.spaces().members().create().execute.return_value = {
-            "name": "spaces/t/members/m"
-        }
-        chat_service.spaces().messages().create().execute.return_value = {
-            "name": "spaces/t/messages/m"
-        }
-        drive_service.files().create().execute.return_value = {"id": "f1"}
-        drive_service.permissions().create().execute.return_value = {"id": "p1"}
+        chat_service.list_spaces.return_value = {"spaces": []}
+        chat_service.list_memberships.return_value = {"memberships": []}
+        chat_service.create_membership.return_value = {"name": "spaces/t/members/m"}
+        chat_service.create_message.return_value = {"name": "spaces/t/messages/m"}
+        drive_service.create_file.return_value = {"id": "f1"}
+        drive_service.create_permission.return_value = {"id": "p1"}
 
         check_permissions_standalone("/fake/creds.json", "admin@example.com")
 
@@ -621,10 +581,8 @@ class TestMemberOperationsEdgeCases:
         validator.test_resources = {"space": "spaces/test123"}
         # Intentionally no space_create_time
 
-        ctx.chat.spaces().members().list().execute.return_value = {"memberships": []}
-        ctx.chat.spaces().members().create().execute.return_value = {
-            "name": "spaces/test123/members/m1"
-        }
+        ctx.chat.list_memberships.return_value = {"memberships": []}
+        ctx.chat.create_membership.return_value = {"name": "spaces/test123/members/m1"}
 
         validator._test_member_operations()
 
@@ -639,8 +597,8 @@ class TestMemberOperationsEdgeCases:
             "space_create_time": "2024-01-01T00:00:00Z",
         }
 
-        ctx.chat.spaces().members().list().execute.return_value = {"memberships": []}
-        ctx.chat.spaces().members().create().execute.side_effect = _http_error(
+        ctx.chat.list_memberships.return_value = {"memberships": []}
+        ctx.chat.create_membership.side_effect = _http_error(
             500, "Internal Server Error"
         )
 
@@ -659,10 +617,8 @@ class TestMemberOperationsEdgeCases:
         }
 
         err = _http_error(400, "Bad Request", b"not available in import mode")
-        ctx.chat.spaces().members().list().execute.side_effect = err
-        ctx.chat.spaces().members().create().execute.return_value = {
-            "name": "spaces/test123/members/m1"
-        }
+        ctx.chat.list_memberships.side_effect = err
+        ctx.chat.create_membership.return_value = {"name": "spaces/test123/members/m1"}
 
         validator._test_member_operations()
 

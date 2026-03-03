@@ -31,15 +31,15 @@ def _make_state(
 ) -> MigrationState:
     """Build a MigrationState with realistic attributes."""
     state = MigrationState()
-    state.migration_summary = MigrationSummary(
+    state.progress.migration_summary = MigrationSummary(
         channels_processed=channels_processed or [],
         spaces_created=spaces_created,
         messages_created=messages_created,
         reactions_created=reactions_created,
         files_created=files_created,
     )
-    state.channels_with_errors = channels_with_errors or []
-    state.incomplete_import_spaces = incomplete_import_spaces or []
+    state.errors.channels_with_errors = channels_with_errors or []
+    state.errors.incomplete_import_spaces = incomplete_import_spaces or []
     return state
 
 

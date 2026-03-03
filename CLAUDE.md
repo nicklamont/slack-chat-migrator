@@ -11,8 +11,13 @@ In **dry-run mode**, `DryRunChatService`/`DryRunDriveService` are injected in pl
 ```
 slack_migrator/
 ├── cli/            # CLI entry points and report generation
-│   ├── commands.py # Main CLI commands (migrate, validate, etc.)
-│   └── report.py   # Migration report formatting
+│   ├── commands.py    # CLI facade — re-exports from sub-modules
+│   ├── common.py      # Shared CLI infrastructure (DefaultGroup, options)
+│   ├── migrate_cmd.py # migrate command and MigrationOrchestrator
+│   ├── validate_cmd.py
+│   ├── cleanup_cmd.py
+│   ├── permissions_cmd.py
+│   └── report.py      # Migration report formatting
 ├── core/           # Core logic
 │   ├── channel_processor.py # Per-channel migration orchestration
 │   ├── cleanup.py           # Post-migration cleanup (import mode completion, members)
@@ -20,21 +25,27 @@ slack_migrator/
 │   ├── context.py           # MigrationContext frozen dataclass (immutable config)
 │   ├── migration_logging.py # Migration success/failure logging
 │   ├── migrator.py          # Composition root — wires all deps, owns lifecycle
-│   └── state.py             # MigrationState dataclass (mutable tracking state)
+│   └── state.py             # MigrationState with typed sub-states (Spaces/Messages/Users/etc.)
 ├── services/       # External API integrations
 │   ├── chat/       # Google Chat API (spaces, messages)
 │   │   └── dry_run_service.py  # No-op Chat API for dry-run mode
+│   ├── chat_adapter.py      # Typed wrapper over raw Chat API service
 │   ├── drive/      # Google Drive API (file uploads, shared drives)
 │   │   └── dry_run_service.py  # No-op Drive API for dry-run mode
-│   ├── discovery.py          # Space discovery and mapping for migration resumption
-│   ├── file.py               # Slack export file parsing
-│   ├── membership_manager.py # Space membership (historical + regular members)
-│   ├── message.py            # Message transformation (Slack → Chat format)
+│   ├── drive_adapter.py     # Typed wrapper over raw Drive API service
+│   ├── discovery.py         # Space discovery and mapping for migration resumption
+│   ├── file.py              # FileHandler class (delegates to download/permissions)
+│   ├── file_download.py     # Slack file download logic
+│   ├── file_permissions.py  # Drive file ownership/sharing
+│   ├── historical_membership.py # Historical member import (createTime/deleteTime)
 │   ├── message_attachments.py
+│   ├── message_builder.py   # Message payload construction (Slack → Chat format)
+│   ├── message_sender.py    # Message send logic, error handling, stats
 │   ├── reaction_processor.py # Batch reaction processing
-│   ├── space_creator.py      # Space creation, listing, and import mode cleanup
-│   ├── user.py               # User mapping (Slack → Google)
-│   └── user_resolver.py      # User identity resolution and impersonation
+│   ├── regular_membership.py # Regular member addition (post-import)
+│   ├── space_creator.py     # Space creation, listing, and import mode cleanup
+│   ├── user.py              # User mapping (Slack → Google)
+│   └── user_resolver.py     # User identity resolution and impersonation
 └── utils/          # Shared utilities
     ├── api.py      # API retry logic, credential handling
     ├── formatting.py

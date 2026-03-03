@@ -40,15 +40,21 @@ def print_dry_run_summary(
     print("\n" + "=" * 80)
     print("DRY RUN SUMMARY")
     print("=" * 80)
-    print(f"Channels processed: {len(state.migration_summary['channels_processed'])}")
-    print(f"Spaces that would be created: {state.migration_summary['spaces_created']}")
     print(
-        f"Messages that would be migrated: {state.migration_summary['messages_created']}"
+        f"Channels processed: {len(state.progress.migration_summary['channels_processed'])}"
     )
     print(
-        f"Reactions that would be migrated: {state.migration_summary['reactions_created']}"
+        f"Spaces that would be created: {state.progress.migration_summary['spaces_created']}"
     )
-    print(f"Files that would be migrated: {state.migration_summary['files_created']}")
+    print(
+        f"Messages that would be migrated: {state.progress.migration_summary['messages_created']}"
+    )
+    print(
+        f"Reactions that would be migrated: {state.progress.migration_summary['reactions_created']}"
+    )
+    print(
+        f"Files that would be migrated: {state.progress.migration_summary['files_created']}"
+    )
 
     # Show file upload details if available
     if file_handler is not None and hasattr(file_handler, "get_file_statistics"):
@@ -83,7 +89,7 @@ def print_dry_run_summary(
     # Get the report file path
     if report_file is None:
         # Get the output directory
-        output_dir = state.output_dir or "."
+        output_dir = state.context.output_dir or "."
         report_file = os.path.join(output_dir, "migration_report.yaml")
 
     print(f"\nDetailed report saved to {report_file}")
@@ -104,10 +110,10 @@ def _group_failed_messages(
         Dict mapping channel names to their list of FailedMessage entries.
     """
     failed_by_channel: dict[str, list[FailedMessage]] = {}
-    if not state.failed_messages:
+    if not state.messages.failed_messages:
         return failed_by_channel
 
-    for failed_msg in state.failed_messages:
+    for failed_msg in state.messages.failed_messages:
         channel = failed_msg.get("channel", "unknown")
         if channel not in failed_by_channel:
             failed_by_channel[channel] = []
@@ -115,7 +121,7 @@ def _group_failed_messages(
 
     log_with_context(
         logging.WARNING,
-        f"Migration completed with {len(state.failed_messages)} failed messages across {len(failed_by_channel)} channels",
+        f"Migration completed with {len(state.messages.failed_messages)} failed messages across {len(failed_by_channel)} channels",
     )
 
     for channel, failures in failed_by_channel.items():
@@ -123,7 +129,7 @@ def _group_failed_messages(
             logging.WARNING,
             f"Channel {channel} had {len(failures)} failed messages",
         )
-        _write_failure_log(state.output_dir, channel, failures)
+        _write_failure_log(state.context.output_dir, channel, failures)
 
     return failed_by_channel
 
@@ -190,27 +196,27 @@ def _build_recommendations(
     """
     recommendations: list[dict[str, str]] = []
 
-    if state.high_failure_rate_channels:
+    if state.errors.high_failure_rate_channels:
         max_pct = config.max_failure_percentage
         recommendations.append(
             {
                 "type": "high_failure_rate",
-                "message": f"Found {len(state.high_failure_rate_channels)} channels with failure rates exceeding {max_pct}%. Check the detailed logs for more information.",
+                "message": f"Found {len(state.errors.high_failure_rate_channels)} channels with failure rates exceeding {max_pct}%. Check the detailed logs for more information.",
                 "severity": "warning",
             }
         )
 
-    if state.channel_conflicts:
+    if state.errors.channel_conflicts:
         recommendations.append(
             {
                 "type": "duplicate_space_conflicts",
-                "message": f"Found {len(state.channel_conflicts)} channels with duplicate space conflicts. "
-                f"These channels were skipped. Add entries to space_mapping in config.yaml to resolve: {', '.join(state.channel_conflicts)}",
+                "message": f"Found {len(state.errors.channel_conflicts)} channels with duplicate space conflicts. "
+                f"These channels were skipped. Add entries to space_mapping in config.yaml to resolve: {', '.join(state.errors.channel_conflicts)}",
                 "severity": "error",
             }
         )
 
-    skipped_reactions = state.skipped_reactions
+    skipped_reactions = state.users.skipped_reactions
     if skipped_reactions:
         recommendations.append(
             {
@@ -244,8 +250,8 @@ def _build_space_details(
     spaces: dict[str, Any] = {}
     skipped_channels: list[str] = []
 
-    for channel in state.migration_summary["channels_processed"]:
-        space_name = state.created_spaces.get(channel)
+    for channel in state.progress.migration_summary["channels_processed"]:
+        space_name = state.spaces.created_spaces.get(channel)
         if not space_name:
             skipped_channels.append(channel)
             continue
@@ -254,7 +260,7 @@ def _build_space_details(
             "messages_migrated": 0,
             "reactions_migrated": 0,
             "files_migrated": 0,
-            "external_users_allowed": state.spaces_with_external_users.get(
+            "external_users_allowed": state.progress.spaces_with_external_users.get(
                 space_name, False
             ),
             "internal_users": [],
@@ -262,8 +268,8 @@ def _build_space_details(
             "failed_messages": len(failed_by_channel.get(channel, [])),
         }
 
-        if channel in state.active_users_by_channel:
-            for user_id in state.active_users_by_channel[channel]:
+        if channel in state.progress.active_users_by_channel:
+            for user_id in state.progress.active_users_by_channel[channel]:
                 user_email = user_map.get(user_id)
                 if not user_email:
                     continue
@@ -272,8 +278,8 @@ def _build_space_details(
                 else:
                     space_stats["internal_users"].append(user_email)
 
-        if channel in state.channel_stats:
-            ch_stats = state.channel_stats[channel]
+        if channel in state.progress.channel_stats:
+            ch_stats = state.progress.channel_stats[channel]
             space_stats["messages_migrated"] = ch_stats.get("message_count", 0)
             space_stats["reactions_migrated"] = ch_stats.get("reaction_count", 0)
             space_stats["files_migrated"] = ch_stats.get("file_count", 0)
@@ -370,7 +376,7 @@ def generate_report(
     Returns:
         Path to the generated YAML report file.
     """
-    output_dir = state.output_dir or "."
+    output_dir = state.context.output_dir or "."
     report_path = os.path.join(output_dir, "migration_report.yaml")
 
     failed_by_channel = _group_failed_messages(state)
@@ -401,23 +407,25 @@ def generate_report(
             "workspace_admin": ctx.workspace_admin,
             "export_path": str(ctx.export_root),
             "output_path": str(output_dir),
-            "channels_processed": len(state.migration_summary["channels_processed"]),
-            "spaces_created": state.migration_summary["spaces_created"],
-            "messages_migrated": state.migration_summary["messages_created"],
-            "reactions_migrated": state.migration_summary["reactions_created"],
-            "files_migrated": state.migration_summary["files_created"],
-            "failed_messages_count": len(state.failed_messages),
+            "channels_processed": len(
+                state.progress.migration_summary["channels_processed"]
+            ),
+            "spaces_created": state.progress.migration_summary["spaces_created"],
+            "messages_migrated": state.progress.migration_summary["messages_created"],
+            "reactions_migrated": state.progress.migration_summary["reactions_created"],
+            "files_migrated": state.progress.migration_summary["files_created"],
+            "failed_messages_count": len(state.messages.failed_messages),
             "channels_with_failures": len(failed_by_channel),
         },
         "spaces": spaces,
         "skipped_channels": skipped_channels,
         "failed_channels": list(failed_by_channel.keys()),
-        "high_failure_rate_channels": dict(state.high_failure_rate_channels),
-        "channel_issues": state.migration_issues,
-        "duplicate_space_conflicts": list(state.channel_conflicts),
+        "high_failure_rate_channels": dict(state.errors.high_failure_rate_channels),
+        "channel_issues": state.errors.migration_issues,
+        "duplicate_space_conflicts": list(state.errors.channel_conflicts),
         "users": users_section,
         "file_upload_details": file_stats,
-        "skipped_reactions": list(state.skipped_reactions),
+        "skipped_reactions": list(state.users.skipped_reactions),
         "recommendations": recommendations,
     }
 
