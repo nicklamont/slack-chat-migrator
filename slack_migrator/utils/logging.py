@@ -24,7 +24,12 @@ _DEBUG_API_ENABLED: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 def sanitize_for_log(text: str) -> str:
     """Redact sensitive tokens and credentials from log text."""
-    text = re.sub(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*", "Bearer [REDACTED]", text)
+    text = re.sub(
+        r"Bearer\s+[A-Za-z0-9\-._~+/]+=*",
+        "Bearer [REDACTED]",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(
         r"\b(token|access_token|key)=[A-Za-z0-9\-._~+/]+=*",
         r"\1=[REDACTED]",

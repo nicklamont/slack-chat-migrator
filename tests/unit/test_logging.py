@@ -916,6 +916,12 @@ class TestSanitizeForLog:
         assert "ya29" not in result
         assert "Bearer [REDACTED]" in result
 
+    def test_redacts_bearer_case_insensitive(self):
+        text = "header: bearer ya29.secret-token-here"
+        result = sanitize_for_log(text)
+        assert "ya29" not in result
+        assert "Bearer [REDACTED]" in result
+
     def test_redacts_token_url_param(self):
         text = "https://example.com/api?token=xoxb-123-456-abc&other=val"
         result = sanitize_for_log(text)

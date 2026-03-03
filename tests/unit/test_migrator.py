@@ -1888,8 +1888,8 @@ class TestMigrate:
         m = _make_migrator_for_migrate(tmp_path)
         mock_cp = MagicMock()
         # Simulate SIGINT during channel processing
-        mock_cp.process_channel.side_effect = lambda ch: (
-            signal_mod.raise_signal(signal_mod.SIGINT)
+        mock_cp.process_channel.side_effect = lambda ch: signal_mod.raise_signal(
+            signal_mod.SIGINT
         )
         mock_cp_cls.return_value = mock_cp
 

@@ -56,7 +56,7 @@ _SERVICE_CACHE_TTL = 2700  # 45 minutes
 def clear_service_cache() -> None:
     """Clear the cached GCP service instances.
 
-    Call this after authentication failures (401/403) to force
+    Call this after authentication failures (401) to force
     re-creation of service objects on next use.
     """
     with _service_cache_lock:
