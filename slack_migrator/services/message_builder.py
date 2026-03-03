@@ -18,7 +18,6 @@ from slack_migrator.utils.logging import (
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
-    from slack_migrator.services.chat_adapter import ChatAdapter
     from slack_migrator.services.message_attachments import MessageAttachmentProcessor
     from slack_migrator.services.user_resolver import UserResolver
 
@@ -246,7 +245,7 @@ def process_attachments(
     space: str,
     user_id: str,
     user_email: str | None,
-    chat_service: ChatAdapter,
+    chat_service: Any,
     payload: dict[str, Any],
     ts: str,
 ) -> None:
