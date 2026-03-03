@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from slack_migrator.core.channel_processor import ChannelProcessor
+from slack_migrator.core.checkpoint import CheckpointData
 from slack_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.context import MigrationContext
@@ -1420,3 +1422,444 @@ class TestUserMapGeneration:
         m = _make_migrator(tmp_path, users=users, channels=channels)
         assert "U002" not in m.user_map
         assert len(m.users_without_email) > 0
+
+
+# ---------------------------------------------------------------------------
+# _initialize_dependent_services tests
+# ---------------------------------------------------------------------------
+
+
+class TestInitializeDependentServices:
+    """Tests for _initialize_dependent_services."""
+
+    def test_creates_file_handler_and_attachment_processor(self, tmp_path):
+        m = _make_migrator(tmp_path)
+        m.chat = MagicMock()
+        m.drive = MagicMock()
+        m._raw_chat = MagicMock()
+        with (
+            patch("slack_migrator.core.migrator.load_existing_space_mappings"),
+            patch("slack_migrator.core.migrator.FileHandler") as fh_cls,
+            patch("slack_migrator.core.migrator.MessageAttachmentProcessor") as map_cls,
+        ):
+            fh_cls.return_value = MagicMock()
+            map_cls.return_value = MagicMock()
+            m._initialize_dependent_services()
+        fh_cls.assert_called_once()
+        map_cls.assert_called_once()
+        assert m.file_handler is fh_cls.return_value
+        assert m.attachment_processor is map_cls.return_value
+
+    def test_resets_mutable_state(self, tmp_path):
+        m = _make_migrator(tmp_path)
+        m.chat = MagicMock()
+        m.drive = MagicMock()
+        m._raw_chat = MagicMock()
+        m.state.spaces.created_spaces["ch1"] = "space1"
+        m.state.context.current_channel = "ch1"
+        with (
+            patch("slack_migrator.core.migrator.load_existing_space_mappings"),
+            patch("slack_migrator.core.migrator.FileHandler"),
+            patch("slack_migrator.core.migrator.MessageAttachmentProcessor"),
+        ):
+            m._initialize_dependent_services()
+        assert m.state.spaces.created_spaces == {}
+        assert m.state.context.current_channel is None
+
+    def test_verbose_logs_debug(self, tmp_path):
+        m = _make_migrator(tmp_path, verbose=True)
+        m.chat = MagicMock()
+        m.drive = MagicMock()
+        m._raw_chat = MagicMock()
+        with (
+            patch("slack_migrator.core.migrator.load_existing_space_mappings"),
+            patch("slack_migrator.core.migrator.FileHandler"),
+            patch("slack_migrator.core.migrator.MessageAttachmentProcessor"),
+            patch("slack_migrator.core.migrator.log_with_context") as mock_log,
+        ):
+            m._initialize_dependent_services()
+        mock_log.assert_any_call(
+            logging.DEBUG, "Migrator initialized with verbose logging enabled"
+        )
+
+    def test_calls_load_existing_space_mappings(self, tmp_path):
+        m = _make_migrator(tmp_path)
+        m.chat = MagicMock()
+        m.drive = MagicMock()
+        m._raw_chat = MagicMock()
+        with (
+            patch(
+                "slack_migrator.core.migrator.load_existing_space_mappings"
+            ) as mock_load,
+            patch("slack_migrator.core.migrator.FileHandler"),
+            patch("slack_migrator.core.migrator.MessageAttachmentProcessor"),
+        ):
+            m._initialize_dependent_services()
+        mock_load.assert_called_once_with(m.ctx, m.state, m.chat)
+
+
+# ---------------------------------------------------------------------------
+# migrate() tests
+# ---------------------------------------------------------------------------
+
+
+def _make_migrator_for_migrate(tmp_path, **kwargs):
+    """Create a migrator with all deps stubbed for testing migrate()."""
+    m = _make_migrator(tmp_path, **kwargs)
+    m.chat = MagicMock()
+    m.drive = MagicMock()
+    m._raw_chat = MagicMock()
+    m._api_services_initialized = True
+    m.file_handler = MagicMock()
+    m.attachment_processor = MagicMock()
+    # Place output dir OUTSIDE the export root so it's not mistaken for a channel
+    output_dir = tmp_path.parent / "migration_output"
+    os.makedirs(output_dir, exist_ok=True)
+    m.state.context.output_dir = str(output_dir)
+    return m
+
+
+class TestMigrate:
+    """Tests for SlackToChatMigrator.migrate()."""
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_success")
+    @patch("slack_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_migrator.core.migrator.save_checkpoint")
+    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_happy_path_returns_true(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        m = _make_migrator_for_migrate(tmp_path)
+        mock_cp = MagicMock()
+        mock_cp.process_channel.return_value = MagicMock(
+            should_abort=False, had_errors=False
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        assert m.migrate() is True
+        mock_cp.process_channel.assert_called_once()
+        mock_save_cp.assert_called_once()
+        mock_clear_cp.assert_called_once()
+        mock_log_success.assert_called_once()
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_success")
+    @patch("slack_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_migrator.core.migrator.save_checkpoint")
+    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_calls_reset_for_run(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        m = _make_migrator_for_migrate(tmp_path)
+        mock_cp = MagicMock()
+        mock_cp.process_channel.return_value = MagicMock(
+            should_abort=False, had_errors=False
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        with patch.object(m.state, "reset_for_run") as mock_reset:
+            m.migrate()
+        mock_reset.assert_called_once()
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_success")
+    @patch("slack_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_migrator.core.migrator.save_checkpoint")
+    @patch("slack_migrator.core.migrator.load_checkpoint")
+    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_checkpoint_resume_skips_completed(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        existing_cp = CheckpointData(
+            started_at="2024-01-01T00:00:00Z",
+            completed_channels={"general": "1704067200"},
+        )
+        mock_load_cp.return_value = existing_cp
+
+        m = _make_migrator_for_migrate(tmp_path)
+        mock_cp = MagicMock()
+        mock_cp_cls.return_value = mock_cp
+
+        assert m.migrate() is True
+        # Channel "general" should be skipped — process_channel not called
+        mock_cp.process_channel.assert_not_called()
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_success")
+    @patch("slack_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_migrator.core.migrator.save_checkpoint")
+    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_abort_breaks_channel_loop(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        # Set up two channels
+        users = [
+            {"id": "U001", "name": "alice", "profile": {"email": "alice@example.com"}}
+        ]
+        channels = [
+            {"id": "C001", "name": "general", "members": ["U001"]},
+            {"id": "C002", "name": "random", "members": ["U001"]},
+        ]
+        m = _make_migrator_for_migrate(tmp_path)
+        _setup_export(tmp_path, users=users, channels=channels)
+
+        mock_cp = MagicMock()
+        # First channel aborts
+        mock_cp.process_channel.return_value = MagicMock(
+            should_abort=True, had_errors=True
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        m.migrate()
+        # Only called once because abort breaks the loop
+        assert mock_cp.process_channel.call_count == 1
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_success")
+    @patch("slack_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_migrator.core.migrator.save_checkpoint")
+    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_channel_errors_skip_checkpoint(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        m = _make_migrator_for_migrate(tmp_path)
+        mock_cp = MagicMock()
+        mock_cp.process_channel.return_value = MagicMock(
+            should_abort=False, had_errors=True
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        m.migrate()
+        # Channel had errors — save_checkpoint should NOT be called
+        mock_save_cp.assert_not_called()
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_failure")
+    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_exception_logs_failure_and_reraises(
+        self,
+        mock_cp_cls,
+        mock_load_cp,
+        mock_log_failure,
+        mock_cleanup,
+        tmp_path,
+    ):
+        m = _make_migrator_for_migrate(tmp_path)
+        mock_cp = MagicMock()
+        mock_cp.process_channel.side_effect = RuntimeError("boom")
+        mock_cp_cls.return_value = mock_cp
+
+        with pytest.raises(RuntimeError, match="boom"):
+            m.migrate()
+        mock_log_failure.assert_called_once()
+        # Cleanup still called in finally block
+        mock_cleanup.assert_called()
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_success")
+    @patch("slack_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_migrator.core.migrator.save_checkpoint")
+    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_migrator.core.migrator.load_space_mappings")
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_update_mode_discovers_spaces(
+        self,
+        mock_cp_cls,
+        mock_load_spaces,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        m = _make_migrator_for_migrate(tmp_path, update_mode=True)
+        mock_load_spaces.return_value = {"general": "spaces/abc"}
+        mock_cp = MagicMock()
+        mock_cp.process_channel.return_value = MagicMock(
+            should_abort=False, had_errors=False
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        m.migrate()
+        mock_load_spaces.assert_called_once()
+        assert m.state.spaces.created_spaces == {"general": "spaces/abc"}
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_success")
+    @patch("slack_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_migrator.core.migrator.save_checkpoint")
+    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_migrator.core.migrator.load_space_mappings")
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_update_mode_no_spaces_found(
+        self,
+        mock_cp_cls,
+        mock_load_spaces,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+        caplog,
+    ):
+        m = _make_migrator_for_migrate(tmp_path, update_mode=True)
+        mock_load_spaces.return_value = {}
+        mock_cp = MagicMock()
+        mock_cp.process_channel.return_value = MagicMock(
+            should_abort=False, had_errors=False
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        with caplog.at_level(logging.WARNING):
+            m.migrate()
+        assert "No existing spaces found" in caplog.text
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_success")
+    @patch("slack_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_migrator.core.migrator.save_checkpoint")
+    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_default_output_dir_created(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        m = _make_migrator_for_migrate(tmp_path)
+        m.state.context.output_dir = None  # Force default path creation
+        mock_cp = MagicMock()
+        mock_cp.process_channel.return_value = MagicMock(
+            should_abort=False, had_errors=False
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        m.migrate()
+        # Output dir should have been set and created
+        assert m.state.context.output_dir is not None
+        assert "migration_logs/run_" in m.state.context.output_dir
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_success")
+    @patch("slack_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_migrator.core.migrator.save_checkpoint")
+    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_dry_run_unmapped_user_summary(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        m = _make_migrator_for_migrate(tmp_path, dry_run=True)
+        mock_cp = MagicMock()
+        mock_cp.process_channel.return_value = MagicMock(
+            should_abort=False, had_errors=False
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        with patch(
+            "slack_migrator.core.migrator.log_unmapped_user_summary_for_dry_run"
+        ) as mock_summary:
+            m.migrate()
+        mock_summary.assert_called_once()
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_success")
+    @patch("slack_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_migrator.core.migrator.save_checkpoint")
+    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_unmapped_users_logged_before_migration(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+        caplog,
+    ):
+        m = _make_migrator_for_migrate(tmp_path)
+        m.unmapped_user_tracker.add_unmapped_user("U999", "general")
+        mock_cp = MagicMock()
+        mock_cp.process_channel.return_value = MagicMock(
+            should_abort=False, had_errors=False
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        with caplog.at_level(logging.WARNING):
+            m.migrate()
+        assert "unmapped users during setup" in caplog.text
