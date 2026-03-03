@@ -22,12 +22,13 @@ from slack_migrator.constants import (
     HTTP_SERVER_ERROR_MIN,
     SPACE_NAME_PREFIX,
 )
-from slack_migrator.services.membership_manager import add_regular_members
+from slack_migrator.services.regular_membership import add_regular_members
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
+    from slack_migrator.services.chat_adapter import ChatAdapter
 
 
 def cleanup_channel_handlers(state: MigrationState) -> None:
@@ -36,12 +37,12 @@ def cleanup_channel_handlers(state: MigrationState) -> None:
     Args:
         state: The migration state holding channel handlers.
     """
-    if not state.channel_handlers:
+    if not state.spaces.channel_handlers:
         return
 
     logger = logging.getLogger("slack_migrator")
 
-    for channel_name, handler in list(state.channel_handlers.items()):
+    for channel_name, handler in list(state.spaces.channel_handlers.items()):
         try:
             handler.flush()
             handler.close()
@@ -56,13 +57,79 @@ def cleanup_channel_handlers(state: MigrationState) -> None:
                 f" for channel {channel_name}: {e}"
             )
 
-    state.channel_handlers.clear()
+    state.spaces.channel_handlers.clear()
 
 
-def run_cleanup(  # noqa: C901
+def _list_spaces_in_import_mode(
+    chat: ChatAdapter,
+) -> list[tuple[str, dict]] | None:
+    """List all spaces and filter to those still in import mode.
+
+    Returns a list of (space_name, space_info) tuples, or None if the
+    space listing itself failed (caller should abort cleanup).
+    """
+    log_with_context(logging.DEBUG, "Listing all spaces to check for import mode...")
+    try:
+        spaces = chat.list_spaces().get("spaces", [])
+    except HttpError as http_e:
+        log_with_context(
+            logging.ERROR,
+            f"HTTP error listing spaces during cleanup: {http_e}"
+            f" (Status: {http_e.resp.status})",
+            error_code=http_e.resp.status,
+        )
+        if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
+            log_with_context(
+                logging.WARNING,
+                "Server error listing spaces"
+                " - this might be a temporary issue, skipping cleanup",
+            )
+        return None
+    except (RefreshError, TransportError) as list_e:
+        log_with_context(
+            logging.ERROR,
+            f"Failed to list spaces during cleanup: {list_e}",
+        )
+        return None
+
+    import_mode_spaces: list[tuple[str, dict]] = []
+    for space in spaces:
+        space_name = space.get("name", "")
+        if not space_name:
+            continue
+
+        try:
+            space_info = chat.get_space(space_name)
+            if space_info.get("importMode"):
+                import_mode_spaces.append((space_name, space_info))
+        except HttpError as http_e:
+            log_with_context(
+                logging.WARNING,
+                f"HTTP error checking space status during cleanup: {http_e}"
+                f" (Status: {http_e.resp.status})",
+                space_name=space_name,
+                error_code=http_e.resp.status,
+            )
+            if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
+                log_with_context(
+                    logging.WARNING,
+                    "Server error checking space - this might be a temporary issue",
+                    space_name=space_name,
+                )
+        except (RefreshError, TransportError) as e:
+            log_with_context(
+                logging.WARNING,
+                f"Failed to get space info during cleanup: {e}",
+                space_name=space_name,
+            )
+
+    return import_mode_spaces
+
+
+def run_cleanup(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     file_handler: Any | None,
 ) -> None:
@@ -80,8 +147,7 @@ def run_cleanup(  # noqa: C901
         user_resolver: User identity resolver.
         file_handler: File handler for drive operations, or None.
     """
-    # Clear current_channel so cleanup operations don't get tagged with channel context
-    state.current_channel = None
+    state.context.current_channel = None
 
     if ctx.dry_run:
         log_with_context(logging.INFO, "[DRY RUN] Would perform post-migration cleanup")
@@ -90,67 +156,9 @@ def run_cleanup(  # noqa: C901
     log_with_context(logging.INFO, "Performing post-migration cleanup")
 
     try:
-        log_with_context(
-            logging.DEBUG, "Listing all spaces to check for import mode..."
-        )
-        try:
-            if chat is None:
-                raise RuntimeError("Chat API service not initialized")
-            spaces = chat.spaces().list().execute().get("spaces", [])
-        except HttpError as http_e:
-            log_with_context(
-                logging.ERROR,
-                f"HTTP error listing spaces during cleanup: {http_e}"
-                f" (Status: {http_e.resp.status})",
-                error_code=http_e.resp.status,
-            )
-            if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
-                log_with_context(
-                    logging.WARNING,
-                    "Server error listing spaces"
-                    " - this might be a temporary issue, skipping cleanup",
-                )
+        import_mode_spaces = _list_spaces_in_import_mode(chat)
+        if import_mode_spaces is None:
             return
-        except (RefreshError, TransportError) as list_e:
-            log_with_context(
-                logging.ERROR,
-                f"Failed to list spaces during cleanup: {list_e}",
-            )
-            return
-
-        import_mode_spaces = []
-
-        for space in spaces:
-            space_name = space.get("name", "")
-            if not space_name:
-                continue
-
-            try:
-                if chat is None:
-                    raise RuntimeError("Chat API service not initialized")
-                space_info = chat.spaces().get(name=space_name).execute()
-                if space_info.get("importMode"):
-                    import_mode_spaces.append((space_name, space_info))
-            except HttpError as http_e:
-                log_with_context(
-                    logging.WARNING,
-                    f"HTTP error checking space status during cleanup: {http_e}"
-                    f" (Status: {http_e.resp.status})",
-                    space_name=space_name,
-                    error_code=http_e.resp.status,
-                )
-                if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
-                    log_with_context(
-                        logging.WARNING,
-                        "Server error checking space - this might be a temporary issue",
-                        space_name=space_name,
-                    )
-            except (RefreshError, TransportError) as e:
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to get space info during cleanup: {e}",
-                    space_name=space_name,
-                )
 
         if import_mode_spaces:
             _complete_import_mode_spaces(
@@ -201,7 +209,7 @@ def run_cleanup(  # noqa: C901
 def _complete_import_mode_spaces(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     file_handler: Any | None,
     import_mode_spaces: list[tuple[str, dict]],
@@ -224,11 +232,11 @@ def _complete_import_mode_spaces(
 
     log_with_context(
         logging.INFO,
-        f"Current channel_to_space mapping: {state.channel_to_space}",
+        f"Current channel_to_space mapping: {state.spaces.channel_to_space}",
     )
     log_with_context(
         logging.INFO,
-        f"Current created_spaces mapping: {state.created_spaces}",
+        f"Current created_spaces mapping: {state.spaces.created_spaces}",
     )
 
     pbar = tqdm(import_mode_spaces, desc="Completing import mode for spaces")
@@ -274,7 +282,7 @@ def _complete_import_mode_spaces(
 def _complete_single_space(
     ctx: MigrationContext,
     state: MigrationState,
-    chat: Any,
+    chat: ChatAdapter,
     user_resolver: Any,
     file_handler: Any | None,
     space_name: str,
@@ -294,7 +302,9 @@ def _complete_single_space(
     external_users_allowed = space_info.get("externalUserAllowed", False)
 
     if not external_users_allowed:
-        external_users_allowed = state.spaces_with_external_users.get(space_name, False)
+        external_users_allowed = state.progress.spaces_with_external_users.get(
+            space_name, False
+        )
         if external_users_allowed:
             log_with_context(
                 logging.INFO,
@@ -310,9 +320,7 @@ def _complete_single_space(
 
     # --- Complete import mode ---------------------------------------------
     try:
-        if chat is None:
-            raise RuntimeError("Chat API service not initialized")
-        chat.spaces().completeImport(name=space_name).execute()
+        chat.complete_import(space_name)
         log_with_context(
             logging.DEBUG,
             f"Successfully completed import mode for space: {space_name}",
@@ -344,13 +352,11 @@ def _complete_single_space(
     # --- Preserve external user access ------------------------------------
     if external_users_allowed:
         try:
-            if chat is None:
-                raise RuntimeError("Chat API service not initialized")
-            chat.spaces().patch(
+            chat.patch_space(
                 name=space_name,
-                updateMask="externalUserAllowed",
+                update_mask="externalUserAllowed",
                 body={"externalUserAllowed": True},
-            ).execute()
+            )
             log_with_context(
                 logging.INFO,
                 f"Preserved external user access for space: {space_name}",
@@ -441,7 +447,7 @@ def _resolve_channel_name(
         The channel name if found, or ``None``.
     """
     # Try channel_to_space mapping first
-    for ch, sp in state.channel_to_space.items():
+    for ch, sp in state.spaces.channel_to_space.items():
         if sp == space_name:
             log_with_context(
                 logging.INFO,
