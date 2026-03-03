@@ -268,8 +268,8 @@ def process_attachments(
         sender_email=sender_email,
     )
 
-    # TEMPORARY SOLUTION: For Drive files, append links to message text instead of using attachments
-    # This is because the Drive file attachment method is not working correctly
+    # TODO(#47): Replace this workaround with proper driveDataRef attachments
+    # For now, Drive file links are appended as text because the attachment method is unreliable
     drive_links = []
     non_drive_attachments = []
 

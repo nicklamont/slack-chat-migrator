@@ -155,7 +155,6 @@ def download_file(
             )
             # Raise an exception to trigger the retry
             response.raise_for_status()
-            return None
 
         # Get content length if available
         content_length = response.headers.get("Content-Length")
