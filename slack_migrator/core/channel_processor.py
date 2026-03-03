@@ -279,8 +279,13 @@ class ChannelProcessor:
         if not self.ctx.dry_run or self.ctx.update_mode:
             self._discover_channel_resources(channel)
 
-        # Build user map with overrides once per channel (expensive operation)
-        cached_user_map = build_user_map_with_overrides(self.ctx, self.user_resolver)
+        # Build user map with overrides once per channel (expensive operation).
+        # Skip in dry-run mode since send_message is never called.
+        cached_user_map = (
+            None
+            if self.ctx.dry_run
+            else build_user_map_with_overrides(self.ctx, self.user_resolver)
+        )
 
         processed_count, failed_count, channel_had_errors = self._send_messages_loop(
             msgs, space, channel, channel_had_errors, cached_user_map

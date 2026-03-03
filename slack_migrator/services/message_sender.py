@@ -13,6 +13,7 @@ from slack_migrator.constants import BOT_SUBTYPES, SYSTEM_SUBTYPES
 from slack_migrator.services.discovery import should_process_message
 from slack_migrator.services.message_builder import (
     build_message_payload,
+    build_user_map_with_overrides,
     generate_message_id,
     process_attachments,
 )
@@ -515,7 +516,9 @@ def send_message(
         channel,
         is_edited,
         edited_ts,
-        user_map_with_overrides if user_map_with_overrides is not None else {},
+        user_map_with_overrides
+        if user_map_with_overrides is not None
+        else build_user_map_with_overrides(ctx, user_resolver),
     )
 
     # Log with appropriate mode indicator
