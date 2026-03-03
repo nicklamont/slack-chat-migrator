@@ -277,48 +277,25 @@ def should_process_channel(channel_name: str, config: MigrationConfig) -> bool:
     Returns:
         True if the channel should be processed, False if it should be skipped
     """
-    log_with_context(
-        logging.DEBUG,
-        f"CHANNEL CHECK: Checking if channel '{channel_name}' should be processed",
-        channel=None,
-    )
-    log_with_context(
-        logging.DEBUG,
-        f"CHANNEL CHECK: include_channels={config.include_channels}, exclude_channels={config.exclude_channels}",
-        channel=channel_name,
-    )
-
-    # Check include list (if specified, only these channels are processed)
+    # Check include list (if specified, only those channels are processed)
     include_channels = set(config.include_channels)
     if include_channels:
-        if channel_name in include_channels:
-            log_with_context(
-                logging.DEBUG,
-                f"CHANNEL CHECK: Channel '{channel_name}' is in include list, will process",
-                channel=None,
-            )
-            return True
-        else:
-            log_with_context(
-                logging.DEBUG,
-                f"CHANNEL CHECK: Channel '{channel_name}' not in include list, skipping",
-                channel=None,
-            )
-            return False
+        should_process = channel_name in include_channels
+        log_with_context(
+            logging.DEBUG,
+            f"Channel '{channel_name}' {'in' if should_process else 'not in'} include list",
+            channel=channel_name,
+        )
+        return should_process
 
     # Check exclude list
     exclude_channels = set(config.exclude_channels)
     if channel_name in exclude_channels:
         log_with_context(
             logging.DEBUG,
-            f"CHANNEL CHECK: Channel '{channel_name}' is in exclude list, skipping",
-            channel=None,
+            f"Channel '{channel_name}' is in exclude list, skipping",
+            channel=channel_name,
         )
         return False
 
-    log_with_context(
-        logging.DEBUG,
-        f"CHANNEL CHECK: Channel '{channel_name}' not in any list, will process",
-        channel=None,
-    )
     return True

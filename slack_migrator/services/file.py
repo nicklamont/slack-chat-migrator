@@ -493,7 +493,7 @@ class FileHandler:
     ) -> bytes | DownloadOutcome | None:
         """Download file content and return it, or None on failure."""
         file_content = self._download_file(file_obj)
-        if not file_content:
+        if file_content is None:
             log_with_context(
                 logging.ERROR,
                 f"Failed to download file {name}, skipping attachment processing",
