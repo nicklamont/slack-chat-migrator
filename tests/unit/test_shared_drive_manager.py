@@ -71,12 +71,12 @@ class TestValidateSharedDrive:
 class TestGetOrCreateSharedDrive:
     """Tests for SharedDriveManager.get_or_create_shared_drive."""
 
-    def test_dry_run_returns_sentinel(self):
+    def test_dry_run_returns_placeholder(self):
         manager, drive_service = _make_manager(dry_run=True)
 
         result = manager.get_or_create_shared_drive()
 
-        assert result == "DRY_RUN_SHARED_DRIVE"
+        assert result == "dry-run-placeholder"
         drive_service.get_drive.assert_not_called()
         drive_service.list_drives.assert_not_called()
 

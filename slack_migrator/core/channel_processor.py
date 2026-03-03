@@ -20,6 +20,7 @@ from tqdm import tqdm
 
 from slack_migrator.constants import API_THROTTLE_MESSAGE_SECONDS
 from slack_migrator.core.config import ImportCompletionStrategy, should_process_channel
+from slack_migrator.exceptions import SpacePermissionError
 from slack_migrator.services.discovery import get_last_message_timestamp
 from slack_migrator.services.historical_membership import add_users_to_space
 from slack_migrator.services.message_builder import build_user_map_with_overrides
@@ -114,10 +115,9 @@ class ChannelProcessor:
         channel_had_errors = False
 
         # Create or reuse space
-        space, is_newly_created = self._create_or_reuse_space(ch_dir)
-
-        # Skip if permission error
-        if space and space.startswith("ERROR_NO_PERMISSION_"):
+        try:
+            space, is_newly_created = self._create_or_reuse_space(ch_dir)
+        except SpacePermissionError:
             log_with_context(
                 logging.WARNING,
                 f"Skipping channel {channel} due to space creation permission error",

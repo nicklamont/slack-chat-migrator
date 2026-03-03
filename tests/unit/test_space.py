@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
@@ -16,6 +17,7 @@ from slack_migrator.constants import (
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.context import MigrationContext
 from slack_migrator.core.state import MigrationState, _default_migration_summary
+from slack_migrator.exceptions import SpacePermissionError
 from slack_migrator.services.historical_membership import add_users_to_space
 from slack_migrator.services.regular_membership import add_regular_members
 from slack_migrator.services.space_creator import (
@@ -358,17 +360,16 @@ class TestCreateSpace:
 
         chat.patch_space.assert_called()
 
-    def test_permission_denied_returns_error_string(self):
-        """403 PERMISSION_DENIED returns an error marker, does not raise."""
+    def test_permission_denied_raises_space_permission_error(self):
+        """403 PERMISSION_DENIED raises SpacePermissionError."""
         ctx, state, chat, user_resolver = self._setup(
             channels_meta={"dev": {"members": []}},
         )
         error = _make_http_error(403, content=b"PERMISSION_DENIED")
         chat.create_space.side_effect = error
 
-        result = create_space(ctx, state, chat, user_resolver, "dev")
-
-        assert result == "ERROR_NO_PERMISSION_dev"
+        with pytest.raises(SpacePermissionError):
+            create_space(ctx, state, chat, user_resolver, "dev")
 
     def test_other_http_error_reraises(self):
         """Non-403 HttpErrors propagate."""
@@ -377,8 +378,6 @@ class TestCreateSpace:
         )
         error = _make_http_error(500, content=b"Internal Server Error")
         chat.create_space.side_effect = error
-
-        import pytest
 
         with pytest.raises(HttpError):
             create_space(ctx, state, chat, user_resolver, "dev")

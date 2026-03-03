@@ -27,3 +27,7 @@ class UserMappingError(MigratorError):
 
 class MigrationAbortedError(MigratorError):
     """Raised when the migration is aborted due to errors exceeding thresholds."""
+
+
+class SpacePermissionError(APIError):
+    """Raised when space creation fails due to a 403 permission error."""
