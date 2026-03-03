@@ -292,6 +292,7 @@ def _parse_rich_text_list(element: dict, list_items: list[str]) -> None:
     """
     list_style = element.get("style", "bullet")
     indent_level = element.get("indent", 0)
+    prefix = "*"  # Defensive default; overwritten for bullet lists below
 
     if list_style == "bullet":
         if indent_level == 0:

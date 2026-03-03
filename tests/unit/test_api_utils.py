@@ -65,6 +65,11 @@ class TestSlackTsToRfc3339:
         date_part, _time_part = result.split("T")
         assert len(date_part.split("-")) == 3
 
+    def test_integer_only_timestamp(self):
+        """Dotless timestamp (no microseconds) should not crash."""
+        result = slack_ts_to_rfc3339("1609459200")
+        assert result == "2021-01-01T00:00:00.000000Z"
+
 
 # ---------------------------------------------------------------------------
 # RetryWrapper — basic attribute delegation
@@ -205,7 +210,8 @@ class TestRetryWrapperRetries:
         assert inner.execute.call_count == 2
 
     @patch("slack_migrator.utils.api.time.sleep")
-    def test_retries_on_generic_exception_then_succeeds(self, mock_sleep):
+    def test_retries_on_connection_error_then_succeeds(self, mock_sleep):
+        """ConnectionError (subclass of OSError) is retried as transient."""
         inner = MagicMock()
         inner.execute.side_effect = [
             ConnectionError("network"),
@@ -217,11 +223,13 @@ class TestRetryWrapperRetries:
         assert inner.execute.call_count == 2
 
     @patch("slack_migrator.utils.api.time.sleep")
-    def test_retries_on_attribute_error_create(self, mock_sleep):
-        """AttributeError mentioning 'create' is retried."""
+    def test_retries_on_transport_error_then_succeeds(self, mock_sleep):
+        """TransportError is retried as a transient network error."""
+        from google.auth.exceptions import TransportError
+
         inner = MagicMock()
         inner.execute.side_effect = [
-            AttributeError("Resource object has no attribute 'create'"),
+            TransportError("connection reset"),
             "ok",
         ]
         wrapper = RetryWrapper(inner)
@@ -272,8 +280,8 @@ class TestRetryWrapperNonRetryable:
         mock_sleep.assert_not_called()
 
     @patch("slack_migrator.utils.api.time.sleep")
-    def test_attribute_error_without_create_not_retried(self, mock_sleep):
-        """AttributeError NOT mentioning 'create' is raised immediately."""
+    def test_attribute_error_not_retried(self, mock_sleep):
+        """AttributeError is not a transient error and should not be retried."""
         inner = MagicMock()
         inner.execute.side_effect = AttributeError("no attribute 'foobar'")
 
@@ -328,24 +336,26 @@ class TestRetryWrapperMaxRetries:
         mock_sleep.assert_not_called()
 
     @patch("slack_migrator.utils.api.time.sleep")
-    def test_max_retries_exhaustion_generic_exception(self, mock_sleep):
+    def test_non_transient_exception_not_retried(self, mock_sleep):
+        """Non-transient exceptions (e.g. RuntimeError) are raised immediately."""
         inner = MagicMock()
         inner.execute.side_effect = RuntimeError("always fails")
 
         wrapper = RetryWrapper(inner, max_retries=2, retry_delay=1)
         with pytest.raises(RuntimeError, match="always fails"):
             wrapper.execute()
-        assert inner.execute.call_count == 3
+        assert inner.execute.call_count == 1
+        mock_sleep.assert_not_called()
 
     @patch("slack_migrator.utils.api.time.sleep")
-    def test_max_retries_exhaustion_attribute_error_create(self, mock_sleep):
+    def test_max_retries_exhaustion_transport_error(self, mock_sleep):
+        from google.auth.exceptions import TransportError
+
         inner = MagicMock()
-        inner.execute.side_effect = AttributeError(
-            "Resource object has no attribute 'create'"
-        )
+        inner.execute.side_effect = TransportError("connection reset")
 
         wrapper = RetryWrapper(inner, max_retries=1, retry_delay=1)
-        with pytest.raises(AttributeError):
+        with pytest.raises(TransportError):
             wrapper.execute()
         assert inner.execute.call_count == 2
 

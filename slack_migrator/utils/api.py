@@ -10,6 +10,7 @@ import logging
 import time
 from typing import Any
 
+from google.auth.exceptions import TransportError
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -204,6 +205,7 @@ class RetryWrapper:
                         self._log_api_response(
                             status_code, request_details, result, channel_context
                         )
+                        request_logged = True
 
                     return result
                 except HttpError as e:
@@ -216,6 +218,7 @@ class RetryWrapper:
                         self._log_api_response(
                             e.resp.status, request_details, None, channel_context
                         )
+                        request_logged = True
                     # Don't retry client errors (4xx) except rate limits (429)
                     if e.resp.status // 100 == 4 and e.resp.status != HTTP_RATE_LIMIT:
                         log_with_context(
@@ -233,20 +236,7 @@ class RetryWrapper:
                         max_delay,
                         log_kwargs,
                     )
-                except AttributeError as e:
-                    last_exception = e
-                    if "has no attribute 'create'" not in str(e):
-                        raise
-                    self._handle_retryable_error(
-                        e,
-                        attempt,
-                        max_retries,
-                        delay,
-                        backoff_factor,
-                        max_delay,
-                        log_kwargs,
-                    )
-                except Exception as e:
+                except (TransportError, OSError) as e:
                     last_exception = e
                     self._handle_retryable_error(
                         e,
@@ -469,7 +459,9 @@ def slack_ts_to_rfc3339(ts: str) -> str:
     Returns:
         An RFC 3339 datetime string ending in ``Z``.
     """
-    secs, micros = ts.split(".")
+    parts = ts.split(".", 1)
+    secs = parts[0]
+    micros = parts[1] if len(parts) > 1 else "000000"
     base = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(int(secs)))
     return f"{base}.{micros}Z"
 

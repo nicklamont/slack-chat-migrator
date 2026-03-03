@@ -140,14 +140,31 @@ class MigrationState:
             )
 
     def reset_for_run(self) -> None:
-        """Reset per-run state at the start of a new migration run."""
+        """Reset per-run state at the start of a new migration run.
+
+        Fields that persist across runs (not reset here):
+        - spaces.space_mapping, space_cache, created_spaces, channel_to_space,
+          channel_id_to_space_id — cross-run mapping state
+        - messages.sent_messages, message_id_map, failed_messages,
+          failed_messages_by_channel — deduplication and history
+        - users.* — cached validation and delegation state
+        - progress.last_processed_timestamps, spaces_with_external_users
+          — resumption bookmarks
+        """
         self.spaces.channel_handlers = {}
         self.messages.thread_map = {}
         self.progress.migration_summary = _default_migration_summary()
+        self.progress.channel_stats = {}
+        self.progress.active_users_by_channel = {}
         self.errors.migration_errors = []
         self.errors.channels_with_errors = []
         self.errors.channel_error_count = 0
+        self.errors.high_failure_rate_channels = {}
+        self.errors.incomplete_import_spaces = []
+        self.errors.channel_conflicts = set()
+        self.errors.migration_issues = {}
         self.context.first_channel_processed = False
+        self.drive_files_cache = {}
 
     @property
     def has_errors(self) -> bool:
