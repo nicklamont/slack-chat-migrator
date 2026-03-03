@@ -20,7 +20,7 @@ class CheckpointData:
     schema_version: int = CHECKPOINT_SCHEMA_VERSION
     completed_channels: dict[str, str] = field(
         default_factory=dict
-    )  # channel -> last_ts
+    )  # channel_name -> ISO 8601 completion timestamp
     started_at: str | None = None
     last_updated: str | None = None
 

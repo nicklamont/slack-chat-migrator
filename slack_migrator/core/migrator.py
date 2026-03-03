@@ -470,7 +470,7 @@ class SlackToChatMigrator:
 
                 # Only checkpoint channels that completed without errors
                 if not result.had_errors:
-                    checkpoint.completed_channels[channel_name] = str(time.time())
+                    checkpoint.completed_channels[channel_name] = now_iso()
                     save_checkpoint(checkpoint_path, checkpoint)
 
             # Log any space mapping conflicts that should be added to config

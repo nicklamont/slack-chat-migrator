@@ -13,6 +13,7 @@ from slack_migrator.exceptions import (
     MigratorError,
     PermissionCheckError,
 )
+from slack_migrator.services.chat_adapter import ChatAdapter
 
 
 class TestCLIGroup:
@@ -194,7 +195,10 @@ class TestCleanupCommand:
             ],
         )
         assert result.exit_code == 0
-        mock_cleanup.assert_called_once_with(mock_chat)
+        mock_cleanup.assert_called_once()
+        adapter = mock_cleanup.call_args[0][0]
+        assert isinstance(adapter, ChatAdapter)
+        assert adapter._svc is mock_chat
 
     @patch("slack_migrator.cli.cleanup_cmd.cleanup_import_mode_spaces")
     @patch("slack_migrator.cli.cleanup_cmd.get_gcp_service")

@@ -9,6 +9,7 @@ import click
 
 from slack_migrator.cli.common import cli, common_options, handle_exception
 from slack_migrator.core.config import load_config
+from slack_migrator.services.chat_adapter import ChatAdapter
 from slack_migrator.services.space_creator import cleanup_import_mode_spaces
 from slack_migrator.utils.api import get_gcp_service
 from slack_migrator.utils.logging import setup_logger
@@ -63,7 +64,7 @@ def cleanup(
     )
 
     try:
-        cleanup_import_mode_spaces(chat)
+        cleanup_import_mode_spaces(ChatAdapter(chat))
     except Exception as e:
         handle_exception(e)
         sys.exit(1)
