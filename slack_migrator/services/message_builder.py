@@ -25,7 +25,24 @@ CLIENT_MESSAGE_PREFIX = "client-slack-"
 CLIENT_EDIT_PREFIX = "client-slack-edit-"
 
 
-def _build_message_payload(
+def build_user_map_with_overrides(
+    ctx: MigrationContext,
+    user_resolver: Any,
+) -> dict[str, str]:
+    """Build the user map with overrides applied for all users.
+
+    This is expensive (iterates all users) and should be called once
+    per channel, not per message.
+    """
+    user_map_with_overrides: dict[str, str] = {}
+    for slack_user_id, email in ctx.user_map.items():
+        internal_email = user_resolver.get_internal_email(slack_user_id, email)
+        if internal_email:
+            user_map_with_overrides[slack_user_id] = internal_email
+    return user_map_with_overrides
+
+
+def build_message_payload(
     ctx: MigrationContext,
     state: MigrationState,
     user_resolver: Any,
@@ -36,6 +53,7 @@ def _build_message_payload(
     channel: str,
     is_edited: bool,
     edited_ts: str,
+    user_map_with_overrides: dict[str, str],
 ) -> tuple[dict[str, Any], str | None, bool, str | None]:
     """Build the Google Chat message payload from a Slack message.
 
@@ -47,16 +65,6 @@ def _build_message_payload(
     """
     # Extract text from Slack blocks (rich formatting) or fallback to plain text
     text = parse_slack_blocks(message)
-
-    # Create a mapping dictionary that has all user mapping overrides applied for ALL users
-    user_map_with_overrides = {}
-
-    # Map ALL user IDs with their proper overrides by iterating over .items()
-    # This ensures we never miss any mentions and handles all potential edge cases
-    for slack_user_id, email in ctx.user_map.items():
-        internal_email = user_resolver.get_internal_email(slack_user_id, email)
-        if internal_email:  # Only add if we got a valid email back
-            user_map_with_overrides[slack_user_id] = internal_email
 
     # Set current message context for enhanced user tracking
     state.context.current_message_ts = ts
@@ -187,7 +195,7 @@ def _build_message_payload(
     return payload, user_email, is_thread_reply, message_reply_option
 
 
-def _generate_message_id(ts: str, is_edited: bool, edited_ts: str) -> str:
+def generate_message_id(ts: str, is_edited: bool, edited_ts: str) -> str:
     """Generate a unique Google Chat ``messageId`` for a Slack message.
 
     Combines the Slack timestamp, current wall-clock milliseconds, and a
@@ -227,7 +235,7 @@ def _generate_message_id(ts: str, is_edited: bool, edited_ts: str) -> str:
     return message_id
 
 
-def _process_attachments(
+def process_attachments(
     user_resolver: Any,
     attachment_processor: Any,
     message: dict[str, Any],

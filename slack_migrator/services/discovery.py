@@ -11,7 +11,11 @@ from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
-from slack_migrator.constants import SPACE_NAME_PREFIX, SPACES_PAGE_SIZE
+from slack_migrator.constants import (
+    API_THROTTLE_DISCOVERY_SECONDS,
+    SPACE_NAME_PREFIX,
+    SPACES_PAGE_SIZE,
+)
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
@@ -78,7 +82,7 @@ def _fetch_all_migration_spaces(
         page_token = response.get("nextPageToken")
         if not page_token:
             break
-        time.sleep(0.2)
+        time.sleep(API_THROTTLE_DISCOVERY_SECONDS)
 
     return all_spaces_by_channel
 

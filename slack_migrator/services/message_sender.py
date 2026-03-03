@@ -12,9 +12,9 @@ from googleapiclient.errors import HttpError
 from slack_migrator.constants import BOT_SUBTYPES, SYSTEM_SUBTYPES
 from slack_migrator.services.discovery import should_process_message
 from slack_migrator.services.message_builder import (
-    _build_message_payload,
-    _generate_message_id,
-    _process_attachments,
+    build_message_payload,
+    generate_message_id,
+    process_attachments,
 )
 from slack_migrator.services.reaction_processor import process_reactions_batch
 from slack_migrator.types import FailedMessage, MessageResult, SendResult
@@ -438,6 +438,7 @@ def send_message(
     attachment_processor: Any,
     space: str,
     message: dict[str, Any],
+    user_map_with_overrides: dict[str, str] | None = None,
 ) -> SendResult:
     """Send a message to a Google Chat space.
 
@@ -449,6 +450,9 @@ def send_message(
         attachment_processor: MessageAttachmentProcessor for file handling.
         space: The space ID to send the message to.
         message: The Slack message to convert and send.
+        user_map_with_overrides: Pre-computed user map with overrides applied.
+            If None, an empty dict is used (callers should compute this once
+            per channel via :func:`build_user_map_with_overrides`).
 
     Returns:
         A :class:`SendResult` encoding success, skip, or failure.
@@ -500,7 +504,7 @@ def send_message(
     is_update_mode = ctx.update_mode
 
     # Build the full message payload (text, sender, thread info)
-    payload, user_email, is_thread_reply, message_reply_option = _build_message_payload(
+    payload, user_email, is_thread_reply, message_reply_option = build_message_payload(
         ctx,
         state,
         user_resolver,
@@ -511,6 +515,7 @@ def send_message(
         channel,
         is_edited,
         edited_ts,
+        user_map_with_overrides if user_map_with_overrides is not None else {},
     )
 
     # Log with appropriate mode indicator
@@ -532,9 +537,9 @@ def send_message(
             chat, user_resolver, user_email, channel, ts, user_id
         )
 
-        message_id = _generate_message_id(ts, is_edited, edited_ts)
+        message_id = generate_message_id(ts, is_edited, edited_ts)
 
-        _process_attachments(
+        process_attachments(
             user_resolver,
             attachment_processor,
             message,

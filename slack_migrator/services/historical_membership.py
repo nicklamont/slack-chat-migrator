@@ -12,6 +12,7 @@ from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
 from slack_migrator.constants import (
+    API_THROTTLE_MEMBER_SECONDS,
     CHANNEL_JOIN_SUBTYPE,
     CHANNEL_LEAVE_SUBTYPE,
     DEFAULT_FALLBACK_JOIN_TIME,
@@ -411,7 +412,7 @@ def _add_historical_members_batch(
             failed_count += 1
 
         # Add a small delay to avoid rate limiting
-        time.sleep(0.1)
+        time.sleep(API_THROTTLE_MEMBER_SECONDS)
 
     # Log summary
     active_count = len(active_users)

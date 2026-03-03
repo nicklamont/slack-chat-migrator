@@ -18,9 +18,11 @@ from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
+from slack_migrator.constants import API_THROTTLE_MESSAGE_SECONDS
 from slack_migrator.core.config import ImportCompletionStrategy, should_process_channel
 from slack_migrator.services.discovery import get_last_message_timestamp
 from slack_migrator.services.historical_membership import add_users_to_space
+from slack_migrator.services.message_builder import build_user_map_with_overrides
 from slack_migrator.services.message_sender import (
     send_message,
     track_message_stats,
@@ -277,8 +279,11 @@ class ChannelProcessor:
         if not self.ctx.dry_run or self.ctx.update_mode:
             self._discover_channel_resources(channel)
 
+        # Build user map with overrides once per channel (expensive operation)
+        cached_user_map = build_user_map_with_overrides(self.ctx, self.user_resolver)
+
         processed_count, failed_count, channel_had_errors = self._send_messages_loop(
-            msgs, space, channel, channel_had_errors
+            msgs, space, channel, channel_had_errors, cached_user_map
         )
 
         log_with_context(
@@ -343,6 +348,7 @@ class ChannelProcessor:
         space: str,
         channel: str,
         channel_had_errors: bool,
+        user_map_with_overrides: dict[str, str] | None = None,
     ) -> tuple[int, int, bool]:
         """Iterate over messages, sending each and tracking results.
 
@@ -385,6 +391,7 @@ class ChannelProcessor:
                 self.attachment_processor,
                 space,
                 m,
+                user_map_with_overrides=user_map_with_overrides,
             )
 
             if result.failed:
@@ -409,7 +416,9 @@ class ChannelProcessor:
                 processed_ts.append(ts)
                 processed_count += 1
 
-            time.sleep(0.05)  # Throttle to avoid Chat API rate limits
+            time.sleep(
+                API_THROTTLE_MESSAGE_SECONDS
+            )  # Throttle to avoid Chat API rate limits
 
         if channel_failures:
             self.state.messages.failed_messages_by_channel[channel] = channel_failures

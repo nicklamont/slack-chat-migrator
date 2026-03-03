@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 import ipaddress
 import logging
 from typing import Any
@@ -18,6 +19,13 @@ from slack_migrator.types import UploadResult
 from slack_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_migrator")
+
+
+class DownloadOutcome(enum.Enum):
+    """Non-bytes outcomes from download_file."""
+
+    GOOGLE_DOCS_LINK = "google_docs_link"
+    GOOGLE_DRIVE_FILE = "google_drive_file"
 
 
 def _is_internal_host(hostname: str) -> bool:
@@ -37,18 +45,19 @@ def _is_internal_host(hostname: str) -> bool:
 def download_file(
     file_obj: dict[str, Any],
     channel: str | None,
-) -> bytes | None:
+) -> bytes | DownloadOutcome | None:
     """Download a file from Slack export or URL.
 
-    Handles Google Docs links (returns sentinel ``b"__GOOGLE_DOCS_SKIP__"``)
-    and Google Drive files (returns sentinel ``b"__GOOGLE_DRIVE_FILE__"``).
+    Handles Google Docs links (returns :attr:`DownloadOutcome.GOOGLE_DOCS_LINK`)
+    and Google Drive files (returns :attr:`DownloadOutcome.GOOGLE_DRIVE_FILE`).
 
     Args:
         file_obj: The file object from Slack.
         channel: Current channel name for logging context.
 
     Returns:
-        File content as bytes, a sentinel marker, or None if download failed.
+        File content as bytes, a :class:`DownloadOutcome` variant, or None if
+        download failed.
     """
     try:
         file_id = file_obj.get("id", "unknown")
@@ -107,7 +116,7 @@ def download_file(
                 file_name=name,
                 channel=channel,
             )
-            return b"__GOOGLE_DOCS_SKIP__"
+            return DownloadOutcome.GOOGLE_DOCS_LINK
 
         if is_google_drive_file:
             log_with_context(
@@ -117,8 +126,7 @@ def download_file(
                 file_name=name,
                 channel=channel,
             )
-            # Return a special marker to indicate this is a Drive file
-            return b"__GOOGLE_DRIVE_FILE__"
+            return DownloadOutcome.GOOGLE_DRIVE_FILE
 
         log_with_context(
             logging.DEBUG,
