@@ -163,7 +163,7 @@ class TestProcessChannel:
     def test_channel_with_space_conflict(self, mock_should, tmp_path):
         """Channel with unresolved space conflict is skipped with errors."""
         processor = _make_processor()
-        processor.state.errors.channel_conflicts = {"general": ["spaces/A", "spaces/B"]}
+        processor.state.errors.channel_conflicts = {"general"}
 
         ch_dir = tmp_path / "general"
         ch_dir.mkdir()

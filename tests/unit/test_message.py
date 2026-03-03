@@ -579,23 +579,16 @@ class TestSendMessage:
 
         assert "general:1700000000.000001" in state.messages.sent_messages
 
-    def test_state_has_thread_map_by_default(self):
-        """MigrationState initializes thread_map as an empty dict."""
-        state = _make_state()
+    def test_send_message_with_channel_none_returns_error(self):
+        """send_message returns an error when current_channel is None."""
+        ctx, state, chat, ur, ap = _make_send_deps(channel=None)
+        msg = {"ts": "1700000000.000001", "user": "U001", "text": "Hello"}
 
-        assert isinstance(state.messages.thread_map, dict)
+        result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-    def test_state_has_sent_messages_by_default(self):
-        """MigrationState initializes sent_messages as an empty set."""
-        state = _make_state()
-
-        assert isinstance(state.messages.sent_messages, set)
-
-    def test_state_has_message_id_map_by_default(self):
-        """MigrationState initializes message_id_map as an empty dict."""
-        state = _make_state()
-
-        assert isinstance(state.messages.message_id_map, dict)
+        assert result.success is False
+        assert result.error == "No current channel set"
+        chat.create_message.assert_not_called()
 
     def test_message_with_files_is_not_skipped(self):
         """Messages with no text but with files are not skipped."""
@@ -774,8 +767,8 @@ class TestProcessReactionsBatch:
 
         assert state.progress.migration_summary["reactions_created"] == 1
 
-    def test_external_user_reactions_skipped(self):
-        """Reactions from external users are skipped to avoid admin attribution."""
+    def test_external_user_reactions_counted_before_external_check(self):
+        """Reactions are counted in the summary before the external user check."""
         ctx, state, chat, ur = self._setup()
         ur.is_external_user.return_value = True
         reactions = [{"name": "thumbsup", "users": ["U001"]}]
