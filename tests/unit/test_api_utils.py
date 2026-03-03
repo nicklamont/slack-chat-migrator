@@ -1042,3 +1042,103 @@ class TestEscapeDriveQueryValue:
     def test_no_mutation_of_safe_characters(self):
         safe = "channel-name_123 (archived)"
         assert escape_drive_query_value(safe) == safe
+
+
+# ---------------------------------------------------------------------------
+# Service cache TTL and 401 eviction
+# ---------------------------------------------------------------------------
+
+
+class TestServiceCacheTTL:
+    """Tests for service cache TTL expiry."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        """Ensure the service cache is empty before and after each test."""
+        _service_cache.clear()
+        yield
+        _service_cache.clear()
+
+    @patch("slack_migrator.utils.api.build")
+    @patch(
+        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+    )
+    def test_ttl_expiry_evicts_cached_service(self, mock_creds, mock_build):
+        """A cached service older than _SERVICE_CACHE_TTL should be evicted."""
+        mock_cred_instance = MagicMock()
+        mock_creds.return_value = mock_cred_instance
+        mock_cred_instance.with_subject.return_value = MagicMock()
+        mock_build.return_value = MagicMock()
+
+        svc1 = get_gcp_service("/path/creds.json", "user@example.com", "chat", "v1")
+        assert mock_build.call_count == 1
+
+        # Artificially age the cache entry past TTL
+        cache_key = "/path/creds.json:user@example.com:chat:v1"
+        old_service, _ = _service_cache[cache_key]
+        _service_cache[cache_key] = (old_service, 0.0)  # epoch = very old
+
+        svc2 = get_gcp_service("/path/creds.json", "user@example.com", "chat", "v1")
+        # build should have been called a second time due to TTL eviction
+        assert mock_build.call_count == 2
+        assert svc1 is not svc2
+
+    @patch("slack_migrator.utils.api.build")
+    @patch(
+        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+    )
+    def test_fresh_cache_entry_not_evicted(self, mock_creds, mock_build):
+        """A cache entry within TTL should be returned without rebuilding."""
+        mock_cred_instance = MagicMock()
+        mock_creds.return_value = mock_cred_instance
+        mock_cred_instance.with_subject.return_value = MagicMock()
+        mock_build.return_value = MagicMock()
+
+        svc1 = get_gcp_service("/path/creds.json", "user@example.com", "chat", "v1")
+        svc2 = get_gcp_service("/path/creds.json", "user@example.com", "chat", "v1")
+
+        assert svc1 is svc2
+        assert mock_build.call_count == 1
+
+
+class TestServiceCache401Eviction:
+    """Tests for 401 error clearing the service cache."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        _service_cache.clear()
+        yield
+        _service_cache.clear()
+
+    @patch("slack_migrator.utils.api.time.sleep")
+    def test_401_clears_service_cache(self, _sleep):
+        """A 401 HttpError in _wrap_execute should clear the service cache."""
+        # Pre-populate the cache with a fake entry
+        _service_cache["fake:key"] = (MagicMock(), 999999999.0)
+        assert len(_service_cache) == 1
+
+        inner = MagicMock()
+        inner.execute.side_effect = _make_http_error(401, "Unauthorized")
+
+        wrapper = RetryWrapper(inner)
+        with pytest.raises(HttpError):
+            wrapper.execute()
+
+        # Cache should have been cleared by the 401 handler
+        assert len(_service_cache) == 0
+
+    @patch("slack_migrator.utils.api.time.sleep")
+    def test_403_does_not_clear_service_cache(self, _sleep):
+        """A 403 HttpError should NOT clear the service cache."""
+        _service_cache["fake:key"] = (MagicMock(), 999999999.0)
+        assert len(_service_cache) == 1
+
+        inner = MagicMock()
+        inner.execute.side_effect = _make_http_error(403, "Forbidden")
+
+        wrapper = RetryWrapper(inner)
+        with pytest.raises(HttpError):
+            wrapper.execute()
+
+        # Cache should NOT have been cleared
+        assert len(_service_cache) == 1

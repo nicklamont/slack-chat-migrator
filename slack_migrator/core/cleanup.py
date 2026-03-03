@@ -21,6 +21,7 @@ from slack_migrator.constants import (
     HTTP_RATE_LIMIT,
     HTTP_SERVER_ERROR_MIN,
     SPACE_NAME_PREFIX,
+    SPACES_PAGE_SIZE,
 )
 from slack_migrator.services.regular_membership import add_regular_members
 from slack_migrator.utils.logging import log_with_context
@@ -69,8 +70,20 @@ def _list_spaces_in_import_mode(
     space listing itself failed (caller should abort cleanup).
     """
     log_with_context(logging.DEBUG, "Listing all spaces to check for import mode...")
+
+    # Paginate through all spaces (the API returns at most SPACES_PAGE_SIZE
+    # per call and a nextPageToken when more pages are available).
+    all_spaces: list[dict] = []
+    page_token: str | None = None
     try:
-        spaces = chat.list_spaces().get("spaces", [])
+        while True:
+            response = chat.list_spaces(
+                page_size=SPACES_PAGE_SIZE, page_token=page_token
+            )
+            all_spaces.extend(response.get("spaces", []))
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
     except HttpError as http_e:
         log_with_context(
             logging.ERROR,
@@ -93,7 +106,7 @@ def _list_spaces_in_import_mode(
         return None
 
     import_mode_spaces: list[tuple[str, dict]] = []
-    for space in spaces:
+    for space in all_spaces:
         space_name = space.get("name", "")
         if not space_name:
             continue

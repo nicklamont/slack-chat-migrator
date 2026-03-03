@@ -21,6 +21,7 @@ from slack_migrator.utils.logging import (
     log_api_response,
     log_failed_message,
     log_with_context,
+    sanitize_for_log,
     setup_channel_logger,
     setup_logger,
     setup_main_log_file,
@@ -901,3 +902,88 @@ class TestEnableHttpClientDebug:
         second_patch = http.client.HTTPConnection.putheader
         # The patched function should be the same object (not re-wrapped)
         assert first_patch is second_patch
+
+
+# --- sanitize_for_log tests ---
+
+
+class TestSanitizeForLog:
+    """Tests for sanitize_for_log()."""
+
+    def test_redacts_bearer_token(self):
+        text = "Authorization: Bearer ya29.abc123XYZ-_~+/def456=="
+        result = sanitize_for_log(text)
+        assert "ya29" not in result
+        assert "Bearer [REDACTED]" in result
+
+    def test_redacts_bearer_case_insensitive(self):
+        text = "header: bearer ya29.secret-token-here"
+        result = sanitize_for_log(text)
+        assert "ya29" not in result
+        assert "Bearer [REDACTED]" in result
+
+    def test_redacts_token_url_param(self):
+        text = "https://example.com/api?token=xoxb-123-456-abc&other=val"
+        result = sanitize_for_log(text)
+        assert "xoxb" not in result
+        assert "token=[REDACTED]" in result
+        assert "other=val" in result
+
+    def test_redacts_access_token_param(self):
+        text = "url?access_token=secret123"
+        result = sanitize_for_log(text)
+        assert "secret123" not in result
+        assert "access_token=[REDACTED]" in result
+
+    def test_redacts_key_param(self):
+        text = "url?key=AIzaSyABC123def456"
+        result = sanitize_for_log(text)
+        assert "AIzaSy" not in result
+        assert "key=[REDACTED]" in result
+
+    def test_case_insensitive_param_redaction(self):
+        text = "url?TOKEN=mysecret123&Key=otherkey456"
+        result = sanitize_for_log(text)
+        assert "mysecret" not in result
+        assert "otherkey" not in result
+
+    def test_no_redaction_for_clean_text(self):
+        text = "Successfully uploaded file report.pdf to Drive"
+        result = sanitize_for_log(text)
+        assert result == text
+
+    def test_empty_string(self):
+        assert sanitize_for_log("") == ""
+
+
+class TestEnhancedFormatterSanitization:
+    """Tests that EnhancedFormatter applies sanitize_for_log."""
+
+    def _make_record(self, msg="test message", level=logging.INFO):
+        return logging.LogRecord(
+            name="slack_migrator",
+            level=level,
+            pathname="test.py",
+            lineno=1,
+            msg=msg,
+            args=(),
+            exc_info=None,
+        )
+
+    def test_bearer_token_redacted_in_output(self):
+        formatter = EnhancedFormatter()
+        record = self._make_record(
+            msg="Got response with Bearer ya29.secret-token-here"
+        )
+        result = formatter.format(record)
+        assert "ya29" not in result
+        assert "Bearer [REDACTED]" in result
+
+    def test_url_token_param_redacted_in_output(self):
+        formatter = EnhancedFormatter()
+        record = self._make_record(
+            msg="Requesting https://api.example.com?token=xoxb-secret"
+        )
+        result = formatter.format(record)
+        assert "xoxb-secret" not in result
+        assert "token=[REDACTED]" in result

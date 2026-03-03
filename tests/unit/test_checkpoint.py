@@ -103,9 +103,22 @@ class TestSaveCheckpoint:
 
         save_checkpoint(cp_path, data)
 
-        assert data.last_updated is not None
         loaded = json.loads(cp_path.read_text())
         assert loaded["last_updated"] is not None
+
+    def test_does_not_mutate_caller_data(self, tmp_path: Path) -> None:
+        """save_checkpoint must not modify the caller's CheckpointData."""
+        cp_path = tmp_path / "checkpoint.json"
+        data = CheckpointData(
+            completed_channels={"general": "1700000000.0"},
+            started_at="2025-01-01T00:00:00+00:00",
+            last_updated=None,
+        )
+
+        save_checkpoint(cp_path, data)
+
+        # The original object should be untouched
+        assert data.last_updated is None
 
     def test_atomic_write(self, tmp_path: Path) -> None:
         """Verify the .tmp file is renamed to the final path (no leftover .tmp)."""
@@ -174,8 +187,9 @@ class TestRoundTrip:
         assert loaded.completed_channels == original.completed_channels
         assert loaded.started_at == original.started_at
         assert loaded.schema_version == original.schema_version
-        # last_updated is set by save_checkpoint
-        assert loaded.last_updated == original.last_updated
+        # last_updated is set on the saved copy, not on original
+        assert loaded.last_updated is not None
+        assert original.last_updated is None  # original is not mutated
 
     def test_channel_skipping(self, tmp_path: Path) -> None:
         """Verify channels A and B are in completed_channels after save/load."""

@@ -9,7 +9,8 @@ from httplib2 import Response
 
 from slack_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_migrator.core.state import MigrationState
-from slack_migrator.services.file import FileHandler
+from slack_migrator.services.file import FileHandler, _safe_temp_suffix
+from slack_migrator.services.file_download import _is_internal_host, download_file
 from slack_migrator.types import UploadResult
 
 # ---------------------------------------------------------------------------
@@ -1911,3 +1912,125 @@ class TestEnsureDriveInitializedDetailed:
         handler.ensure_drive_initialized()
 
         handler.shared_drive_manager.get_or_create_shared_drive.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _safe_temp_suffix
+# ---------------------------------------------------------------------------
+
+
+class TestSafeTempSuffix:
+    """Tests for _safe_temp_suffix()."""
+
+    def test_normal_filename(self):
+        result = _safe_temp_suffix("report.pdf")
+        assert result == "_report.pdf"
+
+    def test_path_separators_replaced(self):
+        result = _safe_temp_suffix("../../etc/passwd")
+        assert "/" not in result
+        assert "\\" not in result
+        assert result.startswith("_")
+
+    def test_null_bytes_replaced(self):
+        result = _safe_temp_suffix("file\x00.txt")
+        assert "\x00" not in result
+        assert result.startswith("_")
+
+    def test_long_name_truncated(self):
+        long_name = "a" * 200
+        result = _safe_temp_suffix(long_name)
+        # underscore prefix + at most 64 chars from the name
+        assert len(result) <= 65
+
+    def test_preserves_safe_characters(self):
+        result = _safe_temp_suffix("my-file_v2.tar.gz")
+        assert result == "_my-file_v2.tar.gz"
+
+    def test_spaces_replaced(self):
+        result = _safe_temp_suffix("my file name.txt")
+        assert " " not in result
+        assert result.startswith("_")
+
+    def test_empty_string(self):
+        result = _safe_temp_suffix("")
+        assert result == "_"
+
+
+# ---------------------------------------------------------------------------
+# SSRF protection — _is_internal_host and download_file URL validation
+# ---------------------------------------------------------------------------
+
+
+class TestIsInternalHost:
+    """Tests for _is_internal_host()."""
+
+    def test_private_ipv4(self):
+        assert _is_internal_host("192.168.1.1") is True
+
+    def test_loopback(self):
+        assert _is_internal_host("127.0.0.1") is True
+
+    def test_link_local(self):
+        assert _is_internal_host("169.254.1.1") is True
+
+    def test_public_ip(self):
+        assert _is_internal_host("8.8.8.8") is False
+
+    def test_dns_name_returns_false(self):
+        assert _is_internal_host("files.slack.com") is False
+
+    def test_10_range(self):
+        assert _is_internal_host("10.0.0.1") is True
+
+
+class TestDownloadFileSSRF:
+    """Tests for SSRF protection in download_file()."""
+
+    def test_blocks_http_scheme(self):
+        """HTTP URLs should be blocked."""
+        file_obj = {
+            "id": "F001",
+            "name": "test.txt",
+            "url_private": "http://files.slack.com/file.txt",
+        }
+        result = download_file(file_obj, "general")
+        assert result is None
+
+    def test_blocks_internal_ip(self):
+        """URLs pointing to internal IPs should be blocked."""
+        file_obj = {
+            "id": "F002",
+            "name": "test.txt",
+            "url_private": "https://192.168.1.1/secret",
+        }
+        result = download_file(file_obj, "general")
+        assert result is None
+
+    def test_blocks_loopback(self):
+        """URLs pointing to loopback should be blocked."""
+        file_obj = {
+            "id": "F003",
+            "name": "test.txt",
+            "url_private": "https://127.0.0.1/internal",
+        }
+        result = download_file(file_obj, "general")
+        assert result is None
+
+    @patch("slack_migrator.services.file_download.requests.get")
+    def test_allows_https_public_url(self, mock_get):
+        """Valid HTTPS URLs to public hosts should proceed to download."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.content = b"file content"
+        mock_response.headers = {}
+        mock_get.return_value = mock_response
+
+        file_obj = {
+            "id": "F004",
+            "name": "test.txt",
+            "url_private": "https://files.slack.com/file.txt",
+        }
+        result = download_file(file_obj, "general")
+        assert result == b"file content"
+        mock_get.assert_called_once()

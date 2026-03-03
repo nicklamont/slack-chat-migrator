@@ -82,6 +82,18 @@ class MigrationConfig:
     # Shared drive
     shared_drive: SharedDriveConfig = field(default_factory=SharedDriveConfig)
 
+    def __post_init__(self) -> None:
+        """Validate configuration values after initialization."""
+        if self.max_retries < 0:
+            raise ValueError(f"max_retries must be >= 0, got {self.max_retries}")
+        if not (0 <= self.max_failure_percentage <= 100):
+            raise ValueError(
+                f"max_failure_percentage must be between 0 and 100,"
+                f" got {self.max_failure_percentage}"
+            )
+        if self.retry_delay < 0:
+            raise ValueError(f"retry_delay must be >= 0, got {self.retry_delay}")
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MigrationConfig:
         """Create a MigrationConfig from a raw config dictionary.

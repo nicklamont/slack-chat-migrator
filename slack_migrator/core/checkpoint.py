@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,11 +60,14 @@ def load_checkpoint(path: Path) -> CheckpointData | None:
 
 
 def save_checkpoint(path: Path, data: CheckpointData) -> None:
-    """Atomically save checkpoint to disk (write .tmp + rename)."""
-    data.last_updated = now_iso()
+    """Atomically save checkpoint to disk (write .tmp + rename).
+
+    Uses ``dataclasses.replace()`` to avoid mutating the caller's *data*.
+    """
+    save_data = replace(data, last_updated=now_iso())
     tmp = path.with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps(asdict(data), indent=2) + "\n")
+        tmp.write_text(json.dumps(asdict(save_data), indent=2) + "\n")
         tmp.replace(path)
     except OSError as e:
         log_with_context(logging.ERROR, f"Failed to write checkpoint {path}: {e}")

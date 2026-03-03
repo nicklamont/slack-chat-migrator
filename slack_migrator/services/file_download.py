@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -16,6 +18,20 @@ from slack_migrator.types import UploadResult
 from slack_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_migrator")
+
+
+def _is_internal_host(hostname: str) -> bool:
+    """Check if hostname is an internal/private IP literal.
+
+    Only blocks IP-literal hostnames (e.g. ``192.168.1.1``).
+    DNS names that resolve to private IPs are not blocked; Slack
+    export URLs use trusted Slack-owned domains.
+    """
+    try:
+        ip = ipaddress.ip_address(hostname)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        return False  # Not an IP literal — allow DNS names through
 
 
 def download_file(
@@ -43,6 +59,24 @@ def download_file(
             log_with_context(
                 logging.WARNING,
                 f"No URL found for file: {name}",
+                file_id=file_id,
+                channel=channel,
+            )
+            return None
+
+        parsed = urlparse(url_private)
+        if parsed.scheme != "https":
+            log_with_context(
+                logging.WARNING,
+                f"Blocked non-HTTPS file URL: scheme={parsed.scheme}",
+                file_id=file_id,
+                channel=channel,
+            )
+            return None
+        if parsed.hostname and _is_internal_host(parsed.hostname):
+            log_with_context(
+                logging.WARNING,
+                f"Blocked internal file URL: {parsed.hostname}",
                 file_id=file_id,
                 channel=channel,
             )

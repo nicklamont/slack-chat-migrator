@@ -8,6 +8,7 @@ import hashlib
 import logging
 import mimetypes
 import os
+import re
 import tempfile
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -41,6 +42,11 @@ if TYPE_CHECKING:
     from slack_migrator.services.drive_adapter import DriveAdapter
 
 logger = logging.getLogger("slack_migrator")
+
+
+def _safe_temp_suffix(name: str) -> str:
+    """Sanitize a filename for use as a temp file suffix."""
+    return "_" + re.sub(r"[^A-Za-z0-9._-]", "_", name)[:64]
 
 
 class FileHandler:
@@ -694,7 +700,7 @@ class FileHandler:
 
             # Create a temporary file for the chat uploader
             with tempfile.NamedTemporaryFile(
-                delete=False, suffix=f"_{name}"
+                delete=False, suffix=_safe_temp_suffix(name)
             ) as temp_file:
                 temp_file.write(file_content)
                 temp_file_path = temp_file.name
@@ -900,7 +906,9 @@ class FileHandler:
 
         Returns the UploadResult or None on failure.
         """
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{name}") as temp_file:
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=_safe_temp_suffix(name)
+        ) as temp_file:
             temp_file.write(file_content)
             temp_file_path = temp_file.name
 

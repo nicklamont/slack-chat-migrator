@@ -1863,3 +1863,40 @@ class TestMigrate:
         with caplog.at_level(logging.WARNING):
             m.migrate()
         assert "unmapped users during setup" in caplog.text
+
+    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_migrator.core.migrator.log_migration_failure")
+    @patch("slack_migrator.core.migrator.save_checkpoint")
+    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    def test_signal_handler_raises_keyboard_interrupt(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_log_failure,
+        mock_cleanup,
+        tmp_path,
+    ):
+        """SIGINT signal handler raises KeyboardInterrupt, which is caught by
+        the ``except BaseException`` block -- log_migration_failure is called
+        exactly once (no double-logging)."""
+        import signal as signal_mod
+
+        m = _make_migrator_for_migrate(tmp_path)
+        mock_cp = MagicMock()
+        # Simulate SIGINT during channel processing
+        mock_cp.process_channel.side_effect = lambda ch: signal_mod.raise_signal(
+            signal_mod.SIGINT
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        with pytest.raises(KeyboardInterrupt):
+            m.migrate()
+
+        # log_migration_failure should be called exactly once
+        mock_log_failure.assert_called_once()
+        args = mock_log_failure.call_args[0]
+        assert isinstance(args[2], KeyboardInterrupt)

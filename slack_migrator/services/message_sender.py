@@ -728,7 +728,7 @@ def send_intro(
     try:
         message_body = {
             "text": intro_text,
-            "createTime": slack_ts_to_rfc3339(f"{time.time()}.000000"),
+            "createTime": slack_ts_to_rfc3339(f"{int(time.time())}.000000"),
             # Explicitly set the sender as the workspace admin
             "sender": {"type": "HUMAN", "name": f"users/{ctx.workspace_admin}"},
         }
