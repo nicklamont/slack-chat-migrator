@@ -161,9 +161,7 @@ def _should_skip_message(
     """Check whether a message should be skipped before processing.
 
     Handles bot checks, update-mode deduplication, dry-run early return,
-    system subtype filtering, and empty message detection.  Increments
-    ``messages_created`` only for non-dry-run messages that pass all
-    skip checks (bot, update-mode, system-subtype, empty).
+    system subtype filtering, and empty message detection.
 
     Returns:
         A ``(should_skip, return_value)`` tuple.  When *should_skip* is
@@ -209,9 +207,6 @@ def _should_skip_message(
         )
         return True, None
 
-    # Increment after all skip checks pass (dry-run counts separately in migrate())
-    state.progress.migration_summary["messages_created"] += 1
-
     return False, None
 
 
@@ -233,9 +228,11 @@ def _handle_send_result(
 ) -> None:
     """Process a successful API response after sending a message.
 
-    Updates ``message_id_map``, ``thread_map``, ``sent_messages``, and
-    triggers reaction processing when applicable.
+    Updates ``messages_created`` counter, ``message_id_map``, ``thread_map``,
+    ``sent_messages``, and triggers reaction processing when applicable.
     """
+    state.progress.migration_summary["messages_created"] += 1
+
     # Store the message ID mapping for potential future edits
     if message_name:
         # For edited messages, store with a special key that includes the edit timestamp
