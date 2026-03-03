@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
@@ -30,6 +30,8 @@ if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
     from slack_migrator.services.chat_adapter import ChatAdapter
+    from slack_migrator.services.file import FileHandler
+    from slack_migrator.services.user_resolver import UserResolver
 
 
 def cleanup_channel_handlers(state: MigrationState) -> None:
@@ -143,8 +145,8 @@ def run_cleanup(
     ctx: MigrationContext,
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
-    file_handler: Any | None,
+    user_resolver: UserResolver,
+    file_handler: FileHandler | None,
 ) -> None:
     """Complete import mode on spaces and add regular members back.
 
@@ -223,8 +225,8 @@ def _complete_import_mode_spaces(
     ctx: MigrationContext,
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
-    file_handler: Any | None,
+    user_resolver: UserResolver,
+    file_handler: FileHandler | None,
     import_mode_spaces: list[tuple[str, dict]],
 ) -> None:
     """Complete import mode for discovered spaces and add members.
@@ -296,8 +298,8 @@ def _complete_single_space(
     ctx: MigrationContext,
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
-    file_handler: Any | None,
+    user_resolver: UserResolver,
+    file_handler: FileHandler | None,
     space_name: str,
     space_info: dict,
 ) -> None:

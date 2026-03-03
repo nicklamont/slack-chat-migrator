@@ -31,10 +31,11 @@ if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
     from slack_migrator.services.chat_adapter import ChatAdapter
+    from slack_migrator.services.user_resolver import UserResolver
 
 
 def channel_has_external_users(
-    ctx: MigrationContext, user_resolver: Any, channel: str
+    ctx: MigrationContext, user_resolver: UserResolver, channel: str
 ) -> bool:
     """Check if a channel has external users that need access.
 
@@ -111,7 +112,7 @@ def create_space(
     ctx: MigrationContext,
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     channel: str,
 ) -> str:
     """Create a Google Chat space for a Slack channel in import mode.

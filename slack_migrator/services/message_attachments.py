@@ -11,6 +11,7 @@ from slack_migrator.types import UploadResult
 from slack_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
+    from slack_migrator.services.chat_adapter import ChatAdapter
     from slack_migrator.services.file import FileHandler
 
 
@@ -37,7 +38,7 @@ class MessageAttachmentProcessor:
         channel: str,
         space: str | None = None,
         user_id: str | None = None,
-        user_service: Any = None,
+        user_service: ChatAdapter | None = None,
         sender_email: str | None = None,
     ) -> list[dict[str, Any]]:
         """Process all file attachments for a message and return attachment payload list.

@@ -7,6 +7,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
@@ -29,10 +30,11 @@ if TYPE_CHECKING:
     from slack_migrator.core.context import MigrationContext
     from slack_migrator.core.state import MigrationState
     from slack_migrator.services.chat_adapter import ChatAdapter
+    from slack_migrator.services.user_resolver import UserResolver
 
 
 def _scan_message_files_for_membership(
-    ch_dir: Any,
+    ch_dir: Path,
     channel: str,
 ) -> tuple[dict[str, dict[str, Any]], set[str]]:
     """Scan all JSON message files to build user join/leave/message history.
@@ -302,7 +304,7 @@ def _add_historical_members_batch(
     ctx: MigrationContext,
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     space: str,
     channel: str,
     user_membership: dict[str, dict[str, Any]],
@@ -433,7 +435,7 @@ def add_users_to_space(
     ctx: MigrationContext,
     state: MigrationState,
     chat: ChatAdapter,
-    user_resolver: Any,
+    user_resolver: UserResolver,
     space: str,
     channel: str,
 ) -> None:
