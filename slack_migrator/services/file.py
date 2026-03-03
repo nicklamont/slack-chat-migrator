@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import requests
 from googleapiclient.errors import HttpError
 
+from slack_migrator.constants import DIRECT_UPLOAD_MAX_BYTES, MAX_FILE_SIZE_BYTES
 from slack_migrator.core.config import MigrationConfig
 from slack_migrator.core.state import MigrationState
 from slack_migrator.services.chat import ChatFileUploader
@@ -24,6 +25,7 @@ from slack_migrator.services.drive import (
     SharedDriveManager,
 )
 from slack_migrator.services.file_download import (
+    DownloadOutcome,
     create_drive_reference,
     download_file,
 )
@@ -60,10 +62,6 @@ class FileHandler:
         "image/gif",
         "image/webp",
     }
-
-    # Maximum file size for direct upload (in bytes) - 25MB for direct Chat uploads
-    # Note: 200MB is Drive API limit, but Chat direct uploads are much smaller
-    DIRECT_UPLOAD_MAX_SIZE = 25 * 1024 * 1024  # 25MB
 
     def __init__(
         self,
@@ -386,9 +384,11 @@ class FileHandler:
             if handled:
                 return sentinel_result
 
+            # After sentinel handling, file_content is guaranteed to be bytes
+            assert isinstance(file_content, bytes)
+
             # Validate size and resolve MIME type
-            MAX_FILE_SIZE = 200 * 1024 * 1024  # 200MB - Drive API limit
-            if len(file_content) > MAX_FILE_SIZE:
+            if len(file_content) > MAX_FILE_SIZE_BYTES:
                 log_with_context(
                     logging.WARNING,
                     f"File {name} is very large ({len(file_content)} bytes), this may cause memory issues",
@@ -490,7 +490,7 @@ class FileHandler:
         name: str,
         channel: str | None,
         file_id: str,
-    ) -> bytes | None:
+    ) -> bytes | DownloadOutcome | None:
         """Download file content and return it, or None on failure."""
         file_content = self._download_file(file_obj)
         if not file_content:
@@ -507,7 +507,7 @@ class FileHandler:
 
     def _handle_download_sentinel(
         self,
-        file_content: bytes,
+        file_content: bytes | DownloadOutcome,
         file_obj: dict[str, Any],
         name: str,
         channel: str | None,
@@ -517,7 +517,7 @@ class FileHandler:
 
         Returns (handled, result). If handled is False, content should be uploaded normally.
         """
-        if file_content == b"__GOOGLE_DOCS_SKIP__":
+        if file_content is DownloadOutcome.GOOGLE_DOCS_LINK:
             log_with_context(
                 logging.DEBUG,
                 f"Google Docs/Sheets file cannot be attached - will appear as link in message text: {name}",
@@ -531,7 +531,7 @@ class FileHandler:
                 url=file_obj.get("url_private", ""),
             )
 
-        if file_content == b"__GOOGLE_DRIVE_FILE__":
+        if file_content is DownloadOutcome.GOOGLE_DRIVE_FILE:
             log_with_context(
                 logging.DEBUG,
                 f"Creating direct Google Drive reference for file: {name}",
@@ -566,7 +566,7 @@ class FileHandler:
         actual_size = len(file_content)
         use_direct = (
             mime_type in self.DIRECT_UPLOAD_MIME_TYPES
-            and actual_size <= self.DIRECT_UPLOAD_MAX_SIZE
+            and actual_size <= DIRECT_UPLOAD_MAX_BYTES
             and not self.dry_run
             and self.chat_uploader.is_suitable_for_direct_upload(name, actual_size)
         )
@@ -1067,7 +1067,9 @@ class FileHandler:
         """
         return transfer_file_ownership(self.drive_service, file_id, new_owner_email)
 
-    def _download_file(self, file_obj: dict[str, Any]) -> bytes | None:
+    def _download_file(
+        self, file_obj: dict[str, Any]
+    ) -> bytes | DownloadOutcome | None:
         """Download a file from Slack export or URL.
 
         Delegates to :func:`file_download.download_file`.

@@ -13,6 +13,7 @@ from googleapiclient.errors import HttpError
 from tqdm import tqdm
 
 from slack_migrator.constants import (
+    API_THROTTLE_MEMBER_SECONDS,
     HTTP_BAD_REQUEST,
     HTTP_CONFLICT,
     HTTP_FORBIDDEN,
@@ -251,7 +252,7 @@ def _add_regular_members_batch(
             )
 
         # Add a small delay to avoid rate limiting
-        time.sleep(0.1)
+        time.sleep(API_THROTTLE_MEMBER_SECONDS)
 
     # Log summary
     log_with_context(
@@ -438,7 +439,7 @@ def _update_folder_permissions(
     if not (file_handler is not None and hasattr(file_handler, "folder_manager")):
         return
 
-    root_folder_id = file_handler._root_folder_id
+    root_folder_id = file_handler.folder_id
     if root_folder_id is None:
         return
 
@@ -449,7 +450,7 @@ def _update_folder_permissions(
         folder_id = file_handler.folder_manager.get_channel_folder_id(
             channel,
             root_folder_id,
-            file_handler._shared_drive_id,
+            file_handler.shared_drive_id,
         )
 
         if folder_id:
@@ -466,7 +467,7 @@ def _update_folder_permissions(
                 folder_id,
                 channel,
                 active_user_emails,
-                file_handler._shared_drive_id,
+                file_handler.shared_drive_id,
             )
     except HttpError as e:
         log_with_context(

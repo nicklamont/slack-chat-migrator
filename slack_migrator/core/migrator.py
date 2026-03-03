@@ -75,9 +75,6 @@ class SlackToChatMigrator:
         self.verbose = verbose
         self.debug_api = debug_api
         self.update_mode = update_mode
-        self.import_mode = (
-            not update_mode
-        )  # Set import_mode to True when not in update mode
 
         if self.update_mode:
             log_with_context(
@@ -401,10 +398,7 @@ class SlackToChatMigrator:
                 checkpoint = CheckpointData(started_at=now_iso())
 
             # Report unmapped user issues before starting migration (if any detected during initialization)
-            if (
-                hasattr(self, "unmapped_user_tracker")
-                and self.unmapped_user_tracker.has_unmapped_users()
-            ):
+            if self.unmapped_user_tracker.has_unmapped_users():
                 unmapped_users = self.unmapped_user_tracker.get_unmapped_users_list()
                 log_with_context(
                     logging.WARNING,
@@ -470,10 +464,7 @@ class SlackToChatMigrator:
             log_space_mapping_conflicts(self.state, self.ctx.dry_run)
 
             # Generate final unmapped user report
-            if (
-                hasattr(self, "unmapped_user_tracker")
-                and self.unmapped_user_tracker.has_unmapped_users()
-            ):
+            if self.unmapped_user_tracker.has_unmapped_users():
                 unmapped_users = self.unmapped_user_tracker.get_unmapped_users_list()
                 log_with_context(
                     logging.ERROR,
@@ -492,7 +483,7 @@ class SlackToChatMigrator:
                 )
 
             # If this was a dry run, provide specific unmapped user guidance
-            if self.dry_run and hasattr(self, "unmapped_user_tracker"):
+            if self.dry_run:
                 log_unmapped_user_summary_for_dry_run(
                     self.unmapped_user_tracker, self.export_root
                 )

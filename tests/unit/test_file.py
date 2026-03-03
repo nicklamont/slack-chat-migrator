@@ -10,7 +10,11 @@ from httplib2 import Response
 from slack_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_migrator.core.state import MigrationState
 from slack_migrator.services.file import FileHandler, _safe_temp_suffix
-from slack_migrator.services.file_download import _is_internal_host, download_file
+from slack_migrator.services.file_download import (
+    DownloadOutcome,
+    _is_internal_host,
+    download_file,
+)
 from slack_migrator.types import UploadResult
 
 # ---------------------------------------------------------------------------
@@ -298,7 +302,9 @@ class TestUploadStrategy:
 
     def test_google_docs_skip(self):
         handler = self._make_ready_handler()
-        handler._download_file = MagicMock(return_value=b"__GOOGLE_DOCS_SKIP__")
+        handler._download_file = MagicMock(
+            return_value=DownloadOutcome.GOOGLE_DOCS_LINK
+        )
 
         file_obj = {
             "id": "F1",
@@ -312,7 +318,9 @@ class TestUploadStrategy:
 
     def test_google_drive_file_reference(self):
         handler = self._make_ready_handler()
-        handler._download_file = MagicMock(return_value=b"__GOOGLE_DRIVE_FILE__")
+        handler._download_file = MagicMock(
+            return_value=DownloadOutcome.GOOGLE_DRIVE_FILE
+        )
         handler._create_drive_reference = MagicMock(
             return_value=UploadResult(
                 upload_type="drive",
@@ -595,7 +603,7 @@ class TestDownloadFile:
             result = handler._download_file(
                 {"id": "F1", "name": "doc", "url_private": url}
             )
-            assert result == b"__GOOGLE_DOCS_SKIP__", f"Failed for URL: {url}"
+            assert result is DownloadOutcome.GOOGLE_DOCS_LINK, f"Failed for URL: {url}"
 
     def test_google_drive_file_returns_drive_marker(self):
         handler = _make_handler()
@@ -607,7 +615,7 @@ class TestDownloadFile:
             result = handler._download_file(
                 {"id": "F1", "name": "file.pdf", "url_private": url}
             )
-            assert result == b"__GOOGLE_DRIVE_FILE__", f"Failed for URL: {url}"
+            assert result is DownloadOutcome.GOOGLE_DRIVE_FILE, f"Failed for URL: {url}"
 
     @patch("slack_migrator.services.file.requests.get")
     def test_successful_download(self, mock_get):
@@ -831,7 +839,9 @@ class TestConstants:
         assert FileHandler.DIRECT_UPLOAD_MIME_TYPES == expected
 
     def test_direct_upload_max_size(self):
-        assert FileHandler.DIRECT_UPLOAD_MAX_SIZE == 25 * 1024 * 1024
+        from slack_migrator.constants import DIRECT_UPLOAD_MAX_BYTES
+
+        assert DIRECT_UPLOAD_MAX_BYTES == 25 * 1024 * 1024
 
 
 # ===========================================================================

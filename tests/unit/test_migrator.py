@@ -176,15 +176,13 @@ class TestInitParams:
         m = _make_migrator(tmp_path, verbose=True)
         assert m.verbose is True
 
-    def test_update_mode_sets_import_mode_false(self, tmp_path):
+    def test_update_mode_flag(self, tmp_path):
         m = _make_migrator(tmp_path, update_mode=True)
         assert m.update_mode is True
-        assert m.import_mode is False
 
-    def test_import_mode_true_when_not_update(self, tmp_path):
+    def test_update_mode_defaults_false(self, tmp_path):
         m = _make_migrator(tmp_path, update_mode=False)
         assert m.update_mode is False
-        assert m.import_mode is True
 
     def test_debug_api_flag(self, tmp_path):
         m = _make_migrator(tmp_path, debug_api=True)
