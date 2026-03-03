@@ -122,6 +122,9 @@ source = ["slack_migrator"]
 show_missing = true
 skip_covered = true
 fail_under = 90
+# CLI orchestration modules are omitted because they wire together
+# already-tested services and require full end-to-end setup (credentials,
+# Slack export, Google API access) that unit tests cannot provide.
 omit = [
     "slack_migrator/cli/migrate_cmd.py",
     "slack_migrator/cli/cleanup_cmd.py",
