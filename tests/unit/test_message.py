@@ -334,6 +334,20 @@ class TestSendMessage:
 
             assert result.skipped == MessageResult.SKIPPED
 
+    def test_system_subtype_does_not_increment_messages_created(self):
+        """System subtypes (channel_join etc.) should not count as created messages."""
+        ctx, state, chat, ur, ap = _make_send_deps()
+        msg = {
+            "ts": "1700000000.000001",
+            "user": "U001",
+            "text": "joined",
+            "subtype": "channel_join",
+        }
+
+        send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
+
+        assert state.progress.migration_summary["messages_created"] == 0
+
     def test_skips_empty_message(self):
         """Messages with no text and no files are treated as failures."""
         ctx, state, chat, ur, ap = _make_send_deps()
