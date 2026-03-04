@@ -123,20 +123,10 @@ class TestUploadFileToChat:
     @patch("os.path.getsize", return_value=1024)
     def test_successful_upload(self, mock_getsize, mock_media_cls):
         uploader = _make_uploader(dry_run=False)
-        mock_media = MagicMock()
-        mock_media_cls.return_value = mock_media
+        mock_media_cls.return_value = MagicMock()
 
         mock_response = {"attachmentDataRef": {"resourceName": "res/123"}}
-        (uploader.chat_service.media().upload().execute.return_value) = mock_response
-        # Reset to allow fresh call tracking
-        uploader.chat_service.reset_mock()
-
-        execute_mock = MagicMock(return_value=mock_response)
-        upload_mock = MagicMock()
-        upload_mock.execute = execute_mock
-        media_mock = MagicMock()
-        media_mock.upload.return_value = upload_mock
-        uploader.chat_service.media.return_value = media_mock
+        uploader.chat_service.upload_media.return_value = mock_response
 
         token, metadata = uploader.upload_file_to_chat(
             "/tmp/test.jpg",
@@ -149,7 +139,7 @@ class TestUploadFileToChat:
         assert metadata["name"] == "test.jpg"
         assert metadata["mimeType"] == "image/jpeg"
         assert metadata["sizeBytes"] == "1024"
-        media_mock.upload.assert_called_once()
+        uploader.chat_service.upload_media.assert_called_once()
 
     @patch("slack_migrator.services.chat.chat_uploader.MediaFileUpload")
     @patch("os.path.getsize", return_value=1024)
@@ -157,18 +147,27 @@ class TestUploadFileToChat:
         uploader = _make_uploader(dry_run=False)
         mock_media_cls.return_value = MagicMock()
 
-        media_mock = MagicMock()
-        upload_mock = MagicMock()
-        upload_mock.execute.side_effect = HttpError(
+        uploader.chat_service.upload_media.side_effect = HttpError(
             Response({"status": "500"}), b"API error"
         )
-        media_mock.upload.return_value = upload_mock
-        uploader.chat_service.media.return_value = media_mock
 
         token, metadata = uploader.upload_file_to_chat(
             "/tmp/fail.png",
             "fail.png",
             parent_space="spaces/FAIL",
+        )
+
+        assert token is None
+        assert metadata is None
+
+    @patch("os.path.getsize", return_value=1024)
+    def test_none_parent_space_returns_none_none(self, mock_getsize):
+        uploader = _make_uploader(dry_run=False)
+
+        token, metadata = uploader.upload_file_to_chat(
+            "/tmp/test.jpg",
+            "test.jpg",
+            parent_space=None,
         )
 
         assert token is None

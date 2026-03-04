@@ -279,3 +279,28 @@ class ChatAdapter:
             self._svc.spaces().members().delete(name=name).execute()
         )
         return result
+
+    # -- Media ----------------------------------------------------------------
+
+    def upload_media(
+        self,
+        parent: str,
+        body: dict[str, Any],
+        media_body: Any,
+    ) -> dict[str, Any]:
+        """Upload a file to Google Chat via the media endpoint.
+
+        Args:
+            parent: Space resource name (e.g. ``spaces/AAAA``).
+            body: Request body (typically ``{"filename": "..."}``).
+            media_body: A ``MediaFileUpload`` (or compatible) object.
+
+        Returns:
+            Upload response dict (use as ``attachment`` in messages).
+        """
+        result: dict[str, Any] = (
+            self._svc.media()
+            .upload(parent=parent, media_body=media_body, body=body)
+            .execute()
+        )
+        return result

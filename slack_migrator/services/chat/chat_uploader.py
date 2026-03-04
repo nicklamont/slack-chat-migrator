@@ -8,7 +8,7 @@ import json
 import logging
 import mimetypes
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
@@ -17,15 +17,18 @@ from slack_migrator.utils.logging import (
     log_with_context,
 )
 
+if TYPE_CHECKING:
+    from slack_migrator.services.chat_adapter import ChatAdapter
+
 
 class ChatFileUploader:
     """Handles direct file uploads to Google Chat API."""
 
-    def __init__(self, chat_service: Any, dry_run: bool = False) -> None:
+    def __init__(self, chat_service: ChatAdapter, dry_run: bool = False) -> None:
         """Initialize the ChatFileUploader.
 
         Args:
-            chat_service: Google Chat API service instance
+            chat_service: Google Chat API service instance (ChatAdapter)
             dry_run: Whether to run in dry run mode
         """
         self.chat_service = chat_service
@@ -79,8 +82,14 @@ class ChatFileUploader:
                 )
                 return (None, None)
 
-            # Use Chat API media upload endpoint
-            # Upload the file using Google Chat API media upload
+            if not parent_space:
+                log_with_context(
+                    logging.ERROR,
+                    f"No parent space provided for Chat API upload of {filename}",
+                    channel=self._get_current_channel(),
+                )
+                return (None, None)
+
             # Create media upload object
             media = MediaFileUpload(
                 file_path,
@@ -90,18 +99,6 @@ class ChatFileUploader:
                 ),  # Use resumable for files > 5MB
             )
 
-            # Upload file to Chat API media endpoint
-            # The Chat API uses the media.upload endpoint for file uploads
-            # The filename should be passed in the request body
-            upload_request = self.chat_service.media().upload(
-                parent=parent_space,  # Required: specify the space where the file should be uploaded
-                media_body=media,
-                body={
-                    "filename": filename
-                },  # Filename in request body as per Chat API requirements
-            )
-
-            # Log the request right before execution
             log_with_context(
                 logging.DEBUG,
                 f"Executing Chat API media upload request for {filename}",
@@ -115,8 +112,11 @@ class ChatFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            # Execute the upload
-            response = upload_request.execute()
+            response = self.chat_service.upload_media(
+                parent=parent_space,
+                body={"filename": filename},
+                media_body=media,
+            )
 
             # According to Google Chat API documentation, return the complete response
             # The documentation states: "Set attachment as the response from calling the upload method"

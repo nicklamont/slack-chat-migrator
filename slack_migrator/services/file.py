@@ -41,6 +41,7 @@ from slack_migrator.utils.logging import log_with_context
 from slack_migrator.utils.mime import resolve_drive_mime_type
 
 if TYPE_CHECKING:
+    from slack_migrator.services.chat_adapter import ChatAdapter
     from slack_migrator.services.drive_adapter import DriveAdapter
 
 logger = logging.getLogger("slack_migrator")
@@ -66,7 +67,7 @@ class FileHandler:
     def __init__(
         self,
         drive_service: DriveAdapter,
-        chat_service: Any,
+        chat_service: ChatAdapter,
         folder_id: str | None,
         config: MigrationConfig,
         workspace_domain: str,
@@ -330,7 +331,7 @@ class FileHandler:
         file_obj: dict[str, Any],
         channel: str | None = None,
         space: str | None = None,
-        user_service: Any = None,
+        user_service: ChatAdapter | None = None,
         sender_email: str | None = None,
     ) -> UploadResult:
         """Upload a file using the most appropriate method based on file type.
@@ -554,7 +555,7 @@ class FileHandler:
         mime_type: str,
         channel: str | None,
         space: str | None,
-        user_service: Any,
+        user_service: ChatAdapter | None,
         sender_email: str | None,
         file_id: str,
         name: str,
@@ -675,7 +676,7 @@ class FileHandler:
         file_content: bytes,
         channel: str | None = None,
         space: str | None = None,
-        user_service: Any = None,
+        user_service: ChatAdapter | None = None,
         sender_email: str | None = None,
     ) -> UploadResult | None:
         """Upload a file directly to Google Chat API.
