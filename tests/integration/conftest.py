@@ -129,8 +129,9 @@ def make_migrator(
     )
 
     # Place output directory as a sibling of the export root so it doesn't
-    # get picked up as a channel directory by migrate().
-    output_dir = export_path.parent / "migration_output"
+    # get picked up as a channel directory by migrate().  Include the export
+    # directory name to keep the output unique per test.
+    output_dir = export_path.parent / f"migration_output_{export_path.name}"
     output_dir.mkdir(exist_ok=True)
     (output_dir / "channel_logs").mkdir(exist_ok=True)
     m.state.context.output_dir = str(output_dir)

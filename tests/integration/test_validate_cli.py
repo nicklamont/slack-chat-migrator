@@ -105,6 +105,9 @@ class TestValidateEmptyExportDir:
     """validate exits non-zero on an empty directory."""
 
     def test_exit_code_nonzero(self, tmp_path: Path) -> None:
-        # Empty directory — no users.json, no channels.json, no channel dirs
-        result = _invoke_validate(tmp_path, tmp_path)
+        # Separate export dir so creds.json written by _invoke_validate
+        # doesn't pollute the "empty" export directory.
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+        result = _invoke_validate(tmp_path, export_dir)
         assert result.exit_code != 0
