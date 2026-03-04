@@ -173,15 +173,18 @@ def generate_user_map(
         ]
         if no_id > 0:
             lines.append(f"  - {no_id}/{total} entries have no 'id' field.")
-            # Show a sample entry to help diagnose schema issues
-            # no_id > 0 guarantees users is non-empty
-            sample_keys = list(users[0].keys())[:8]
+            # Show a sample entry (one that lacks 'id') to help diagnose schema issues
+            # no_id > 0 guarantees at least one entry without an 'id' field
+            sample_user = next(u for u in users if not u.get("id"))
+            sample_keys = list(sample_user.keys())[:8]
             lines.append(f"  - Sample entry keys: {sample_keys}")
             lines.append(
                 "  - Expected format: each entry needs 'id' and 'profile.email'."
             )
         if no_email > 0:
-            lines.append(f"  - {no_email} users have no email in 'profile.email'.")
+            lines.append(
+                f"  - {no_email} user{' has' if no_email == 1 else 's have'} no email in 'profile.email'."
+            )
         if ignored_bots_count > 0:
             lines.append(
                 f"  - {ignored_bots_count} bot users were ignored (ignore_bots enabled)."
@@ -191,7 +194,6 @@ def generate_user_map(
         )
 
         detail = "\n".join(lines)
-        log_with_context(logging.ERROR, detail)
         raise UserMappingError(detail)
 
     log_with_context(logging.INFO, f"Generated user mapping for {len(user_map)} users")

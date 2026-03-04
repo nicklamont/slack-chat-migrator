@@ -200,7 +200,7 @@ class TestGenerateUserMap:
         users = [{"id": "U001", "name": "noemail", "profile": {}}]
         _write_users_json(tmp_path, users)
 
-        with pytest.raises(UserMappingError, match="1 users have no email") as exc:
+        with pytest.raises(UserMappingError, match="1 user has no email") as exc:
             generate_user_map(tmp_path, MigrationConfig())
 
         detail = str(exc.value)
