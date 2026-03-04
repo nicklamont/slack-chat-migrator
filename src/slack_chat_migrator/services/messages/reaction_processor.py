@@ -43,18 +43,15 @@ def process_reactions_batch(
         reactions: List of Slack reaction dicts (each with ``name`` and ``users``).
         message_id: Short message identifier for logging.
     """
+    requests_by_user, reaction_count = _group_and_filter_reactions(
+        ctx, state, user_resolver, reactions, message_id
+    )
+
+    state.progress.migration_summary["reactions_created"] += reaction_count
+
     # Impersonation in _build_user_batches() requires real credentials
-    # outside the DI boundary, so skip in dry-run mode.
+    # outside the DI boundary, so skip API execution in dry-run mode.
     if ctx.dry_run:
-        reaction_count = 0
-        for r in reactions:
-            for uid in r.get("users", []):
-                if _should_skip_bot_reaction(
-                    ctx, user_resolver, uid, r.get("name", ""), message_id, state
-                ):
-                    continue
-                reaction_count += 1
-        state.progress.migration_summary["reactions_created"] += reaction_count
         log_with_context(
             logging.DEBUG,
             f"[DRY RUN] Would add {reaction_count} reactions to message {message_id}",
@@ -62,12 +59,6 @@ def process_reactions_batch(
             channel=state.context.current_channel,
         )
         return
-
-    requests_by_user, reaction_count = _group_and_filter_reactions(
-        ctx, state, user_resolver, reactions, message_id
-    )
-
-    state.progress.migration_summary["reactions_created"] += reaction_count
 
     log_with_context(
         logging.DEBUG,

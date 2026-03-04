@@ -190,7 +190,7 @@ def create_space(
 
         log_with_context(
             logging.INFO,
-            f"Created space {space_name} for channel {channel} in import mode with threading enabled",
+            f"{ctx.log_prefix}Created space {space_name} for channel {channel} in import mode with threading enabled",
             channel=channel,
             space_name=space_name,
         )
