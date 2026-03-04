@@ -46,7 +46,14 @@ def process_reactions_batch(
     # Impersonation in _build_user_batches() requires real credentials
     # outside the DI boundary, so skip in dry-run mode.
     if ctx.dry_run:
-        reaction_count = sum(len(r.get("users", [])) for r in reactions)
+        reaction_count = 0
+        for r in reactions:
+            for uid in r.get("users", []):
+                if _should_skip_bot_reaction(
+                    ctx, user_resolver, uid, r.get("name", ""), message_id, state
+                ):
+                    continue
+                reaction_count += 1
         state.progress.migration_summary["reactions_created"] += reaction_count
         log_with_context(
             logging.DEBUG,
