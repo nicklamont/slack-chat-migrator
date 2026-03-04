@@ -180,90 +180,76 @@ def create_space(
             channel=channel,
         )
 
-    # Store space name (either real or generated)
-    space_name = None
+    try:
+        # Create the space in import mode
+        space = chat.create_space(body)
+        space_name: str = space["name"]
 
-    if ctx.dry_run:
-        # In dry run mode, increment the counter but don't make API call
+        # Increment the spaces created counter
         state.progress.migration_summary["spaces_created"] += 1
-        # Use a consistent space name format for tracking
-        space_name = f"spaces/{channel}"
+
         log_with_context(
             logging.INFO,
-            f"[DRY RUN] Would create space {space_name} for channel {channel} in import mode with threading enabled",
+            f"Created space {space_name} for channel {channel} in import mode with threading enabled",
             channel=channel,
+            space_name=space_name,
         )
-    else:
-        try:
-            # Create the space in import mode
-            space = chat.create_space(body)
-            space_name = space["name"]
 
-            # Increment the spaces created counter
-            state.progress.migration_summary["spaces_created"] += 1
+        # Add warning about 90-day limit for import mode
+        log_with_context(
+            logging.DEBUG,
+            f"IMPORTANT: Space {space_name} is in import mode. Per Google Chat API restrictions, "
+            f"import mode must be completed within {IMPORT_MODE_DAYS_LIMIT} days or the space will be automatically deleted.",
+            channel=channel,
+            space_name=space_name,
+        )
 
+        # If channel has a purpose or topic, update the space details
+        purpose = meta.get("purpose", {}).get("value", "")
+        topic = meta.get("topic", {}).get("value", "")
+
+        if purpose or topic:
+            description = ""
+            if purpose:
+                description += f"Purpose: {purpose}\n\n"
+            if topic:
+                description += f"Topic: {topic}"
+
+            if description:
+                try:
+                    # Update space with description
+                    space_details = {
+                        "spaceDetails": {"description": description.strip()}
+                    }
+
+                    update_mask = "spaceDetails"
+
+                    chat.patch_space(
+                        name=space_name,
+                        update_mask=update_mask,
+                        body=space_details,
+                    )
+
+                    log_with_context(
+                        logging.INFO,
+                        f"Updated space {space_name} with description from channel metadata",
+                        channel=channel,
+                    )
+                except HttpError as e:
+                    log_with_context(
+                        logging.WARNING,
+                        f"Failed to update space description: {e}",
+                        channel=channel,
+                    )
+    except HttpError as e:
+        if e.resp.status == HTTP_FORBIDDEN and PERMISSION_DENIED_ERROR in str(e):
             log_with_context(
-                logging.INFO,
-                f"Created space {space_name} for channel {channel} in import mode with threading enabled",
-                channel=channel,
-                space_name=space_name,
+                logging.WARNING, f"Error setting up channel {channel}: {e}"
             )
-
-            # Add warning about 90-day limit for import mode
-            log_with_context(
-                logging.DEBUG,
-                f"IMPORTANT: Space {space_name} is in import mode. Per Google Chat API restrictions, "
-                f"import mode must be completed within {IMPORT_MODE_DAYS_LIMIT} days or the space will be automatically deleted.",
-                channel=channel,
-                space_name=space_name,
-            )
-
-            # If channel has a purpose or topic, update the space details
-            purpose = meta.get("purpose", {}).get("value", "")
-            topic = meta.get("topic", {}).get("value", "")
-
-            if purpose or topic:
-                description = ""
-                if purpose:
-                    description += f"Purpose: {purpose}\n\n"
-                if topic:
-                    description += f"Topic: {topic}"
-
-                if description:
-                    try:
-                        # Update space with description
-                        space_details = {
-                            "spaceDetails": {"description": description.strip()}
-                        }
-
-                        update_mask = "spaceDetails"
-
-                        chat.patch_space(
-                            name=space_name,
-                            update_mask=update_mask,
-                            body=space_details,
-                        )
-
-                        log_with_context(
-                            logging.INFO,
-                            f"Updated space {space_name} with description from channel metadata",
-                            channel=channel,
-                        )
-                    except HttpError as e:
-                        log_with_context(
-                            logging.WARNING,
-                            f"Failed to update space description: {e}",
-                            channel=channel,
-                        )
-        except HttpError as e:
-            if e.resp.status == HTTP_FORBIDDEN and PERMISSION_DENIED_ERROR in str(e):
-                log_with_context(
-                    logging.WARNING, f"Error setting up channel {channel}: {e}"
-                )
-                raise SpacePermissionError(channel) from e
-            else:
-                # For other errors, re-raise
-                raise
+            raise SpacePermissionError(channel) from e
+        else:
+            # For other errors, re-raise
+            raise
 
     # Store the created space in state
     state.spaces.created_spaces[channel] = space_name

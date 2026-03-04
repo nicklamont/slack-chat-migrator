@@ -577,6 +577,7 @@ def _make_channel_processor(
         config=config,
         user_map={"U001": "user1@example.com"},
         users_without_email=[],
+        bot_user_ids=frozenset(),
         channels_meta={},
         channel_id_to_name={},
         channel_name_to_id={},

@@ -162,6 +162,13 @@ def _collect_user_membership_data(
     meta = ctx.channels_meta.get(channel, {})
     active_users = _apply_channel_metadata_members(meta, user_membership)
 
+    # Filter out bot user IDs that were excluded by ignore_bots.
+    # These have no email mapping and would cause ERROR logs in the membership pipeline.
+    if ctx.bot_user_ids:
+        for bot_id in ctx.bot_user_ids:
+            user_membership.pop(bot_id, None)
+            active_users.discard(bot_id)
+
     log_with_context(
         logging.DEBUG,
         f"Identified {len(active_users)} active users for channel {channel}",

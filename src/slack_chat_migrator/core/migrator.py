@@ -123,7 +123,7 @@ class SlackToChatMigrator:
         self.state.spaces.space_mapping = load_space_mapping(self.config_path)
 
         # Generate user mapping from users.json
-        self.user_map, self.users_without_email = generate_user_map(
+        self.user_map, self.users_without_email, self.bot_user_ids = generate_user_map(
             self.export_root, self.config
         )
 
@@ -178,6 +178,7 @@ class SlackToChatMigrator:
             config=self.config,
             user_map=self.user_map,
             users_without_email=self.users_without_email,
+            bot_user_ids=self.bot_user_ids,
             channels_meta=self.channels_meta,
             channel_id_to_name=self.channel_id_to_name,
             channel_name_to_id=self.channel_name_to_id,

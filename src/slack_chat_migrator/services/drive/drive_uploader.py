@@ -96,14 +96,6 @@ class DriveFileUploader:
             )
             return 0
 
-        if self.dry_run:
-            log_with_context(
-                logging.INFO,
-                f"[DRY RUN] Would pre-cache file hashes from folder {folder_id}",
-                channel=self._get_current_channel(),
-            )
-            return 0
-
         try:
             log_with_context(
                 logging.DEBUG,
@@ -307,12 +299,6 @@ class DriveFileUploader:
         Returns:
             Tuple of (file_id, public_url) if successful, (None, None) otherwise
         """
-        if self.dry_run:
-            return (
-                f"DRY_FILE_{filename}",
-                f"https://drive.google.com/dry-run/{filename}",
-            )
-
         try:
             # Get MIME type
             mime_type, _ = mimetypes.guess_type(filename)
@@ -591,14 +577,6 @@ class DriveFileUploader:
         Returns:
             True if successful, False otherwise
         """
-        if self.dry_run:
-            log_with_context(
-                logging.DEBUG,
-                f"[DRY RUN] Would transfer ownership of file {file_id} to {new_owner_email}",
-                channel=self._get_current_channel(),
-            )
-            return True
-
         try:
             permission = {
                 "type": "user",
