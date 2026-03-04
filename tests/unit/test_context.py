@@ -23,6 +23,7 @@ def _make_ctx(**overrides) -> MigrationContext:
         "config": MigrationConfig(),
         "user_map": {},
         "users_without_email": [],
+        "bot_user_ids": frozenset(),
         "channels_meta": {},
         "channel_id_to_name": {},
         "channel_name_to_id": {},

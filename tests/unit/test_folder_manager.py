@@ -31,14 +31,17 @@ def _make_drive_service():
 class TestCreateRootFolderInSharedDrive:
     """Tests for create_root_folder_in_shared_drive."""
 
-    def test_dry_run_returns_fake_folder_id(self):
+    def test_dry_run_delegates_to_drive_service(self):
+        """Dry run no longer short-circuits — DI stubs handle API calls."""
         svc = _make_drive_service()
-        fm = FolderManager(svc, dry_run=True)
+        svc.list_files.return_value = {"files": []}
+        svc.create_file.return_value = {"id": "stub-folder-id"}
 
+        fm = FolderManager(svc, dry_run=True)
         result = fm.create_root_folder_in_shared_drive("attachments", "drive123")
 
-        assert result == "DRY_ROOT_FOLDER_attachments"
-        svc.list_files.assert_not_called()
+        assert result == "stub-folder-id"
+        svc.list_files.assert_called_once()
 
     def test_creates_folder_in_shared_drive(self):
         svc = _make_drive_service()
@@ -90,14 +93,17 @@ class TestCreateRootFolderInSharedDrive:
 class TestGetOrCreateChannelFolder:
     """Tests for get_or_create_channel_folder."""
 
-    def test_dry_run_returns_fake_folder_id(self):
+    def test_dry_run_delegates_to_drive_service(self):
+        """Dry run no longer short-circuits — DI stubs handle API calls."""
         svc = _make_drive_service()
-        fm = FolderManager(svc, dry_run=True)
+        svc.list_files.return_value = {"files": []}
+        svc.create_file.return_value = {"id": "stub-chan-id"}
 
+        fm = FolderManager(svc, dry_run=True)
         result = fm.get_or_create_channel_folder("general", "parent123")
 
-        assert result == "DRY_CHANNEL_FOLDER_general"
-        svc.list_files.assert_not_called()
+        assert result == "stub-chan-id"
+        svc.list_files.assert_called_once()
 
     def test_creates_new_channel_folder(self):
         svc = _make_drive_service()
@@ -204,13 +210,17 @@ class TestGetOrCreateChannelFolder:
 class TestCreateRegularDriveFolder:
     """Tests for create_regular_drive_folder."""
 
-    def test_dry_run_returns_fake_folder_id(self):
+    def test_dry_run_delegates_to_drive_service(self):
+        """Dry run no longer short-circuits — DI stubs handle API calls."""
         svc = _make_drive_service()
-        fm = FolderManager(svc, dry_run=True)
+        svc.list_files.return_value = {"files": []}
+        svc.create_file.return_value = {"id": "stub-regular-id"}
 
+        fm = FolderManager(svc, dry_run=True)
         result = fm.create_regular_drive_folder("attachments")
 
-        assert result == "DRY_REGULAR_FOLDER_attachments"
+        assert result == "stub-regular-id"
+        svc.list_files.assert_called_once()
 
     def test_creates_folder_with_correct_metadata(self):
         svc = _make_drive_service()
@@ -323,7 +333,8 @@ class TestGetChannelFolderId:
 class TestSetChannelFolderPermissions:
     """Tests for set_channel_folder_permissions."""
 
-    def test_dry_run_returns_true(self):
+    def test_dry_run_delegates_to_drive_service(self):
+        """Dry run no longer short-circuits — DI stubs handle API calls."""
         svc = _make_drive_service()
         fm = FolderManager(svc, dry_run=True)
 
@@ -334,7 +345,7 @@ class TestSetChannelFolderPermissions:
         )
 
         assert result is True
-        svc.create_permission.assert_not_called()
+        assert svc.create_permission.call_count == 2
 
     def test_grants_reader_access_to_all_users(self):
         svc = _make_drive_service()

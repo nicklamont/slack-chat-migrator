@@ -53,12 +53,6 @@ class ChatFileUploader:
         Returns:
             Tuple of (attachment_token, attachment_metadata) if successful, (None, None) otherwise
         """
-        if self.dry_run:
-            return (
-                {"token": f"DRY_CHAT_TOKEN_{filename}"},
-                {"name": filename, "driveFile": {"name": f"DRY_CHAT_FILE_{filename}"}},
-            )
-
         try:
             if not parent_space:
                 log_with_context(

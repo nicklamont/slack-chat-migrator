@@ -35,6 +35,7 @@ def _make_ctx(
     export_root=None,
     dry_run=False,
     workspace_admin="admin@example.com",
+    bot_user_ids=None,
 ):
     """Create a MigrationContext with common test defaults."""
     return MigrationContext(
@@ -51,6 +52,7 @@ def _make_ctx(
         users_without_email=users_without_email
         if users_without_email is not None
         else [],
+        bot_user_ids=bot_user_ids if bot_user_ids is not None else frozenset(),
         channels_meta=channels_meta or {},
         channel_id_to_name={},
         channel_name_to_id={},
@@ -63,6 +65,7 @@ def _make_membership_deps(
     export_root=None,
     dry_run=False,
     workspace_admin="admin@example.com",
+    bot_user_ids=None,
 ):
     """Create explicit deps for membership manager tests.
 
@@ -75,6 +78,7 @@ def _make_membership_deps(
         export_root=export_root,
         dry_run=dry_run,
         workspace_admin=workspace_admin,
+        bot_user_ids=bot_user_ids,
     )
     state = MigrationState()
     state.progress.migration_summary = _default_migration_summary()
@@ -245,30 +249,20 @@ class TestCreateSpace:
         user_resolver.is_external_user.return_value = False
         return ctx, state, chat, user_resolver
 
-    def test_dry_run_returns_space_name(self):
-        """Dry run creates a fake space name without API calls."""
+    def test_dry_run_delegates_to_chat_service(self):
+        """Dry run no longer short-circuits — DI stubs handle API calls."""
         ctx, state, chat, user_resolver = self._setup(
             channels_meta={"general": {"members": []}},
             dry_run=True,
         )
+        chat.create_space.return_value = {"name": "spaces/dry-run-stub"}
 
         result = create_space(ctx, state, chat, user_resolver, "general")
 
-        assert result == "spaces/general"
+        assert result == "spaces/dry-run-stub"
         assert state.progress.migration_summary["spaces_created"] == 1
-        assert state.spaces.created_spaces["general"] == "spaces/general"
-        # chat.create_space() should NOT be called in dry run
-        chat.create_space.assert_not_called()
-
-    def test_dry_run_general_channel_display_name(self):
-        """General channel gets '(General)' suffix in dry run."""
-        ctx, state, chat, user_resolver = self._setup(
-            channels_meta={"general": {"is_general": True, "members": []}},
-            dry_run=True,
-        )
-
-        result = create_space(ctx, state, chat, user_resolver, "general")
-        assert result == "spaces/general"
+        assert state.spaces.created_spaces["general"] == "spaces/dry-run-stub"
+        chat.create_space.assert_called_once()
 
     def test_creates_space_via_api(self):
         """Non-dry-run calls the Google Chat API to create a space."""
@@ -407,6 +401,7 @@ class TestCreateSpace:
             channels_meta={"dev": {"members": []}},
             dry_run=True,
         )
+        chat.create_space.return_value = {"name": "spaces/dev"}
 
         create_space(ctx, state, chat, user_resolver, "dev")
 
@@ -737,6 +732,39 @@ class TestAddUsersToSpace:
 
         # Should not raise
         add_users_to_space(ctx, state, chat, ur, "spaces/broken", "broken")
+
+    @patch("slack_chat_migrator.services.spaces.historical_membership.time.sleep")
+    @patch(
+        "slack_chat_migrator.services.spaces.historical_membership.tqdm",
+        side_effect=lambda x, **kw: x,
+    )
+    def test_bot_user_ids_filtered_from_membership(
+        self, mock_tqdm, mock_sleep, tmp_path
+    ):
+        """Bot user IDs in ctx.bot_user_ids are excluded from membership."""
+        msgs = [
+            {"type": "message", "user": "U001", "ts": "1700000000.000000"},
+            {"type": "message", "user": "B001", "ts": "1700000001.000000"},
+        ]
+        self._setup_channel_dir(tmp_path, "dev", msgs)
+
+        ctx, state, chat, ur = _make_membership_deps(
+            user_map={"U001": "alice@example.com"},
+            channels_meta={"dev": {"members": ["U001", "B001"]}},
+            export_root=tmp_path,
+            bot_user_ids=frozenset({"B001"}),
+        )
+        ur.get_internal_email.return_value = "alice@example.com"
+        ur.is_external_user.return_value = False
+
+        add_users_to_space(ctx, state, chat, ur, "spaces/dev", "dev")
+
+        # Only U001 should be added, B001 should be filtered out
+        assert chat.create_membership.call_count == 1
+        body = chat.create_membership.call_args.kwargs["body"]
+        assert "alice@example.com" in body["member"]["name"]
+        # B001 should not be in active_users
+        assert "B001" not in state.progress.active_users_by_channel["dev"]
 
 
 # ---------------------------------------------------------------------------

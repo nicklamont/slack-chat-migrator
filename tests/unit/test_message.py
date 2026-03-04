@@ -43,6 +43,7 @@ def _make_ctx(
         config=MigrationConfig(ignore_bots=ignore_bots),
         user_map=user_map or {},
         users_without_email=[],
+        bot_user_ids=frozenset(),
         channels_meta=channels_meta or {},
         channel_id_to_name={},
         channel_name_to_id={},
@@ -728,7 +729,7 @@ class TestProcessReactionsBatch:
     def test_unmapped_user_calls_handle_unmapped(self):
         """Unmapped user reactions call _handle_unmapped_user_reaction."""
         ctx = _make_ctx(
-            dry_run=True,
+            dry_run=False,
             user_map={"U001": "user1@example.com"},  # U099 is unmapped
         )
         state = _make_state()
@@ -749,7 +750,7 @@ class TestProcessReactionsBatch:
 
     def test_skips_bot_reactions_when_ignore_bots(self):
         """Bot user reactions are skipped when ignore_bots is True."""
-        ctx, state, chat, ur = self._setup(dry_run=True, ignore_bots=True)
+        ctx, state, chat, ur = self._setup(dry_run=False, ignore_bots=True)
         ur.get_user_data.return_value = {
             "is_bot": True,
             "real_name": "Bot",

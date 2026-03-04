@@ -35,11 +35,14 @@ class TestGenerateUserMap:
         ]
         _write_users_json(tmp_path, users)
 
-        user_map, without_email = generate_user_map(tmp_path, MigrationConfig())
+        user_map, without_email, bot_ids = generate_user_map(
+            tmp_path, MigrationConfig()
+        )
 
         assert user_map["U001"] == "alice@example.com"
         assert user_map["U002"] == "bob@example.com"
         assert len(without_email) == 0
+        assert bot_ids == frozenset()
 
     def test_email_domain_override(self, tmp_path):
         users = [
@@ -52,7 +55,7 @@ class TestGenerateUserMap:
         _write_users_json(tmp_path, users)
         config = MigrationConfig(email_domain_override="new.com")
 
-        user_map, _ = generate_user_map(tmp_path, config)
+        user_map, _, _bot_ids = generate_user_map(tmp_path, config)
 
         assert user_map["U001"] == "alice@new.com"
 
@@ -69,7 +72,7 @@ class TestGenerateUserMap:
             user_mapping_overrides={"U001": "override@example.com"}
         )
 
-        user_map, _ = generate_user_map(tmp_path, config)
+        user_map, _, _bot_ids = generate_user_map(tmp_path, config)
 
         assert user_map["U001"] == "override@example.com"
 
@@ -84,7 +87,7 @@ class TestGenerateUserMap:
         _write_users_json(tmp_path, users)
         config = MigrationConfig(user_mapping_overrides={"U999": "external@other.com"})
 
-        user_map, _ = generate_user_map(tmp_path, config)
+        user_map, _, _bot_ids = generate_user_map(tmp_path, config)
 
         assert user_map["U999"] == "external@other.com"
 
@@ -94,7 +97,7 @@ class TestGenerateUserMap:
         ]
         _write_users_json(tmp_path, users)
 
-        user_map, _without_email = generate_user_map(
+        user_map, _without_email, _bot_ids = generate_user_map(
             tmp_path,
             MigrationConfig(user_mapping_overrides={"U001": "fallback@co.com"}),
         )
@@ -113,7 +116,9 @@ class TestGenerateUserMap:
         ]
         _write_users_json(tmp_path, users)
 
-        user_map, without_email = generate_user_map(tmp_path, MigrationConfig())
+        user_map, without_email, _bot_ids = generate_user_map(
+            tmp_path, MigrationConfig()
+        )
 
         assert "U002" not in user_map
         assert len(without_email) == 1
@@ -136,10 +141,11 @@ class TestGenerateUserMap:
         _write_users_json(tmp_path, users)
         config = MigrationConfig(ignore_bots=True)
 
-        user_map, _ = generate_user_map(tmp_path, config)
+        user_map, _, bot_ids = generate_user_map(tmp_path, config)
 
         assert "U001" in user_map
         assert "B001" not in user_map
+        assert bot_ids == frozenset({"B001"})
 
     def test_bots_included_by_default(self, tmp_path):
         users = [
@@ -152,9 +158,10 @@ class TestGenerateUserMap:
         ]
         _write_users_json(tmp_path, users)
 
-        user_map, _ = generate_user_map(tmp_path, MigrationConfig())
+        user_map, _, bot_ids = generate_user_map(tmp_path, MigrationConfig())
 
         assert "B001" in user_map
+        assert bot_ids == frozenset()
 
     def test_missing_users_json_raises(self, tmp_path):
         with pytest.raises(ExportError, match=r"users\.json not found"):
@@ -181,7 +188,7 @@ class TestGenerateUserMap:
         ]
         _write_users_json(tmp_path, users)
 
-        user_map, _ = generate_user_map(tmp_path, MigrationConfig())
+        user_map, _, _bot_ids = generate_user_map(tmp_path, MigrationConfig())
 
         assert len(user_map) == 1
         assert "U001" in user_map

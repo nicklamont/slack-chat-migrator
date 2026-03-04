@@ -48,9 +48,6 @@ class SharedDriveManager:
         Returns:
             True if valid and accessible, False otherwise
         """
-        if self.dry_run:
-            return True
-
         try:
             self.drive_service.get_drive(drive_id=shared_drive_id)
             return True
@@ -66,13 +63,6 @@ class SharedDriveManager:
         Returns:
             Shared drive ID if successful, None otherwise
         """
-        if self.dry_run:
-            log_with_context(
-                logging.DEBUG,
-                "Dry run: skipping shared drive setup",
-            )
-            return "dry-run-placeholder"
-
         try:
             # Get shared drive configuration
             shared_drive_name = self.config.shared_drive.name

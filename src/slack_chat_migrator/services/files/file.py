@@ -138,18 +138,9 @@ class FileHandler:
         if folder_id:
             self._root_folder_id = folder_id
 
-        if dry_run:
-            self._root_folder_id = folder_id or "DRY_RUN_FOLDER"
-            self._drive_initialized = True
-            log_with_context(
-                logging.DEBUG,
-                "FileHandler initialized with verbose logging",
-                channel=self._get_current_channel(),
-            )
-
     def ensure_drive_initialized(self) -> None:
         """Ensure drive structures are initialized. Call this after permission validation."""
-        if not self._drive_initialized and not self.dry_run:
+        if not self._drive_initialized:
             log_with_context(
                 logging.INFO,
                 "Initializing Google Drive structures (shared drive and folder hierarchy)...",
@@ -244,7 +235,7 @@ class FileHandler:
         This helps improve deduplication by building a hash cache of all
         existing files before starting any channel uploads.
         """
-        if not self._root_folder_id or self.dry_run:
+        if not self._root_folder_id:
             return
 
         try:
@@ -569,7 +560,6 @@ class FileHandler:
             space is not None
             and mime_type in self.DIRECT_UPLOAD_MIME_TYPES
             and actual_size <= DIRECT_UPLOAD_MAX_BYTES
-            and not self.dry_run
             and self.chat_uploader.is_suitable_for_direct_upload(name, actual_size)
         )
         if not use_direct:

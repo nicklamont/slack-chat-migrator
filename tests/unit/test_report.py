@@ -70,6 +70,7 @@ def _make_ctx(
         users_without_email=users_without_email
         if users_without_email is not None
         else [],
+        bot_user_ids=frozenset(),
         channels_meta={},
         channel_id_to_name={},
         channel_name_to_id={},

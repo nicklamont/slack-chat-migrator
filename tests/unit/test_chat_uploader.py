@@ -107,18 +107,6 @@ class TestCanUploadDirectly:
 class TestUploadFileToChat:
     """Tests for ChatFileUploader.upload_file_to_chat."""
 
-    def test_dry_run_returns_mock_result(self):
-        uploader = _make_uploader(dry_run=True)
-        token, metadata = uploader.upload_file_to_chat(
-            "/tmp/test.png",
-            "test.png",
-            parent_space="spaces/ABC",
-        )
-
-        assert token == {"token": "DRY_CHAT_TOKEN_test.png"}
-        assert metadata["name"] == "test.png"
-        assert "DRY_CHAT_FILE_test.png" in (metadata["driveFile"]["name"])
-
     @patch("slack_chat_migrator.services.chat.chat_uploader.MediaFileUpload")
     @patch("os.path.getsize", return_value=1024)
     def test_successful_upload(self, mock_getsize, mock_media_cls):

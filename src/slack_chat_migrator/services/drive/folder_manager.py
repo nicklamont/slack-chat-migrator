@@ -51,9 +51,6 @@ class FolderManager:
         Returns:
             Folder ID if successful, None otherwise
         """
-        if self.dry_run:
-            return f"DRY_ROOT_FOLDER_{folder_name}"
-
         try:
             # Check if folder already exists in shared drive
             safe_name = escape_drive_query_value(folder_name)
@@ -120,9 +117,6 @@ class FolderManager:
         Returns:
             Folder ID if successful, None otherwise
         """
-        if self.dry_run:
-            return f"DRY_REGULAR_FOLDER_{folder_name}"
-
         try:
             # Search for existing folder
             safe_name = escape_drive_query_value(folder_name)
@@ -188,9 +182,6 @@ class FolderManager:
         Returns:
             The folder ID if successful, None otherwise
         """
-        if self.dry_run:
-            return f"DRY_CHANNEL_FOLDER_{channel}"
-
         # Check cache
         cache_key = f"folder_{channel}"
         if cache_key in self.folder_cache:
@@ -405,15 +396,6 @@ class FolderManager:
         Returns:
             True if permissions were set successfully, False otherwise
         """
-        if self.dry_run:
-            log_with_context(
-                logging.INFO,
-                f"[DRY RUN] Would set permissions on channel folder {channel} for {len(user_emails)} users",
-                channel=channel,
-                folder_id=folder_id,
-            )
-            return True
-
         # Add permissions for all users
         success_count = 0
         failed_count = 0
