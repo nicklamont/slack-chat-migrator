@@ -475,26 +475,26 @@ def add_users_to_space(
 
     # Check if the workspace admin is in the active users
     # Google Chat automatically adds the creator as a member, but we only want them if they were in the channel
-    assert ctx.workspace_admin is not None  # guaranteed in live mode
     admin_email = ctx.workspace_admin
-    admin_user_id = None
+    if admin_email is not None:
+        admin_user_id = None
 
-    # Look up the admin's Slack user ID if they had one (they'll be in user_map if they were in Slack)
-    for slack_user_id, email in ctx.user_map.items():
-        if email.lower() == admin_email.lower():
-            admin_user_id = slack_user_id
-            break
+        # Look up the admin's Slack user ID if they had one (they'll be in user_map if they were in Slack)
+        for slack_user_id, email in ctx.user_map.items():
+            if email.lower() == admin_email.lower():
+                admin_user_id = slack_user_id
+                break
 
-    # If we found a user ID for the admin, check if they were in the channel
-    admin_in_channel = False
-    if admin_user_id:
-        admin_in_channel = admin_user_id in active_users
+        # If we found a user ID for the admin, check if they were in the channel
+        admin_in_channel = False
+        if admin_user_id:
+            admin_in_channel = admin_user_id in active_users
 
-    log_with_context(
-        logging.DEBUG,
-        f"Workspace admin ({admin_email}) {'was' if admin_in_channel else 'was not'} in original Slack channel {channel}",
-        channel=channel,
-    )
+        log_with_context(
+            logging.DEBUG,
+            f"Workspace admin ({admin_email}) {'was' if admin_in_channel else 'was not'} in original Slack channel {channel}",
+            channel=channel,
+        )
 
     _compute_membership_times(ctx, channel, user_membership)
 
