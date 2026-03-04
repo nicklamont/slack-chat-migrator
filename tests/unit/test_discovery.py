@@ -295,7 +295,7 @@ class TestDiscoverExistingSpaces:
         chat = MagicMock()
         state = MigrationState()
         http_error = HttpError(
-            resp=MagicMock(status=403),
+            resp=Response({"status": "403"}),
             content=b"Forbidden",
         )
         chat.list_spaces = MagicMock(side_effect=http_error)
@@ -545,7 +545,7 @@ class TestGetLastMessageTimestamp:
         """HttpError is caught and returns 0."""
         chat = MagicMock()
         http_error = HttpError(
-            resp=MagicMock(status=404),
+            resp=Response({"status": "404"}),
             content=b"Not Found",
         )
         chat.list_messages = MagicMock(side_effect=http_error)

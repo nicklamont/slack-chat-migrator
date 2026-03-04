@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.core.state import MigrationState
@@ -117,7 +118,7 @@ class TestGetDelegate:
     def test_http_error_falls_back_to_admin_chat(self, mock_get_service):
         resolver = _make_resolver()
 
-        http_error = HttpError(resp=MagicMock(status=403), content=b"Forbidden")
+        http_error = HttpError(resp=Response({"status": "403"}), content=b"Forbidden")
         mock_service = MagicMock()
         mock_service.spaces.return_value.list.return_value.execute.side_effect = (
             http_error

@@ -10,6 +10,7 @@ from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.core.context import MigrationContext
 from slack_chat_migrator.core.state import MigrationState, _default_migration_summary
 from slack_chat_migrator.services.messages.message_sender import (
+    _resolve_chat_service,
     send_intro,
     send_message,
     track_message_stats,
@@ -151,7 +152,7 @@ class TestTrackMessageStats:
         assert state.progress.channel_stats["general"]["file_count"] == 3
         assert state.progress.migration_summary["files_created"] == 3
 
-    def test_dry_run_counts_reactions(self):
+    def test_dry_run_counts_reactions_in_channel_stats(self):
         ctx, state, ur, ap = self._setup(dry_run=True)
         msg = {
             "ts": "1234.5",
@@ -162,7 +163,10 @@ class TestTrackMessageStats:
 
         track_message_stats(ctx, state, ur, ap, msg)
 
-        assert state.progress.migration_summary["reactions_created"] == 1
+        # reactions_created in summary is now handled by process_reactions_batch
+        # in the send pipeline; track_message_stats only updates channel_stats.
+        assert state.progress.channel_stats["general"]["reaction_count"] == 1
+        assert state.progress.migration_summary["reactions_created"] == 0
 
     def test_skips_bot_messages_when_ignore_bots(self):
         ctx, state, ur, ap = self._setup(ignore_bots=True)
@@ -267,17 +271,18 @@ class TestSendMessage:
         assert state.progress.migration_summary["messages_created"] == 1
         chat.create_message.assert_called_once()
 
-    def test_dry_run_returns_non_success_and_does_not_call_api(self):
-        """In dry run mode, no API call is made and a non-success SendResult is returned."""
+    def test_dry_run_processes_message_through_full_pipeline(self):
+        """In dry run mode, messages flow through the full send pipeline."""
         ctx, state, chat, ur, ap = _make_send_deps(dry_run=True)
         msg = {"ts": "1700000000.000001", "user": "U001", "text": "Hello"}
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result.success is False
-        # messages_created should NOT be incremented in dry run (handled elsewhere)
-        assert state.progress.migration_summary["messages_created"] == 0
-        chat.create_message.assert_not_called()
+        # Messages now go through the full pipeline (build payload, send via
+        # DryRunChatService) so they succeed and are accurately counted.
+        assert result.success is True
+        assert state.progress.migration_summary["messages_created"] == 1
+        chat.create_message.assert_called_once()
 
     def test_skips_bot_message_subtype_when_ignore_bots(self):
         """Messages with bot_message subtype are skipped when ignore_bots is True."""
@@ -669,7 +674,7 @@ class TestSendMessage:
 
         result = send_message(ctx, state, chat, ur, ap, "spaces/SPACE1", msg)
 
-        assert result.success is False
+        assert result.success is True
 
 
 # ---------------------------------------------------------------------------
@@ -973,3 +978,46 @@ class TestLogSpaceMappingConflicts:
 
         # Should not raise
         log_space_mapping_conflicts(state)
+
+
+class TestResolveChatService:
+    """Unit tests for _resolve_chat_service dry-run bypass."""
+
+    def test_dry_run_returns_original_chat(self):
+        """In dry-run mode, the original chat adapter is returned without impersonation."""
+        chat = MagicMock()
+        user_resolver = MagicMock()
+
+        result = _resolve_chat_service(
+            chat,
+            user_resolver,
+            "alice@example.com",
+            "general",
+            "1.0",
+            "U001",
+            dry_run=True,
+        )
+
+        assert result is chat
+        user_resolver.get_delegate.assert_not_called()
+
+    def test_non_dry_run_delegates_to_resolver(self):
+        """In non-dry-run mode, impersonation is attempted via get_delegate."""
+        chat = MagicMock()
+        impersonated = MagicMock()
+        user_resolver = MagicMock()
+        user_resolver.get_delegate.return_value = impersonated
+        user_resolver.is_external_user.return_value = False
+
+        result = _resolve_chat_service(
+            chat,
+            user_resolver,
+            "alice@example.com",
+            "general",
+            "1.0",
+            "U001",
+            dry_run=False,
+        )
+
+        assert result is impersonated
+        user_resolver.get_delegate.assert_called_once_with("alice@example.com")

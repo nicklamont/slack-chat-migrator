@@ -201,7 +201,7 @@ class ChannelProcessor:
             return ChannelResult(should_abort=True, had_errors=True)
 
         # Delete space if errors
-        if channel_had_errors and not self.ctx.dry_run and not self.ctx.update_mode:
+        if channel_had_errors and not self.ctx.update_mode:
             self._delete_space_if_errors(space, channel)
 
         return ChannelResult(should_abort=False, had_errors=channel_had_errors)
@@ -281,21 +281,15 @@ class ChannelProcessor:
                 f"{self.ctx.log_prefix}Found {message_count} messages in channel {channel}",
                 channel=channel,
             )
-            # Intentional approximation: counts all messages without per-message
-            # skip checks (bot, system-subtype, empty).  Accurate counting would
-            # require running the full send pipeline, which dry-run avoids.
-            self.state.progress.migration_summary["messages_created"] += message_count
 
+        # Resource discovery queries the Chat API for the last message
+        # timestamp (for resumption).  Skipped in dry-run because the stub
+        # always returns an empty list — there are no real messages to find.
         if not self.ctx.dry_run or self.ctx.update_mode:
             self._discover_channel_resources(channel)
 
-        # Build user map with overrides once per channel (expensive operation).
-        # Skip in dry-run mode since send_message is never called.
-        cached_user_map = (
-            None
-            if self.ctx.dry_run
-            else build_user_map_with_overrides(self.ctx, self.user_resolver)
-        )
+        # Build user map with overrides once per channel.
+        cached_user_map = build_user_map_with_overrides(self.ctx, self.user_resolver)
 
         processed_count, failed_count, channel_had_errors = self._send_messages_loop(
             msgs, space, channel, channel_had_errors, cached_user_map
@@ -383,7 +377,7 @@ class ChannelProcessor:
 
             ts = m["ts"]
 
-            if ts in processed_ts and not self.ctx.dry_run:
+            if ts in processed_ts:
                 processed_count += 1
                 continue
 
@@ -394,9 +388,6 @@ class ChannelProcessor:
                 self.attachment_processor,
                 m,
             )
-
-            if self.ctx.dry_run:
-                continue
 
             result = send_message(
                 self.ctx,
@@ -574,9 +565,6 @@ class ChannelProcessor:
         self, channel: str, processed_count: int, failed_count: int
     ) -> bool:
         """Determine if the migration should abort after errors in a channel."""
-        if self.ctx.dry_run:
-            return False
-
         # Only consider aborting if we had failures
         if failed_count > 0:
             log_with_context(

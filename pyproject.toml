@@ -49,6 +49,7 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.10",
     "types-requests>=2.32",
+    "types-httplib2>=0.22",
     "types-PyYAML>=6.0",
     "pytest-cov>=5.0",
     "coverage>=7.0",
@@ -116,6 +117,7 @@ python_functions = "test_*"
 addopts = "-v --tb=short --strict-markers"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: Integration tests (dry-run, no credentials needed)",
 ]
 
 [tool.commitizen]

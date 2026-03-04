@@ -14,6 +14,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from googleapiclient.errors import HttpError
+from httplib2 import Response
+
 from slack_chat_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
@@ -21,7 +24,7 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# Leaf request object — every chain terminates with .execute()
+# Leaf request objects — every chain terminates with .execute()
 # ---------------------------------------------------------------------------
 
 
@@ -33,6 +36,17 @@ class DryRunRequest:
 
     def execute(self) -> dict[str, Any]:
         return self._data
+
+
+class DryRunErrorRequest:
+    """Mock API request that raises ``HttpError`` on ``execute()``."""
+
+    def __init__(self, status_code: int) -> None:
+        self._status_code = status_code
+
+    def execute(self) -> dict[str, Any]:
+        resp = Response({"status": str(self._status_code)})
+        raise HttpError(resp, b"Injected dry-run error")
 
 
 # ---------------------------------------------------------------------------
@@ -58,9 +72,15 @@ class DryRunReactions:
 class DryRunMessages:
     """Stub for ``spaces().messages()``."""
 
-    def __init__(self, state: MigrationState) -> None:
+    def __init__(
+        self,
+        state: MigrationState,
+        error_schedule: dict[int, int] | None = None,
+    ) -> None:
         self._state = state
         self._counter = 0
+        self.captured_calls: list[dict[str, Any]] = []
+        self._error_schedule: dict[int, int] = error_schedule or {}
 
     def create(
         self,
@@ -69,8 +89,28 @@ class DryRunMessages:
         body: dict[str, Any] | None = None,
         messageId: str = "",
         messageReplyOption: str = "",
-    ) -> DryRunRequest:
+    ) -> DryRunRequest | DryRunErrorRequest:
         self._counter += 1
+
+        # Capture the call for test inspection
+        self.captured_calls.append(
+            {
+                "parent": parent,
+                "body": body,
+                "messageId": messageId,
+                "messageReplyOption": messageReplyOption,
+            }
+        )
+
+        # Check error schedule
+        if self._counter in self._error_schedule:
+            status_code = self._error_schedule[self._counter]
+            log_with_context(
+                logging.DEBUG,
+                f"[DRY RUN] Injecting HTTP {status_code} error for message #{self._counter}",
+            )
+            return DryRunErrorRequest(status_code)
+
         thread_name = f"{parent}/threads/dry-run-{self._counter}"
         msg_name = f"{parent}/messages/dry-run-{self._counter}"
         log_with_context(logging.DEBUG, f"[DRY RUN] Would send message to {parent}")
@@ -167,11 +207,22 @@ class DryRunMedia:
 
 
 class DryRunSpaces:
-    """Stub for ``spaces()``."""
+    """Stub for ``spaces()``.
 
-    def __init__(self, state: MigrationState) -> None:
+    Holds singleton ``_messages`` and ``_members`` sub-objects so that
+    state (counters, captured calls) accumulates correctly across the
+    entire migration run.
+    """
+
+    def __init__(
+        self,
+        state: MigrationState,
+        message_error_schedule: dict[int, int] | None = None,
+    ) -> None:
         self._state = state
         self._counter = 0
+        self._messages = DryRunMessages(state, error_schedule=message_error_schedule)
+        self._members = DryRunMembers(state)
 
     def create(self, *, body: dict[str, Any] | None = None) -> DryRunRequest:
         self._counter += 1
@@ -228,10 +279,10 @@ class DryRunSpaces:
         return DryRunRequest({})
 
     def members(self) -> DryRunMembers:
-        return DryRunMembers(self._state)
+        return self._members
 
     def messages(self) -> DryRunMessages:
-        return DryRunMessages(self._state)
+        return self._messages
 
 
 # ---------------------------------------------------------------------------
@@ -245,13 +296,30 @@ class DryRunChatService:
     Implements the same method-chain interface as the Google Chat API
     (``service.spaces().create(body=X).execute()``) but returns canned
     responses instead of making real API calls.
+
+    Holds singleton ``_spaces`` and ``_media`` sub-objects so that state
+    (counters, captured calls, error schedules) persists across the
+    entire migration run.
     """
 
-    def __init__(self, state: MigrationState) -> None:
+    def __init__(
+        self,
+        state: MigrationState,
+        message_error_schedule: dict[int, int] | None = None,
+    ) -> None:
         self._state = state
+        self._spaces = DryRunSpaces(
+            state, message_error_schedule=message_error_schedule
+        )
+        self._media = DryRunMedia()
 
     def spaces(self) -> DryRunSpaces:
-        return DryRunSpaces(self._state)
+        return self._spaces
 
     def media(self) -> DryRunMedia:
-        return DryRunMedia()
+        return self._media
+
+    @property
+    def captured_messages(self) -> list[dict[str, Any]]:
+        """All ``create()`` calls recorded by the messages stub."""
+        return self._spaces.messages().captured_calls

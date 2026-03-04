@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_chat_migrator.core.channel_processor import ChannelProcessor
 from slack_chat_migrator.core.config import ImportCompletionStrategy, MigrationConfig
@@ -274,7 +275,7 @@ class TestProcessChannel:
         return_value="spaces/DRY",
     )
     def test_dry_run_mode(self, mock_create, mock_should, tmp_path):
-        """Dry run sets mode_prefix and does not delete space on errors."""
+        """Dry run follows the same cleanup path as real mode (delete is a no-op)."""
         processor = _make_processor(dry_run=True, export_root=tmp_path)
 
         ch_dir = tmp_path / "general"
@@ -295,8 +296,9 @@ class TestProcessChannel:
 
         assert should_abort is False
         assert had_errors is True
-        # In dry run mode, _delete_space_if_errors should NOT be called
-        mock_delete.assert_not_called()
+        # Dry-run mode now follows the same cleanup path; the underlying
+        # DryRunChatService.delete() is a no-op, so this is safe.
+        mock_delete.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -470,9 +472,10 @@ class TestProcessMessages:
         assert processed == 2
         assert mock_send.call_count == 2
 
+    @patch("slack_chat_migrator.core.channel_processor.send_message")
     @patch("slack_chat_migrator.core.channel_processor.track_message_stats")
-    def test_dry_run_counts_only(self, mock_track, tmp_path):
-        """Dry run mode counts messages but does not send them."""
+    def test_dry_run_sends_through_pipeline(self, mock_track, mock_send, tmp_path):
+        """Dry run mode sends messages through the full pipeline."""
         processor = _make_processor(dry_run=True, export_root=tmp_path)
 
         ch_dir = tmp_path / "general"
@@ -487,12 +490,14 @@ class TestProcessMessages:
             )
         )
 
+        mock_send.return_value = SendResult(message_name="spaces/S1/messages/M1")
         processed, failed, _had_errors = processor._process_messages(
             ch_dir, "spaces/S1", False
         )
 
-        assert processor.state.progress.migration_summary["messages_created"] == 3
-        assert processed == 0
+        # Dry run now sends through the full pipeline
+        assert mock_send.call_count == 3
+        assert processed == 3
         assert failed == 0
 
     @patch("slack_chat_migrator.core.channel_processor.send_message")
@@ -561,7 +566,7 @@ class TestCompleteImportMode:
     def test_http_error(self):
         """HttpError during completion sets channel_had_errors to True."""
         processor = _make_processor()
-        http_error = HttpError(resp=MagicMock(status=403), content=b"Forbidden")
+        http_error = HttpError(resp=Response({"status": "403"}), content=b"Forbidden")
         processor.chat.complete_import.side_effect = http_error
 
         result = processor._complete_import_mode("spaces/S1", "general", False)
@@ -671,7 +676,7 @@ class TestAddMembers:
         """HttpError during member addition sets channel_had_errors."""
         processor = _make_processor()
         mock_add.side_effect = HttpError(
-            resp=MagicMock(status=403), content=b"Forbidden"
+            resp=Response({"status": "403"}), content=b"Forbidden"
         )
 
         result = processor._add_members("spaces/S1", "general", True, False)
@@ -724,11 +729,11 @@ class TestShouldAbortImport:
 
         assert processor._should_abort_import("general", 5, 3) is False
 
-    def test_dry_run_always_returns_false(self):
-        """Dry run mode never aborts, even with failures and abort_on_error."""
+    def test_dry_run_respects_abort_on_error(self):
+        """Dry run mode follows the same abort logic as real mode."""
         processor = _make_processor(dry_run=True, abort_on_error=True)
 
-        assert processor._should_abort_import("general", 5, 3) is False
+        assert processor._should_abort_import("general", 5, 3) is True
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +769,7 @@ class TestDeleteSpaceIfErrors:
         processor.state.spaces.created_spaces["general"] = "spaces/S1"
         processor.state.progress.migration_summary["spaces_created"] = 1
         processor.chat.delete_space.side_effect = HttpError(
-            resp=MagicMock(status=404), content=b"Not found"
+            resp=Response({"status": "404"}), content=b"Not found"
         )
 
         # Should not raise
