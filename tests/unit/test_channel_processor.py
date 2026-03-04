@@ -9,12 +9,12 @@ from unittest.mock import MagicMock, patch
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
-from slack_migrator.core.channel_processor import ChannelProcessor
-from slack_migrator.core.config import ImportCompletionStrategy, MigrationConfig
-from slack_migrator.core.context import MigrationContext
-from slack_migrator.core.state import MigrationState, _default_migration_summary
-from slack_migrator.exceptions import SpacePermissionError
-from slack_migrator.types import SendResult
+from slack_chat_migrator.core.channel_processor import ChannelProcessor
+from slack_chat_migrator.core.config import ImportCompletionStrategy, MigrationConfig
+from slack_chat_migrator.core.context import MigrationContext
+from slack_chat_migrator.core.state import MigrationState, _default_migration_summary
+from slack_chat_migrator.exceptions import SpacePermissionError
+from slack_chat_migrator.types import SendResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -92,19 +92,19 @@ def _make_processor(
 class TestProcessChannel:
     """Tests for ChannelProcessor.process_channel()."""
 
-    @patch("slack_migrator.core.channel_processor.track_message_stats")
+    @patch("slack_chat_migrator.core.channel_processor.track_message_stats")
     @patch(
-        "slack_migrator.core.channel_processor.send_message",
+        "slack_chat_migrator.core.channel_processor.send_message",
         return_value=SendResult(message_name="spaces/SPACE1/messages/MSG1"),
     )
-    @patch("slack_migrator.core.channel_processor.add_users_to_space")
-    @patch("slack_migrator.core.channel_processor.add_regular_members")
+    @patch("slack_chat_migrator.core.channel_processor.add_users_to_space")
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     @patch(
-        "slack_migrator.core.channel_processor.create_space",
+        "slack_chat_migrator.core.channel_processor.create_space",
         return_value="spaces/SPACE1",
     )
     @patch(
-        "slack_migrator.core.channel_processor.should_process_channel",
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
         return_value=True,
     )
     def test_happy_path_returns_false(
@@ -142,7 +142,7 @@ class TestProcessChannel:
         assert processor.state.spaces.channel_to_space["general"] == "spaces/SPACE1"
 
     @patch(
-        "slack_migrator.core.channel_processor.should_process_channel",
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
         return_value=False,
     )
     def test_channel_skipped_by_config(self, mock_should, tmp_path):
@@ -158,7 +158,7 @@ class TestProcessChannel:
         mock_should.assert_called_once_with("random", processor.ctx.config)
 
     @patch(
-        "slack_migrator.core.channel_processor.should_process_channel",
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
         return_value=True,
     )
     def test_channel_with_space_conflict(self, mock_should, tmp_path):
@@ -176,11 +176,11 @@ class TestProcessChannel:
         assert "general" in processor.state.errors.migration_issues
 
     @patch(
-        "slack_migrator.core.channel_processor.should_process_channel",
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
         return_value=True,
     )
     @patch(
-        "slack_migrator.core.channel_processor.create_space",
+        "slack_chat_migrator.core.channel_processor.create_space",
         side_effect=SpacePermissionError("general"),
     )
     def test_permission_error_on_space_creation(
@@ -198,14 +198,14 @@ class TestProcessChannel:
         assert should_abort is False
         assert had_errors is True
 
-    @patch("slack_migrator.core.channel_processor.add_users_to_space")
-    @patch("slack_migrator.core.channel_processor.add_regular_members")
+    @patch("slack_chat_migrator.core.channel_processor.add_users_to_space")
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     @patch(
-        "slack_migrator.core.channel_processor.create_space",
+        "slack_chat_migrator.core.channel_processor.create_space",
         return_value="spaces/SPACE1",
     )
     @patch(
-        "slack_migrator.core.channel_processor.should_process_channel",
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
         return_value=True,
     )
     def test_abort_on_error_returns_true(
@@ -233,14 +233,14 @@ class TestProcessChannel:
         assert should_abort is True
         assert had_errors is True
 
-    @patch("slack_migrator.core.channel_processor.add_users_to_space")
-    @patch("slack_migrator.core.channel_processor.add_regular_members")
+    @patch("slack_chat_migrator.core.channel_processor.add_users_to_space")
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     @patch(
-        "slack_migrator.core.channel_processor.create_space",
+        "slack_chat_migrator.core.channel_processor.create_space",
         return_value="spaces/SPACE1",
     )
     @patch(
-        "slack_migrator.core.channel_processor.should_process_channel",
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
         return_value=True,
     )
     def test_delete_space_if_errors_and_cleanup_enabled(
@@ -266,11 +266,11 @@ class TestProcessChannel:
         mock_delete.assert_called_once_with("spaces/SPACE1", "general")
 
     @patch(
-        "slack_migrator.core.channel_processor.should_process_channel",
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
         return_value=True,
     )
     @patch(
-        "slack_migrator.core.channel_processor.create_space",
+        "slack_chat_migrator.core.channel_processor.create_space",
         return_value="spaces/DRY",
     )
     def test_dry_run_mode(self, mock_create, mock_should, tmp_path):
@@ -310,11 +310,11 @@ class TestSetupChannelLogging:
         processor = _make_processor()
 
         with patch(
-            "slack_migrator.core.channel_processor.setup_channel_logger",
+            "slack_chat_migrator.core.channel_processor.setup_channel_logger",
             return_value=MagicMock(),
         ) as mock_setup:
             with patch(
-                "slack_migrator.core.channel_processor.is_debug_api_enabled",
+                "slack_chat_migrator.core.channel_processor.is_debug_api_enabled",
                 return_value=False,
             ):
                 processor._setup_channel_logging("general")
@@ -332,7 +332,7 @@ class TestCreateOrReuseSpace:
     """Tests for ChannelProcessor._create_or_reuse_space()."""
 
     @patch(
-        "slack_migrator.core.channel_processor.create_space",
+        "slack_chat_migrator.core.channel_processor.create_space",
         return_value="spaces/NEW1",
     )
     def test_new_space_creation(self, mock_create, tmp_path):
@@ -368,7 +368,7 @@ class TestCreateOrReuseSpace:
         assert is_new is False
         assert processor.state.spaces.space_cache["general"] == "spaces/EXISTING"
 
-    @patch("slack_migrator.core.channel_processor.create_space")
+    @patch("slack_chat_migrator.core.channel_processor.create_space")
     def test_space_from_cache(self, mock_create, tmp_path):
         """Uses cached space if available instead of creating a new one."""
         processor = _make_processor()
@@ -391,10 +391,10 @@ class TestProcessMessages:
     """Tests for ChannelProcessor._process_messages()."""
 
     @patch(
-        "slack_migrator.core.channel_processor.send_message",
+        "slack_chat_migrator.core.channel_processor.send_message",
         return_value=SendResult(message_name="spaces/S/messages/M1"),
     )
-    @patch("slack_migrator.core.channel_processor.track_message_stats")
+    @patch("slack_chat_migrator.core.channel_processor.track_message_stats")
     def test_happy_path_with_messages(self, mock_track, mock_send, tmp_path):
         """Processes messages successfully and returns counts."""
         processor = _make_processor(export_root=tmp_path)
@@ -421,7 +421,7 @@ class TestProcessMessages:
         assert had_errors is False
         assert mock_send.call_count == 2
 
-    @patch("slack_migrator.core.channel_processor.track_message_stats")
+    @patch("slack_chat_migrator.core.channel_processor.track_message_stats")
     def test_message_loading_failure_bad_json(self, mock_track, tmp_path):
         """Bad JSON files are skipped with a warning; valid files still process."""
         processor = _make_processor(dry_run=True, export_root=tmp_path)
@@ -441,10 +441,10 @@ class TestProcessMessages:
         assert processor.state.progress.migration_summary["messages_created"] == 1
 
     @patch(
-        "slack_migrator.core.channel_processor.send_message",
+        "slack_chat_migrator.core.channel_processor.send_message",
         return_value=SendResult(message_name="spaces/S/messages/M1"),
     )
-    @patch("slack_migrator.core.channel_processor.track_message_stats")
+    @patch("slack_chat_migrator.core.channel_processor.track_message_stats")
     def test_duplicate_message_deduplication(self, mock_track, mock_send, tmp_path):
         """Duplicate timestamps are deduplicated, only unique messages sent."""
         processor = _make_processor(export_root=tmp_path)
@@ -470,7 +470,7 @@ class TestProcessMessages:
         assert processed == 2
         assert mock_send.call_count == 2
 
-    @patch("slack_migrator.core.channel_processor.track_message_stats")
+    @patch("slack_chat_migrator.core.channel_processor.track_message_stats")
     def test_dry_run_counts_only(self, mock_track, tmp_path):
         """Dry run mode counts messages but does not send them."""
         processor = _make_processor(dry_run=True, export_root=tmp_path)
@@ -495,8 +495,8 @@ class TestProcessMessages:
         assert processed == 0
         assert failed == 0
 
-    @patch("slack_migrator.core.channel_processor.send_message")
-    @patch("slack_migrator.core.channel_processor.track_message_stats")
+    @patch("slack_chat_migrator.core.channel_processor.send_message")
+    @patch("slack_chat_migrator.core.channel_processor.track_message_stats")
     def test_failure_threshold_exceeded(self, mock_track, mock_send, tmp_path):
         """When failure rate exceeds threshold, channel is flagged."""
         processor = _make_processor(max_failure_percentage=10, export_root=tmp_path)
@@ -619,7 +619,7 @@ class TestCompleteImportMode:
 class TestAddMembers:
     """Tests for ChannelProcessor._add_members()."""
 
-    @patch("slack_migrator.core.channel_processor.add_regular_members")
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     def test_success_for_new_space(self, mock_add):
         """Adds members to a newly created space without errors."""
         processor = _make_processor()
@@ -637,7 +637,7 @@ class TestAddMembers:
             "general",
         )
 
-    @patch("slack_migrator.core.channel_processor.add_regular_members")
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     def test_success_for_existing_space(self, mock_add):
         """Updates members in an existing space (not newly created)."""
         processor = _make_processor()
@@ -655,7 +655,7 @@ class TestAddMembers:
             "general",
         )
 
-    @patch("slack_migrator.core.channel_processor.add_regular_members")
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     def test_existing_space_adds_members_even_with_errors(self, mock_add):
         """For existing spaces, members are updated even if channel had errors."""
         processor = _make_processor()
@@ -666,7 +666,7 @@ class TestAddMembers:
         assert result is True  # channel_had_errors passed through
         mock_add.assert_called_once()
 
-    @patch("slack_migrator.core.channel_processor.add_regular_members")
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     def test_api_error_http_error(self, mock_add):
         """HttpError during member addition sets channel_had_errors."""
         processor = _make_processor()
@@ -678,7 +678,7 @@ class TestAddMembers:
 
         assert result is True
 
-    @patch("slack_migrator.core.channel_processor.add_regular_members")
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     def test_unexpected_error_broad_catch(self, mock_add):
         """Unexpected errors are caught by the broad except clause."""
         processor = _make_processor()
@@ -688,7 +688,7 @@ class TestAddMembers:
 
         assert result is True
 
-    @patch("slack_migrator.core.channel_processor.add_regular_members")
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     def test_skip_for_new_space_with_errors(self, mock_add):
         """Skips member addition for a newly created space that had import errors."""
         processor = _make_processor()
@@ -782,7 +782,7 @@ class TestDiscoverChannelResources:
     """Tests for ChannelProcessor._discover_channel_resources()."""
 
     @patch(
-        "slack_migrator.core.channel_processor.get_last_message_timestamp",
+        "slack_chat_migrator.core.channel_processor.get_last_message_timestamp",
         return_value=12345.0,
     )
     def test_found_last_timestamp(self, mock_get_ts):
@@ -806,7 +806,7 @@ class TestDiscoverChannelResources:
         assert "general" not in processor.state.progress.last_processed_timestamps
 
     @patch(
-        "slack_migrator.core.channel_processor.get_last_message_timestamp",
+        "slack_chat_migrator.core.channel_processor.get_last_message_timestamp",
         return_value=0,
     )
     def test_no_messages_found_timestamp_zero(self, mock_get_ts):
@@ -819,7 +819,7 @@ class TestDiscoverChannelResources:
         assert "general" not in processor.state.progress.last_processed_timestamps
 
     @patch(
-        "slack_migrator.core.channel_processor.get_last_message_timestamp",
+        "slack_chat_migrator.core.channel_processor.get_last_message_timestamp",
         return_value=999.0,
     )
     def test_initializes_thread_map_when_missing(self, mock_get_ts):

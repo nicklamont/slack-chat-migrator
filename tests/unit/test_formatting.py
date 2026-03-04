@@ -2,8 +2,8 @@
 
 from unittest.mock import MagicMock
 
-from slack_migrator.core.state import MigrationState
-from slack_migrator.utils.formatting import (
+from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.utils.formatting import (
     _parse_rich_text_elements,
     convert_formatting,
     parse_slack_blocks,

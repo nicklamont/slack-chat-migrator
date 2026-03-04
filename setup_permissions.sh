@@ -33,7 +33,7 @@
 
 # Default configuration values
 PROJECT_ID=$(gcloud config get-value project)
-SERVICE_ACCOUNT_NAME="slack-migrator-sa"
+SERVICE_ACCOUNT_NAME="slack-chat-migrator-sa"
 KEY_FILE="slack-chat-migrator-sa-key.json"
 
 # Function to display script usage
@@ -42,7 +42,7 @@ show_help() {
   echo
   echo "Options:"
   echo "  --project PROJECT_ID    GCP project ID (default: current gcloud project)"
-  echo "  --sa-name NAME          Service account name (default: slack-migrator-sa)"
+  echo "  --sa-name NAME          Service account name (default: slack-chat-migrator-sa)"
   echo "  --key-file FILE         Key file name (default: slack-chat-migrator-sa-key.json)"
   echo "  --help                  Show this help message"
   echo
@@ -316,8 +316,8 @@ display_next_steps() {
   echo "1. VERIFY PERMISSIONS (ALWAYS DO THIS FIRST)"
   echo "   This confirms your service account is properly set up:"
   echo
-  echo "   slack-migrator check-permissions --creds_path \"$(pwd)/${KEY_FILE}\" \\"
-  echo "                                  --workspace_admin your-admin@domain.com"
+  echo "   slack-chat-migrator check-permissions --creds_path \"$(pwd)/${KEY_FILE}\" \\"
+  echo "                                       --workspace_admin your-admin@domain.com"
   echo
   echo "2. CREATE AND CUSTOMIZE CONFIG FILE (ONE-TIME SETUP)"
   echo "   If you haven't already, create a config file to customize the migration:"
@@ -328,26 +328,24 @@ display_next_steps() {
   echo "3. TEST WITH DRY RUN (RECOMMENDED BEFORE EACH MIGRATION)"
   echo "   This simulates the migration without making any changes:"
   echo
-  echo "   slack-migrator --creds_path \"$(pwd)/${KEY_FILE}\" \\"
-  echo "                 --export_path /path/to/slack/export \\"
-  echo "                 --workspace_admin your-admin@domain.com \\"
-  echo "                 --config config.yaml --dry_run"
+  echo "   slack-chat-migrator validate --creds_path \"$(pwd)/${KEY_FILE}\" \\"
+  echo "                               --export_path /path/to/slack/export \\"
+  echo "                               --workspace_admin your-admin@domain.com"
   echo
   echo "4. RUN THE ACTUAL MIGRATION"
   echo "   When you're ready to perform the actual migration:"
   echo
-  echo "   slack-migrator --creds_path \"$(pwd)/${KEY_FILE}\" \\"
-  echo "                 --export_path /path/to/slack/export \\"
-  echo "                 --workspace_admin your-admin@domain.com \\"
-  echo "                 --config config.yaml"
+  echo "   slack-chat-migrator migrate --creds_path \"$(pwd)/${KEY_FILE}\" \\"
+  echo "                              --export_path /path/to/slack/export \\"
+  echo "                              --workspace_admin your-admin@domain.com"
   echo
   echo "5. IF MIGRATION IS INTERRUPTED (OPTIONAL)"
   echo "   Use update mode to continue an interrupted migration:"
   echo
-  echo "   slack-migrator --creds_path \"$(pwd)/${KEY_FILE}\" \\"
-  echo "                 --export_path /path/to/slack/export \\"
-  echo "                 --workspace_admin your-admin@domain.com \\"
-  echo "                 --config config.yaml --update_mode"
+  echo "   slack-chat-migrator migrate --creds_path \"$(pwd)/${KEY_FILE}\" \\"
+  echo "                              --export_path /path/to/slack/export \\"
+  echo "                              --workspace_admin your-admin@domain.com \\"
+  echo "                              --update_mode"
   echo "======================================================================"
   echo
   echo "📝 NOTE: You only need to run this setup script once, unless you:"

@@ -4,8 +4,8 @@ from unittest.mock import MagicMock
 
 from googleapiclient.errors import HttpError
 
-from slack_migrator.core.config import MigrationConfig, SharedDriveConfig
-from slack_migrator.services.drive.shared_drive_manager import (
+from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
+from slack_chat_migrator.services.drive.shared_drive_manager import (
     SharedDriveManager,
 )
 

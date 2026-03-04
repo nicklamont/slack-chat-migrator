@@ -1,6 +1,6 @@
 ## Slack to Google Chat Migration Tool
 
-This tool migrates Slack JSON exports into Google Chat spaces via the Chat Import API.
+Migrates Slack workspace JSON exports into Google Chat spaces via the [Google Chat Import API](https://developers.google.com/workspace/chat/import-data-overview).
 
 ### Features
 
@@ -16,6 +16,28 @@ This tool migrates Slack JSON exports into Google Chat spaces via the Chat Impor
 - Includes comprehensive reports for both validation runs and actual migrations
 - Identifies users without email addresses for mapping
 - Automatic permission checking before migration
+- Checkpoint-based resumption for interrupted migrations
+
+### How It Works
+
+This tool uses the [Google Chat Import API](https://developers.google.com/workspace/chat/import-data-overview) to migrate Slack data into Google Chat. Important things to know about import mode:
+
+- **Spaces are created in import mode** — they are hidden from users until import is completed
+- **90-day deadline** — Google automatically deletes spaces that remain in import mode for more than 90 days
+- **No notifications** — messages imported in import mode don't trigger notifications for users
+- **No link previews** — URLs in imported messages won't generate link previews
+- **Drive-preferred attachments** — file attachments are uploaded to a shared Google Drive and linked in messages (Google recommends Drive for imported content)
+- **Archival limitations** — Google Chat's space archive/read-only features are not available during import mode; spaces become fully active once import completes
+
+```mermaid
+flowchart LR
+    A[Slack Export] --> B[Validate]
+    B --> C[Create Spaces\nin Import Mode]
+    C --> D[Import Messages\n& Attachments]
+    D --> E[Complete Import\nMode]
+    E --> F[Add Members]
+    F --> G[Spaces Visible\nto Users]
+```
 
 ### Prerequisites
 
@@ -67,44 +89,33 @@ pip install git+https://github.com/nicklamont/slack-chat-migrator.git
 
 > Note: Build configuration is defined in `pyproject.toml`. Install the package with `pip install -e .` rather than running any build files directly.
 
-### Setting Up Permissions
-
-Before running your first migration, you need to set up the Google Cloud permissions. The `setup_permissions.sh` script automates most of this process:
+### Quick Start
 
 ```bash
-# Ensure the Google Cloud SDK (gcloud) is installed first
-# Then run the permissions setup script
+# 1. Set up permissions (one-time)
 ./setup_permissions.sh
+# Then complete domain-wide delegation in Google Workspace Admin Console
+
+# 2. Configure
+cp config.yaml.example config.yaml
+# Edit config.yaml with your settings
+
+# 3. Validate (dry run)
+slack-chat-migrator validate \
+  --creds_path /path/to/key.json \
+  --export_path ./slack_export \
+  --workspace_admin admin@company.com
+
+# 4. Migrate
+slack-chat-migrator migrate \
+  --creds_path /path/to/key.json \
+  --export_path ./slack_export \
+  --workspace_admin admin@company.com
 ```
-
-**When to run setup_permissions.sh:**
-- Once during initial setup, after installing the package
-- If you're setting up the tool in a new Google Cloud project
-- If you encounter permission errors during migration
-- If you need to create a new service account
-
-**Important Prerequisites:**
-1. The script provides **automated** setup, but all steps can be done manually in the Google Cloud Console
-2. If using the script, Google Cloud SDK must be installed as a system component (not via pip)
-3. As an alternative to the script, follow the manual setup steps in the Troubleshooting section
-
-**What the script does:**
-1. Checks for the Google Cloud SDK installation (if using the automated approach)
-2. Enables required Google Cloud APIs
-3. Creates a service account with necessary permissions
-4. Downloads a service account key file
-5. Provides instructions for manual steps in Google Workspace admin console
-
-**Important Notes:**
-- The script is **optional** - all steps can be performed manually in the Google Cloud Console
-- If you choose to use the script:
-  - You need the Google Cloud SDK installed as a system component (not via pip)
-  - After running the script, you'll still need to complete the domain-wide delegation setup in Google Workspace
-- See the Troubleshooting section for manual setup instructions if you prefer not to use the script
 
 ### Configuration
 
-Create a `config.yaml` file:
+Create a `config.yaml` file (or copy from `config.yaml.example`):
 
 ```yaml
 # Shared Drive configuration for storing attachments
@@ -157,9 +168,8 @@ max_failure_percentage: 10
 
 # Strategy for completing import mode when errors occur
 # Options:
-#   - "skip_on_error": Skip completing import mode if channel had errors (default)
+#   - "skip_on_error" (default): Skip completing import mode if channel had errors
 #   - "force_complete": Complete import mode even if errors occurred
-#   - "always_skip": Never complete import mode (useful for testing)
 import_completion_strategy: "skip_on_error"
 
 # Whether to delete spaces that had errors during migration
@@ -173,20 +183,36 @@ max_retries: 3
 retry_delay: 2
 ```
 
+#### Space Mapping
+
+When using `--update_mode` to resume a migration, the tool discovers existing spaces by name. If multiple Google Chat spaces have the same name (e.g., multiple "Slack #general" spaces from previous attempts), you need to specify which space to use for each channel:
+
+```yaml
+space_mapping:
+  "general": "AAAAAgcE123"  # Use this space ID for the general channel
+  "random": "AAAABbTr456"   # Use this space ID for the random channel
+```
+
+When duplicate spaces are found, the tool will:
+1. Skip those specific channels (not abort the entire migration)
+2. Mark these channels as failed in the migration report
+3. Log detailed information about each space to help you choose
+4. Provide exact configuration entries to copy into your config file
+
 > **Note:** Debug and logging options are controlled via command-line flags (`--verbose` and `--debug_api`) rather than configuration file settings. This ensures consistent logging behavior across all migration runs.
 
 ### Command-Line Reference
 
-The `slack-migrator` command provides four subcommands:
+The `slack-chat-migrator` command provides four subcommands:
 
 ```
-slack-migrator migrate            # Run the full migration
-slack-migrator check-permissions  # Validate API permissions only
-slack-migrator validate           # Dry-run validation of export data
-slack-migrator cleanup            # Complete import mode on stuck spaces
+slack-chat-migrator migrate            # Run the full migration
+slack-chat-migrator check-permissions  # Validate API permissions only
+slack-chat-migrator validate           # Dry-run validation of export data
+slack-chat-migrator cleanup            # Complete import mode on stuck spaces
 ```
 
-> **Backwards compatibility:** Running `slack-migrator --creds_path ...` (flags without a subcommand) automatically routes to `migrate`.
+> **Backwards compatibility:** Running `slack-chat-migrator --creds_path ...` (flags without a subcommand) automatically routes to `migrate`.
 
 #### Subcommands
 
@@ -240,6 +266,7 @@ Complete import mode on spaces that are stuck. Does **not** require a Slack expo
 | `--creds_path` | Yes | Path to the service account credentials JSON file |
 | `--workspace_admin` | Yes | Email of workspace admin to impersonate |
 | `--config` | No | Path to config YAML (default: config.yaml) |
+| `--yes` or `-y` | No | Skip the confirmation prompt |
 | `--verbose` or `-v` | No | Enable verbose console logging |
 | `--debug_api` | No | Enable detailed API request/response logging |
 
@@ -258,36 +285,37 @@ Both options are independent and can be used together for maximum debugging info
 
 ```bash
 # Check permissions before migration (highly recommended)
-slack-migrator check-permissions \
+slack-chat-migrator check-permissions \
   --creds_path /path/to/key.json \
   --workspace_admin admin@company.com
 
 # Validate export data without making changes
-slack-migrator validate \
+slack-chat-migrator validate \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
   --workspace_admin admin@company.com
 
 # Execute the full migration
-slack-migrator migrate \
+slack-chat-migrator migrate \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
   --workspace_admin admin@company.com
 
 # Resume an interrupted migration
-slack-migrator migrate \
+slack-chat-migrator migrate \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
   --workspace_admin admin@company.com \
   --update_mode
 
 # Complete import mode on stuck spaces (no export needed)
-slack-migrator cleanup \
+slack-chat-migrator cleanup \
   --creds_path /path/to/key.json \
-  --workspace_admin admin@company.com
+  --workspace_admin admin@company.com \
+  --yes
 
 # Debug a problematic migration with detailed logging
-slack-migrator migrate \
+slack-chat-migrator migrate \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
   --workspace_admin admin@company.com \
@@ -325,7 +353,7 @@ For a successful migration, follow this recommended workflow:
 
 3. **Verify permissions** (recommended before each migration):
    ```bash
-   slack-migrator check-permissions \
+   slack-chat-migrator check-permissions \
      --creds_path /path/to/credentials.json \
      --workspace_admin admin@domain.com
    ```
@@ -340,7 +368,7 @@ For a successful migration, follow this recommended workflow:
 5. **Run comprehensive validation** (automatically performed before every migration):
    ```bash
    # For validation-only runs:
-   slack-migrator validate \
+   slack-chat-migrator validate \
      --creds_path /path/to/credentials.json \
      --export_path ./slack_export \
      --workspace_admin admin@domain.com
@@ -359,7 +387,7 @@ For a successful migration, follow this recommended workflow:
    # Step 2: User confirmation to proceed
    # Step 3: Actual migration
 
-   slack-migrator migrate \
+   slack-chat-migrator migrate \
      --creds_path /path/to/credentials.json \
      --export_path ./slack_export \
      --workspace_admin admin@domain.com
@@ -368,7 +396,7 @@ For a successful migration, follow this recommended workflow:
 7. **If migration is interrupted** (optional):
    ```bash
    # Resume migration with update mode
-   slack-migrator migrate \
+   slack-chat-migrator migrate \
      --creds_path /path/to/credentials.json \
      --export_path ./slack_export \
      --workspace_admin admin@domain.com \
@@ -380,29 +408,39 @@ For a successful migration, follow this recommended workflow:
    older messages may be posted as new standalone messages instead of being properly threaded.
 
    If multiple Google Chat spaces exist with the same name (e.g., multiple "Slack #general" spaces),
-   the tool will detect this conflict and show you the details of each space. You'll need to add a
-   `space_mapping` section to your config.yaml file to specify which space to use for each channel:
-
-   ```yaml
-   space_mapping:
-     "general": "AAAAAgcE123"  # Use this space ID for the general channel
-     "random": "AAAABbTr456"   # Use this space ID for the random channel
-   ```
+   the tool will detect this conflict and provide guidance. See [Space Mapping](#space-mapping) above.
 
 8. **If spaces are stuck in import mode** (optional):
    ```bash
    # Complete import mode on stuck spaces without needing the export
-   slack-migrator cleanup \
+   slack-chat-migrator cleanup \
      --creds_path /path/to/credentials.json \
      --workspace_admin admin@domain.com
    ```
 
 ### Migration Process and Cleanup
 
-The migration process follows these steps for each channel:
+#### Per-Channel Process
+
+The migration processes each channel through the following stages:
+
+```mermaid
+flowchart TD
+    A[Create Space in Import Mode] --> B[Add Historical Members]
+    B --> C[Post Channel Intro\npurpose / topic]
+    C --> D[Import Messages\nattachments & reactions]
+    D --> E{Errors?}
+    E -->|No| F[Complete Import Mode]
+    E -->|Yes| G{import_completion_strategy}
+    G -->|skip_on_error| H[Leave in Import Mode]
+    G -->|force_complete| F
+    F --> I[Add Regular Members]
+    I --> J[Channel Complete]
+    H --> K[Channel Skipped\nneeds cleanup]
+```
 
 1. **Create Space**: Creates a Google Chat space in import mode
-2. **Add Historical Members**: Adds users who were in the Slack channel
+2. **Add Historical Members**: Adds users who were in the Slack channel (with `createTime`/`deleteTime` for accurate membership history)
 3. **Send Intro**: Posts channel metadata (purpose/topic) as the first message
 4. **Import Messages**: Migrates all messages with their attachments and reactions
 5. **Complete Import**: Finishes the import mode for the space
@@ -419,7 +457,6 @@ The tool provides several configurable options for handling errors during migrat
 3. **Import Completion Strategy**: Determines how to handle import mode completion when errors occur:
    - `skip_on_error` (default): Don't complete import mode if there were errors
    - `force_complete`: Complete import mode even if there were errors
-   - `always_skip`: Never complete import mode (useful for testing)
 
 4. **Cleanup on Error**: When enabled (`cleanup_on_error: true`), spaces with errors will be deleted during cleanup. When disabled (default), spaces with errors will be kept (allowing manual completion).
 
@@ -452,6 +489,18 @@ After all channels are processed, a **cleanup process** runs to ensure all space
 5. Adds regular members to these spaces
 
 The cleanup process is important because spaces in import mode have limitations and will be automatically deleted after 90 days if not properly completed.
+
+#### Checkpoint and Resumption
+
+The migration tool writes a checkpoint file (`.migration_checkpoint.json`) in the Slack export directory to track progress. This file records:
+
+- Which channels have been fully processed (with completion timestamps)
+- When the migration started
+- When the checkpoint was last updated
+
+If a migration is interrupted (e.g., by a crash or `Ctrl+C`), the checkpoint allows the tool to skip already-completed channels on the next run. The checkpoint file is automatically removed after a successful migration completes.
+
+> **Note:** The checkpoint tracks channel-level progress only. If a migration is interrupted mid-channel, that channel will be reprocessed from the beginning on the next run.
 
 ### Output Directory and Log Files
 
@@ -552,7 +601,7 @@ To identify users that need mapping:
 
 1. Run comprehensive validation to generate a report:
    ```bash
-   slack-migrator validate \
+   slack-chat-migrator validate \
      --creds_path /path/to/key.json \
      --export_path ./slack_export \
      --workspace_admin admin@company.com
@@ -563,66 +612,34 @@ To identify users that need mapping:
 
 3. Run the migration with the updated config (validation runs automatically first)
 
-### Package Structure
+### Known Limitations
 
-The codebase is organized into the following modules:
+#### Google Chat Import API Constraints
 
-- `slack_migrator/__init__.py` - Package initialization
-- `slack_migrator/__main__.py` - Main entry point
-- `slack_migrator/core/` - Core functionality
-  - `slack_migrator/core/migrator.py` - Main migration logic
-  - `slack_migrator/core/config.py` - Configuration handling
-- `slack_migrator/services/` - Service interactions
-  - `slack_migrator/services/space.py` - Space creation and management
-  - `slack_migrator/services/message.py` - Message handling and formatting
-  - `slack_migrator/services/file.py` - File and attachment handling
-  - `slack_migrator/services/user.py` - User mapping utilities
-- `slack_migrator/cli/` - Command-line interface components
-  - `slack_migrator/cli/commands.py` - CLI group and subcommands (migrate, check-permissions, validate, cleanup)
-  - `slack_migrator/cli/report.py` - Report generation
-- `slack_migrator/utils/` - Utility functions
-  - `slack_migrator/utils/logging.py` - Logging utilities
-  - `slack_migrator/utils/api.py` - API and retry utilities
-  - `slack_migrator/utils/formatting.py` - Message formatting utilities
-  - `slack_migrator/utils/permissions.py` - Permission validation
+These are limitations of the [Google Chat Import API](https://developers.google.com/workspace/chat/import-data-overview) itself, not specific to this tool:
 
+- **90-day import mode limit** — spaces left in import mode for more than 90 days are automatically deleted by Google
+- **No link previews** — URLs in imported messages don't generate link previews
+- **No duplicate `createTime`** — two messages in the same space cannot have the same `createTime` timestamp; the tool handles this by incrementing timestamps when collisions occur
+- **No notifications during import** — users don't receive any notifications for messages imported in import mode
+- **External user limitations** — external users (outside your Google Workspace domain) cannot be impersonated via domain-wide delegation; their messages are attributed to the workspace admin with sender annotation
+- **No native attachments** — the Import API doesn't support native file attachments on messages; files are uploaded to Google Drive and linked in message text (this is Google's recommended approach for imported content)
 
-### GCP on Cloud Run
-
-1. Enable APIs:
-   ```bash
-   gcloud services enable chat.googleapis.com drive.googleapis.com
-   ```
-
-2. Create service account & grant roles:
-   ```bash
-   gcloud iam service-accounts create slack-migrator-sa
-   # grant chat.admin and drive permissions
-   ```
-
-3. Domain-wide delegation in Admin console with above scopes.
-
-4. Build & push container:
-   ```bash
-   gcloud builds submit --tag gcr.io/$PROJECT_ID/slack-migrator
-   ```
-
-5. Create & execute Cloud Run job (mount export & map via Cloud Storage or volume).
-
-### Known Issues
+#### Tool-Specific Limitations
 
 - **Thread Continuity in Update Mode**: When using update mode to resume an interrupted migration, messages that are part of threads started in the previous migration may not be correctly threaded with their parent thread. This occurs because the tool only imports messages newer than the last message in each space, and thread replies to older messages are posted as new standalone messages instead of being properly attached to their original thread context.
 
 - **Limited External User Support**: The migration tool has several limitations when dealing with external users (users outside your Google Workspace domain):
   - External users cannot be impersonated due to Google Chat API restrictions, so their messages are posted by the workspace admin with attribution text indicating the original sender
   - Emoji reactions from external users are dropped and not migrated
-  - External users are not automatically added to migrated spaces - only internal workspace users receive space memberships during migration
+  - External users are not automatically added to migrated spaces — only internal workspace users receive space memberships during migration
 
 - **Attachment Handling**: When Slack attachment files are uploaded to Google Drive during migration, a link to the Google Drive file is appended to the end of the message content rather than being attached as a native Google Chat attachment. This preserves access to the files but changes how they appear in the migrated conversations.
 
- - **Formatting Limitations**: Caveats related to migrating Markdown formatting from Slack to Google Chat, including:
-   - Nested bullet lists may not indent correctly in Google Chat, causing subbullets to appear as manually indented bullets that do not wrap correctly.
-   - Bold styling around user mentions (e.g., `*<@USER>*`) is not supported by Google Chat and will display literal asterisks.
+- **Formatting Limitations**: Caveats related to migrating Markdown formatting from Slack to Google Chat, including:
+  - Nested bullet lists may not indent correctly in Google Chat, causing subbullets to appear as manually indented bullets that do not wrap correctly.
+  - Bold styling around user mentions (e.g., `*<@USER>*`) is not supported by Google Chat and will display literal asterisks.
+
 ### Troubleshooting
 
 #### Google Cloud SDK Issues
@@ -681,12 +698,112 @@ If you prefer not to use the setup script, follow these steps manually:
   - Ensure the service account has proper domain-wide delegation configured
   - Check that all required APIs are enabled
   - Verify your config.yaml has the correct service account key file path
-  - Run `slack-migrator check-permissions` to validate permissions
+  - Run `slack-chat-migrator check-permissions` to validate permissions
 
 - **Files/Attachments Not Migrating**:
   - Ensure you have the `drive` scope in your service account permissions
   - Check for errors in the migration log related to file access
   - Verify shared drive settings if using a shared drive for storage
+
+### Project Structure
+
+```
+src/slack_chat_migrator/
+├── __init__.py                    # Package initialization and version
+├── __main__.py                    # Entry point (python -m slack_chat_migrator)
+├── constants.py                   # Shared constants
+├── exceptions.py                  # Custom exception types
+├── types.py                       # Shared type definitions
+├── cli/                           # CLI entry points and report generation
+│   ├── commands.py                # CLI facade — re-exports from sub-modules
+│   ├── common.py                  # Shared CLI infrastructure (DefaultGroup, options)
+│   ├── migrate_cmd.py             # migrate command and MigrationOrchestrator
+│   ├── validate_cmd.py            # validate command
+│   ├── cleanup_cmd.py             # cleanup command
+│   ├── permissions_cmd.py         # check-permissions command
+│   └── report.py                  # Migration report formatting
+├── core/                          # Core logic
+│   ├── channel_processor.py       # Per-channel migration orchestration
+│   ├── checkpoint.py              # Checkpoint persistence for resumable migrations
+│   ├── cleanup.py                 # Post-migration cleanup (import mode, members)
+│   ├── config.py                  # YAML config loading and validation
+│   ├── context.py                 # MigrationContext frozen dataclass (immutable config)
+│   ├── migration_logging.py       # Migration success/failure logging
+│   ├── migrator.py                # Composition root — wires all deps, owns lifecycle
+│   └── state.py                   # MigrationState with typed sub-states
+├── services/                      # External API integrations
+│   ├── chat/                      # Google Chat API
+│   │   ├── chat_uploader.py       # Chat-based media upload
+│   │   └── dry_run_service.py     # No-op Chat API for dry-run mode
+│   ├── chat_adapter.py            # Typed wrapper over raw Chat API service
+│   ├── drive/                     # Google Drive API
+│   │   ├── drive_uploader.py      # Drive file upload logic
+│   │   ├── dry_run_service.py     # No-op Drive API for dry-run mode
+│   │   ├── folder_manager.py      # Drive folder creation and management
+│   │   └── shared_drive_manager.py # Shared drive creation and management
+│   ├── drive_adapter.py           # Typed wrapper over raw Drive API service
+│   ├── files/                     # Slack file handling
+│   │   ├── file.py                # FileHandler class (delegates to download/permissions)
+│   │   ├── file_download.py       # Slack file download logic
+│   │   └── file_permissions.py    # Drive file ownership/sharing
+│   ├── messages/                  # Message migration pipeline
+│   │   ├── message_attachments.py # Attachment processing
+│   │   ├── message_builder.py     # Message payload construction (Slack → Chat format)
+│   │   ├── message_sender.py      # Message send logic, error handling, stats
+│   │   └── reaction_processor.py  # Batch reaction processing
+│   ├── spaces/                    # Space lifecycle management
+│   │   ├── discovery.py           # Space discovery and mapping for resumption
+│   │   ├── historical_membership.py # Historical member import (createTime/deleteTime)
+│   │   ├── regular_membership.py  # Regular member addition (post-import)
+│   │   └── space_creator.py       # Space creation, listing, import mode cleanup
+│   ├── user.py                    # User mapping (Slack → Google)
+│   └── user_resolver.py           # User identity resolution and impersonation
+└── utils/                         # Shared utilities
+    ├── api.py                     # API retry logic, credential handling
+    ├── formatting.py              # Message formatting utilities
+    ├── logging.py                 # Logging setup and utilities
+    ├── mime.py                    # MIME type detection
+    ├── permissions.py             # Permission validation
+    └── user_validation.py         # User data validation
+tests/
+├── unit/                          # Fast, isolated tests
+└── integration/                   # Tests requiring external services
+```
+
+### Setting Up Permissions
+
+Before running your first migration, you need to set up the Google Cloud permissions. The `setup_permissions.sh` script automates most of this process:
+
+```bash
+# Ensure the Google Cloud SDK (gcloud) is installed first
+# Then run the permissions setup script
+./setup_permissions.sh
+```
+
+**When to run setup_permissions.sh:**
+- Once during initial setup, after installing the package
+- If you're setting up the tool in a new Google Cloud project
+- If you encounter permission errors during migration
+- If you need to create a new service account
+
+**Important Prerequisites:**
+1. The script provides **automated** setup, but all steps can be done manually in the Google Cloud Console
+2. If using the script, Google Cloud SDK must be installed as a system component (not via pip)
+3. As an alternative to the script, follow the manual setup steps in the Troubleshooting section
+
+**What the script does:**
+1. Checks for the Google Cloud SDK installation (if using the automated approach)
+2. Enables required Google Cloud APIs
+3. Creates a service account with necessary permissions
+4. Downloads a service account key file
+5. Provides instructions for manual steps in Google Workspace admin console
+
+**Important Notes:**
+- The script is **optional** - all steps can be performed manually in the Google Cloud Console
+- If you choose to use the script:
+  - You need the Google Cloud SDK installed as a system component (not via pip)
+  - After running the script, you'll still need to complete the domain-wide delegation setup in Google Workspace
+- See the Troubleshooting section for manual setup instructions if you prefer not to use the script
 
 ### License
 

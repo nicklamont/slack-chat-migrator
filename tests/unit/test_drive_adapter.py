@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from slack_migrator.services.drive_adapter import DriveAdapter
+from slack_chat_migrator.services.drive_adapter import DriveAdapter
 
 
 @pytest.fixture()

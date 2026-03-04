@@ -1,4 +1,4 @@
-"""Unit tests for slack_migrator.core.cleanup module."""
+"""Unit tests for slack_chat_migrator.core.cleanup module."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 
-from slack_migrator.core.cleanup import (
+from slack_chat_migrator.core.cleanup import (
     _complete_import_mode_spaces,
     _complete_single_space,
     _list_spaces_in_import_mode,
@@ -19,7 +19,7 @@ from slack_migrator.core.cleanup import (
     cleanup_channel_handlers,
     run_cleanup,
 )
-from slack_migrator.core.state import MigrationState
+from slack_chat_migrator.core.state import MigrationState
 
 from .conftest import _make_ctx
 
@@ -142,10 +142,10 @@ class TestCleanupChannelHandlers:
         assert fresh_state.spaces.channel_handlers == {}
 
     def test_handler_removed_from_logger(self, fresh_state: MigrationState) -> None:
-        """Each handler is removed from the slack_migrator logger."""
+        """Each handler is removed from the slack_chat_migrator logger."""
         handler = MagicMock()
         fresh_state.spaces.channel_handlers = {"general": handler}
-        logger = logging.getLogger("slack_migrator")
+        logger = logging.getLogger("slack_chat_migrator")
 
         # Ensure the handler is "in" the logger so removeHandler is meaningful
         logger.addHandler(handler)
@@ -160,8 +160,8 @@ class TestCleanupChannelHandlers:
 # ===================================================================
 
 
-@patch("slack_migrator.core.cleanup.tqdm", side_effect=lambda x, **kw: x)
-@patch("slack_migrator.core.cleanup.add_regular_members")
+@patch("slack_chat_migrator.core.cleanup.tqdm", side_effect=lambda x, **kw: x)
+@patch("slack_chat_migrator.core.cleanup.add_regular_members")
 class TestRunCleanup:
     """Tests for run_cleanup."""
 
@@ -198,7 +198,7 @@ class TestRunCleanup:
         state = MigrationState()
         chat = _mock_chat(spaces_list=[])
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
 
             log_messages = [c.args[1] for c in mock_log.call_args_list]
@@ -212,7 +212,7 @@ class TestRunCleanup:
         state = MigrationState()
         chat = _mock_chat(list_side_effect=_http_error(500, "Internal Server Error"))
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
 
             log_messages = [c.args[1] for c in mock_log.call_args_list]
@@ -226,7 +226,7 @@ class TestRunCleanup:
         state = MigrationState()
         chat = _mock_chat(list_side_effect=RefreshError("token expired"))
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
 
             log_messages = [c.args[1] for c in mock_log.call_args_list]
@@ -240,7 +240,7 @@ class TestRunCleanup:
         state = MigrationState()
         chat = _mock_chat(list_side_effect=TransportError("connection reset"))
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
 
             log_messages = [c.args[1] for c in mock_log.call_args_list]
@@ -264,7 +264,7 @@ class TestRunCleanup:
         chat.patch_space.return_value = {}
 
         with patch(
-            "slack_migrator.core.cleanup._complete_import_mode_spaces"
+            "slack_chat_migrator.core.cleanup._complete_import_mode_spaces"
         ) as mock_complete:
             run_cleanup(ctx, state, chat, user_resolver=MagicMock(), file_handler=None)
 
@@ -291,7 +291,7 @@ class TestRunCleanup:
             {"name": "spaces/b", "importMode": False},
         ]
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
 
             log_messages = [c.args[1] for c in mock_log.call_args_list]
@@ -313,7 +313,7 @@ class TestRunCleanup:
 
         # Force the outer try to raise
         with patch(
-            "slack_migrator.core.cleanup._complete_import_mode_spaces",
+            "slack_chat_migrator.core.cleanup._complete_import_mode_spaces",
             side_effect=_http_error(403, "Forbidden"),
         ):
             # Need import_mode_spaces to be non-empty so _complete is called
@@ -324,7 +324,7 @@ class TestRunCleanup:
                 "importMode": True,
             }
 
-            with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+            with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
                 run_cleanup(ctx, state, chat2, user_resolver=None, file_handler=None)
 
                 log_messages = [c.args[1] for c in mock_log.call_args_list]
@@ -347,10 +347,10 @@ class TestRunCleanup:
         }
 
         with patch(
-            "slack_migrator.core.cleanup._complete_import_mode_spaces",
+            "slack_chat_migrator.core.cleanup._complete_import_mode_spaces",
             side_effect=_http_error(429, "Too Many Requests"),
         ):
-            with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+            with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
                 run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
 
                 log_messages = [c.args[1] for c in mock_log.call_args_list]
@@ -373,10 +373,10 @@ class TestRunCleanup:
         }
 
         with patch(
-            "slack_migrator.core.cleanup._complete_import_mode_spaces",
+            "slack_chat_migrator.core.cleanup._complete_import_mode_spaces",
             side_effect=_http_error(503, "Service Unavailable"),
         ):
-            with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+            with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
                 run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
 
                 log_messages = [c.args[1] for c in mock_log.call_args_list]
@@ -405,7 +405,7 @@ class TestRunCleanup:
         chat = MagicMock()
         chat.list_spaces.return_value = {"spaces": [{"name": ""}, {}]}
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
 
             log_messages = [c.args[1] for c in mock_log.call_args_list]
@@ -421,7 +421,7 @@ class TestRunCleanup:
         chat = MagicMock()
         chat.list_spaces.side_effect = ValueError("unexpected")
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
 
             log_messages = [c.args[1] for c in mock_log.call_args_list]
@@ -438,7 +438,7 @@ class TestRunCleanup:
         chat.list_spaces.return_value = {"spaces": [{"name": "spaces/a"}]}
         chat.get_space.side_effect = RefreshError("token expired")
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             run_cleanup(ctx, state, chat, user_resolver=None, file_handler=None)
 
             log_messages = [c.args[1] for c in mock_log.call_args_list]
@@ -542,8 +542,8 @@ class TestListSpacesInImportModePagination:
 # ===================================================================
 
 
-@patch("slack_migrator.core.cleanup.tqdm", side_effect=lambda x, **kw: x)
-@patch("slack_migrator.core.cleanup.add_regular_members")
+@patch("slack_chat_migrator.core.cleanup.tqdm", side_effect=lambda x, **kw: x)
+@patch("slack_chat_migrator.core.cleanup.add_regular_members")
 class TestCompleteImportModeSpaces:
     """Tests for _complete_import_mode_spaces."""
 
@@ -559,7 +559,9 @@ class TestCompleteImportModeSpaces:
             ("spaces/abc", {"name": "spaces/abc", "displayName": "Slack #general"}),
         ]
 
-        with patch("slack_migrator.core.cleanup._complete_single_space") as mock_single:
+        with patch(
+            "slack_chat_migrator.core.cleanup._complete_single_space"
+        ) as mock_single:
             _complete_import_mode_spaces(
                 ctx, state, chat, MagicMock(), None, import_mode_spaces
             )
@@ -587,7 +589,7 @@ class TestCompleteImportModeSpaces:
                 raise _http_error(500, "Server Error")
 
         with patch(
-            "slack_migrator.core.cleanup._complete_single_space",
+            "slack_chat_migrator.core.cleanup._complete_single_space",
             side_effect=fake_complete,
         ):
             _complete_import_mode_spaces(
@@ -618,7 +620,7 @@ class TestCompleteImportModeSpaces:
                 raise RefreshError("token expired")
 
         with patch(
-            "slack_migrator.core.cleanup._complete_single_space",
+            "slack_chat_migrator.core.cleanup._complete_single_space",
             side_effect=fake_complete,
         ):
             _complete_import_mode_spaces(
@@ -649,7 +651,7 @@ class TestCompleteImportModeSpaces:
                 raise TransportError("connection reset")
 
         with patch(
-            "slack_migrator.core.cleanup._complete_single_space",
+            "slack_chat_migrator.core.cleanup._complete_single_space",
             side_effect=fake_complete,
         ):
             _complete_import_mode_spaces(
@@ -673,8 +675,8 @@ class TestCompleteImportModeSpaces:
         ]
 
         with (
-            patch("slack_migrator.core.cleanup._complete_single_space"),
-            patch("slack_migrator.core.cleanup.log_with_context") as mock_log,
+            patch("slack_chat_migrator.core.cleanup._complete_single_space"),
+            patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log,
         ):
             _complete_import_mode_spaces(
                 ctx, state, chat, MagicMock(), None, import_mode_spaces
@@ -689,7 +691,7 @@ class TestCompleteImportModeSpaces:
 # ===================================================================
 
 
-@patch("slack_migrator.core.cleanup.add_regular_members")
+@patch("slack_chat_migrator.core.cleanup.add_regular_members")
 class TestCompleteSingleSpace:
     """Tests for _complete_single_space."""
 
@@ -729,7 +731,7 @@ class TestCompleteSingleSpace:
         )
         space_info = {"name": "spaces/abc", "displayName": "Slack #general"}
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             _complete_single_space(
                 ctx, state, chat, MagicMock(), None, "spaces/abc", space_info
             )
@@ -749,7 +751,7 @@ class TestCompleteSingleSpace:
         chat = _mock_chat(complete_import_side_effect=_http_error(400, "Bad Request"))
         space_info = {"name": "spaces/abc"}
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             _complete_single_space(
                 ctx, state, chat, MagicMock(), None, "spaces/abc", space_info
             )
@@ -891,9 +893,9 @@ class TestCompleteSingleSpace:
         chat = _mock_chat()
         space_info = {"name": "spaces/abc", "displayName": "Unknown Space"}
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             with patch(
-                "slack_migrator.core.cleanup._resolve_channel_name",
+                "slack_chat_migrator.core.cleanup._resolve_channel_name",
                 return_value=None,
             ):
                 _complete_single_space(
@@ -921,7 +923,7 @@ class TestCompleteSingleSpace:
         }
         mock_members.side_effect = RuntimeError("membership explosion")
 
-        with patch("slack_migrator.core.cleanup.log_with_context") as mock_log:
+        with patch("slack_chat_migrator.core.cleanup.log_with_context") as mock_log:
             _complete_single_space(
                 ctx, state, chat, MagicMock(), None, "spaces/abc", space_info
             )

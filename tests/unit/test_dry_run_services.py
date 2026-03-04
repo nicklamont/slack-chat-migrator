@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from slack_migrator.core.state import MigrationState
-from slack_migrator.services.chat.dry_run_service import (
+from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.services.chat.dry_run_service import (
     DryRunChatService,
     DryRunMedia,
     DryRunMembers,
@@ -19,7 +19,7 @@ from slack_migrator.services.chat.dry_run_service import (
     DryRunRequest,
     DryRunSpaces,
 )
-from slack_migrator.services.drive.dry_run_service import (
+from slack_chat_migrator.services.drive.dry_run_service import (
     DryRunDrives,
     DryRunDriveService,
     DryRunFiles,

@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
-import slack_migrator.utils.logging as log_module
-from slack_migrator.utils.logging import (
+import slack_chat_migrator.utils.logging as log_module
+from slack_chat_migrator.utils.logging import (
     EnhancedFormatter,
     ImmediateFlushHandler,
     JsonFormatter,
@@ -33,8 +33,8 @@ _STDLIB_PUTHEADER = http.client.HTTPConnection.putheader
 
 @pytest.fixture(autouse=True)
 def _clean_logger():
-    """Remove all handlers from the slack_migrator logger before and after each test."""
-    logger = logging.getLogger("slack_migrator")
+    """Remove all handlers from the slack_chat_migrator logger before and after each test."""
+    logger = logging.getLogger("slack_chat_migrator")
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
     yield
@@ -53,7 +53,7 @@ class TestJsonFormatter:
     def test_basic_format_contains_required_keys(self):
         formatter = JsonFormatter()
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.INFO,
             pathname="test.py",
             lineno=1,
@@ -70,7 +70,7 @@ class TestJsonFormatter:
     def test_excludes_standard_record_attributes(self):
         formatter = JsonFormatter()
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.INFO,
             pathname="test.py",
             lineno=1,
@@ -86,7 +86,7 @@ class TestJsonFormatter:
     def test_includes_extra_attributes(self):
         formatter = JsonFormatter()
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.INFO,
             pathname="test.py",
             lineno=1,
@@ -108,7 +108,7 @@ class TestEnhancedFormatter:
     """Tests for EnhancedFormatter."""
 
     def _make_record(
-        self, msg="test message", level=logging.INFO, name="slack_migrator"
+        self, msg="test message", level=logging.INFO, name="slack_chat_migrator"
     ):
         return logging.LogRecord(
             name=name,
@@ -146,7 +146,7 @@ class TestEnhancedFormatter:
         record = self._make_record()
         result = formatter.format(record)
         # When verbose=True, the verbose format overrides the supplied fmt
-        assert "slack_migrator" in result
+        assert "slack_chat_migrator" in result
         assert ":1]" in result
 
     def test_api_details_not_included_by_default(self):
@@ -229,7 +229,7 @@ class TestSetupLogger:
     def test_returns_logger_instance(self):
         result = setup_logger()
         assert isinstance(result, logging.Logger)
-        assert result.name == "slack_migrator"
+        assert result.name == "slack_chat_migrator"
 
     def test_logger_level_is_debug(self):
         result = setup_logger()
@@ -252,7 +252,7 @@ class TestSetupLogger:
         assert console_handlers[0].level == logging.DEBUG
 
     def test_clears_existing_handlers(self):
-        logger = logging.getLogger("slack_migrator")
+        logger = logging.getLogger("slack_chat_migrator")
         logger.addHandler(logging.StreamHandler())
         logger.addHandler(logging.StreamHandler())
         assert len(logger.handlers) == 2
@@ -432,13 +432,13 @@ class TestLogApiRequest:
 
     def test_no_log_when_debug_api_disabled(self):
         setup_logger(debug_api=False)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_request("GET", "https://example.com/api")
             mock_ctx.assert_not_called()
 
     def test_logs_when_debug_api_enabled(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_request("POST", "https://chat.googleapis.com/v1/spaces?key=abc")
             mock_ctx.assert_called_once()
             args = mock_ctx.call_args
@@ -448,7 +448,7 @@ class TestLogApiRequest:
 
     def test_sensitive_fields_redacted_in_data(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_request(
                 "POST",
                 "https://example.com/api",
@@ -461,14 +461,14 @@ class TestLogApiRequest:
 
     def test_passes_extra_kwargs(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_request("GET", "https://example.com", channel="general")
             call_kwargs = mock_ctx.call_args[1]
             assert call_kwargs["channel"] == "general"
 
     def test_handles_none_data(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_request("GET", "https://example.com", data=None)
             mock_ctx.assert_called_once()
             call_kwargs = mock_ctx.call_args[1]
@@ -483,13 +483,13 @@ class TestLogApiResponse:
 
     def test_no_log_when_debug_api_disabled(self):
         setup_logger(debug_api=False)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_response(200, "https://example.com")
             mock_ctx.assert_not_called()
 
     def test_logs_success_response(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_response(200, "https://example.com/api")
             mock_ctx.assert_called_once()
             msg = mock_ctx.call_args[0][1]
@@ -497,7 +497,7 @@ class TestLogApiResponse:
 
     def test_includes_dict_response_data(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_response(200, "https://example.com", response_data={"ok": True})
             call_kwargs = mock_ctx.call_args[1]
             assert "response" in call_kwargs
@@ -505,14 +505,14 @@ class TestLogApiResponse:
 
     def test_includes_list_response_data(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_response(200, "https://example.com", response_data=[1, 2, 3])
             call_kwargs = mock_ctx.call_args[1]
             assert "response" in call_kwargs
 
     def test_truncates_long_dict_response(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             large_data = {"key": "x" * 3000}
             log_api_response(200, "https://example.com", response_data=large_data)
             call_kwargs = mock_ctx.call_args[1]
@@ -520,14 +520,14 @@ class TestLogApiResponse:
 
     def test_truncates_long_string_response(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_response(200, "https://example.com", response_data="x" * 2000)
             call_kwargs = mock_ctx.call_args[1]
             assert "... [truncated]" in call_kwargs["response"]
 
     def test_handles_unserializable_response(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             # An object that will fail json.dumps but has a str representation
             class BadJson:
                 def __str__(self):
@@ -539,14 +539,14 @@ class TestLogApiResponse:
 
     def test_error_status_code_in_message(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_response(404, "https://example.com")
             msg = mock_ctx.call_args[0][1]
             assert "404" in msg
 
     def test_passes_extra_kwargs(self):
         setup_logger(debug_api=True)
-        with patch("slack_migrator.utils.logging.log_with_context") as mock_ctx:
+        with patch("slack_chat_migrator.utils.logging.log_with_context") as mock_ctx:
             log_api_response(200, "https://example.com", channel="dev")
             call_kwargs = mock_ctx.call_args[1]
             assert call_kwargs["channel"] == "dev"
@@ -604,12 +604,12 @@ class TestLogFailedMessage:
 class TestGetLogger:
     """Tests for get_logger()."""
 
-    def test_returns_slack_migrator_logger(self):
+    def test_returns_slack_chat_migrator_logger(self):
         result = get_logger()
-        assert result.name == "slack_migrator"
+        assert result.name == "slack_chat_migrator"
 
     def test_creates_handler_if_none_exist(self):
-        logger = logging.getLogger("slack_migrator")
+        logger = logging.getLogger("slack_chat_migrator")
         for h in logger.handlers[:]:
             logger.removeHandler(h)
         result = get_logger()
@@ -618,10 +618,10 @@ class TestGetLogger:
     def test_does_not_duplicate_handlers(self):
         # First call creates a handler
         get_logger()
-        handler_count = len(logging.getLogger("slack_migrator").handlers)
+        handler_count = len(logging.getLogger("slack_chat_migrator").handlers)
         # Second call should not add more handlers
         get_logger()
-        assert len(logging.getLogger("slack_migrator").handlers) == handler_count
+        assert len(logging.getLogger("slack_chat_migrator").handlers) == handler_count
 
 
 # --- setup_main_log_file tests ---
@@ -656,7 +656,7 @@ class TestSetupMainLogFile:
         handler = setup_main_log_file(str(tmp_path))
         # Error-level log with a channel should still pass the main filter
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.ERROR,
             pathname="test.py",
             lineno=1,
@@ -670,7 +670,7 @@ class TestSetupMainLogFile:
     def test_main_log_filter_passes_no_channel_logs(self, tmp_path):
         handler = setup_main_log_file(str(tmp_path))
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.INFO,
             pathname="test.py",
             lineno=1,
@@ -684,7 +684,7 @@ class TestSetupMainLogFile:
     def test_main_log_filter_excludes_channel_info_logs(self, tmp_path):
         handler = setup_main_log_file(str(tmp_path))
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.INFO,
             pathname="test.py",
             lineno=1,
@@ -699,7 +699,7 @@ class TestSetupMainLogFile:
     def test_main_log_filter_excludes_api_logs_without_debug(self, tmp_path):
         handler = setup_main_log_file(str(tmp_path), debug_api=False)
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.DEBUG,
             pathname="test.py",
             lineno=1,
@@ -713,7 +713,7 @@ class TestSetupMainLogFile:
     def test_main_log_filter_passes_empty_channel(self, tmp_path):
         handler = setup_main_log_file(str(tmp_path))
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.INFO,
             pathname="test.py",
             lineno=1,
@@ -747,7 +747,7 @@ class TestSetupChannelLogger:
     def test_channel_filter_passes_matching_channel(self, tmp_path):
         handler = setup_channel_logger(str(tmp_path), "general")
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.INFO,
             pathname="test.py",
             lineno=1,
@@ -761,7 +761,7 @@ class TestSetupChannelLogger:
     def test_channel_filter_excludes_different_channel(self, tmp_path):
         handler = setup_channel_logger(str(tmp_path), "general")
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.INFO,
             pathname="test.py",
             lineno=1,
@@ -775,7 +775,7 @@ class TestSetupChannelLogger:
     def test_channel_filter_excludes_no_channel(self, tmp_path):
         handler = setup_channel_logger(str(tmp_path), "general")
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.INFO,
             pathname="test.py",
             lineno=1,
@@ -816,7 +816,7 @@ class TestSetupChannelLogger:
     def test_channel_filter_api_data_matching_channel(self, tmp_path):
         handler = setup_channel_logger(str(tmp_path), "general", debug_api=True)
         record = logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=logging.DEBUG,
             pathname="test.py",
             lineno=1,
@@ -961,7 +961,7 @@ class TestEnhancedFormatterSanitization:
 
     def _make_record(self, msg="test message", level=logging.INFO):
         return logging.LogRecord(
-            name="slack_migrator",
+            name="slack_chat_migrator",
             level=level,
             pathname="test.py",
             lineno=1,

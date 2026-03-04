@@ -15,19 +15,19 @@ pre-commit install
 
 ```bash
 # Lint
-ruff check slack_migrator/ tests/
+ruff check src/slack_chat_migrator/ tests/
 
 # Format
-ruff format slack_migrator/ tests/
+ruff format src/slack_chat_migrator/ tests/
 
 # Type check
-mypy slack_migrator/
+mypy src/slack_chat_migrator/
 
 # Tests
 pytest tests/ -v
 
 # Tests with coverage
-pytest tests/ --cov=slack_migrator
+pytest tests/ --cov=slack_chat_migrator
 
 # Integration tests (require GCP credentials)
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json pytest tests/integration/ -v

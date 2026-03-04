@@ -2,9 +2,11 @@
 
 from unittest.mock import MagicMock
 
-from slack_migrator.core.state import MigrationState
-from slack_migrator.services.message_attachments import MessageAttachmentProcessor
-from slack_migrator.types import UploadResult
+from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.services.messages.message_attachments import (
+    MessageAttachmentProcessor,
+)
+from slack_chat_migrator.types import UploadResult
 
 # ---------------------------------------------------------------------------
 # Helpers

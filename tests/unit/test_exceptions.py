@@ -2,7 +2,7 @@
 
 import pytest
 
-from slack_migrator.exceptions import (
+from slack_chat_migrator.exceptions import (
     APIError,
     ConfigError,
     ExportError,
