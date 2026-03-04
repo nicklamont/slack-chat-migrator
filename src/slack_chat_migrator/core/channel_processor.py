@@ -201,7 +201,7 @@ class ChannelProcessor:
             return ChannelResult(should_abort=True, had_errors=True)
 
         # Delete space if errors
-        if channel_had_errors and not self.ctx.dry_run and not self.ctx.update_mode:
+        if channel_had_errors and not self.ctx.update_mode:
             self._delete_space_if_errors(space, channel)
 
         return ChannelResult(should_abort=False, had_errors=channel_had_errors)
@@ -562,9 +562,6 @@ class ChannelProcessor:
         self, channel: str, processed_count: int, failed_count: int
     ) -> bool:
         """Determine if the migration should abort after errors in a channel."""
-        if self.ctx.dry_run:
-            return False
-
         # Only consider aborting if we had failures
         if failed_count > 0:
             log_with_context(

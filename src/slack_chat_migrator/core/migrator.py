@@ -67,6 +67,7 @@ class SlackToChatMigrator:
         verbose: bool = False,
         update_mode: bool = False,
         debug_api: bool = False,
+        message_error_schedule: dict[int, int] | None = None,
     ):
         """Initialize the migrator with the required parameters."""
         self.creds_path = creds_path
@@ -77,6 +78,7 @@ class SlackToChatMigrator:
         self.verbose = verbose
         self.debug_api = debug_api
         self.update_mode = update_mode
+        self._message_error_schedule = message_error_schedule
 
         if self.update_mode:
             log_with_context(
@@ -140,6 +142,7 @@ class SlackToChatMigrator:
         self.chat: Any = None
         self.drive: Any = None
         self._api_services_initialized = False
+        self._dry_run_chat_service: DryRunChatService | None = None
 
         # UserResolver is created in _initialize_api_services() after chat
         # is available, avoiding the two-phase init pattern (create with
@@ -186,7 +189,11 @@ class SlackToChatMigrator:
                 logging.INFO,
                 "Dry-run mode: using no-op Chat and Drive services",
             )
-            raw_chat = DryRunChatService(self.state)
+            raw_chat = DryRunChatService(
+                self.state,
+                message_error_schedule=self._message_error_schedule,
+            )
+            self._dry_run_chat_service = raw_chat
             self.chat = ChatAdapter(raw_chat)
             self.drive = DriveAdapter(DryRunDriveService())
         else:

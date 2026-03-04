@@ -14,7 +14,19 @@ from typing import Any
 
 import pytest
 
+import slack_chat_migrator.constants as _constants
 from slack_chat_migrator.core.migrator import SlackToChatMigrator
+
+# ---------------------------------------------------------------------------
+# Auto-use fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Eliminate API throttle delays in integration tests."""
+    monkeypatch.setattr(_constants, "API_THROTTLE_MESSAGE_SECONDS", 0)
+
 
 # ---------------------------------------------------------------------------
 # Low-level builders
@@ -95,6 +107,7 @@ def make_migrator(
     *,
     admin_email: str = "admin@example.com",
     config_text: str = _MINIMAL_CONFIG,
+    message_error_schedule: dict[int, int] | None = None,
 ) -> SlackToChatMigrator:
     """Create a ``SlackToChatMigrator`` in dry-run mode, ready to ``migrate()``.
 
@@ -112,6 +125,7 @@ def make_migrator(
         workspace_admin=admin_email,
         config_path=str(config_path),
         dry_run=True,
+        message_error_schedule=message_error_schedule,
     )
 
     # Place output directory as a sibling of the export root so it doesn't

@@ -600,11 +600,11 @@ def _make_channel_processor(
 class TestShouldAbortImport:
     """Tests for ChannelProcessor._should_abort_import()."""
 
-    def test_no_abort_in_dry_run(self):
+    def test_dry_run_respects_abort_on_error(self):
         p = _make_channel_processor(
             dry_run=True, config=MigrationConfig(abort_on_error=True)
         )
-        assert p._should_abort_import("general", 10, 5) is False
+        assert p._should_abort_import("general", 10, 5) is True
 
     def test_no_abort_when_no_failures(self):
         p = _make_channel_processor(config=MigrationConfig(abort_on_error=True))

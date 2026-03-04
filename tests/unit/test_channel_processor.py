@@ -274,7 +274,7 @@ class TestProcessChannel:
         return_value="spaces/DRY",
     )
     def test_dry_run_mode(self, mock_create, mock_should, tmp_path):
-        """Dry run sets mode_prefix and does not delete space on errors."""
+        """Dry run follows the same cleanup path as real mode (delete is a no-op)."""
         processor = _make_processor(dry_run=True, export_root=tmp_path)
 
         ch_dir = tmp_path / "general"
@@ -295,8 +295,9 @@ class TestProcessChannel:
 
         assert should_abort is False
         assert had_errors is True
-        # In dry run mode, _delete_space_if_errors should NOT be called
-        mock_delete.assert_not_called()
+        # Dry-run mode now follows the same cleanup path; the underlying
+        # DryRunChatService.delete() is a no-op, so this is safe.
+        mock_delete.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -727,11 +728,11 @@ class TestShouldAbortImport:
 
         assert processor._should_abort_import("general", 5, 3) is False
 
-    def test_dry_run_always_returns_false(self):
-        """Dry run mode never aborts, even with failures and abort_on_error."""
+    def test_dry_run_respects_abort_on_error(self):
+        """Dry run mode follows the same abort logic as real mode."""
         processor = _make_processor(dry_run=True, abort_on_error=True)
 
-        assert processor._should_abort_import("general", 5, 3) is False
+        assert processor._should_abort_import("general", 5, 3) is True
 
 
 # ---------------------------------------------------------------------------
