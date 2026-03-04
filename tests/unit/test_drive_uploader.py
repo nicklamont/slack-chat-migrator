@@ -16,7 +16,6 @@ from slack_chat_migrator.services.drive.drive_uploader import (
 
 
 def _make_uploader(
-    dry_run=False,
     workspace_domain="example.com",
     service_account_email=None,
 ):
@@ -25,7 +24,6 @@ def _make_uploader(
     return DriveFileUploader(
         drive_service=drive_service,
         workspace_domain=workspace_domain,
-        dry_run=dry_run,
         service_account_email=service_account_email,
     )
 
@@ -216,7 +214,7 @@ class TestPreCacheFolderFileHashes:
 
     def test_dry_run_delegates_to_service(self):
         """Dry run mode delegates to the (injected) drive service."""
-        uploader = _make_uploader(dry_run=True)
+        uploader = _make_uploader()
         uploader.drive_service.list_files.return_value = {"files": []}
 
         count = uploader.pre_cache_folder_file_hashes("folder1")
@@ -491,7 +489,6 @@ class TestInit:
         )
 
         assert uploader.workspace_domain == "test.com"
-        assert uploader.dry_run is False
         assert uploader.service_account_email == "sa@test.com"
         assert uploader.file_hash_cache == {}
         assert uploader.folders_pre_cached == set()
@@ -635,7 +632,7 @@ class TestTransferOwnership:
 
     def test_dry_run_delegates_to_service(self):
         """Dry run mode delegates to the (injected) drive service."""
-        uploader = _make_uploader(dry_run=True)
+        uploader = _make_uploader()
         uploader.drive_service.create_permission.return_value = {}
 
         result = uploader.transfer_ownership("file1", "owner@example.com")

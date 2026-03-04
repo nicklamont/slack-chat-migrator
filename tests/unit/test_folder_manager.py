@@ -37,7 +37,7 @@ class TestCreateRootFolderInSharedDrive:
         svc.list_files.return_value = {"files": []}
         svc.create_file.return_value = {"id": "stub-folder-id"}
 
-        fm = FolderManager(svc, dry_run=True)
+        fm = FolderManager(svc)
         result = fm.create_root_folder_in_shared_drive("attachments", "drive123")
 
         assert result == "stub-folder-id"
@@ -99,7 +99,7 @@ class TestGetOrCreateChannelFolder:
         svc.list_files.return_value = {"files": []}
         svc.create_file.return_value = {"id": "stub-chan-id"}
 
-        fm = FolderManager(svc, dry_run=True)
+        fm = FolderManager(svc)
         result = fm.get_or_create_channel_folder("general", "parent123")
 
         assert result == "stub-chan-id"
@@ -216,7 +216,7 @@ class TestCreateRegularDriveFolder:
         svc.list_files.return_value = {"files": []}
         svc.create_file.return_value = {"id": "stub-regular-id"}
 
-        fm = FolderManager(svc, dry_run=True)
+        fm = FolderManager(svc)
         result = fm.create_regular_drive_folder("attachments")
 
         assert result == "stub-regular-id"
@@ -336,7 +336,7 @@ class TestSetChannelFolderPermissions:
     def test_dry_run_delegates_to_drive_service(self):
         """Dry run no longer short-circuits — DI stubs handle API calls."""
         svc = _make_drive_service()
-        fm = FolderManager(svc, dry_run=True)
+        fm = FolderManager(svc)
 
         result = fm.set_channel_folder_permissions(
             "folder123",

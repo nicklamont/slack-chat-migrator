@@ -24,15 +24,13 @@ if TYPE_CHECKING:
 class ChatFileUploader:
     """Handles direct file uploads to Google Chat API."""
 
-    def __init__(self, chat_service: ChatAdapter, dry_run: bool = False) -> None:
+    def __init__(self, chat_service: ChatAdapter) -> None:
         """Initialize the ChatFileUploader.
 
         Args:
             chat_service: Google Chat API service instance (ChatAdapter)
-            dry_run: Whether to run in dry run mode
         """
         self.chat_service = chat_service
-        self.dry_run = dry_run
         # Set by FileHandler before each channel is processed
         self.current_channel: str | None = None
 

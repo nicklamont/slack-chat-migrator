@@ -475,6 +475,7 @@ def add_users_to_space(
 
     # Check if the workspace admin is in the active users
     # Google Chat automatically adds the creator as a member, but we only want them if they were in the channel
+    assert ctx.workspace_admin is not None  # guaranteed in live mode
     admin_email = ctx.workspace_admin
     admin_user_id = None
 

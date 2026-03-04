@@ -23,8 +23,8 @@ from slack_chat_migrator.utils.logging import setup_logger
 @common_options
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
 def cleanup(
-    creds_path: str,
-    workspace_admin: str,
+    creds_path: str | None,
+    workspace_admin: str | None,
     config: str,
     verbose: bool,
     debug_api: bool,
@@ -45,6 +45,11 @@ def cleanup(
         yes: Skip confirmation prompt.
     """
     setup_logger(verbose, debug_api)
+
+    if not creds_path:
+        raise click.UsageError("--creds_path is required for cleanup")
+    if not workspace_admin:
+        raise click.UsageError("--workspace_admin is required for cleanup")
 
     if not yes:
         if not click.confirm(

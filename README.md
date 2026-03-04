@@ -100,13 +100,11 @@ pip install git+https://github.com/nicklamont/slack-chat-migrator.git
 cp config.yaml.example config.yaml
 # Edit config.yaml with your settings
 
-# 3. Validate (dry run)
+# 3. Validate (dry run — no credentials needed)
 slack-chat-migrator validate \
-  --creds_path /path/to/key.json \
-  --export_path ./slack_export \
-  --workspace_admin admin@company.com
+  --export_path ./slack_export
 
-# 4. Migrate
+# 4. Migrate (credentials required for live migration)
 slack-chat-migrator migrate \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
@@ -222,9 +220,9 @@ Run the full Slack-to-Google-Chat migration.
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `--creds_path` | Yes | Path to the service account credentials JSON file |
+| `--creds_path` | Live only | Path to the service account credentials JSON file (optional with `--dry_run`) |
 | `--export_path` | Yes | Path to the Slack export directory |
-| `--workspace_admin` | Yes | Email of workspace admin to impersonate |
+| `--workspace_admin` | Live only | Email of workspace admin to impersonate (optional with `--dry_run`) |
 | `--config` | No | Path to config YAML (default: config.yaml) |
 | `--dry_run` | No | Validation-only mode - performs comprehensive validation without making changes |
 | `--update_mode` | No | Update mode - update existing spaces instead of creating new ones |
@@ -246,13 +244,13 @@ Validate that the service account has all required API scopes. Does **not** requ
 
 ##### `validate`
 
-Dry-run validation of export data, user mappings, and channels. Equivalent to `migrate --dry_run` but expressed as an explicit command.
+Dry-run validation of export data, user mappings, and channels. Equivalent to `migrate --dry_run` but expressed as an explicit command. Credentials are optional — you can run a full validation with only `--export_path`.
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `--creds_path` | Yes | Path to the service account credentials JSON file |
+| `--creds_path` | No | Path to the service account credentials JSON file |
 | `--export_path` | Yes | Path to the Slack export directory |
-| `--workspace_admin` | Yes | Email of workspace admin to impersonate |
+| `--workspace_admin` | No | Email of workspace admin to impersonate |
 | `--config` | No | Path to config YAML (default: config.yaml) |
 | `--verbose` or `-v` | No | Enable verbose console logging |
 | `--debug_api` | No | Enable detailed API request/response logging |
@@ -289,7 +287,11 @@ slack-chat-migrator check-permissions \
   --creds_path /path/to/key.json \
   --workspace_admin admin@company.com
 
-# Validate export data without making changes
+# Validate export data without making changes (no credentials needed)
+slack-chat-migrator validate \
+  --export_path ./slack_export
+
+# Validate with credentials (also tests impersonation permissions)
 slack-chat-migrator validate \
   --creds_path /path/to/key.json \
   --export_path ./slack_export \
@@ -367,7 +369,11 @@ For a successful migration, follow this recommended workflow:
 
 5. **Run comprehensive validation** (automatically performed before every migration):
    ```bash
-   # For validation-only runs:
+   # Quick validation (no credentials needed):
+   slack-chat-migrator validate \
+     --export_path ./slack_export
+
+   # Full validation with permission testing:
    slack-chat-migrator validate \
      --creds_path /path/to/credentials.json \
      --export_path ./slack_export \
@@ -602,11 +608,9 @@ To identify users that need mapping:
 1. Run comprehensive validation to generate a report:
    ```bash
    slack-chat-migrator validate \
-     --creds_path /path/to/key.json \
-     --export_path ./slack_export \
-     --workspace_admin admin@company.com
+     --export_path ./slack_export
    ```
-   This validates all aspects of the migration including user mappings, file access, and content formatting.
+   This validates user mappings, file access, and content formatting. No credentials are needed for validation.
 
 2. Review the validation report and add any required mappings to your `config.yaml` file under `user_mapping_overrides`
 

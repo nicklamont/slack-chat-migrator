@@ -18,7 +18,6 @@ def _make_http_error(status=404, content=b"Not Found"):
 
 
 def _make_manager(
-    dry_run=False,
     shared_drive_name="Imported Slack Attachments",
     shared_drive_id=None,
 ):
@@ -33,7 +32,6 @@ def _make_manager(
     manager = SharedDriveManager(
         drive_service=drive_service,
         config=config,
-        dry_run=dry_run,
     )
     return manager, drive_service
 
@@ -43,7 +41,7 @@ class TestValidateSharedDrive:
 
     def test_dry_run_delegates_to_drive_service(self):
         """Dry run no longer short-circuits — DI stubs handle it."""
-        manager, drive_service = _make_manager(dry_run=True)
+        manager, drive_service = _make_manager()
         drive_service.get_drive.return_value = {"id": "some-drive-id"}
 
         result = manager.validate_shared_drive("some-drive-id")
@@ -76,7 +74,7 @@ class TestGetOrCreateSharedDrive:
 
     def test_dry_run_delegates_to_drive_service(self):
         """Dry run no longer short-circuits — DI stubs handle it."""
-        manager, drive_service = _make_manager(dry_run=True)
+        manager, drive_service = _make_manager()
         drive_service.list_drives.return_value = {
             "drives": [{"id": "stub-id", "name": "Imported Slack Attachments"}]
         }
@@ -156,7 +154,6 @@ class TestGetOrCreateSharedDrive:
         manager = SharedDriveManager(
             drive_service=drive_service,
             config=config,
-            dry_run=False,
         )
         drive_service.list_drives.return_value = {
             "drives": [

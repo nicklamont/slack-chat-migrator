@@ -25,18 +25,15 @@ class FolderManager:
         self,
         drive_service: DriveAdapter,
         workspace_domain: str | None = None,
-        dry_run: bool = False,
     ) -> None:
         """Initialize the FolderManager.
 
         Args:
             drive_service: DriveAdapter instance for Google Drive API calls
             workspace_domain: The workspace domain for permissions
-            dry_run: Whether to run in dry run mode
         """
         self.drive_service = drive_service
         self.workspace_domain = workspace_domain
-        self.dry_run = dry_run
         self.folder_cache: dict[str, str] = {}
 
     def create_root_folder_in_shared_drive(
