@@ -164,7 +164,35 @@ def generate_user_map(
             )
 
     if not user_map:
-        raise UserMappingError("No valid users found in users.json")
+        total = len(users)
+        no_id = sum(1 for u in users if not u.get("id"))
+        no_email = len(users_without_email)
+
+        lines = [
+            f"No valid users found in users.json ({total} entries parsed).",
+        ]
+        if no_id > 0:
+            lines.append(f"  - {no_id}/{total} entries have no 'id' field.")
+            # Show a sample entry to help diagnose schema issues
+            # no_id > 0 guarantees users is non-empty
+            sample_keys = list(users[0].keys())[:8]
+            lines.append(f"  - Sample entry keys: {sample_keys}")
+            lines.append(
+                "  - Expected format: each entry needs 'id' and 'profile.email'."
+            )
+        if no_email > 0:
+            lines.append(f"  - {no_email} users have no email in 'profile.email'.")
+        if ignored_bots_count > 0:
+            lines.append(
+                f"  - {ignored_bots_count} bot users were ignored (ignore_bots enabled)."
+            )
+        lines.append(
+            "  Tip: map users manually via user_mapping_overrides in config.yaml."
+        )
+
+        detail = "\n".join(lines)
+        log_with_context(logging.ERROR, detail)
+        raise UserMappingError(detail)
 
     log_with_context(logging.INFO, f"Generated user mapping for {len(user_map)} users")
     if ignored_bots_count > 0:
