@@ -282,6 +282,9 @@ class ChannelProcessor:
                 channel=channel,
             )
 
+        # Resource discovery queries the Chat API for the last message
+        # timestamp (for resumption).  Skipped in dry-run because the stub
+        # always returns an empty list — there are no real messages to find.
         if not self.ctx.dry_run or self.ctx.update_mode:
             self._discover_channel_resources(channel)
 
@@ -374,7 +377,7 @@ class ChannelProcessor:
 
             ts = m["ts"]
 
-            if ts in processed_ts and not self.ctx.dry_run:
+            if ts in processed_ts:
                 processed_count += 1
                 continue
 

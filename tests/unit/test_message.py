@@ -10,6 +10,7 @@ from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.core.context import MigrationContext
 from slack_chat_migrator.core.state import MigrationState, _default_migration_summary
 from slack_chat_migrator.services.messages.message_sender import (
+    _resolve_chat_service,
     send_intro,
     send_message,
     track_message_stats,
@@ -977,3 +978,46 @@ class TestLogSpaceMappingConflicts:
 
         # Should not raise
         log_space_mapping_conflicts(state)
+
+
+class TestResolveChatService:
+    """Unit tests for _resolve_chat_service dry-run bypass."""
+
+    def test_dry_run_returns_original_chat(self):
+        """In dry-run mode, the original chat adapter is returned without impersonation."""
+        chat = MagicMock()
+        user_resolver = MagicMock()
+
+        result = _resolve_chat_service(
+            chat,
+            user_resolver,
+            "alice@example.com",
+            "general",
+            "1.0",
+            "U001",
+            dry_run=True,
+        )
+
+        assert result is chat
+        user_resolver.get_delegate.assert_not_called()
+
+    def test_non_dry_run_delegates_to_resolver(self):
+        """In non-dry-run mode, impersonation is attempted via get_delegate."""
+        chat = MagicMock()
+        impersonated = MagicMock()
+        user_resolver = MagicMock()
+        user_resolver.get_delegate.return_value = impersonated
+        user_resolver.is_external_user.return_value = False
+
+        result = _resolve_chat_service(
+            chat,
+            user_resolver,
+            "alice@example.com",
+            "general",
+            "1.0",
+            "U001",
+            dry_run=False,
+        )
+
+        assert result is impersonated
+        user_resolver.get_delegate.assert_called_once_with("alice@example.com")

@@ -69,7 +69,11 @@ class SlackToChatMigrator:
         debug_api: bool = False,
         message_error_schedule: dict[int, int] | None = None,
     ):
-        """Initialize the migrator with the required parameters."""
+        """Initialize the migrator with the required parameters.
+
+        ``message_error_schedule`` is test-only: maps 1-based message
+        ordinal to HTTP status code for error injection in dry-run mode.
+        """
         self.creds_path = creds_path
         self.export_root = Path(export_path)
         self.workspace_admin = workspace_admin.strip()

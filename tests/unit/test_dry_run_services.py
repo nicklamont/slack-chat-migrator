@@ -9,9 +9,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+from googleapiclient.errors import HttpError
+
 from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.services.chat.dry_run_service import (
     DryRunChatService,
+    DryRunErrorRequest,
     DryRunMedia,
     DryRunMembers,
     DryRunMessages,
@@ -39,6 +43,36 @@ class TestDryRunRequest:
     def test_execute_returns_empty_dict(self):
         req = DryRunRequest({})
         assert req.execute() == {}
+
+
+# ===================================================================
+# DryRunErrorRequest
+# ===================================================================
+
+
+class TestDryRunErrorRequest:
+    def test_execute_raises_http_error(self):
+        req = DryRunErrorRequest(400)
+        with pytest.raises(HttpError) as exc_info:
+            req.execute()
+        assert exc_info.value.resp.status == 400
+
+    def test_execute_preserves_status_code(self):
+        req = DryRunErrorRequest(429)
+        with pytest.raises(HttpError) as exc_info:
+            req.execute()
+        assert exc_info.value.resp.status == 429
+
+    def test_error_schedule_indexing(self):
+        """Schedule key 1 fails the first call, key 2 fails the second."""
+        msgs = DryRunMessages(MigrationState(), error_schedule={2: 403})
+        # First call succeeds
+        result = msgs.create(parent="spaces/s1").execute()
+        assert "name" in result
+        # Second call fails
+        with pytest.raises(HttpError) as exc_info:
+            msgs.create(parent="spaces/s1").execute()
+        assert exc_info.value.resp.status == 403
 
 
 # ===================================================================
