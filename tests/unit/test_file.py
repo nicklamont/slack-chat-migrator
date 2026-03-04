@@ -116,7 +116,7 @@ class TestFileHandlerInit:
     def test_dry_run_uses_explicit_folder_id(self):
         handler = _make_handler(folder_id="custom", dry_run=True)
         assert handler._root_folder_id == "custom"
-        assert handler._drive_initialized is False
+        assert handler._drive_initialized is True
 
     def test_file_stats_initial_values(self):
         handler = _make_handler()

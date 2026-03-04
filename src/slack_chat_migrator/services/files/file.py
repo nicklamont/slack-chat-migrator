@@ -131,6 +131,7 @@ class FileHandler:
         # This avoids expensive operations before permission validation
         if folder_id:
             self._root_folder_id = folder_id
+            self._drive_initialized = True
 
     def ensure_drive_initialized(self) -> None:
         """Ensure drive structures are initialized. Call this after permission validation."""
