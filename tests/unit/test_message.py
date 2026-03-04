@@ -9,7 +9,6 @@ from httplib2 import Response
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.core.context import MigrationContext
 from slack_chat_migrator.core.state import MigrationState, _default_migration_summary
-from slack_chat_migrator.services.discovery import log_space_mapping_conflicts
 from slack_chat_migrator.services.messages.message_sender import (
     send_intro,
     send_message,
@@ -18,6 +17,7 @@ from slack_chat_migrator.services.messages.message_sender import (
 from slack_chat_migrator.services.messages.reaction_processor import (
     process_reactions_batch,
 )
+from slack_chat_migrator.services.spaces.discovery import log_space_mapping_conflicts
 from slack_chat_migrator.types import MessageResult
 
 

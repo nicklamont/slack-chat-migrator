@@ -18,9 +18,9 @@ from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.core.context import MigrationContext
 from slack_chat_migrator.core.state import MigrationState, _default_migration_summary
 from slack_chat_migrator.exceptions import SpacePermissionError
-from slack_chat_migrator.services.historical_membership import add_users_to_space
-from slack_chat_migrator.services.regular_membership import add_regular_members
-from slack_chat_migrator.services.space_creator import (
+from slack_chat_migrator.services.spaces.historical_membership import add_users_to_space
+from slack_chat_migrator.services.spaces.regular_membership import add_regular_members
+from slack_chat_migrator.services.spaces.space_creator import (
     IMPORT_MODE_DAYS_LIMIT,
     channel_has_external_users,
     create_space,
@@ -440,9 +440,9 @@ class TestAddUsersToSpace:
         (ch_dir / "2024-01-01.json").write_text(json.dumps(messages))
         return ch_dir
 
-    @patch("slack_chat_migrator.services.historical_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.historical_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.historical_membership.tqdm",
+        "slack_chat_migrator.services.spaces.historical_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_dry_run_processes_via_noop_service(self, mock_tqdm, mock_sleep, tmp_path):
@@ -464,9 +464,9 @@ class TestAddUsersToSpace:
         # With DI, dry-run calls flow through mock (DryRunChatService in prod)
         chat.create_membership.assert_called()
 
-    @patch("slack_chat_migrator.services.historical_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.historical_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.historical_membership.tqdm",
+        "slack_chat_migrator.services.spaces.historical_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_adds_user_with_membership_body(self, mock_tqdm, mock_sleep, tmp_path):
@@ -496,9 +496,9 @@ class TestAddUsersToSpace:
         assert "createTime" in body
         assert "deleteTime" in body
 
-    @patch("slack_chat_migrator.services.historical_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.historical_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.historical_membership.tqdm",
+        "slack_chat_migrator.services.spaces.historical_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_user_without_email_skipped(self, mock_tqdm, mock_sleep, tmp_path):
@@ -517,9 +517,9 @@ class TestAddUsersToSpace:
         # create_membership should not be called since user has no email
         chat.create_membership.assert_not_called()
 
-    @patch("slack_chat_migrator.services.historical_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.historical_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.historical_membership.tqdm",
+        "slack_chat_migrator.services.spaces.historical_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_409_conflict_counted_as_success(self, mock_tqdm, mock_sleep, tmp_path):
@@ -541,9 +541,9 @@ class TestAddUsersToSpace:
         # Should not raise
         add_users_to_space(ctx, state, chat, ur, "spaces/dev", "dev")
 
-    @patch("slack_chat_migrator.services.historical_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.historical_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.historical_membership.tqdm",
+        "slack_chat_migrator.services.spaces.historical_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_other_http_error_counted_as_failure(self, mock_tqdm, mock_sleep, tmp_path):
@@ -565,9 +565,9 @@ class TestAddUsersToSpace:
         # Should not raise
         add_users_to_space(ctx, state, chat, ur, "spaces/dev", "dev")
 
-    @patch("slack_chat_migrator.services.historical_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.historical_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.historical_membership.tqdm",
+        "slack_chat_migrator.services.spaces.historical_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_unexpected_error_counted_as_failure(self, mock_tqdm, mock_sleep, tmp_path):
@@ -588,9 +588,9 @@ class TestAddUsersToSpace:
         # Should not raise
         add_users_to_space(ctx, state, chat, ur, "spaces/dev", "dev")
 
-    @patch("slack_chat_migrator.services.historical_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.historical_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.historical_membership.tqdm",
+        "slack_chat_migrator.services.spaces.historical_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_join_time_from_channel_join_event(self, mock_tqdm, mock_sleep, tmp_path):
@@ -620,9 +620,9 @@ class TestAddUsersToSpace:
         # The join time should use the channel_join timestamp (1699000000 -> 2023-11-03)
         assert "2023-11-03" in body["createTime"]
 
-    @patch("slack_chat_migrator.services.historical_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.historical_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.historical_membership.tqdm",
+        "slack_chat_migrator.services.spaces.historical_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_leave_time_from_channel_leave_event(self, mock_tqdm, mock_sleep, tmp_path):
@@ -658,9 +658,9 @@ class TestAddUsersToSpace:
         # Leave time should use the channel_leave timestamp (1701000000 -> 2023-11-26)
         assert "2023-11-26" in body["deleteTime"]
 
-    @patch("slack_chat_migrator.services.historical_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.historical_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.historical_membership.tqdm",
+        "slack_chat_migrator.services.spaces.historical_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_external_user_tracked(self, mock_tqdm, mock_sleep, tmp_path):
@@ -696,9 +696,9 @@ class TestAddUsersToSpace:
 
         assert "U001" in state.progress.active_users_by_channel["dev"]
 
-    @patch("slack_chat_migrator.services.historical_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.historical_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.historical_membership.tqdm",
+        "slack_chat_migrator.services.spaces.historical_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_metadata_members_added_with_default_join_time(
@@ -747,9 +747,9 @@ class TestAddUsersToSpace:
 class TestAddRegularMembers:
     """Tests for add_regular_members()."""
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_dry_run_processes_via_noop_service(self, mock_tqdm, mock_sleep):
@@ -769,9 +769,9 @@ class TestAddRegularMembers:
         # With DI, dry-run calls flow through mock (DryRunChatService in prod)
         chat.create_membership.assert_called()
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_adds_active_users_as_regular_members(self, mock_tqdm, mock_sleep):
@@ -795,9 +795,9 @@ class TestAddRegularMembers:
         assert "createTime" not in body
         assert "deleteTime" not in body
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_unmapped_user_skipped(self, mock_tqdm, mock_sleep):
@@ -810,9 +810,9 @@ class TestAddRegularMembers:
 
         chat.create_membership.assert_not_called()
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_409_conflict_counted_as_success(self, mock_tqdm, mock_sleep):
@@ -831,9 +831,9 @@ class TestAddRegularMembers:
         # Should not raise
         add_regular_members(ctx, state, chat, ur, None, "spaces/dev", "dev")
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_400_error_counted_as_failure(self, mock_tqdm, mock_sleep):
@@ -852,9 +852,9 @@ class TestAddRegularMembers:
         # Should not raise
         add_regular_members(ctx, state, chat, ur, None, "spaces/dev", "dev")
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_403_error_logged_with_extra_detail(self, mock_tqdm, mock_sleep):
@@ -873,9 +873,9 @@ class TestAddRegularMembers:
         # Should not raise
         add_regular_members(ctx, state, chat, ur, None, "spaces/dev", "dev")
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_unexpected_exception_counted_as_failure(self, mock_tqdm, mock_sleep):
@@ -923,9 +923,9 @@ class TestAddRegularMembers:
         # Verify the fallback loaded the members
         assert state.progress.active_users_by_channel["dev"] == ["U001", "U002"]
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_admin_removed_if_not_in_channel(self, mock_tqdm, mock_sleep):
@@ -956,9 +956,9 @@ class TestAddRegularMembers:
         # Admin should be removed (delete called with admin membership name)
         chat.delete_membership.assert_called()
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_admin_kept_if_in_channel(self, mock_tqdm, mock_sleep):
@@ -989,9 +989,9 @@ class TestAddRegularMembers:
         # Admin should NOT be removed
         chat.delete_membership.assert_not_called()
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_external_user_enables_external_access(self, mock_tqdm, mock_sleep):
@@ -1012,9 +1012,9 @@ class TestAddRegularMembers:
         # Space should be patched to enable external user access
         chat.patch_space.assert_called()
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_external_user_tracked_in_external_users_set(self, mock_tqdm, mock_sleep):
@@ -1033,9 +1033,9 @@ class TestAddRegularMembers:
 
         assert "ext@other.com" in state.users.external_users
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_drive_folder_permissions_updated(self, mock_tqdm, mock_sleep):
@@ -1056,9 +1056,9 @@ class TestAddRegularMembers:
 
         file_handler.folder_manager.set_channel_folder_permissions.assert_called_once()
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_verification_failure_does_not_raise(self, mock_tqdm, mock_sleep):
@@ -1078,9 +1078,9 @@ class TestAddRegularMembers:
         # Should not raise
         add_regular_members(ctx, state, chat, ur, None, "spaces/dev", "dev")
 
-    @patch("slack_chat_migrator.services.regular_membership.time.sleep")
+    @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     @patch(
-        "slack_chat_migrator.services.regular_membership.tqdm",
+        "slack_chat_migrator.services.spaces.regular_membership.tqdm",
         side_effect=lambda x, **kw: x,
     )
     def test_admin_found_by_email_field(self, mock_tqdm, mock_sleep):

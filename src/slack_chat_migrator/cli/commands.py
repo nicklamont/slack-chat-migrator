@@ -32,7 +32,7 @@ from slack_chat_migrator.cli.validate_cmd import validate  # noqa: F401
 
 # --- re-export names that tests patch via ``slack_chat_migrator.cli.commands.X`` ---
 from slack_chat_migrator.core.config import load_config  # noqa: F401
-from slack_chat_migrator.services.space_creator import (
+from slack_chat_migrator.services.spaces.space_creator import (
     cleanup_import_mode_spaces,  # noqa: F401
 )
 from slack_chat_migrator.utils.api import get_gcp_service  # noqa: F401

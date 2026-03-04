@@ -21,7 +21,7 @@ from slack_chat_migrator.core.migration_logging import (
 )
 from slack_chat_migrator.core.migrator import SlackToChatMigrator
 from slack_chat_migrator.core.state import MigrationState, _default_migration_summary
-from slack_chat_migrator.services.space_creator import (
+from slack_chat_migrator.services.spaces.space_creator import (
     _list_all_spaces,
     cleanup_import_mode_spaces,
 )
@@ -1207,14 +1207,14 @@ class TestListAllSpaces:
 class TestCleanupImportModeSpaces:
     """Tests for the cleanup_import_mode_spaces() standalone function."""
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_no_spaces_found(self, mock_list):
         mock_list.return_value = []
         chat_service = MagicMock()
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_no_spaces_in_import_mode(self, mock_list):
         mock_list.return_value = [{"name": "spaces/abc"}]
         chat_service = MagicMock()
@@ -1223,7 +1223,7 @@ class TestCleanupImportModeSpaces:
         cleanup_import_mode_spaces(chat_service)
         chat_service.complete_import.assert_not_called()
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_completes_import_mode_spaces(self, mock_list):
         mock_list.return_value = [{"name": "spaces/abc"}]
         chat_service = MagicMock()
@@ -1234,7 +1234,7 @@ class TestCleanupImportModeSpaces:
         cleanup_import_mode_spaces(chat_service)
         chat_service.complete_import.assert_called_once_with("spaces/abc")
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_preserves_external_user_access(self, mock_list):
         mock_list.return_value = [{"name": "spaces/xyz"}]
         chat_service = MagicMock()
@@ -1250,7 +1250,7 @@ class TestCleanupImportModeSpaces:
             body={"externalUserAllowed": True},
         )
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_handles_complete_import_http_error(self, mock_list):
         from googleapiclient.errors import HttpError
 
@@ -1268,7 +1268,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_handles_complete_import_refresh_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/fail"}]
         chat_service = MagicMock()
@@ -1282,7 +1282,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_handles_complete_import_transport_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/fail"}]
         chat_service = MagicMock()
@@ -1296,7 +1296,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise — TransportError is caught
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_skips_spaces_with_empty_name(self, mock_list):
         mock_list.return_value = [{"name": ""}, {"name": "spaces/ok"}]
         chat_service = MagicMock()
@@ -1308,7 +1308,7 @@ class TestCleanupImportModeSpaces:
         # Only the "spaces/ok" space should be checked
         chat_service.get_space.assert_called()
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_handles_get_exception(self, mock_list):
         mock_list.return_value = [{"name": "spaces/err"}]
         chat_service = MagicMock()
@@ -1318,7 +1318,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_handles_get_transport_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/err"}]
         chat_service = MagicMock()
@@ -1328,7 +1328,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise — TransportError is caught
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_handles_patch_exception(self, mock_list):
         mock_list.return_value = [{"name": "spaces/ok"}]
         chat_service = MagicMock()
@@ -1342,7 +1342,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_handles_patch_transport_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/ok"}]
         chat_service = MagicMock()

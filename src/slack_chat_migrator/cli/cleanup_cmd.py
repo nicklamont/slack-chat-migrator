@@ -10,7 +10,7 @@ import click
 from slack_chat_migrator.cli.common import cli, common_options, handle_exception
 from slack_chat_migrator.core.config import load_config
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
-from slack_chat_migrator.services.space_creator import cleanup_import_mode_spaces
+from slack_chat_migrator.services.spaces.space_creator import cleanup_import_mode_spaces
 from slack_chat_migrator.utils.api import get_gcp_service
 from slack_chat_migrator.utils.logging import setup_logger
 

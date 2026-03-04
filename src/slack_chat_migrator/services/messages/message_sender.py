@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 from googleapiclient.errors import HttpError
 
 from slack_chat_migrator.constants import BOT_SUBTYPES, SYSTEM_SUBTYPES
-from slack_chat_migrator.services.discovery import should_process_message
 from slack_chat_migrator.services.messages.message_builder import (
     build_message_payload,
     build_user_map_with_overrides,
@@ -20,6 +19,7 @@ from slack_chat_migrator.services.messages.message_builder import (
 from slack_chat_migrator.services.messages.reaction_processor import (
     process_reactions_batch,
 )
+from slack_chat_migrator.services.spaces.discovery import should_process_message
 from slack_chat_migrator.types import FailedMessage, MessageResult, SendResult
 from slack_chat_migrator.utils.api import slack_ts_to_rfc3339
 from slack_chat_migrator.utils.formatting import parse_slack_blocks

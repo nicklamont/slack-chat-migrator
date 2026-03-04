@@ -23,7 +23,7 @@ from slack_chat_migrator.constants import (
     SPACE_NAME_PREFIX,
     SPACES_PAGE_SIZE,
 )
-from slack_chat_migrator.services.regular_membership import add_regular_members
+from slack_chat_migrator.services.spaces.regular_membership import add_regular_members
 from slack_chat_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:

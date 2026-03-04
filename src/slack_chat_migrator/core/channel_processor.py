@@ -29,8 +29,6 @@ from slack_chat_migrator.core.config import (
     should_process_channel,
 )
 from slack_chat_migrator.exceptions import SpacePermissionError
-from slack_chat_migrator.services.discovery import get_last_message_timestamp
-from slack_chat_migrator.services.historical_membership import add_users_to_space
 from slack_chat_migrator.services.messages.message_builder import (
     build_user_map_with_overrides,
 )
@@ -38,8 +36,10 @@ from slack_chat_migrator.services.messages.message_sender import (
     send_message,
     track_message_stats,
 )
-from slack_chat_migrator.services.regular_membership import add_regular_members
-from slack_chat_migrator.services.space_creator import create_space
+from slack_chat_migrator.services.spaces.discovery import get_last_message_timestamp
+from slack_chat_migrator.services.spaces.historical_membership import add_users_to_space
+from slack_chat_migrator.services.spaces.regular_membership import add_regular_members
+from slack_chat_migrator.services.spaces.space_creator import create_space
 from slack_chat_migrator.types import MessageResult
 from slack_chat_migrator.utils.logging import (
     is_debug_api_enabled,

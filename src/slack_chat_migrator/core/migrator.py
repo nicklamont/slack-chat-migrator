@@ -32,16 +32,16 @@ from slack_chat_migrator.core.migration_logging import (
 from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.services.chat.dry_run_service import DryRunChatService
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
-from slack_chat_migrator.services.discovery import (
-    load_existing_space_mappings,
-    load_space_mappings,
-    log_space_mapping_conflicts,
-)
 from slack_chat_migrator.services.drive.dry_run_service import DryRunDriveService
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
 from slack_chat_migrator.services.file import FileHandler
 from slack_chat_migrator.services.messages.message_attachments import (
     MessageAttachmentProcessor,
+)
+from slack_chat_migrator.services.spaces.discovery import (
+    load_existing_space_mappings,
+    load_space_mappings,
+    log_space_mapping_conflicts,
 )
 from slack_chat_migrator.services.user import generate_user_map
 from slack_chat_migrator.services.user_resolver import UserResolver
