@@ -566,7 +566,8 @@ class FileHandler:
         """
         actual_size = len(file_content)
         use_direct = (
-            mime_type in self.DIRECT_UPLOAD_MIME_TYPES
+            space is not None
+            and mime_type in self.DIRECT_UPLOAD_MIME_TYPES
             and actual_size <= DIRECT_UPLOAD_MAX_BYTES
             and not self.dry_run
             and self.chat_uploader.is_suitable_for_direct_upload(name, actual_size)

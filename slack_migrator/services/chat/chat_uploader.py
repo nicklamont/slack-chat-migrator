@@ -60,6 +60,14 @@ class ChatFileUploader:
             )
 
         try:
+            if not parent_space:
+                log_with_context(
+                    logging.ERROR,
+                    f"No parent space provided for Chat API upload of {filename}",
+                    channel=self._get_current_channel(),
+                )
+                return (None, None)
+
             # Get file size and MIME type
             file_size = os.path.getsize(file_path)
             mime_type, _ = mimetypes.guess_type(filename)
@@ -78,14 +86,6 @@ class ChatFileUploader:
                 log_with_context(
                     logging.WARNING,
                     f"File {filename} ({file_size} bytes) exceeds Chat API limit ({max_size} bytes)",
-                    channel=self._get_current_channel(),
-                )
-                return (None, None)
-
-            if not parent_space:
-                log_with_context(
-                    logging.ERROR,
-                    f"No parent space provided for Chat API upload of {filename}",
                     channel=self._get_current_channel(),
                 )
                 return (None, None)
