@@ -8,7 +8,7 @@ import httplib2
 import pytest
 from googleapiclient.errors import HttpError
 
-from slack_migrator.utils.api import (
+from slack_chat_migrator.utils.api import (
     RetryWrapper,
     _service_cache,
     escape_drive_query_value,
@@ -143,7 +143,7 @@ class TestRetryWrapperDelegation:
 class TestRetryWrapperExecuteSuccess:
     """Execute calls that succeed immediately."""
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_execute_returns_result_on_success(self, _sleep):
         inner = MagicMock()
         inner.execute.return_value = {"name": "spaces/abc"}
@@ -153,7 +153,7 @@ class TestRetryWrapperExecuteSuccess:
         assert result == {"name": "spaces/abc"}
         inner.execute.assert_called_once()
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_execute_uses_args_and_kwargs(self, _sleep):
         inner = MagicMock()
         inner.execute.return_value = "ok"
@@ -172,7 +172,7 @@ class TestRetryWrapperExecuteSuccess:
 class TestRetryWrapperRetries:
     """Execute calls that fail then succeed (retryable errors)."""
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_retries_on_429_then_succeeds(self, mock_sleep):
         inner = MagicMock()
         inner.execute.side_effect = [
@@ -185,7 +185,7 @@ class TestRetryWrapperRetries:
         assert inner.execute.call_count == 2
         mock_sleep.assert_called_once()
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_retries_on_500_then_succeeds(self, mock_sleep):
         inner = MagicMock()
         inner.execute.side_effect = [
@@ -197,7 +197,7 @@ class TestRetryWrapperRetries:
         assert result == "ok"
         assert inner.execute.call_count == 2
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_retries_on_503_then_succeeds(self, mock_sleep):
         inner = MagicMock()
         inner.execute.side_effect = [
@@ -209,7 +209,7 @@ class TestRetryWrapperRetries:
         assert result == "done"
         assert inner.execute.call_count == 2
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_retries_on_connection_error_then_succeeds(self, mock_sleep):
         """ConnectionError (subclass of OSError) is retried as transient."""
         inner = MagicMock()
@@ -222,7 +222,7 @@ class TestRetryWrapperRetries:
         assert result == "recovered"
         assert inner.execute.call_count == 2
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_retries_on_transport_error_then_succeeds(self, mock_sleep):
         """TransportError is retried as a transient network error."""
         from google.auth.exceptions import TransportError
@@ -246,7 +246,7 @@ class TestRetryWrapperRetries:
 class TestRetryWrapperNonRetryable:
     """Errors that should NOT be retried."""
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_400_not_retried(self, mock_sleep):
         inner = MagicMock()
         inner.execute.side_effect = _make_http_error(400, "Bad Request")
@@ -257,7 +257,7 @@ class TestRetryWrapperNonRetryable:
         inner.execute.assert_called_once()
         mock_sleep.assert_not_called()
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_403_not_retried(self, mock_sleep):
         inner = MagicMock()
         inner.execute.side_effect = _make_http_error(403, "Forbidden")
@@ -268,7 +268,7 @@ class TestRetryWrapperNonRetryable:
         inner.execute.assert_called_once()
         mock_sleep.assert_not_called()
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_404_not_retried(self, mock_sleep):
         inner = MagicMock()
         inner.execute.side_effect = _make_http_error(404, "Not Found")
@@ -279,7 +279,7 @@ class TestRetryWrapperNonRetryable:
         inner.execute.assert_called_once()
         mock_sleep.assert_not_called()
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_attribute_error_not_retried(self, mock_sleep):
         """AttributeError is not a transient error and should not be retried."""
         inner = MagicMock()
@@ -300,7 +300,7 @@ class TestRetryWrapperNonRetryable:
 class TestRetryWrapperMaxRetries:
     """Verify the wrapper gives up after max_retries."""
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_raises_after_default_max_retries(self, mock_sleep):
         """Default max_retries is 3 → 4 total attempts (0..3)."""
         inner = MagicMock()
@@ -312,7 +312,7 @@ class TestRetryWrapperMaxRetries:
         # initial + 3 retries = 4 calls
         assert inner.execute.call_count == 4
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_raises_after_custom_max_retries(self, mock_sleep):
         """Honour max_retries parameter."""
         inner = MagicMock()
@@ -324,7 +324,7 @@ class TestRetryWrapperMaxRetries:
         # initial + 1 retry = 2 calls
         assert inner.execute.call_count == 2
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_zero_retries_raises_immediately(self, mock_sleep):
         inner = MagicMock()
         inner.execute.side_effect = _make_http_error(500, "Server Error")
@@ -335,7 +335,7 @@ class TestRetryWrapperMaxRetries:
         assert inner.execute.call_count == 1
         mock_sleep.assert_not_called()
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_non_transient_exception_not_retried(self, mock_sleep):
         """Non-transient exceptions (e.g. RuntimeError) are raised immediately."""
         inner = MagicMock()
@@ -347,7 +347,7 @@ class TestRetryWrapperMaxRetries:
         assert inner.execute.call_count == 1
         mock_sleep.assert_not_called()
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_max_retries_exhaustion_transport_error(self, mock_sleep):
         from google.auth.exceptions import TransportError
 
@@ -368,7 +368,7 @@ class TestRetryWrapperMaxRetries:
 class TestRetryWrapperBackoff:
     """Verify exponential backoff sleep durations."""
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_backoff_increases_exponentially(self, mock_sleep):
         inner = MagicMock()
         inner.execute.side_effect = [
@@ -384,7 +384,7 @@ class TestRetryWrapperBackoff:
         sleep_values = [call.args[0] for call in mock_sleep.call_args_list]
         assert sleep_values == [1.0, 2.0, 4.0]
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_backoff_respects_custom_initial_delay(self, mock_sleep):
         inner = MagicMock()
         inner.execute.side_effect = [
@@ -397,7 +397,7 @@ class TestRetryWrapperBackoff:
         # first attempt (attempt=0): delay * backoff^0 = 5 * 1 = 5
         mock_sleep.assert_called_once_with(5.0)
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_backoff_capped_at_max_delay(self, mock_sleep):
         """Sleep time should never exceed 60 seconds."""
         inner = MagicMock()
@@ -423,7 +423,7 @@ class TestRetryWrapperBackoff:
 class TestRetryWrapperChannelContext:
     """Verify channel context getter is invoked and tolerant of failures."""
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_channel_context_getter_called(self, _sleep):
         getter = MagicMock(return_value="general")
         inner = MagicMock()
@@ -433,7 +433,7 @@ class TestRetryWrapperChannelContext:
         wrapper.execute()
         getter.assert_called()
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_channel_context_getter_exception_ignored(self, _sleep):
         """If the getter raises, the call should still succeed."""
         getter = MagicMock(side_effect=RuntimeError("boom"))
@@ -444,7 +444,7 @@ class TestRetryWrapperChannelContext:
         result = wrapper.execute()
         assert result == "ok"
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_no_channel_context_getter(self, _sleep):
         """Works fine with no getter at all."""
         inner = MagicMock()
@@ -461,7 +461,7 @@ class TestRetryWrapperChannelContext:
 class TestRetryWrapperChaining:
     """Verify that chained calls like service.spaces().messages().execute() work."""
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_deep_chain_execute(self, _sleep):
         """Simulate service.spaces().messages().list().execute()."""
         # Build the chain from inside out
@@ -679,7 +679,7 @@ class TestExtractStatusCode:
 class TestRetryWrapperApiLogging:
     """Verify _log_api_request / _log_api_response behaviour."""
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_log_api_request_called_when_debug_enabled(self, _sleep):
         """When debug API is enabled, _log_api_request should be called."""
         inner = MagicMock()
@@ -696,7 +696,7 @@ class TestRetryWrapperApiLogging:
             wrapper.execute()
             mock_log_req.assert_called_once()
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_log_api_response_called_on_success(self, _sleep):
         """Response logging is called on successful execute."""
         inner = MagicMock()
@@ -717,7 +717,7 @@ class TestRetryWrapperApiLogging:
         """_log_api_request silently returns when debug is disabled."""
         wrapper = RetryWrapper(MagicMock())
         with patch(
-            "slack_migrator.utils.logging.is_debug_api_enabled", return_value=False
+            "slack_chat_migrator.utils.logging.is_debug_api_enabled", return_value=False
         ):
             # Should not raise
             wrapper._log_api_request(
@@ -729,9 +729,10 @@ class TestRetryWrapperApiLogging:
         wrapper = RetryWrapper(MagicMock())
         with (
             patch(
-                "slack_migrator.utils.logging.is_debug_api_enabled", return_value=True
+                "slack_chat_migrator.utils.logging.is_debug_api_enabled",
+                return_value=True,
             ),
-            patch("slack_migrator.utils.logging.log_api_request") as mock_log,
+            patch("slack_chat_migrator.utils.logging.log_api_request") as mock_log,
         ):
             wrapper._log_api_request(
                 {
@@ -749,9 +750,10 @@ class TestRetryWrapperApiLogging:
         wrapper = RetryWrapper(MagicMock())
         with (
             patch(
-                "slack_migrator.utils.logging.is_debug_api_enabled", return_value=True
+                "slack_chat_migrator.utils.logging.is_debug_api_enabled",
+                return_value=True,
             ),
-            patch("slack_migrator.utils.logging.log_api_request") as mock_log,
+            patch("slack_chat_migrator.utils.logging.log_api_request") as mock_log,
         ):
             wrapper._log_api_request(
                 {
@@ -769,9 +771,10 @@ class TestRetryWrapperApiLogging:
         wrapper = RetryWrapper(MagicMock())
         with (
             patch(
-                "slack_migrator.utils.logging.is_debug_api_enabled", return_value=True
+                "slack_chat_migrator.utils.logging.is_debug_api_enabled",
+                return_value=True,
             ),
-            patch("slack_migrator.utils.logging.log_api_request") as mock_log,
+            patch("slack_chat_migrator.utils.logging.log_api_request") as mock_log,
         ):
             wrapper._log_api_request(
                 {
@@ -789,7 +792,7 @@ class TestRetryWrapperApiLogging:
     def test_log_api_response_no_crash_when_debug_disabled(self):
         wrapper = RetryWrapper(MagicMock())
         with patch(
-            "slack_migrator.utils.logging.is_debug_api_enabled", return_value=False
+            "slack_chat_migrator.utils.logging.is_debug_api_enabled", return_value=False
         ):
             wrapper._log_api_response(
                 200,
@@ -802,9 +805,10 @@ class TestRetryWrapperApiLogging:
         wrapper = RetryWrapper(MagicMock())
         with (
             patch(
-                "slack_migrator.utils.logging.is_debug_api_enabled", return_value=True
+                "slack_chat_migrator.utils.logging.is_debug_api_enabled",
+                return_value=True,
             ),
-            patch("slack_migrator.utils.logging.log_api_response") as mock_log,
+            patch("slack_chat_migrator.utils.logging.log_api_response") as mock_log,
         ):
             wrapper._log_api_response(
                 201,
@@ -835,9 +839,9 @@ class TestGetGcpService:
         yield
         _service_cache.clear()
 
-    @patch("slack_migrator.utils.api.build")
+    @patch("slack_chat_migrator.utils.api.build")
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_creates_service_and_returns_retry_wrapper(self, mock_creds, mock_build):
         mock_cred_instance = MagicMock()
@@ -868,9 +872,9 @@ class TestGetGcpService:
             "chat", "v1", credentials=mock_delegated, cache_discovery=False
         )
 
-    @patch("slack_migrator.utils.api.build")
+    @patch("slack_chat_migrator.utils.api.build")
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_caches_service_by_key(self, mock_creds, mock_build):
         mock_cred_instance = MagicMock()
@@ -885,9 +889,9 @@ class TestGetGcpService:
         # build should only be called once — second call uses cache
         mock_build.assert_called_once()
 
-    @patch("slack_migrator.utils.api.build")
+    @patch("slack_chat_migrator.utils.api.build")
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_different_args_not_cached(self, mock_creds, mock_build):
         mock_cred_instance = MagicMock()
@@ -901,9 +905,9 @@ class TestGetGcpService:
         assert svc1 is not svc2
         assert mock_build.call_count == 2
 
-    @patch("slack_migrator.utils.api.build")
+    @patch("slack_chat_migrator.utils.api.build")
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_different_api_not_cached(self, mock_creds, mock_build):
         mock_cred_instance = MagicMock()
@@ -918,7 +922,7 @@ class TestGetGcpService:
         assert mock_build.call_count == 2
 
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_file_not_found_error(self, mock_creds):
         mock_creds.side_effect = FileNotFoundError("no such file")
@@ -927,7 +931,7 @@ class TestGetGcpService:
             get_gcp_service("/bad/path.json", "user@example.com", "chat", "v1")
 
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_invalid_credential_file(self, mock_creds):
         mock_creds.side_effect = ValueError("bad json")
@@ -936,7 +940,7 @@ class TestGetGcpService:
             get_gcp_service("/bad/creds.json", "user@example.com", "chat", "v1")
 
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_json_decode_error(self, mock_creds):
         mock_creds.side_effect = json.JSONDecodeError("err", "doc", 0)
@@ -944,9 +948,9 @@ class TestGetGcpService:
         with pytest.raises(ValueError, match="Invalid credential file format"):
             get_gcp_service("/bad/creds.json", "user@example.com", "chat", "v1")
 
-    @patch("slack_migrator.utils.api.build")
+    @patch("slack_chat_migrator.utils.api.build")
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_build_failure_propagates(self, mock_creds, mock_build):
         mock_cred_instance = MagicMock()
@@ -957,9 +961,9 @@ class TestGetGcpService:
         with pytest.raises(Exception, match="discovery failed"):
             get_gcp_service("/path/creds.json", "user@example.com", "chat", "v1")
 
-    @patch("slack_migrator.utils.api.build")
+    @patch("slack_chat_migrator.utils.api.build")
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_passes_retry_params_to_wrapper(self, mock_creds, mock_build):
         mock_cred_instance = MagicMock()
@@ -979,9 +983,9 @@ class TestGetGcpService:
         assert result._max_retries == 7
         assert result._retry_delay == 5
 
-    @patch("slack_migrator.utils.api.build")
+    @patch("slack_chat_migrator.utils.api.build")
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_channel_context_set_in_wrapper(self, mock_creds, mock_build):
         mock_cred_instance = MagicMock()
@@ -996,9 +1000,9 @@ class TestGetGcpService:
         # The channel context getter should return the channel passed
         assert result._channel_context_getter() == "general"
 
-    @patch("slack_migrator.utils.api.build")
+    @patch("slack_chat_migrator.utils.api.build")
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_no_channel_produces_none_context(self, mock_creds, mock_build):
         mock_cred_instance = MagicMock()
@@ -1059,9 +1063,9 @@ class TestServiceCacheTTL:
         yield
         _service_cache.clear()
 
-    @patch("slack_migrator.utils.api.build")
+    @patch("slack_chat_migrator.utils.api.build")
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_ttl_expiry_evicts_cached_service(self, mock_creds, mock_build):
         """A cached service older than _SERVICE_CACHE_TTL should be evicted."""
@@ -1083,9 +1087,9 @@ class TestServiceCacheTTL:
         assert mock_build.call_count == 2
         assert svc1 is not svc2
 
-    @patch("slack_migrator.utils.api.build")
+    @patch("slack_chat_migrator.utils.api.build")
     @patch(
-        "slack_migrator.utils.api.service_account.Credentials.from_service_account_file"
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
     )
     def test_fresh_cache_entry_not_evicted(self, mock_creds, mock_build):
         """A cache entry within TTL should be returned without rebuilding."""
@@ -1110,7 +1114,7 @@ class TestServiceCache401Eviction:
         yield
         _service_cache.clear()
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_401_clears_service_cache(self, _sleep):
         """A 401 HttpError in _wrap_execute should clear the service cache."""
         # Pre-populate the cache with a fake entry
@@ -1127,7 +1131,7 @@ class TestServiceCache401Eviction:
         # Cache should have been cleared by the 401 handler
         assert len(_service_cache) == 0
 
-    @patch("slack_migrator.utils.api.time.sleep")
+    @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_403_does_not_clear_service_cache(self, _sleep):
         """A 403 HttpError should NOT clear the service cache."""
         _service_cache["fake:key"] = (MagicMock(), 999999999.0)

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from slack_migrator.core.config import MigrationConfig
-from slack_migrator.core.context import MigrationContext
+from slack_chat_migrator.core.config import MigrationConfig
+from slack_chat_migrator.core.context import MigrationContext
 
 
 def _make_ctx(**overrides) -> MigrationContext:
@@ -133,7 +133,7 @@ class TestMigrationContextIntegrationWithMigrator:
         """Verify the migrator creates a ctx that matches its own attributes."""
         import json
 
-        from slack_migrator.core.migrator import SlackToChatMigrator
+        from slack_chat_migrator.core.migrator import SlackToChatMigrator
 
         # Set up minimal export
         users = [

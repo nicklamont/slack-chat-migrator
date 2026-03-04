@@ -1,4 +1,4 @@
-"""Tests for slack_migrator.cli.report module."""
+"""Tests for slack_chat_migrator.cli.report module."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from unittest.mock import MagicMock, patch
 
 import yaml
 
-from slack_migrator.cli.report import generate_report, print_dry_run_summary
-from slack_migrator.core.config import MigrationConfig
-from slack_migrator.core.context import MigrationContext
-from slack_migrator.core.state import MigrationState, _default_migration_summary
-from slack_migrator.types import FailedMessage, MigrationSummary
+from slack_chat_migrator.cli.report import generate_report, print_dry_run_summary
+from slack_chat_migrator.core.config import MigrationConfig
+from slack_chat_migrator.core.context import MigrationContext
+from slack_chat_migrator.core.state import MigrationState, _default_migration_summary
+from slack_chat_migrator.types import FailedMessage, MigrationSummary
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -308,7 +308,7 @@ class TestPrintDryRunSummary:
 class TestGenerateReport:
     """Tests for the generate_report function."""
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_basic_report_generation(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -333,7 +333,7 @@ class TestGenerateReport:
         assert report["migration_summary"]["failed_messages_count"] == 0
         assert report["migration_summary"]["channels_with_failures"] == 0
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_report_uses_dot_when_output_dir_none(
         self, mock_log, tmp_path, monkeypatch
     ):
@@ -348,7 +348,7 @@ class TestGenerateReport:
         assert result == os.path.join(".", "migration_report.yaml")
         assert os.path.exists(result)
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_report_contains_spaces_section(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -369,7 +369,7 @@ class TestGenerateReport:
         assert report["spaces"]["general"]["files_migrated"] == 2
         assert "random" in report["spaces"]
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_skipped_channels_when_no_space_created(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -385,7 +385,7 @@ class TestGenerateReport:
         assert "random" in report["skipped_channels"]
         assert "random" not in report["spaces"]
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_failed_messages_grouped_by_channel(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -408,7 +408,7 @@ class TestGenerateReport:
         assert report["spaces"]["general"]["failed_messages"] == 2
         assert report["spaces"]["random"]["failed_messages"] == 1
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_failed_messages_writes_channel_logs(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -434,7 +434,7 @@ class TestGenerateReport:
         assert "Error: timeout" in content
         assert '"text": "hello"' in content
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_failed_messages_with_no_payload(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -454,7 +454,7 @@ class TestGenerateReport:
         # "Payload:" should not appear since payload is empty dict
         assert "Payload:" not in content
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_failed_messages_unlisted_channel(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -470,7 +470,7 @@ class TestGenerateReport:
 
         assert "unlisted" in report["failed_channels"]
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_external_users_in_report(self, mock_log, tmp_path):
         ctx = _make_ctx(
             user_map={"U001": "alice@example.com", "U002": "ext@other.com"},
@@ -499,7 +499,7 @@ class TestGenerateReport:
         mappings = report["external_user_mappings_for_config"]
         assert any("user_mapping_overrides:" in line for line in mappings)
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_no_external_users_no_recommendation(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -516,7 +516,7 @@ class TestGenerateReport:
         assert "external_users" not in rec_types
         assert "external_user_mappings_for_config" not in report
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_users_without_email_in_report(self, mock_log, tmp_path):
         ctx = _make_ctx(
             users_without_email=[
@@ -549,7 +549,7 @@ class TestGenerateReport:
         rec_types = [r["type"] for r in report["recommendations"]]
         assert "users_without_email" in rec_types
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_users_without_email_app_user(self, mock_log, tmp_path):
         ctx = _make_ctx(
             users_without_email=[
@@ -572,7 +572,7 @@ class TestGenerateReport:
 
         assert report["users"]["users_without_email"]["U200"]["type"] == "Bot"
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_users_without_email_missing_id_skipped(self, mock_log, tmp_path):
         ctx = _make_ctx(
             users_without_email=[
@@ -591,7 +591,7 @@ class TestGenerateReport:
         # Should be empty since the user had no id
         assert report["users"]["users_without_email"] == {}
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_high_failure_rate_channels_recommendation(self, mock_log, tmp_path):
         config = MigrationConfig()
         config.max_failure_percentage = 10
@@ -612,7 +612,7 @@ class TestGenerateReport:
         rec_types = [r["type"] for r in report["recommendations"]]
         assert "high_failure_rate" in rec_types
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_empty_high_failure_rate_channels_no_recommendation(
         self, mock_log, tmp_path
     ):
@@ -630,7 +630,7 @@ class TestGenerateReport:
         rec_types = [r["type"] for r in report["recommendations"]]
         assert "high_failure_rate" not in rec_types
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_channel_conflicts_recommendation(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -647,7 +647,7 @@ class TestGenerateReport:
         rec_types = [r["type"] for r in report["recommendations"]]
         assert "duplicate_space_conflicts" in rec_types
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_no_channel_conflicts_no_recommendation(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -664,7 +664,7 @@ class TestGenerateReport:
         rec_types = [r["type"] for r in report["recommendations"]]
         assert "duplicate_space_conflicts" not in rec_types
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_skipped_reactions_recommendation(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -688,7 +688,7 @@ class TestGenerateReport:
         rec_types = [r["type"] for r in report["recommendations"]]
         assert "skipped_reactions" in rec_types
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_file_statistics_in_report(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -709,7 +709,7 @@ class TestGenerateReport:
         assert report["file_upload_details"]["total_files_processed"] == 10
         assert report["file_upload_details"]["successful_uploads"] == 8
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_file_statistics_exception_produces_empty_dict(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -728,7 +728,7 @@ class TestGenerateReport:
             report["file_upload_details"] is None or report["file_upload_details"] == {}
         )
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_active_users_by_channel_internal_and_external(self, mock_log, tmp_path):
         ctx = _make_ctx(
             user_map={
@@ -756,7 +756,7 @@ class TestGenerateReport:
         assert "bob@example.com" in general_space["internal_users"]
         assert "ext@other.com" in general_space["external_users"]
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_active_users_unmapped_user_skipped(self, mock_log, tmp_path):
         ctx = _make_ctx(user_map={"U001": "alice@example.com"})
         state = _make_state(output_dir=str(tmp_path))
@@ -777,7 +777,7 @@ class TestGenerateReport:
             == 1
         )
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_spaces_with_external_users_flag(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -793,7 +793,7 @@ class TestGenerateReport:
         assert report["spaces"]["general"]["external_users_allowed"] is True
         assert report["spaces"]["random"]["external_users_allowed"] is False
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_migration_issues_in_report(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -808,7 +808,7 @@ class TestGenerateReport:
 
         assert report["channel_issues"] == {"general": ["issue1", "issue2"]}
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_report_log_message(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -820,7 +820,7 @@ class TestGenerateReport:
         log_messages = [str(call) for call in mock_log.call_args_list]
         assert any("Migration report generated" in msg for msg in log_messages)
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_empty_channels_processed(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -836,7 +836,7 @@ class TestGenerateReport:
         assert report["migration_summary"]["channels_processed"] == 0
         assert report["spaces"] == {}
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_failed_messages_channel_log_write_failure(self, mock_log, tmp_path):
         """When writing channel logs fails, it should log an error but not crash."""
         ctx = _make_ctx()
@@ -858,7 +858,7 @@ class TestGenerateReport:
         with patch("builtins.open", side_effect=patched_open):
             generate_report(ctx, state, user_resolver)
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_failed_message_payload_not_serializable(self, mock_log, tmp_path):
         """When payload can't be JSON-serialized, it should use repr fallback."""
         ctx = _make_ctx()
@@ -888,7 +888,7 @@ class TestGenerateReport:
             content = f.read()
         assert "<Unserializable>" in content
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_no_failed_messages_no_channel_logs(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))
@@ -901,7 +901,7 @@ class TestGenerateReport:
         logs_dir = os.path.join(str(tmp_path), "channel_logs")
         assert not os.path.exists(logs_dir)
 
-    @patch("slack_migrator.cli.report.log_with_context")
+    @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_timestamp_in_report(self, mock_log, tmp_path):
         ctx = _make_ctx()
         state = _make_state(output_dir=str(tmp_path))

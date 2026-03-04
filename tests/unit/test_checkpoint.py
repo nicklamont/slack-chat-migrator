@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from slack_migrator.core.checkpoint import (
+from slack_chat_migrator.core.checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
     CheckpointData,
     clear_checkpoint,

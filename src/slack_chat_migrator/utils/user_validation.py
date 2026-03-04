@@ -1,0 +1,475 @@
+"""
+Simple unmapped user tracking integrated into existing user mapping logic.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections import defaultdict
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+from slack_chat_migrator.core.config import MigrationConfig
+from slack_chat_migrator.utils.logging import log_with_context
+
+
+class UserType(str, Enum):
+    """Classification of Slack users for migration handling."""
+
+    REGULAR_USER = "regular_user"
+    WORKFLOW_BOT = "workflow_bot"
+    BOT = "bot"
+    DELETED_USER = "deleted_user"
+    RESTRICTED_USER = "restricted_user"
+    NO_EMAIL = "no_email"
+    MISSING_FROM_EXPORT = "missing_from_export"
+
+
+class UnmappedUserTracker:
+    """Simple tracker for unmapped users detected during migration."""
+
+    def __init__(self) -> None:
+        self.unmapped_users: set[str] = set()  # Just track the user IDs
+        self.user_contexts: dict[str, set[str]] = defaultdict(
+            set
+        )  # Track where they were encountered
+
+    def add_unmapped_user(self, user_id: str, context: str = "") -> None:
+        """Add an unmapped user to the tracker.
+
+        Args:
+            user_id: The unmapped Slack user ID
+            context: Optional context about where this user was encountered
+        """
+        self.unmapped_users.add(user_id)
+        if context:
+            self.user_contexts[user_id].add(context)
+
+    def track_unmapped_mention(
+        self, user_id: str, channel: str = "", message_ts: str = "", text: str = ""
+    ) -> None:
+        """Track an unmapped user mention with detailed context.
+
+        Args:
+            user_id: The unmapped Slack user ID
+            channel: The channel where the mention was found
+            message_ts: The timestamp of the message containing the mention
+            text: The message text containing the mention
+        """
+        # Create a descriptive context from the available information
+        context_parts = ["mention"]
+        if channel and channel != "unknown":
+            context_parts.append(f"channel:{channel}")
+        if message_ts and message_ts != "unknown":
+            context_parts.append(f"ts:{message_ts}")
+
+        context = ", ".join(context_parts)
+        self.add_unmapped_user(user_id, context)
+
+    def track_unmapped_channel_member(self, user_id: str, channel: str) -> None:
+        """Track an unmapped user found in channel membership.
+
+        Args:
+            user_id: The unmapped Slack user ID
+            channel: The channel where this user is a member
+        """
+        context = f"channel_member:#{channel}"
+        self.add_unmapped_user(user_id, context)
+
+    def has_unmapped_users(self) -> bool:
+        """Check if any unmapped users were found.
+
+        Returns:
+            True if at least one unmapped user has been recorded.
+        """
+        return len(self.unmapped_users) > 0
+
+    def get_unmapped_count(self) -> int:
+        """Get the count of unmapped users.
+
+        Returns:
+            Number of distinct unmapped user IDs.
+        """
+        return len(self.unmapped_users)
+
+    def get_unmapped_users_list(self) -> list[str]:
+        """Get a sorted list of unmapped user IDs.
+
+        Returns:
+            Alphabetically sorted list of unmapped Slack user IDs.
+        """
+        return sorted(self.unmapped_users)
+
+
+def log_unmapped_user_summary_for_dry_run(
+    unmapped_user_tracker: UnmappedUserTracker | None,
+    export_root: Path | str,
+) -> None:
+    """Log a simple summary of unmapped users during dry run.
+
+    Args:
+        unmapped_user_tracker: The tracker instance, or None if not available.
+        export_root: Path to the Slack export directory.
+    """
+    if unmapped_user_tracker is None or not unmapped_user_tracker.has_unmapped_users():
+        log_with_context(logging.INFO, "✅ No unmapped users detected during dry run")
+        return
+
+    tracker = unmapped_user_tracker
+    unmapped_users = tracker.get_unmapped_users_list()
+
+    # Analyze unmapped users to provide better guidance
+    user_analysis = analyze_unmapped_users(export_root, unmapped_users)
+
+    log_with_context(
+        logging.ERROR, f"🚨 DRY RUN DETECTED {len(unmapped_users)} UNMAPPED USERS 🚨"
+    )
+
+    log_with_context(logging.ERROR, "")
+    log_with_context(logging.ERROR, "IMMEDIATE ACTION REQUIRED:")
+    log_with_context(logging.ERROR, "Add these unmapped users to your config.yaml:")
+    log_with_context(logging.ERROR, "")
+    log_with_context(logging.ERROR, "user_mapping_overrides:")
+
+    for user_id in unmapped_users:
+        # Show contexts where this user was encountered if available
+        contexts = tracker.user_contexts.get(user_id, set())
+        context_info = (
+            f" # Found in: {', '.join(contexts)}" if contexts else " # Unmapped user"
+        )
+
+        # Add user type information from analysis
+        user_info = user_analysis.get(user_id, {})
+        user_type = user_info.get("type", "unknown")
+        if user_type != "unknown":
+            context_info += f" - {user_type}"
+
+        log_with_context(
+            logging.ERROR, f'  "{user_id}": "user@yourdomain.com"{context_info}'
+        )
+
+    log_with_context(logging.ERROR, "")
+    log_with_context(logging.ERROR, "📋 RECOMMENDED ACTIONS:")
+    log_with_context(logging.ERROR, "")
+
+    # Provide specific recommendations based on analysis
+    if user_analysis:
+        analysis_summary = categorize_user_analysis(user_analysis)
+
+        # Provide specific guidance for each category
+        if analysis_summary.get("Bots and workflow automations", 0) > 0:
+            log_with_context(logging.ERROR, "🤖 For BOTS and WORKFLOW AUTOMATIONS:")
+            log_with_context(
+                logging.ERROR,
+                "   OPTION 1 (Easiest): Enable 'ignore_bots: true' in config.yaml",
+            )
+            log_with_context(
+                logging.ERROR,
+                "   OPTION 2: Map to archive account 'bot-archive@yourdomain.com'",
+            )
+            log_with_context(
+                logging.ERROR,
+                "   NOTE: Bot integrations won't work in Google Chat anyway",
+            )
+            log_with_context(logging.ERROR, "")
+
+        if analysis_summary.get("Deleted users", 0) > 0:
+            log_with_context(logging.ERROR, "🗑️  For DELETED USERS:")
+            log_with_context(
+                logging.ERROR, "   RECOMMENDED: Map to 'deleted-user@yourdomain.com'"
+            )
+            log_with_context(logging.ERROR, "")
+
+        if analysis_summary.get("Users without email addresses", 0) > 0:
+            log_with_context(logging.ERROR, "📧 For USERS WITHOUT EMAIL:")
+            log_with_context(
+                logging.ERROR,
+                "   RECOMMENDED: Find their real email or use placeholder",
+            )
+            log_with_context(logging.ERROR, "")
+
+    log_with_context(logging.ERROR, "⚙️  ADD TO CONFIG.YAML:")
+    log_with_context(logging.ERROR, "")
+
+    # Check if we have bots and suggest the ignore_bots option
+    has_bots = any(
+        user_analysis.get(uid, {}).get("type") in [UserType.BOT, UserType.WORKFLOW_BOT]
+        for uid in unmapped_users
+    )
+    if has_bots:
+        log_with_context(logging.ERROR, "1. EASIEST SOLUTION - Ignore all bots:")
+        log_with_context(logging.ERROR, "   ignore_bots: true")
+        log_with_context(logging.ERROR, "")
+        log_with_context(logging.ERROR, "2. OR manually map specific users:")
+    else:
+        log_with_context(logging.ERROR, "Add user mappings:")
+
+    log_with_context(logging.ERROR, "user_mapping_overrides:")
+
+    for user_id in unmapped_users:
+        user_info = user_analysis.get(user_id, {})
+        user_type = user_info.get("type", "unknown")
+        user_name = user_info.get("name", "Unknown")
+
+        if user_type in [UserType.BOT, UserType.WORKFLOW_BOT]:
+            log_with_context(
+                logging.ERROR,
+                f'  "{user_id}": "bot-archive@yourdomain.com"  # {user_name} (bot)',
+            )
+        elif user_type == UserType.DELETED_USER:
+            log_with_context(
+                logging.ERROR,
+                f'  "{user_id}": "deleted-user@yourdomain.com"  # {user_name} (deleted)',
+            )
+        else:
+            log_with_context(
+                logging.ERROR,
+                f'  "{user_id}": "user@yourdomain.com"  # {user_name} ({user_type})',
+            )
+
+    log_with_context(logging.ERROR, "")
+    log_with_context(logging.ERROR, "💡 WHY IGNORE BOTS:")
+    log_with_context(
+        logging.ERROR,
+        "   • Most bot content is automated notifications or integrations",
+    )
+    log_with_context(
+        logging.ERROR, "   • Bot functionality won't work in Google Chat anyway"
+    )
+    log_with_context(logging.ERROR, "   • Focus on human conversations that matter")
+    log_with_context(
+        logging.ERROR, "   • Simplifies migration by removing mapping requirements"
+    )
+
+
+def analyze_unmapped_users(
+    export_root: Path | str, unmapped_user_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Analyze unmapped users to determine their types and provide better guidance.
+
+    Args:
+        export_root: Path to the Slack export directory.
+        unmapped_user_ids: List of unmapped user IDs to analyze
+
+    Returns:
+        Dict mapping user_id to analysis info (type, name, details, etc.)
+    """
+    analysis: dict[str, dict[str, Any]] = {}
+
+    try:
+        # Load users.json to get detailed user information
+        users_file = Path(export_root) / "users.json"
+        if not users_file.exists():
+            log_with_context(
+                logging.WARNING, "users.json not found, cannot analyze unmapped users"
+            )
+            return analysis
+
+        with open(users_file) as f:
+            users_data = json.load(f)
+
+        # Create lookup map for user data
+        user_lookup = {user["id"]: user for user in users_data}
+
+        for user_id in unmapped_user_ids:
+            user_data = user_lookup.get(user_id, {})
+
+            if not user_data:
+                analysis[user_id] = {
+                    "type": UserType.MISSING_FROM_EXPORT,
+                    "name": "Unknown",
+                }
+                continue
+
+            # Determine user type based on available data
+            user_type: UserType = UserType.REGULAR_USER
+            details = []
+
+            if user_data.get("is_bot", False):
+                if user_data.get("is_workflow_bot", False):
+                    user_type = UserType.WORKFLOW_BOT
+                    details.append("Slack workflow automation")
+                else:
+                    user_type = UserType.BOT
+                    details.append("Bot/app integration")
+            elif user_data.get("deleted", False):
+                user_type = UserType.DELETED_USER
+                details.append("Deleted from Slack")
+            elif user_data.get("is_restricted", False):
+                user_type = UserType.RESTRICTED_USER
+                details.append("Restricted/guest user")
+            elif not user_data.get("profile", {}).get("email"):
+                user_type = UserType.NO_EMAIL
+                details.append("No email address")
+
+            real_name = user_data.get("real_name", user_data.get("name", "Unknown"))
+
+            analysis[user_id] = {
+                "type": user_type,
+                "name": real_name,
+                "details": details,
+                "data": user_data,
+            }
+
+    except Exception as e:
+        log_with_context(logging.WARNING, f"Error analyzing unmapped users: {e}")
+
+    return analysis
+
+
+def categorize_user_analysis(
+    user_analysis: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    """Categorize analyzed users for summary reporting.
+
+    Args:
+        user_analysis: Analysis results from analyze_unmapped_users
+
+    Returns:
+        Dict mapping category names to counts
+    """
+    categories = {
+        "Bots and workflow automations": 0,
+        "Deleted users": 0,
+        "Users without email addresses": 0,
+        "Restricted/guest users": 0,
+        "Missing from export": 0,
+        "Other": 0,
+    }
+
+    for user_info in user_analysis.values():
+        user_type = user_info.get("type", "unknown")
+
+        if user_type in [UserType.BOT, UserType.WORKFLOW_BOT]:
+            categories["Bots and workflow automations"] += 1
+        elif user_type == UserType.DELETED_USER:
+            categories["Deleted users"] += 1
+        elif user_type == UserType.NO_EMAIL:
+            categories["Users without email addresses"] += 1
+        elif user_type == UserType.RESTRICTED_USER:
+            categories["Restricted/guest users"] += 1
+        elif user_type == UserType.MISSING_FROM_EXPORT:
+            categories["Missing from export"] += 1
+        else:
+            categories["Other"] += 1
+
+    return categories
+
+
+def initialize_unmapped_user_tracking() -> UnmappedUserTracker:
+    """Create and return a new unmapped user tracker.
+
+    Returns:
+        A fresh UnmappedUserTracker instance.
+    """
+    return UnmappedUserTracker()
+
+
+def scan_channel_members_for_unmapped_users(
+    unmapped_user_tracker: UnmappedUserTracker,
+    export_root: Path | str,
+    config: MigrationConfig,
+    user_map: dict[str, str],
+) -> None:
+    """Scan channels.json for users listed as members but not in user_map.
+
+    This is crucial because Google Chat will try to add all channel members
+    to the migrated spaces, so we need mappings for all of them.
+
+    Args:
+        unmapped_user_tracker: The tracker to record unmapped users into.
+        export_root: Path to the Slack export directory.
+        config: Migration configuration (for include/exclude channels, ignore_bots).
+        user_map: Mapping of Slack user IDs to Google email addresses.
+    """
+    tracker = unmapped_user_tracker
+
+    try:
+        channels_file = Path(export_root) / "channels.json"
+        if not channels_file.exists():
+            log_with_context(
+                logging.WARNING,
+                "channels.json not found, skipping channel member validation",
+            )
+            return
+
+        with open(channels_file) as f:
+            channels_data = json.load(f)
+
+        channels_to_check = []
+
+        # Determine which channels to check based on include/exclude settings
+        if config.include_channels:
+            # Only check included channels
+            include_set = set(config.include_channels)
+            channels_to_check = [
+                ch for ch in channels_data if ch.get("name") in include_set
+            ]
+        else:
+            # Check all channels except excluded ones
+            exclude_set = set(config.exclude_channels)
+            channels_to_check = [
+                ch for ch in channels_data if ch.get("name") not in exclude_set
+            ]
+
+        unmapped_members_found = 0
+        total_members_checked = 0
+
+        # Load user data once if ignore_bots is enabled
+        user_lookup = {}
+        ignore_bots = config.ignore_bots
+        if ignore_bots:
+            try:
+                users_file = Path(export_root) / "users.json"
+                if users_file.exists():
+                    with open(users_file) as f:
+                        users_data = json.load(f)
+                    user_lookup = {user["id"]: user for user in users_data}
+            except (OSError, json.JSONDecodeError) as e:
+                log_with_context(
+                    logging.WARNING, f"Error loading users.json for bot checking: {e}"
+                )
+                user_lookup = {}
+
+        for channel in channels_to_check:
+            channel_name = channel.get("name", "unknown")
+            members = channel.get("members", [])
+
+            for member_id in members:
+                total_members_checked += 1
+
+                # Check if this member has a mapping
+                if member_id not in user_map:
+                    # If ignore_bots is enabled, check if this is a bot before tracking as unmapped
+                    if ignore_bots and user_lookup:
+                        user_data = user_lookup.get(member_id, {})
+                        if user_data.get("is_bot", False):
+                            # Skip tracking this bot as unmapped
+                            log_with_context(
+                                logging.DEBUG,
+                                f"Skipping bot channel member {member_id} ({user_data.get('real_name', 'Unknown')}) in #{channel_name} - ignore_bots enabled",
+                            )
+                            continue
+
+                    tracker.track_unmapped_channel_member(member_id, channel_name)
+                    unmapped_members_found += 1
+
+        if unmapped_members_found > 0:
+            log_with_context(
+                logging.WARNING,
+                f"Found {unmapped_members_found} channel members without user mappings "
+                f"(checked {total_members_checked} total members across {len(channels_to_check)} channels)",
+            )
+        else:
+            log_with_context(
+                logging.INFO,
+                f"✅ All {total_members_checked} channel members have user mappings "
+                f"(checked {len(channels_to_check)} channels)",
+            )
+
+    except Exception as e:
+        log_with_context(
+            logging.ERROR, f"Error scanning channel members for unmapped users: {e}"
+        )

@@ -9,7 +9,7 @@ The codebase uses **dependency injection** — `SlackToChatMigrator` is the comp
 In **dry-run mode**, `DryRunChatService`/`DryRunDriveService` are injected in place of real API services, eliminating scattered `if dry_run` checks.
 
 ```
-slack_migrator/
+src/slack_chat_migrator/
 ├── cli/            # CLI entry points and report generation
 │   ├── commands.py    # CLI facade — re-exports from sub-modules
 │   ├── common.py      # Shared CLI infrastructure (DefaultGroup, options)
@@ -69,17 +69,17 @@ pre-commit install
 
 ```bash
 # Lint and format
-ruff check slack_migrator/ tests/          # lint
-ruff check --fix slack_migrator/ tests/    # lint + autofix
-ruff format slack_migrator/ tests/         # format
+ruff check src/slack_chat_migrator/ tests/          # lint
+ruff check --fix src/slack_chat_migrator/ tests/    # lint + autofix
+ruff format src/slack_chat_migrator/ tests/         # format
 
 # Type check
-mypy slack_migrator/
+mypy src/slack_chat_migrator/
 
 # Tests
 pytest tests/ -v                           # all tests
 pytest tests/unit/ -v                      # unit only
-pytest tests/ --cov=slack_migrator         # with coverage
+pytest tests/ --cov=slack_chat_migrator    # with coverage
 
 # Commit message validation
 cz check --message "fix: description"

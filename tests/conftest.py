@@ -1,10 +1,10 @@
-"""Shared test fixtures for the slack_migrator test suite."""
+"""Shared test fixtures for the slack_chat_migrator test suite."""
 
 import json
 
 import pytest
 
-from slack_migrator.core.config import MigrationConfig
+from slack_chat_migrator.core.config import MigrationConfig
 
 
 @pytest.fixture()

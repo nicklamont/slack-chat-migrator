@@ -6,8 +6,8 @@ import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from slack_migrator.exceptions import PermissionCheckError
-from slack_migrator.utils.permissions import (
+from slack_chat_migrator.exceptions import PermissionCheckError
+from slack_chat_migrator.utils.permissions import (
     PermissionCheckContext,
     PermissionValidator,
     check_permissions_standalone,
@@ -510,7 +510,7 @@ class TestValidatePermissions:
 class TestCheckPermissionsStandalone:
     """Tests for check_permissions_standalone."""
 
-    @patch("slack_migrator.utils.permissions.get_gcp_service")
+    @patch("slack_chat_migrator.utils.permissions.get_gcp_service")
     def test_happy_path(self, mock_get_service):
         """Happy path with mocked services."""
         chat_service = MagicMock()
@@ -535,7 +535,7 @@ class TestCheckPermissionsStandalone:
         assert result is True
         assert mock_get_service.call_count == 2
 
-    @patch("slack_migrator.utils.permissions.get_gcp_service")
+    @patch("slack_chat_migrator.utils.permissions.get_gcp_service")
     def test_uses_default_retry_params(self, mock_get_service):
         """Default retry parameters are passed to get_gcp_service."""
         chat_service = MagicMock()
@@ -557,7 +557,7 @@ class TestCheckPermissionsStandalone:
         assert calls[0].kwargs["max_retries"] == 3
         assert calls[0].kwargs["retry_delay"] == 2
 
-    @patch("slack_migrator.utils.permissions.get_gcp_service")
+    @patch("slack_chat_migrator.utils.permissions.get_gcp_service")
     def test_api_service_creation_fails(self, mock_get_service):
         """API service creation failure propagates."""
         mock_get_service.side_effect = ValueError("Invalid credentials")

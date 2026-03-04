@@ -12,9 +12,9 @@ from typing import Any
 
 import pytest
 
-from slack_migrator.core.config import MigrationConfig
-from slack_migrator.core.context import MigrationContext
-from slack_migrator.core.state import MigrationState
+from slack_chat_migrator.core.config import MigrationConfig
+from slack_chat_migrator.core.context import MigrationContext
+from slack_chat_migrator.core.state import MigrationState
 
 # ---------------------------------------------------------------------------
 # MigrationContext factory

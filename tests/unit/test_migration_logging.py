@@ -5,14 +5,14 @@ from __future__ import annotations
 import logging
 from unittest.mock import patch
 
-from slack_migrator.core.migration_logging import (
+from slack_chat_migrator.core.migration_logging import (
     _collect_statistics,
     log_migration_failure,
     log_migration_success,
 )
-from slack_migrator.core.state import MigrationState
-from slack_migrator.types import MigrationSummary
-from slack_migrator.utils.user_validation import UnmappedUserTracker
+from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.types import MigrationSummary
+from slack_chat_migrator.utils.user_validation import UnmappedUserTracker
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -124,7 +124,7 @@ class TestCollectStatistics:
 class TestLogMigrationSuccess:
     """Tests for log_migration_success."""
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_dry_run_success(self, mock_log):
         state = _make_state(channels_processed=["general"])
         log_migration_success(state, dry_run=True, duration=60.0)
@@ -134,7 +134,7 @@ class TestLogMigrationSuccess:
         assert first_call[0][0] == logging.INFO
         assert "DRY RUN VALIDATION COMPLETED" in first_call[0][1]
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_normal_success(self, mock_log):
         state = _make_state(
             channels_processed=["general"],
@@ -147,7 +147,7 @@ class TestLogMigrationSuccess:
         assert first_call[0][0] == logging.INFO
         assert "COMPLETED SUCCESSFULLY" in first_call[0][1]
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_no_work_interrupted_early(self, mock_log):
         """No spaces created AND no channels processed => interrupted early."""
         state = _make_state()
@@ -157,7 +157,7 @@ class TestLogMigrationSuccess:
         assert first_call[0][0] == logging.WARNING
         assert "INTERRUPTED DURING INITIALIZATION" in first_call[0][1]
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_no_work_but_channels_processed(self, mock_log):
         """Channels processed but no spaces/messages => interrupted before import."""
         state = _make_state(channels_processed=["general"])
@@ -167,7 +167,7 @@ class TestLogMigrationSuccess:
         assert first_call[0][0] == logging.WARNING
         assert "INTERRUPTED BEFORE ANY SPACES" in first_call[0][1]
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_duration_logged(self, mock_log):
         state = _make_state(
             channels_processed=["general"],
@@ -181,7 +181,7 @@ class TestLogMigrationSuccess:
         assert "1.5 minutes" in duration_call[0][1]
         assert "90.0 seconds" in duration_call[0][1]
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_zero_duration(self, mock_log):
         state = _make_state(
             channels_processed=["ch"],
@@ -194,7 +194,7 @@ class TestLogMigrationSuccess:
         assert "0.0 minutes" in duration_call[0][1]
         assert "0.0 seconds" in duration_call[0][1]
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_very_long_duration(self, mock_log):
         state = _make_state(
             channels_processed=["ch"],
@@ -206,7 +206,7 @@ class TestLogMigrationSuccess:
         duration_call = mock_log.call_args_list[1]
         assert "120.0 minutes" in duration_call[0][1]
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_issues_logged_as_warnings(self, mock_log):
         state = _make_state(
             channels_processed=["ch"],
@@ -233,7 +233,7 @@ class TestLogMigrationSuccess:
         assert any("Channels with errors: 1" in m for m in warning_messages)
         assert any("Incomplete imports: 1" in m for m in warning_messages)
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_no_issues_logged_when_clean(self, mock_log):
         state = _make_state(
             channels_processed=["ch"],
@@ -245,7 +245,7 @@ class TestLogMigrationSuccess:
         messages = [call[0][1] for call in mock_log.call_args_list]
         assert any("No issues detected" in m for m in messages)
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_dry_run_skips_space_message_stats(self, mock_log):
         """In dry-run mode, spaces/messages/reactions/files stats are not logged."""
         state = _make_state(channels_processed=["ch"])
@@ -266,7 +266,7 @@ class TestLogMigrationSuccess:
 class TestLogMigrationFailure:
     """Tests for log_migration_failure."""
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_keyboard_interrupt(self, mock_log):
         state = _make_state(channels_processed=["ch"])
         log_migration_failure(state, False, KeyboardInterrupt(), duration=30.0)
@@ -275,7 +275,7 @@ class TestLogMigrationFailure:
         assert first_call[0][0] == logging.WARNING
         assert "INTERRUPTED BY USER" in first_call[0][1]
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_keyboard_interrupt_dry_run(self, mock_log):
         state = _make_state(channels_processed=["ch"])
         log_migration_failure(state, True, KeyboardInterrupt(), duration=10.0)
@@ -283,7 +283,7 @@ class TestLogMigrationFailure:
         first_call = mock_log.call_args_list[0]
         assert "DRY RUN VALIDATION INTERRUPTED" in first_call[0][1]
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_runtime_error(self, mock_log):
         state = _make_state(channels_processed=["ch"])
         exc = RuntimeError("something went wrong")
@@ -294,7 +294,7 @@ class TestLogMigrationFailure:
         assert "MIGRATION FAILED" in first_call[0][1]
         assert first_call[1]["exception_type"] == "RuntimeError"
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_dry_run_failure(self, mock_log):
         state = _make_state()
         exc = ValueError("bad config")
@@ -303,7 +303,7 @@ class TestLogMigrationFailure:
         first_call = mock_log.call_args_list[0]
         assert "DRY RUN VALIDATION FAILED" in first_call[0][1]
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_duration_logged_on_failure(self, mock_log):
         state = _make_state()
         log_migration_failure(state, False, RuntimeError("fail"), duration=300.0)
@@ -312,7 +312,7 @@ class TestLogMigrationFailure:
         assert "5.0 minutes" in all_messages
         assert "300.0 seconds" in all_messages
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_zero_duration_on_failure(self, mock_log):
         state = _make_state()
         log_migration_failure(state, False, RuntimeError("instant"), duration=0.0)
@@ -320,7 +320,7 @@ class TestLogMigrationFailure:
         all_messages = " ".join(call[0][1] for call in mock_log.call_args_list)
         assert "0.0 minutes" in all_messages
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_progress_before_failure(self, mock_log):
         state = _make_state(
             channels_processed=["a", "b"],
@@ -334,7 +334,7 @@ class TestLogMigrationFailure:
         assert "Spaces created: 2" in all_messages
         assert "Messages migrated: 50" in all_messages
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_progress_before_interruption(self, mock_log):
         state = _make_state(
             channels_processed=["a"],
@@ -346,7 +346,7 @@ class TestLogMigrationFailure:
         all_messages = " ".join(call[0][1] for call in mock_log.call_args_list)
         assert "PROGRESS BEFORE INTERRUPTION" in all_messages
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_dry_run_skips_space_message_progress(self, mock_log):
         state = _make_state(channels_processed=["ch"])
         log_migration_failure(state, True, RuntimeError("fail"), duration=5.0)
@@ -355,7 +355,7 @@ class TestLogMigrationFailure:
         assert not any("Spaces created" in m for m in messages)
         assert not any("Messages migrated" in m for m in messages)
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_recovery_guidance_interrupt(self, mock_log):
         state = _make_state()
         log_migration_failure(state, False, KeyboardInterrupt(), duration=5.0)
@@ -363,7 +363,7 @@ class TestLogMigrationFailure:
         messages = [call[0][1] for call in mock_log.call_args_list]
         assert any("--update_mode" in m for m in messages)
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_recovery_guidance_interrupt_dry_run(self, mock_log):
         state = _make_state()
         log_migration_failure(state, True, KeyboardInterrupt(), duration=5.0)
@@ -371,7 +371,7 @@ class TestLogMigrationFailure:
         messages = [call[0][1] for call in mock_log.call_args_list]
         assert any("restart the validation" in m for m in messages)
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_recovery_guidance_error(self, mock_log):
         state = _make_state()
         log_migration_failure(state, False, RuntimeError("boom"), duration=5.0)
@@ -379,7 +379,7 @@ class TestLogMigrationFailure:
         messages = [call[0][1] for call in mock_log.call_args_list]
         assert any("--update_mode" in m for m in messages)
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_recovery_guidance_error_dry_run(self, mock_log):
         state = _make_state()
         log_migration_failure(state, True, ValueError("bad"), duration=5.0)
@@ -387,7 +387,7 @@ class TestLogMigrationFailure:
         messages = [call[0][1] for call in mock_log.call_args_list]
         assert any("Fix the validation issues" in m for m in messages)
 
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_different_exception_types(self, mock_log):
         """Verify various exception types are handled and reported correctly."""
         exceptions = [
@@ -402,8 +402,8 @@ class TestLogMigrationFailure:
             first_call = mock_log.call_args_list[0]
             assert first_call[1]["exception_type"] == expected_type
 
-    @patch("slack_migrator.core.migration_logging.traceback.format_exc")
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.traceback.format_exc")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_traceback_logged_on_error(self, mock_log, mock_format_exc):
         mock_format_exc.return_value = "Traceback (most recent call last):\n  ..."
         state = _make_state()
@@ -412,8 +412,8 @@ class TestLogMigrationFailure:
         messages = [call[0][1] for call in mock_log.call_args_list]
         assert any("Traceback" in m for m in messages)
 
-    @patch("slack_migrator.core.migration_logging.traceback.format_exc")
-    @patch("slack_migrator.core.migration_logging.log_with_context")
+    @patch("slack_chat_migrator.core.migration_logging.traceback.format_exc")
+    @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_traceback_not_logged_on_interrupt(self, mock_log, mock_format_exc):
         """KeyboardInterrupt should not produce a traceback log."""
         state = _make_state()

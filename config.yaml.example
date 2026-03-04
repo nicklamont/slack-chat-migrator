@@ -5,10 +5,10 @@
 shared_drive:
   # Option 1: Specify an existing shared drive by ID
   # id: "0AInA6b6Ej1Q2Uk9PVA"  # Replace with your shared drive ID
-  
+
   # Option 2: Specify a shared drive by name (will be created if it doesn't exist)
   name: "Imported Slack Attachments"
-  
+
   # If neither id nor name is specified, the tool will create a new shared drive
   # with the name "Imported Slack Attachments"
 
@@ -21,7 +21,7 @@ exclude_channels:
 # Space mapping configuration
 # The migrator uses the Google Chat API to discover existing spaces. If multiple spaces
 # have the same channel name, you need to specify which space ID to use for which channel.
-# 
+#
 # When duplicate spaces are found, the migrator will:
 # 1. Skip those specific channels (not abort the entire migration)
 # 2. Mark these channels as failed in the migration report
@@ -68,7 +68,7 @@ max_failure_percentage: 10
 
 # Strategy for completing import mode when errors occur
 # Options:
-#   "skip_on_error" - Don't complete import mode if there were errors (default)
+#   "skip_on_error" (default) - Don't complete import mode if there were errors
 #   "force_complete" - Complete import mode even if there were errors
 import_completion_strategy: "skip_on_error"
 
@@ -84,6 +84,3 @@ max_retries: 5
 
 # Initial delay between retry attempts (in seconds)
 retry_delay: 1.0
-
-# Batch size for message processing
-batch_size: 100

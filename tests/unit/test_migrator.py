@@ -10,23 +10,23 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from slack_migrator.core.channel_processor import ChannelProcessor
-from slack_migrator.core.checkpoint import CheckpointData
-from slack_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
-from slack_migrator.core.config import MigrationConfig
-from slack_migrator.core.context import MigrationContext
-from slack_migrator.core.migration_logging import (
+from slack_chat_migrator.core.channel_processor import ChannelProcessor
+from slack_chat_migrator.core.checkpoint import CheckpointData
+from slack_chat_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
+from slack_chat_migrator.core.config import MigrationConfig
+from slack_chat_migrator.core.context import MigrationContext
+from slack_chat_migrator.core.migration_logging import (
     log_migration_failure,
     log_migration_success,
 )
-from slack_migrator.core.migrator import SlackToChatMigrator
-from slack_migrator.core.state import MigrationState, _default_migration_summary
-from slack_migrator.services.space_creator import (
+from slack_chat_migrator.core.migrator import SlackToChatMigrator
+from slack_chat_migrator.core.state import MigrationState, _default_migration_summary
+from slack_chat_migrator.services.space_creator import (
     _list_all_spaces,
     cleanup_import_mode_spaces,
 )
-from slack_migrator.services.user_resolver import UserResolver
-from slack_migrator.types import MigrationSummary
+from slack_chat_migrator.services.user_resolver import UserResolver
+from slack_chat_migrator.types import MigrationSummary
 
 
 def _make_summary(**overrides: object) -> MigrationSummary:
@@ -425,7 +425,7 @@ class TestExportPathValidation:
         users = [{"id": "U001", "name": "alice", "profile": {"email": "a@b.com"}}]
         (tmp_path / "users.json").write_text(json.dumps(users))
         (tmp_path / "general").mkdir()
-        with caplog.at_level(logging.WARNING, logger="slack_migrator"):
+        with caplog.at_level(logging.WARNING, logger="slack_chat_migrator"):
             m = SlackToChatMigrator(
                 creds_path="fake_creds.json",
                 export_path=str(tmp_path),
@@ -447,7 +447,7 @@ class TestExportPathValidation:
         (tmp_path / "general").mkdir()
         # Create dir but no .json files inside it
 
-        with caplog.at_level(logging.WARNING, logger="slack_migrator"):
+        with caplog.at_level(logging.WARNING, logger="slack_chat_migrator"):
             _m = SlackToChatMigrator(
                 creds_path="fake_creds.json",
                 export_path=str(tmp_path),
@@ -716,7 +716,7 @@ class TestDeleteSpaceIfErrors:
 class TestInitializeApiServices:
     """Tests for _initialize_api_services()."""
 
-    @patch("slack_migrator.core.migrator.get_gcp_service")
+    @patch("slack_chat_migrator.core.migrator.get_gcp_service")
     def test_services_initialized(self, mock_gcp_service, tmp_path):
         m = _make_migrator(tmp_path, dry_run=False)
         mock_chat = MagicMock()
@@ -727,8 +727,8 @@ class TestInitializeApiServices:
         with patch.object(m, "_initialize_dependent_services"):
             m._initialize_api_services()
 
-        from slack_migrator.services.chat_adapter import ChatAdapter
-        from slack_migrator.services.drive_adapter import DriveAdapter
+        from slack_chat_migrator.services.chat_adapter import ChatAdapter
+        from slack_chat_migrator.services.drive_adapter import DriveAdapter
 
         assert isinstance(m.chat, ChatAdapter)
         assert m.chat._svc is mock_chat
@@ -738,10 +738,12 @@ class TestInitializeApiServices:
 
     def test_dry_run_uses_noop_services(self, tmp_path):
         """In dry-run mode, DryRunChatService wrapped in ChatAdapter is injected."""
-        from slack_migrator.services.chat.dry_run_service import DryRunChatService
-        from slack_migrator.services.chat_adapter import ChatAdapter
-        from slack_migrator.services.drive.dry_run_service import DryRunDriveService
-        from slack_migrator.services.drive_adapter import DriveAdapter
+        from slack_chat_migrator.services.chat.dry_run_service import DryRunChatService
+        from slack_chat_migrator.services.chat_adapter import ChatAdapter
+        from slack_chat_migrator.services.drive.dry_run_service import (
+            DryRunDriveService,
+        )
+        from slack_chat_migrator.services.drive_adapter import DriveAdapter
 
         m = _make_migrator(tmp_path, dry_run=True)
 
@@ -754,7 +756,7 @@ class TestInitializeApiServices:
         assert isinstance(m.drive._svc, DryRunDriveService)
         assert m._api_services_initialized is True
 
-    @patch("slack_migrator.core.migrator.get_gcp_service")
+    @patch("slack_chat_migrator.core.migrator.get_gcp_service")
     def test_no_double_initialization(self, mock_gcp_service, tmp_path):
         m = _make_migrator(tmp_path)
         m._api_services_initialized = True
@@ -1014,7 +1016,7 @@ class TestLogMigrationSuccess:
             channels_processed=["general"],
             messages_created=10,
         )
-        with caplog.at_level(logging.INFO, logger="slack_migrator"):
+        with caplog.at_level(logging.INFO, logger="slack_chat_migrator"):
             log_migration_success(m.state, m.dry_run, 60.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "DRY RUN" in messages
@@ -1029,7 +1031,7 @@ class TestLogMigrationSuccess:
             reactions_created=10,
             files_created=5,
         )
-        with caplog.at_level(logging.INFO, logger="slack_migrator"):
+        with caplog.at_level(logging.INFO, logger="slack_chat_migrator"):
             log_migration_success(m.state, m.dry_run, 120.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "Channels processed: 2" in messages
@@ -1045,7 +1047,7 @@ class TestLogMigrationSuccess:
         )
         m.state.errors.channels_with_errors = ["general"]
         m.state.errors.incomplete_import_spaces = [("spaces/abc", "general")]
-        with caplog.at_level(logging.WARNING, logger="slack_migrator"):
+        with caplog.at_level(logging.WARNING, logger="slack_chat_migrator"):
             log_migration_success(m.state, m.dry_run, 30.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "Channels with errors: 1" in messages
@@ -1054,7 +1056,7 @@ class TestLogMigrationSuccess:
     def test_logs_no_work_done(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=False)
         m.state.progress.migration_summary = _default_migration_summary()
-        with caplog.at_level(logging.WARNING, logger="slack_migrator"):
+        with caplog.at_level(logging.WARNING, logger="slack_chat_migrator"):
             log_migration_success(m.state, m.dry_run, 5.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "INTERRUPTED" in messages
@@ -1076,7 +1078,7 @@ class TestLogMigrationFailure:
             messages_created=5,
         )
         exc = RuntimeError("something broke")
-        with caplog.at_level(logging.ERROR, logger="slack_migrator"):
+        with caplog.at_level(logging.ERROR, logger="slack_chat_migrator"):
             log_migration_failure(m.state, m.dry_run, exc, 30.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "RuntimeError" in messages
@@ -1091,7 +1093,7 @@ class TestLogMigrationFailure:
             messages_created=5,
         )
         exc = KeyboardInterrupt()
-        with caplog.at_level(logging.WARNING, logger="slack_migrator"):
+        with caplog.at_level(logging.WARNING, logger="slack_chat_migrator"):
             log_migration_failure(m.state, m.dry_run, exc, 10.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "INTERRUPTED" in messages
@@ -1101,7 +1103,7 @@ class TestLogMigrationFailure:
         m = _make_migrator(tmp_path, dry_run=True)
         m.state.progress.migration_summary = _default_migration_summary()
         exc = ValueError("bad config")
-        with caplog.at_level(logging.ERROR, logger="slack_migrator"):
+        with caplog.at_level(logging.ERROR, logger="slack_chat_migrator"):
             log_migration_failure(m.state, m.dry_run, exc, 2.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "DRY RUN VALIDATION FAILED" in messages
@@ -1114,7 +1116,7 @@ class TestLogMigrationFailure:
             messages_created=100,
         )
         exc = Exception("api error")
-        with caplog.at_level(logging.ERROR, logger="slack_migrator"):
+        with caplog.at_level(logging.ERROR, logger="slack_chat_migrator"):
             log_migration_failure(m.state, m.dry_run, exc, 60.0)
         messages = " ".join(r.message for r in caplog.records)
         assert "Channels processed: 2" in messages
@@ -1205,14 +1207,14 @@ class TestListAllSpaces:
 class TestCleanupImportModeSpaces:
     """Tests for the cleanup_import_mode_spaces() standalone function."""
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_no_spaces_found(self, mock_list):
         mock_list.return_value = []
         chat_service = MagicMock()
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_no_spaces_in_import_mode(self, mock_list):
         mock_list.return_value = [{"name": "spaces/abc"}]
         chat_service = MagicMock()
@@ -1221,7 +1223,7 @@ class TestCleanupImportModeSpaces:
         cleanup_import_mode_spaces(chat_service)
         chat_service.complete_import.assert_not_called()
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_completes_import_mode_spaces(self, mock_list):
         mock_list.return_value = [{"name": "spaces/abc"}]
         chat_service = MagicMock()
@@ -1232,7 +1234,7 @@ class TestCleanupImportModeSpaces:
         cleanup_import_mode_spaces(chat_service)
         chat_service.complete_import.assert_called_once_with("spaces/abc")
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_preserves_external_user_access(self, mock_list):
         mock_list.return_value = [{"name": "spaces/xyz"}]
         chat_service = MagicMock()
@@ -1248,7 +1250,7 @@ class TestCleanupImportModeSpaces:
             body={"externalUserAllowed": True},
         )
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_handles_complete_import_http_error(self, mock_list):
         from googleapiclient.errors import HttpError
 
@@ -1266,7 +1268,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_handles_complete_import_refresh_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/fail"}]
         chat_service = MagicMock()
@@ -1280,7 +1282,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_handles_complete_import_transport_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/fail"}]
         chat_service = MagicMock()
@@ -1294,7 +1296,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise — TransportError is caught
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_skips_spaces_with_empty_name(self, mock_list):
         mock_list.return_value = [{"name": ""}, {"name": "spaces/ok"}]
         chat_service = MagicMock()
@@ -1306,7 +1308,7 @@ class TestCleanupImportModeSpaces:
         # Only the "spaces/ok" space should be checked
         chat_service.get_space.assert_called()
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_handles_get_exception(self, mock_list):
         mock_list.return_value = [{"name": "spaces/err"}]
         chat_service = MagicMock()
@@ -1316,7 +1318,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_handles_get_transport_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/err"}]
         chat_service = MagicMock()
@@ -1326,7 +1328,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise — TransportError is caught
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_handles_patch_exception(self, mock_list):
         mock_list.return_value = [{"name": "spaces/ok"}]
         chat_service = MagicMock()
@@ -1340,7 +1342,7 @@ class TestCleanupImportModeSpaces:
         # Should not raise
         cleanup_import_mode_spaces(chat_service)
 
-    @patch("slack_migrator.services.space_creator._list_all_spaces")
+    @patch("slack_chat_migrator.services.space_creator._list_all_spaces")
     def test_handles_patch_transport_error(self, mock_list):
         mock_list.return_value = [{"name": "spaces/ok"}]
         chat_service = MagicMock()
@@ -1365,7 +1367,7 @@ class TestCleanup:
 
     def test_dry_run_skips_cleanup(self, tmp_path, caplog):
         m = _make_migrator(tmp_path, dry_run=True)
-        with caplog.at_level(logging.INFO, logger="slack_migrator"):
+        with caplog.at_level(logging.INFO, logger="slack_chat_migrator"):
             run_cleanup(
                 m.ctx,
                 m.state,
@@ -1436,9 +1438,11 @@ class TestInitializeDependentServices:
         m.drive = MagicMock()
 
         with (
-            patch("slack_migrator.core.migrator.load_existing_space_mappings"),
-            patch("slack_migrator.core.migrator.FileHandler") as fh_cls,
-            patch("slack_migrator.core.migrator.MessageAttachmentProcessor") as map_cls,
+            patch("slack_chat_migrator.core.migrator.load_existing_space_mappings"),
+            patch("slack_chat_migrator.core.migrator.FileHandler") as fh_cls,
+            patch(
+                "slack_chat_migrator.core.migrator.MessageAttachmentProcessor"
+            ) as map_cls,
         ):
             fh_cls.return_value = MagicMock()
             map_cls.return_value = MagicMock()
@@ -1456,9 +1460,9 @@ class TestInitializeDependentServices:
         m.state.spaces.created_spaces["ch1"] = "space1"
         m.state.context.current_channel = "ch1"
         with (
-            patch("slack_migrator.core.migrator.load_existing_space_mappings"),
-            patch("slack_migrator.core.migrator.FileHandler"),
-            patch("slack_migrator.core.migrator.MessageAttachmentProcessor"),
+            patch("slack_chat_migrator.core.migrator.load_existing_space_mappings"),
+            patch("slack_chat_migrator.core.migrator.FileHandler"),
+            patch("slack_chat_migrator.core.migrator.MessageAttachmentProcessor"),
         ):
             m._initialize_dependent_services()
         assert m.state.spaces.created_spaces == {}
@@ -1470,10 +1474,10 @@ class TestInitializeDependentServices:
         m.drive = MagicMock()
 
         with (
-            patch("slack_migrator.core.migrator.load_existing_space_mappings"),
-            patch("slack_migrator.core.migrator.FileHandler"),
-            patch("slack_migrator.core.migrator.MessageAttachmentProcessor"),
-            patch("slack_migrator.core.migrator.log_with_context") as mock_log,
+            patch("slack_chat_migrator.core.migrator.load_existing_space_mappings"),
+            patch("slack_chat_migrator.core.migrator.FileHandler"),
+            patch("slack_chat_migrator.core.migrator.MessageAttachmentProcessor"),
+            patch("slack_chat_migrator.core.migrator.log_with_context") as mock_log,
         ):
             m._initialize_dependent_services()
         mock_log.assert_any_call(
@@ -1487,10 +1491,10 @@ class TestInitializeDependentServices:
 
         with (
             patch(
-                "slack_migrator.core.migrator.load_existing_space_mappings"
+                "slack_chat_migrator.core.migrator.load_existing_space_mappings"
             ) as mock_load,
-            patch("slack_migrator.core.migrator.FileHandler"),
-            patch("slack_migrator.core.migrator.MessageAttachmentProcessor"),
+            patch("slack_chat_migrator.core.migrator.FileHandler"),
+            patch("slack_chat_migrator.core.migrator.MessageAttachmentProcessor"),
         ):
             m._initialize_dependent_services()
         mock_load.assert_called_once_with(m.ctx, m.state, m.chat)
@@ -1519,13 +1523,13 @@ def _make_migrator_for_migrate(tmp_path, **kwargs):
 class TestMigrate:
     """Tests for SlackToChatMigrator.migrate()."""
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_success")
-    @patch("slack_migrator.core.migrator.clear_checkpoint")
-    @patch("slack_migrator.core.migrator.save_checkpoint")
-    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
-    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_happy_path_returns_true(
         self,
         mock_cp_cls,
@@ -1550,13 +1554,13 @@ class TestMigrate:
         mock_clear_cp.assert_called_once()
         mock_log_success.assert_called_once()
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_success")
-    @patch("slack_migrator.core.migrator.clear_checkpoint")
-    @patch("slack_migrator.core.migrator.save_checkpoint")
-    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
-    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_calls_reset_for_run(
         self,
         mock_cp_cls,
@@ -1579,13 +1583,13 @@ class TestMigrate:
             m.migrate()
         mock_reset.assert_called_once()
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_success")
-    @patch("slack_migrator.core.migrator.clear_checkpoint")
-    @patch("slack_migrator.core.migrator.save_checkpoint")
-    @patch("slack_migrator.core.migrator.load_checkpoint")
-    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_checkpoint_resume_skips_completed(
         self,
         mock_cp_cls,
@@ -1611,13 +1615,13 @@ class TestMigrate:
         # Channel "general" should be skipped — process_channel not called
         mock_cp.process_channel.assert_not_called()
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_success")
-    @patch("slack_migrator.core.migrator.clear_checkpoint")
-    @patch("slack_migrator.core.migrator.save_checkpoint")
-    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
-    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_abort_breaks_channel_loop(
         self,
         mock_cp_cls,
@@ -1651,13 +1655,13 @@ class TestMigrate:
         # Only called once because abort breaks the loop
         assert mock_cp.process_channel.call_count == 1
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_success")
-    @patch("slack_migrator.core.migrator.clear_checkpoint")
-    @patch("slack_migrator.core.migrator.save_checkpoint")
-    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
-    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_channel_errors_skip_checkpoint(
         self,
         mock_cp_cls,
@@ -1680,10 +1684,10 @@ class TestMigrate:
         # Channel had errors — save_checkpoint should NOT be called
         mock_save_cp.assert_not_called()
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_failure")
-    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_failure")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_exception_logs_failure_and_reraises(
         self,
         mock_cp_cls,
@@ -1703,14 +1707,14 @@ class TestMigrate:
         # Cleanup still called in finally block
         mock_cleanup.assert_called()
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_success")
-    @patch("slack_migrator.core.migrator.clear_checkpoint")
-    @patch("slack_migrator.core.migrator.save_checkpoint")
-    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
-    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
-    @patch("slack_migrator.core.migrator.load_space_mappings")
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.load_space_mappings")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_update_mode_discovers_spaces(
         self,
         mock_cp_cls,
@@ -1735,14 +1739,14 @@ class TestMigrate:
         mock_load_spaces.assert_called_once()
         assert m.state.spaces.created_spaces == {"general": "spaces/abc"}
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_success")
-    @patch("slack_migrator.core.migrator.clear_checkpoint")
-    @patch("slack_migrator.core.migrator.save_checkpoint")
-    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
-    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
-    @patch("slack_migrator.core.migrator.load_space_mappings")
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.load_space_mappings")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_update_mode_no_spaces_found(
         self,
         mock_cp_cls,
@@ -1768,13 +1772,13 @@ class TestMigrate:
             m.migrate()
         assert "No existing spaces found" in caplog.text
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_success")
-    @patch("slack_migrator.core.migrator.clear_checkpoint")
-    @patch("slack_migrator.core.migrator.save_checkpoint")
-    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
-    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_default_output_dir_created(
         self,
         mock_cp_cls,
@@ -1799,13 +1803,13 @@ class TestMigrate:
         assert m.state.context.output_dir is not None
         assert "migration_logs/run_" in m.state.context.output_dir
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_success")
-    @patch("slack_migrator.core.migrator.clear_checkpoint")
-    @patch("slack_migrator.core.migrator.save_checkpoint")
-    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
-    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_dry_run_unmapped_user_summary(
         self,
         mock_cp_cls,
@@ -1825,18 +1829,18 @@ class TestMigrate:
         mock_cp_cls.return_value = mock_cp
 
         with patch(
-            "slack_migrator.core.migrator.log_unmapped_user_summary_for_dry_run"
+            "slack_chat_migrator.core.migrator.log_unmapped_user_summary_for_dry_run"
         ) as mock_summary:
             m.migrate()
         mock_summary.assert_called_once()
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_success")
-    @patch("slack_migrator.core.migrator.clear_checkpoint")
-    @patch("slack_migrator.core.migrator.save_checkpoint")
-    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
-    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_unmapped_users_logged_before_migration(
         self,
         mock_cp_cls,
@@ -1861,12 +1865,12 @@ class TestMigrate:
             m.migrate()
         assert "unmapped users during setup" in caplog.text
 
-    @patch("slack_migrator.core.migrator.cleanup_channel_handlers")
-    @patch("slack_migrator.core.migrator.log_migration_failure")
-    @patch("slack_migrator.core.migrator.save_checkpoint")
-    @patch("slack_migrator.core.migrator.load_checkpoint", return_value=None)
-    @patch("slack_migrator.core.migrator.log_space_mapping_conflicts")
-    @patch("slack_migrator.core.migrator.ChannelProcessor")
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_failure")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
     def test_signal_handler_raises_keyboard_interrupt(
         self,
         mock_cp_cls,

@@ -7,15 +7,15 @@ import requests
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from slack_migrator.core.config import MigrationConfig, SharedDriveConfig
-from slack_migrator.core.state import MigrationState
-from slack_migrator.services.file import FileHandler, _safe_temp_suffix
-from slack_migrator.services.file_download import (
+from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
+from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.services.file import FileHandler, _safe_temp_suffix
+from slack_chat_migrator.services.file_download import (
     DownloadOutcome,
     _is_internal_host,
     download_file,
 )
-from slack_migrator.types import UploadResult
+from slack_chat_migrator.types import UploadResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -67,10 +67,10 @@ def _make_handler(
     chat_service = MagicMock()
 
     with (
-        patch("slack_migrator.services.file.SharedDriveManager"),
-        patch("slack_migrator.services.file.FolderManager"),
-        patch("slack_migrator.services.file.DriveFileUploader"),
-        patch("slack_migrator.services.file.ChatFileUploader"),
+        patch("slack_chat_migrator.services.file.SharedDriveManager"),
+        patch("slack_chat_migrator.services.file.FolderManager"),
+        patch("slack_chat_migrator.services.file.DriveFileUploader"),
+        patch("slack_chat_migrator.services.file.ChatFileUploader"),
     ):
         handler = FileHandler(
             drive_service=drive_service,
@@ -617,7 +617,7 @@ class TestDownloadFile:
             )
             assert result is DownloadOutcome.GOOGLE_DRIVE_FILE, f"Failed for URL: {url}"
 
-    @patch("slack_migrator.services.file.requests.get")
+    @patch("slack_chat_migrator.services.file.requests.get")
     def test_successful_download(self, mock_get):
         handler = _make_handler()
         mock_response = MagicMock()
@@ -637,7 +637,7 @@ class TestDownloadFile:
             timeout=60,
         )
 
-    @patch("slack_migrator.services.file.requests.get")
+    @patch("slack_chat_migrator.services.file.requests.get")
     def test_http_error_raises_for_retry(self, mock_get):
         handler = _make_handler()
         mock_response = MagicMock()
@@ -656,7 +656,7 @@ class TestDownloadFile:
                 }
             )
 
-    @patch("slack_migrator.services.file.requests.get")
+    @patch("slack_chat_migrator.services.file.requests.get")
     def test_auth_error_returns_none_no_raise(self, mock_get):
         handler = _make_handler()
         mock_response = MagicMock()
@@ -669,7 +669,7 @@ class TestDownloadFile:
         )
         assert result is None
 
-    @patch("slack_migrator.services.file.requests.get")
+    @patch("slack_chat_migrator.services.file.requests.get")
     def test_connection_error_re_raises(self, mock_get):
         handler = _make_handler()
         mock_get.side_effect = requests.exceptions.ConnectionError("conn refused")
@@ -688,7 +688,7 @@ class TestDownloadFile:
         # Trigger a generic exception in processing by providing a file_obj
         # that will cause issues after URL check
         with patch(
-            "slack_migrator.services.file.requests.get",
+            "slack_chat_migrator.services.file.requests.get",
             side_effect=ValueError("unexpected"),
         ):
             result = handler._download_file(
@@ -839,7 +839,7 @@ class TestConstants:
         assert FileHandler.DIRECT_UPLOAD_MIME_TYPES == expected
 
     def test_direct_upload_max_size(self):
-        from slack_migrator.constants import DIRECT_UPLOAD_MAX_BYTES
+        from slack_chat_migrator.constants import DIRECT_UPLOAD_MAX_BYTES
 
         assert DIRECT_UPLOAD_MAX_BYTES == 25 * 1024 * 1024
 
@@ -1109,7 +1109,9 @@ class TestUploadDirectToChat:
         handler = self._make_ready_handler()
         mock_user_service = MagicMock()
 
-        with patch("slack_migrator.services.file.ChatFileUploader") as MockUploader:
+        with patch(
+            "slack_chat_migrator.services.file.ChatFileUploader"
+        ) as MockUploader:
             mock_instance = MagicMock()
             mock_instance.upload_file_to_chat.return_value = (
                 {"uploadUri": "uri"},
@@ -2027,7 +2029,7 @@ class TestDownloadFileSSRF:
         result = download_file(file_obj, "general")
         assert result is None
 
-    @patch("slack_migrator.services.file_download.requests.get")
+    @patch("slack_chat_migrator.services.file_download.requests.get")
     def test_allows_https_public_url(self, mock_get):
         """Valid HTTPS URLs to public hosts should proceed to download."""
         mock_response = MagicMock()

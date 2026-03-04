@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from slack_migrator.services.chat_adapter import ChatAdapter
+from slack_chat_migrator.services.chat_adapter import ChatAdapter
 
 
 @pytest.fixture()

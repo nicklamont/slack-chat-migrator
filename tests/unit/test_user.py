@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from slack_migrator.core.config import MigrationConfig
-from slack_migrator.exceptions import ExportError, UserMappingError
-from slack_migrator.services.user import generate_user_map
+from slack_chat_migrator.core.config import MigrationConfig
+from slack_chat_migrator.exceptions import ExportError, UserMappingError
+from slack_chat_migrator.services.user import generate_user_map
 
 
 def _write_users_json(tmpdir: Path, users: list) -> Path:

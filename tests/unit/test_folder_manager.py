@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 from googleapiclient.errors import HttpError
 
-from slack_migrator.services.drive.folder_manager import (
+from slack_chat_migrator.services.drive.folder_manager import (
     FolderManager,
 )
 

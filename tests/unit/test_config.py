@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from slack_migrator.core.config import (
+from slack_chat_migrator.core.config import (
     ImportCompletionStrategy,
     MigrationConfig,
     create_default_config,

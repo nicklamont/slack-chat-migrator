@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from slack_migrator.services.drive.drive_uploader import (
+from slack_chat_migrator.services.drive.drive_uploader import (
     DriveFileUploader,
 )
 
@@ -319,7 +319,7 @@ class TestUploadFileToDrive:
         assert file_id == "DRY_FILE_test.txt"
         assert "dry-run" in url
 
-    @patch("slack_migrator.services.drive.drive_uploader.MediaFileUpload")
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_successful_upload(self, mock_media_cls, tmp_path):
         """Successful upload returns file metadata."""
         uploader = _make_uploader()
@@ -345,7 +345,7 @@ class TestUploadFileToDrive:
         assert file_id == "new_file_id"
         assert url == "https://new_link"
 
-    @patch("slack_migrator.services.drive.drive_uploader.MediaFileUpload")
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_http_error_during_upload(self, mock_media_cls, tmp_path):
         """HttpError during upload returns (None, None)."""
         uploader = _make_uploader()
@@ -367,7 +367,7 @@ class TestUploadFileToDrive:
         assert file_id is None
         assert url is None
 
-    @patch("slack_migrator.services.drive.drive_uploader.MediaFileUpload")
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_reuses_existing_file_by_hash(self, mock_media_cls, tmp_path):
         """Reuses existing file when hash matches."""
         uploader = _make_uploader()
@@ -399,7 +399,7 @@ class TestUploadFileToDrive:
         # create should NOT have been called
         uploader.drive_service.create_file.assert_not_called()
 
-    @patch("slack_migrator.services.drive.drive_uploader.MediaFileUpload")
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_reused_file_sets_poster_permission(self, mock_media_cls, tmp_path):
         """Sets poster permission on reused file when message_poster_email provided."""
         uploader = _make_uploader()
@@ -755,7 +755,7 @@ class TestFindFileByHashCacheMiss:
 class TestUploadFileToDriveAdditional:
     """Additional tests for upload_file_to_drive."""
 
-    @patch("slack_migrator.services.drive.drive_uploader.MediaFileUpload")
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_default_mime_type_fallback(self, mock_media_cls, tmp_path):
         """Unknown file extension falls back to application/octet-stream."""
         uploader = _make_uploader()
@@ -781,7 +781,7 @@ class TestUploadFileToDriveAdditional:
             str(test_file), mimetype="application/octet-stream"
         )
 
-    @patch("slack_migrator.services.drive.drive_uploader.MediaFileUpload")
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_upload_with_shared_drive(self, mock_media_cls, tmp_path):
         """Upload to shared drive includes supports_all_drives."""
         uploader = _make_uploader()
@@ -805,7 +805,7 @@ class TestUploadFileToDriveAdditional:
         call_kwargs = uploader.drive_service.create_file.call_args
         assert call_kwargs.kwargs.get("supports_all_drives") is True
 
-    @patch("slack_migrator.services.drive.drive_uploader.MediaFileUpload")
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_upload_sets_poster_permission_on_new_file(self, mock_media_cls, tmp_path):
         """Message poster email triggers permission call on new upload."""
         uploader = _make_uploader()

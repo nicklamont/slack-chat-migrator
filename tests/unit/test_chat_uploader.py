@@ -7,7 +7,7 @@ import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
-from slack_migrator.services.chat.chat_uploader import (
+from slack_chat_migrator.services.chat.chat_uploader import (
     ChatFileUploader,
 )
 
@@ -119,7 +119,7 @@ class TestUploadFileToChat:
         assert metadata["name"] == "test.png"
         assert "DRY_CHAT_FILE_test.png" in (metadata["driveFile"]["name"])
 
-    @patch("slack_migrator.services.chat.chat_uploader.MediaFileUpload")
+    @patch("slack_chat_migrator.services.chat.chat_uploader.MediaFileUpload")
     @patch("os.path.getsize", return_value=1024)
     def test_successful_upload(self, mock_getsize, mock_media_cls):
         uploader = _make_uploader(dry_run=False)
@@ -141,7 +141,7 @@ class TestUploadFileToChat:
         assert metadata["sizeBytes"] == "1024"
         uploader.chat_service.upload_media.assert_called_once()
 
-    @patch("slack_migrator.services.chat.chat_uploader.MediaFileUpload")
+    @patch("slack_chat_migrator.services.chat.chat_uploader.MediaFileUpload")
     @patch("os.path.getsize", return_value=1024)
     def test_upload_failure_returns_none_none(self, mock_getsize, mock_media_cls):
         uploader = _make_uploader(dry_run=False)

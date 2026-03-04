@@ -6,11 +6,11 @@ from unittest.mock import MagicMock, patch
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
-from slack_migrator.core.config import MigrationConfig
-from slack_migrator.core.state import MigrationState
-from slack_migrator.services.chat_adapter import ChatAdapter
-from slack_migrator.services.user_resolver import UserResolver
-from slack_migrator.utils.user_validation import UnmappedUserTracker
+from slack_chat_migrator.core.config import MigrationConfig
+from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.services.chat_adapter import ChatAdapter
+from slack_chat_migrator.services.user_resolver import UserResolver
+from slack_chat_migrator.utils.user_validation import UnmappedUserTracker
 
 
 def _make_resolver(
@@ -75,7 +75,7 @@ class TestGetDelegate:
 
         assert result is resolver.chat
 
-    @patch("slack_migrator.services.user_resolver.get_gcp_service")
+    @patch("slack_chat_migrator.services.user_resolver.get_gcp_service")
     def test_valid_email_first_call_creates_and_caches_service(self, mock_get_service):
         resolver = _make_resolver()
         mock_service = MagicMock(name="impersonated_service")
@@ -101,7 +101,7 @@ class TestGetDelegate:
         assert isinstance(result, ChatAdapter)
         assert result._svc is mock_service
 
-    @patch("slack_migrator.services.user_resolver.get_gcp_service")
+    @patch("slack_chat_migrator.services.user_resolver.get_gcp_service")
     def test_valid_email_already_cached_returns_from_cache(self, mock_get_service):
         resolver = _make_resolver()
         cached_service = MagicMock(name="cached_service")
@@ -113,7 +113,7 @@ class TestGetDelegate:
         mock_get_service.assert_not_called()
         assert result is cached_service
 
-    @patch("slack_migrator.services.user_resolver.get_gcp_service")
+    @patch("slack_chat_migrator.services.user_resolver.get_gcp_service")
     def test_http_error_falls_back_to_admin_chat(self, mock_get_service):
         resolver = _make_resolver()
 
@@ -129,7 +129,7 @@ class TestGetDelegate:
         assert result is resolver.chat
         assert resolver.state.users.valid_users["bad@example.com"] is False
 
-    @patch("slack_migrator.services.user_resolver.get_gcp_service")
+    @patch("slack_chat_migrator.services.user_resolver.get_gcp_service")
     def test_refresh_error_falls_back_to_admin_chat(self, mock_get_service):
         resolver = _make_resolver()
 
@@ -140,7 +140,7 @@ class TestGetDelegate:
         assert result is resolver.chat
         assert resolver.state.users.valid_users["expired@example.com"] is False
 
-    @patch("slack_migrator.services.user_resolver.get_gcp_service")
+    @patch("slack_chat_migrator.services.user_resolver.get_gcp_service")
     def test_invalid_user_cached_returns_admin_chat(self, mock_get_service):
         """Second call for a previously-failed user returns admin chat without retrying."""
         resolver = _make_resolver()

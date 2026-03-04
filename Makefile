@@ -5,26 +5,26 @@ install:
 	pre-commit install
 
 lint:
-	ruff check slack_migrator/ tests/
+	ruff check src/slack_chat_migrator/ tests/
 
 fix:
-	ruff check --fix slack_migrator/ tests/
-	ruff format slack_migrator/ tests/
+	ruff check --fix src/slack_chat_migrator/ tests/
+	ruff format src/slack_chat_migrator/ tests/
 
 format:
-	ruff format slack_migrator/ tests/
+	ruff format src/slack_chat_migrator/ tests/
 
 format-check:
-	ruff format --check slack_migrator/ tests/
+	ruff format --check src/slack_chat_migrator/ tests/
 
 typecheck:
-	mypy slack_migrator/
+	mypy src/slack_chat_migrator/
 
 test:
 	pytest tests/ -v
 
 test-cov:
-	pytest tests/ --cov=slack_migrator --cov-report=term-missing
+	pytest tests/ --cov=slack_chat_migrator --cov-report=term-missing
 
 check: lint format-check typecheck test
 

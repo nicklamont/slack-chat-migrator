@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from slack_migrator.core.state import (
+from slack_chat_migrator.core.state import (
     ContextState,
     ErrorState,
     MessageState,
@@ -14,7 +14,7 @@ from slack_migrator.core.state import (
     UserState,
     _default_migration_summary,
 )
-from slack_migrator.types import FailedMessage, MigrationSummary
+from slack_chat_migrator.types import FailedMessage, MigrationSummary
 
 
 def _make_summary(**overrides: object) -> MigrationSummary:
