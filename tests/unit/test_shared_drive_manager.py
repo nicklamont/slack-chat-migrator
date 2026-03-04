@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.services.drive.shared_drive_manager import (
@@ -12,7 +13,7 @@ from slack_chat_migrator.services.drive.shared_drive_manager import (
 
 def _make_http_error(status=404, content=b"Not Found"):
     """Create an HttpError with the given status and content."""
-    resp = MagicMock(status=status)
+    resp = Response({"status": str(status)})
     return HttpError(resp=resp, content=content)
 
 

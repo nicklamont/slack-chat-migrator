@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_chat_migrator.core.channel_processor import ChannelProcessor
 from slack_chat_migrator.core.config import ImportCompletionStrategy, MigrationConfig
@@ -565,7 +566,7 @@ class TestCompleteImportMode:
     def test_http_error(self):
         """HttpError during completion sets channel_had_errors to True."""
         processor = _make_processor()
-        http_error = HttpError(resp=MagicMock(status=403), content=b"Forbidden")
+        http_error = HttpError(resp=Response({"status": "403"}), content=b"Forbidden")
         processor.chat.complete_import.side_effect = http_error
 
         result = processor._complete_import_mode("spaces/S1", "general", False)
@@ -675,7 +676,7 @@ class TestAddMembers:
         """HttpError during member addition sets channel_had_errors."""
         processor = _make_processor()
         mock_add.side_effect = HttpError(
-            resp=MagicMock(status=403), content=b"Forbidden"
+            resp=Response({"status": "403"}), content=b"Forbidden"
         )
 
         result = processor._add_members("spaces/S1", "general", True, False)
@@ -768,7 +769,7 @@ class TestDeleteSpaceIfErrors:
         processor.state.spaces.created_spaces["general"] = "spaces/S1"
         processor.state.progress.migration_summary["spaces_created"] = 1
         processor.chat.delete_space.side_effect = HttpError(
-            resp=MagicMock(status=404), content=b"Not found"
+            resp=Response({"status": "404"}), content=b"Not found"
         )
 
         # Should not raise
