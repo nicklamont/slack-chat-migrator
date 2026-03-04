@@ -281,21 +281,12 @@ class ChannelProcessor:
                 f"{self.ctx.log_prefix}Found {message_count} messages in channel {channel}",
                 channel=channel,
             )
-            # Intentional approximation: counts all messages without per-message
-            # skip checks (bot, system-subtype, empty).  Accurate counting would
-            # require running the full send pipeline, which dry-run avoids.
-            self.state.progress.migration_summary["messages_created"] += message_count
 
         if not self.ctx.dry_run or self.ctx.update_mode:
             self._discover_channel_resources(channel)
 
-        # Build user map with overrides once per channel (expensive operation).
-        # Skip in dry-run mode since send_message is never called.
-        cached_user_map = (
-            None
-            if self.ctx.dry_run
-            else build_user_map_with_overrides(self.ctx, self.user_resolver)
-        )
+        # Build user map with overrides once per channel.
+        cached_user_map = build_user_map_with_overrides(self.ctx, self.user_resolver)
 
         processed_count, failed_count, channel_had_errors = self._send_messages_loop(
             msgs, space, channel, channel_had_errors, cached_user_map
@@ -394,9 +385,6 @@ class ChannelProcessor:
                 self.attachment_processor,
                 m,
             )
-
-            if self.ctx.dry_run:
-                continue
 
             result = send_message(
                 self.ctx,

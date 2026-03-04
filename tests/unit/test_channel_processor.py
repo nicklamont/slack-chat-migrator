@@ -470,9 +470,10 @@ class TestProcessMessages:
         assert processed == 2
         assert mock_send.call_count == 2
 
+    @patch("slack_chat_migrator.core.channel_processor.send_message")
     @patch("slack_chat_migrator.core.channel_processor.track_message_stats")
-    def test_dry_run_counts_only(self, mock_track, tmp_path):
-        """Dry run mode counts messages but does not send them."""
+    def test_dry_run_sends_through_pipeline(self, mock_track, mock_send, tmp_path):
+        """Dry run mode sends messages through the full pipeline."""
         processor = _make_processor(dry_run=True, export_root=tmp_path)
 
         ch_dir = tmp_path / "general"
@@ -487,12 +488,14 @@ class TestProcessMessages:
             )
         )
 
+        mock_send.return_value = SendResult(message_name="spaces/S1/messages/M1")
         processed, failed, _had_errors = processor._process_messages(
             ch_dir, "spaces/S1", False
         )
 
-        assert processor.state.progress.migration_summary["messages_created"] == 3
-        assert processed == 0
+        # Dry run now sends through the full pipeline
+        assert mock_send.call_count == 3
+        assert processed == 3
         assert failed == 0
 
     @patch("slack_chat_migrator.core.channel_processor.send_message")

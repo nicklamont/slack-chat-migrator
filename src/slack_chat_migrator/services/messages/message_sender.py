@@ -167,8 +167,8 @@ def _should_skip_message(
 ) -> tuple[bool, MessageResult | None]:
     """Check whether a message should be skipped before processing.
 
-    Handles bot checks, update-mode deduplication, dry-run early return,
-    system subtype filtering, and empty message detection.
+    Handles bot checks, update-mode deduplication, system subtype
+    filtering, and empty message detection.
 
     Returns:
         A ``(should_skip, return_value)`` tuple.  When *should_skip* is
@@ -181,17 +181,6 @@ def _should_skip_message(
         state, ctx.update_mode, message_key, channel, ts, user_id
     ):
         return True, MessageResult.ALREADY_SENT
-
-    if ctx.dry_run:
-        log_with_context(
-            logging.DEBUG,
-            f"{ctx.log_prefix}Would send message TS={ts} from user={user_id}",
-            channel=channel,
-            ts=ts,
-            user_id=user_id,
-            is_thread_reply=(thread_ts is not None and thread_ts != ts),
-        )
-        return True, None
 
     # System subtype skip
     if message.get("subtype") in SYSTEM_SUBTYPES:
@@ -406,12 +395,18 @@ def _resolve_chat_service(
     channel: str,
     ts: str,
     user_id: str,
+    *,
+    dry_run: bool = False,
 ) -> ChatAdapter:
     """Return the appropriate Chat service for sending a message.
 
     Uses impersonation when available for the user, otherwise falls back
-    to the admin service.
+    to the admin service.  In dry-run mode, impersonation is skipped
+    entirely because the underlying credential path may not exist.
     """
+    if dry_run:
+        return chat
+
     if not user_email or user_resolver.is_external_user(user_email):
         return chat
 
@@ -504,8 +499,8 @@ def send_message(
     if should_skip:
         if skip_result is not None:
             return SendResult(skipped=skip_result)
-        # None from _should_skip_message means dry-run or empty message —
-        # neither a real success nor an intentional skip with a named reason.
+        # None from _should_skip_message means empty message —
+        # not a real success nor an intentional skip with a named reason.
         return SendResult()
 
     is_update_mode = ctx.update_mode
@@ -543,7 +538,13 @@ def send_message(
 
     try:
         chat_service = _resolve_chat_service(
-            chat, user_resolver, user_email, channel, ts, user_id
+            chat,
+            user_resolver,
+            user_email,
+            channel,
+            ts,
+            user_id,
+            dry_run=ctx.dry_run,
         )
 
         message_id = generate_message_id(ts, is_edited, edited_ts)
@@ -649,19 +650,11 @@ def track_message_stats(
 
     state.progress.channel_stats[channel]["message_count"] += 1
 
-    # Track reactions
+    # Track reactions for channel_stats (summary-level reactions_created
+    # is handled by process_reactions_batch in the send pipeline).
     if "reactions" in m:
         reaction_count = _count_reactions_excluding_bots(ctx.config, user_resolver, m)
         state.progress.channel_stats[channel]["reaction_count"] += reaction_count
-
-        if ctx.dry_run:
-            state.progress.migration_summary["reactions_created"] += reaction_count
-            log_with_context(
-                logging.DEBUG,
-                f"{ctx.log_prefix}Counted {reaction_count} reactions for message {ts}",
-                channel=channel,
-                ts=ts,
-            )
 
     # Track files
     file_count = attachment_processor.count_message_files(m)

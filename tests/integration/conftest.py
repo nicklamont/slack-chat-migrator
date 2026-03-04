@@ -135,6 +135,8 @@ USERS = [
         "real_name": "Alice Smith",
         "profile": {"email": "alice@example.com", "real_name": "Alice Smith"},
         "is_bot": False,
+        "is_app_user": False,
+        "is_restricted": False,
         "deleted": False,
     },
     {
@@ -143,6 +145,8 @@ USERS = [
         "real_name": "Bob Jones",
         "profile": {"email": "bob@example.com", "real_name": "Bob Jones"},
         "is_bot": False,
+        "is_app_user": False,
+        "is_restricted": False,
         "deleted": False,
     },
     {
@@ -151,24 +155,44 @@ USERS = [
         "real_name": "Test Bot",
         "profile": {},
         "is_bot": True,
+        "is_app_user": False,
+        "is_restricted": False,
         "deleted": False,
+    },
+    {
+        "id": "U003",
+        "name": "deleted_user",
+        "real_name": "Deleted User",
+        "profile": {"email": "deleted@example.com", "real_name": "Deleted User"},
+        "is_bot": False,
+        "is_app_user": False,
+        "is_restricted": False,
+        "deleted": True,
     },
 ]
 
 GENERAL_CHANNEL = {
     "id": "C001",
     "name": "general",
+    "created": 1609459000,
+    "is_general": True,
     "members": ["U001", "U002"],
-    "purpose": {"value": "General discussion"},
-    "topic": {"value": "Welcome"},
+    "purpose": {
+        "value": "General discussion",
+        "creator": "U001",
+        "last_set": 1609459000,
+    },
+    "topic": {"value": "Welcome", "creator": "U001", "last_set": 1609459000},
 }
 
 RANDOM_CHANNEL = {
     "id": "C002",
     "name": "random",
+    "created": 1609459100,
+    "is_general": False,
     "members": ["U001"],
-    "purpose": {"value": "Random stuff"},
-    "topic": {"value": ""},
+    "purpose": {"value": "Random stuff", "creator": "U001", "last_set": 1609459100},
+    "topic": {"value": "", "creator": "", "last_set": 0},
 }
 
 
@@ -187,6 +211,139 @@ def make_messages(
         }
         for i in range(count)
     ]
+
+
+def make_rich_text_message(
+    user: str = "U001",
+    ts: str = "1609459200.000000",
+    text: str = "Hello world",
+) -> dict[str, Any]:
+    """Message with ``blocks`` containing ``rich_text`` elements."""
+    return {
+        "type": "message",
+        "user": user,
+        "text": text,
+        "ts": ts,
+        "blocks": [
+            {
+                "type": "rich_text",
+                "block_id": "blk1",
+                "elements": [
+                    {
+                        "type": "rich_text_section",
+                        "elements": [
+                            {"type": "text", "text": text},
+                            {
+                                "type": "text",
+                                "text": " bold part",
+                                "style": {"bold": True},
+                            },
+                            {
+                                "type": "link",
+                                "url": "https://example.com",
+                                "text": "a link",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def make_thread_messages(
+    user: str = "U001",
+    parent_ts: str = "1609459200.000000",
+    reply_count: int = 2,
+) -> list[dict[str, Any]]:
+    """Parent message plus *reply_count* threaded replies."""
+    parent: dict[str, Any] = {
+        "type": "message",
+        "user": user,
+        "text": "Thread parent",
+        "ts": parent_ts,
+        "reply_count": reply_count,
+        "replies": [],
+    }
+    msgs = [parent]
+    for i in range(reply_count):
+        reply_ts = f"{float(parent_ts) + i + 1:.6f}"
+        parent["replies"].append({"user": user, "ts": reply_ts})
+        msgs.append(
+            {
+                "type": "message",
+                "user": user,
+                "text": f"Reply {i + 1}",
+                "ts": reply_ts,
+                "thread_ts": parent_ts,
+            }
+        )
+    return msgs
+
+
+def make_message_with_reactions(
+    user: str = "U001",
+    ts: str = "1609459200.000000",
+    text: str = "Reacted message",
+    reactions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Message with a ``reactions`` array."""
+    if reactions is None:
+        reactions = [
+            {"name": "thumbsup", "users": ["U001", "U002"], "count": 2},
+            {"name": "heart", "users": ["U001"], "count": 1},
+        ]
+    return {
+        "type": "message",
+        "user": user,
+        "text": text,
+        "ts": ts,
+        "reactions": reactions,
+    }
+
+
+def make_message_with_files(
+    user: str = "U001",
+    ts: str = "1609459200.000000",
+    text: str = "See attached",
+    file_count: int = 1,
+) -> dict[str, Any]:
+    """Message with ``files`` array of *file_count* file objects."""
+    files = [
+        {
+            "id": f"F{i:04d}",
+            "name": f"file_{i}.txt",
+            "mimetype": "text/plain",
+            "url_private_download": f"https://files.slack.com/file_{i}.txt",
+            "size": 1024,
+            "mode": "hosted",
+        }
+        for i in range(file_count)
+    ]
+    return {
+        "type": "message",
+        "user": user,
+        "text": text,
+        "ts": ts,
+        "files": files,
+    }
+
+
+def make_subtype_message(
+    user: str = "U001",
+    ts: str = "1609459200.000000",
+    subtype: str = "channel_join",
+) -> dict[str, Any]:
+    """System message with a specific subtype (e.g. ``channel_join``)."""
+    return {
+        "type": "message",
+        "user": user,
+        "ts": ts,
+        "subtype": subtype,
+        "text": f"<@{user}> has joined the channel"
+        if subtype == "channel_join"
+        else "",
+    }
 
 
 # ---------------------------------------------------------------------------
