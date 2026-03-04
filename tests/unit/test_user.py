@@ -177,6 +177,53 @@ class TestGenerateUserMap:
         with pytest.raises(UserMappingError, match="No valid users found"):
             generate_user_map(tmp_path, MigrationConfig())
 
+    def test_no_valid_users_error_shows_no_id_diagnostics(self, tmp_path):
+        """When entries lack 'id', the error includes count and sample keys."""
+        users = [
+            {"name": "noid", "profile": {"email": "a@b.com"}},
+            {"name": "noid2", "profile": {"email": "c@d.com"}},
+        ]
+        _write_users_json(tmp_path, users)
+
+        with pytest.raises(
+            UserMappingError, match="2/2 entries have no 'id' field"
+        ) as exc:
+            generate_user_map(tmp_path, MigrationConfig())
+
+        detail = str(exc.value)
+        assert "Sample entry keys:" in detail
+        assert "'name'" in detail
+        assert "Expected format: each entry needs 'id' and 'profile.email'" in detail
+
+    def test_no_valid_users_error_shows_no_email_count(self, tmp_path):
+        """When all users lack emails, the error includes no-email count."""
+        users = [{"id": "U001", "name": "noemail", "profile": {}}]
+        _write_users_json(tmp_path, users)
+
+        with pytest.raises(UserMappingError, match="1 user has no email") as exc:
+            generate_user_map(tmp_path, MigrationConfig())
+
+        detail = str(exc.value)
+        assert "Tip: map users manually via user_mapping_overrides" in detail
+
+    def test_no_valid_users_error_shows_bot_count(self, tmp_path):
+        """When all users are ignored bots, the error includes bot count."""
+        users = [
+            {"id": "B001", "name": "bot", "is_bot": True, "profile": {}},
+            {"id": "B002", "name": "bot2", "is_bot": True, "profile": {}},
+        ]
+        _write_users_json(tmp_path, users)
+
+        with pytest.raises(UserMappingError, match="2 bot users were ignored"):
+            generate_user_map(tmp_path, MigrationConfig(ignore_bots=True))
+
+    def test_no_valid_users_error_empty_list(self, tmp_path):
+        """Empty users.json reports 0 entries parsed."""
+        _write_users_json(tmp_path, [])
+
+        with pytest.raises(UserMappingError, match=r"0 entries parsed"):
+            generate_user_map(tmp_path, MigrationConfig())
+
     def test_user_without_id_skipped(self, tmp_path):
         users = [
             {"name": "noid", "profile": {"email": "noid@example.com"}},
