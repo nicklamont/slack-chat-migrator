@@ -51,7 +51,7 @@ def _invoke_validate(
     if extra_args:
         args.extend(extra_args)
 
-    runner = CliRunner(mix_stderr=False)
+    runner = CliRunner()
     return runner.invoke(cli, args, catch_exceptions=True)
 
 
