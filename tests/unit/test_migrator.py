@@ -1434,7 +1434,7 @@ class TestInitializeDependentServices:
         m = _make_migrator(tmp_path)
         m.chat = MagicMock()
         m.drive = MagicMock()
-        m._raw_chat = MagicMock()
+
         with (
             patch("slack_migrator.core.migrator.load_existing_space_mappings"),
             patch("slack_migrator.core.migrator.FileHandler") as fh_cls,
@@ -1452,7 +1452,7 @@ class TestInitializeDependentServices:
         m = _make_migrator(tmp_path)
         m.chat = MagicMock()
         m.drive = MagicMock()
-        m._raw_chat = MagicMock()
+
         m.state.spaces.created_spaces["ch1"] = "space1"
         m.state.context.current_channel = "ch1"
         with (
@@ -1468,7 +1468,7 @@ class TestInitializeDependentServices:
         m = _make_migrator(tmp_path, verbose=True)
         m.chat = MagicMock()
         m.drive = MagicMock()
-        m._raw_chat = MagicMock()
+
         with (
             patch("slack_migrator.core.migrator.load_existing_space_mappings"),
             patch("slack_migrator.core.migrator.FileHandler"),
@@ -1484,7 +1484,7 @@ class TestInitializeDependentServices:
         m = _make_migrator(tmp_path)
         m.chat = MagicMock()
         m.drive = MagicMock()
-        m._raw_chat = MagicMock()
+
         with (
             patch(
                 "slack_migrator.core.migrator.load_existing_space_mappings"
@@ -1506,7 +1506,6 @@ def _make_migrator_for_migrate(tmp_path, **kwargs):
     m = _make_migrator(tmp_path, **kwargs)
     m.chat = MagicMock()
     m.drive = MagicMock()
-    m._raw_chat = MagicMock()
     m._api_services_initialized = True
     m.file_handler = MagicMock()
     m.attachment_processor = MagicMock()

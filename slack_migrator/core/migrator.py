@@ -186,8 +186,6 @@ class SlackToChatMigrator:
             )
             raw_chat = DryRunChatService(self.state)
             self.chat = ChatAdapter(raw_chat)
-            # Raw service kept for media uploads (ChatFileUploader)
-            self._raw_chat = raw_chat
             self.drive = DriveAdapter(DryRunDriveService())
         else:
             log_with_context(
@@ -204,8 +202,6 @@ class SlackToChatMigrator:
                 retry_delay=self.config.retry_delay,
             )
             self.chat = ChatAdapter(raw_chat)
-            # Raw service kept for media uploads (ChatFileUploader)
-            self._raw_chat = raw_chat
             self.drive = DriveAdapter(
                 get_gcp_service(
                     creds_path_str,
@@ -241,11 +237,9 @@ class SlackToChatMigrator:
     def _initialize_dependent_services(self) -> None:
         """Initialize services that depend on API clients."""
         # Initialize file handler with explicit deps (no migrator back-reference)
-        # FileHandler uses the raw chat service for media uploads
-        # (ChatFileUploader needs .media().upload()), not ChatAdapter
         self.file_handler = FileHandler(
             self.drive,
-            self._raw_chat,
+            self.chat,
             folder_id=None,
             config=self.config,
             workspace_domain=self.workspace_domain,
