@@ -116,6 +116,7 @@ python_functions = "test_*"
 addopts = "-v --tb=short --strict-markers"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: Integration tests (dry-run, no credentials needed)",
 ]
 
 [tool.commitizen]
