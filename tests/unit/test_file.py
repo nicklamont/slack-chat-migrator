@@ -106,11 +106,12 @@ class TestFileHandlerInit:
         handler = _make_handler(folder_id=None)
         assert handler._root_folder_id is None
 
-    def test_dry_run_sets_defaults(self):
+    def test_dry_run_defers_initialization(self):
+        """Dry run no longer special-cases init — DI stubs handle API calls."""
         handler = _make_handler(dry_run=True)
         assert handler.dry_run is True
-        assert handler._drive_initialized is True
-        assert handler._root_folder_id == "DRY_RUN_FOLDER"
+        assert handler._drive_initialized is False
+        assert handler._root_folder_id is None
 
     def test_dry_run_uses_explicit_folder_id(self):
         handler = _make_handler(folder_id="custom", dry_run=True)
@@ -809,12 +810,13 @@ class TestEnsureDriveInitialized:
         handler.ensure_drive_initialized()
         handler._initialize_shared_drive_and_folder.assert_not_called()
 
-    def test_skips_if_dry_run(self):
+    def test_dry_run_delegates_to_init(self):
+        """Dry run no longer short-circuits — DI stubs handle API calls."""
         handler = _make_handler(dry_run=True)
         handler._initialize_shared_drive_and_folder = MagicMock()
 
         handler.ensure_drive_initialized()
-        handler._initialize_shared_drive_and_folder.assert_not_called()
+        handler._initialize_shared_drive_and_folder.assert_called_once()
 
     def test_calls_init_when_needed(self):
         handler = _make_handler()
@@ -969,15 +971,16 @@ class TestPreCacheRootFolder:
 
         handler.drive_uploader.pre_cache_folder_file_hashes.assert_not_called()
 
-    def test_skips_in_dry_run(self):
-        """Returns early when dry_run is True."""
+    def test_dry_run_delegates_to_pre_cache(self):
+        """Dry run no longer short-circuits — DI stubs handle pre-caching."""
         handler = _make_handler(dry_run=True)
         handler._root_folder_id = "some_folder"
-        handler.drive_uploader.pre_cache_folder_file_hashes = MagicMock()
+        handler.drive_uploader.pre_cache_folder_file_hashes = MagicMock(return_value=0)
+        handler.drive_service.list_files.return_value = {"files": []}
 
         handler._pre_cache_root_folder()
 
-        handler.drive_uploader.pre_cache_folder_file_hashes.assert_not_called()
+        handler.drive_uploader.pre_cache_folder_file_hashes.assert_called_once()
 
     def test_caches_root_folder_files(self):
         """Caches files from root folder."""

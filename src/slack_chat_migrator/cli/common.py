@@ -72,13 +72,15 @@ def common_options(f: Callable[..., None]) -> Callable[..., None]:
     """
     f = click.option(
         "--creds_path",
-        required=True,
-        help="Path to service account credentials JSON",
+        required=False,
+        default=None,
+        help="Path to service account credentials JSON (optional for --dry_run / validate)",
     )(f)
     f = click.option(
         "--workspace_admin",
-        required=True,
-        help="Email of workspace admin to impersonate",
+        required=False,
+        default=None,
+        help="Email of workspace admin to impersonate (optional for --dry_run / validate)",
     )(f)
     f = click.option(
         "--config",

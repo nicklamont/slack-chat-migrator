@@ -22,10 +22,10 @@ class MigrationContext:
 
     # Paths
     export_root: Path
-    creds_path: str
+    creds_path: str | None
 
     # Workspace identity
-    workspace_admin: str
+    workspace_admin: str | None
     workspace_domain: str
 
     # Mode flags
@@ -40,6 +40,9 @@ class MigrationContext:
     # User data (populated from users.json + config overrides)
     user_map: dict[str, str]  # slack_user_id -> google_email
     users_without_email: list[dict[str, Any]]
+
+    # Bot user IDs excluded by ignore_bots (used to filter membership pipeline)
+    bot_user_ids: frozenset[str]
 
     # Channel metadata (from channels.json)
     channels_meta: dict[str, SlackChannel]  # channel_name -> channel data

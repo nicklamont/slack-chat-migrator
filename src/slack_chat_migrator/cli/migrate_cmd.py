@@ -63,9 +63,9 @@ logger = logging.getLogger("slack_chat_migrator")
     help="Skip permission checks (not recommended)",
 )
 def migrate(
-    creds_path: str,
+    creds_path: str | None,
     export_path: str,
-    workspace_admin: str,
+    workspace_admin: str | None,
     config: str,
     verbose: bool,
     debug_api: bool,
@@ -164,13 +164,29 @@ class MigrationOrchestrator:
 
     def validate_prerequisites(self) -> None:
         """Validate all prerequisites before migration."""
-        # Check credentials file
-        creds_path = Path(self.args.creds_path)
-        if not creds_path.exists():
-            raise ConfigError(
-                f"Credentials file not found: {self.args.creds_path}. "
-                "Make sure your service account JSON key file exists and has the correct path."
-            )
+        # In dry-run mode, credentials and workspace_admin are optional
+        if not self.args.dry_run:
+            if not self.args.creds_path:
+                raise click.UsageError("--creds_path is required for live migration")
+            if not self.args.workspace_admin:
+                raise click.UsageError(
+                    "--workspace_admin is required for live migration"
+                )
+            # Check credentials file exists
+            creds_path = Path(self.args.creds_path)
+            if not creds_path.exists():
+                raise ConfigError(
+                    f"Credentials file not found: {self.args.creds_path}. "
+                    "Make sure your service account JSON key file exists and has the correct path."
+                )
+        elif self.args.creds_path:
+            # Dry-run with creds provided — still validate the file exists
+            creds_path = Path(self.args.creds_path)
+            if not creds_path.exists():
+                raise ConfigError(
+                    f"Credentials file not found: {self.args.creds_path}. "
+                    "Make sure your service account JSON key file exists and has the correct path."
+                )
 
         # Initialize main migrator
         self.migrator = self.create_migrator()

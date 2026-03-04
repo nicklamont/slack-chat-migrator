@@ -41,9 +41,9 @@ from slack_chat_migrator.utils.logging import log_with_context, setup_logger
     help="(ignored — validate always runs in dry-run mode)",
 )
 def validate(
-    creds_path: str,
+    creds_path: str | None,
     export_path: str,
-    workspace_admin: str,
+    workspace_admin: str | None,
     config: str,
     verbose: bool,
     debug_api: bool,

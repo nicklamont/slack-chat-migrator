@@ -117,16 +117,10 @@ class FileHandler:
         }
 
         # Initialize modular services
-        self.shared_drive_manager = SharedDriveManager(
-            drive_service, config, dry_run=dry_run
-        )
-        self.folder_manager = FolderManager(
-            drive_service, workspace_domain, dry_run=dry_run
-        )
-        self.drive_uploader = DriveFileUploader(
-            drive_service, workspace_domain, dry_run=dry_run
-        )
-        self.chat_uploader = ChatFileUploader(chat_service, dry_run=dry_run)
+        self.shared_drive_manager = SharedDriveManager(drive_service, config)
+        self.folder_manager = FolderManager(drive_service, workspace_domain)
+        self.drive_uploader = DriveFileUploader(drive_service, workspace_domain)
+        self.chat_uploader = ChatFileUploader(chat_service)
 
         # Initialize the root folder and shared drive
         self._shared_drive_id: str | None = None
@@ -137,19 +131,11 @@ class FileHandler:
         # This avoids expensive operations before permission validation
         if folder_id:
             self._root_folder_id = folder_id
-
-        if dry_run:
-            self._root_folder_id = folder_id or "DRY_RUN_FOLDER"
             self._drive_initialized = True
-            log_with_context(
-                logging.DEBUG,
-                "FileHandler initialized with verbose logging",
-                channel=self._get_current_channel(),
-            )
 
     def ensure_drive_initialized(self) -> None:
         """Ensure drive structures are initialized. Call this after permission validation."""
-        if not self._drive_initialized and not self.dry_run:
+        if not self._drive_initialized:
             log_with_context(
                 logging.INFO,
                 "Initializing Google Drive structures (shared drive and folder hierarchy)...",
@@ -244,7 +230,7 @@ class FileHandler:
         This helps improve deduplication by building a hash cache of all
         existing files before starting any channel uploads.
         """
-        if not self._root_folder_id or self.dry_run:
+        if not self._root_folder_id:
             return
 
         try:
@@ -569,7 +555,6 @@ class FileHandler:
             space is not None
             and mime_type in self.DIRECT_UPLOAD_MIME_TYPES
             and actual_size <= DIRECT_UPLOAD_MAX_BYTES
-            and not self.dry_run
             and self.chat_uploader.is_suitable_for_direct_upload(name, actual_size)
         )
         if not use_direct:
@@ -711,9 +696,7 @@ class FileHandler:
                 # Use user-specific service if provided, otherwise use default chat uploader
                 if user_service:
                     # Create a temporary chat uploader with the user's service
-                    user_chat_uploader = ChatFileUploader(
-                        user_service, dry_run=self.dry_run
-                    )
+                    user_chat_uploader = ChatFileUploader(user_service)
                     # Set channel context for logging
                     user_chat_uploader.current_channel = (
                         self.state.context.current_channel

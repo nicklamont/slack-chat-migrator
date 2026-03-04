@@ -16,13 +16,10 @@ from slack_chat_migrator.services.chat.chat_uploader import (
 # ---------------------------------------------------------------------------
 
 
-def _make_uploader(dry_run=False):
+def _make_uploader():
     """Create a ChatFileUploader with a mocked chat service."""
     chat_service = MagicMock()
-    return ChatFileUploader(
-        chat_service=chat_service,
-        dry_run=dry_run,
-    )
+    return ChatFileUploader(chat_service=chat_service)
 
 
 # ===========================================================================
@@ -107,22 +104,10 @@ class TestCanUploadDirectly:
 class TestUploadFileToChat:
     """Tests for ChatFileUploader.upload_file_to_chat."""
 
-    def test_dry_run_returns_mock_result(self):
-        uploader = _make_uploader(dry_run=True)
-        token, metadata = uploader.upload_file_to_chat(
-            "/tmp/test.png",
-            "test.png",
-            parent_space="spaces/ABC",
-        )
-
-        assert token == {"token": "DRY_CHAT_TOKEN_test.png"}
-        assert metadata["name"] == "test.png"
-        assert "DRY_CHAT_FILE_test.png" in (metadata["driveFile"]["name"])
-
     @patch("slack_chat_migrator.services.chat.chat_uploader.MediaFileUpload")
     @patch("os.path.getsize", return_value=1024)
     def test_successful_upload(self, mock_getsize, mock_media_cls):
-        uploader = _make_uploader(dry_run=False)
+        uploader = _make_uploader()
         mock_media_cls.return_value = MagicMock()
 
         mock_response = {"attachmentDataRef": {"resourceName": "res/123"}}
@@ -144,7 +129,7 @@ class TestUploadFileToChat:
     @patch("slack_chat_migrator.services.chat.chat_uploader.MediaFileUpload")
     @patch("os.path.getsize", return_value=1024)
     def test_upload_failure_returns_none_none(self, mock_getsize, mock_media_cls):
-        uploader = _make_uploader(dry_run=False)
+        uploader = _make_uploader()
         mock_media_cls.return_value = MagicMock()
 
         uploader.chat_service.upload_media.side_effect = HttpError(
@@ -162,7 +147,7 @@ class TestUploadFileToChat:
 
     @patch("os.path.getsize", return_value=1024)
     def test_none_parent_space_returns_none_none(self, mock_getsize):
-        uploader = _make_uploader(dry_run=False)
+        uploader = _make_uploader()
 
         token, metadata = uploader.upload_file_to_chat(
             "/tmp/test.jpg",
@@ -175,7 +160,7 @@ class TestUploadFileToChat:
 
     @patch("os.path.getsize")
     def test_oversized_file_returns_none_none(self, mock_getsize):
-        uploader = _make_uploader(dry_run=False)
+        uploader = _make_uploader()
         # 201MB exceeds the 200MB Chat API limit
         mock_getsize.return_value = 201 * 1024 * 1024
 

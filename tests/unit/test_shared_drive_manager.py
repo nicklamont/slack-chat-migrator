@@ -18,7 +18,6 @@ def _make_http_error(status=404, content=b"Not Found"):
 
 
 def _make_manager(
-    dry_run=False,
     shared_drive_name="Imported Slack Attachments",
     shared_drive_id=None,
 ):
@@ -33,7 +32,6 @@ def _make_manager(
     manager = SharedDriveManager(
         drive_service=drive_service,
         config=config,
-        dry_run=dry_run,
     )
     return manager, drive_service
 
@@ -41,13 +39,15 @@ def _make_manager(
 class TestValidateSharedDrive:
     """Tests for SharedDriveManager.validate_shared_drive."""
 
-    def test_dry_run_returns_true_without_api_call(self):
-        manager, drive_service = _make_manager(dry_run=True)
+    def test_dry_run_delegates_to_drive_service(self):
+        """Dry run no longer short-circuits — DI stubs handle it."""
+        manager, drive_service = _make_manager()
+        drive_service.get_drive.return_value = {"id": "some-drive-id"}
 
         result = manager.validate_shared_drive("some-drive-id")
 
         assert result is True
-        drive_service.get_drive.assert_not_called()
+        drive_service.get_drive.assert_called_once()
 
     def test_valid_drive_returns_true(self):
         manager, drive_service = _make_manager()
@@ -72,14 +72,17 @@ class TestValidateSharedDrive:
 class TestGetOrCreateSharedDrive:
     """Tests for SharedDriveManager.get_or_create_shared_drive."""
 
-    def test_dry_run_returns_placeholder(self):
-        manager, drive_service = _make_manager(dry_run=True)
+    def test_dry_run_delegates_to_drive_service(self):
+        """Dry run no longer short-circuits — DI stubs handle it."""
+        manager, drive_service = _make_manager()
+        drive_service.list_drives.return_value = {
+            "drives": [{"id": "stub-id", "name": "Imported Slack Attachments"}]
+        }
 
         result = manager.get_or_create_shared_drive()
 
-        assert result == "dry-run-placeholder"
-        drive_service.get_drive.assert_not_called()
-        drive_service.list_drives.assert_not_called()
+        assert result == "stub-id"
+        drive_service.list_drives.assert_called_once()
 
     def test_configured_drive_id_valid_returns_it(self):
         manager, drive_service = _make_manager(
@@ -151,7 +154,6 @@ class TestGetOrCreateSharedDrive:
         manager = SharedDriveManager(
             drive_service=drive_service,
             config=config,
-            dry_run=False,
         )
         drive_service.list_drives.return_value = {
             "drives": [

@@ -35,11 +35,11 @@ class UserResolver:
         config: MigrationConfig,
         state: MigrationState,
         chat: ChatAdapter,
-        creds_path: str,
+        creds_path: str | None,
         user_map: dict[str, str],
         unmapped_user_tracker: UnmappedUserTracker,
         export_root: str | Path,
-        workspace_admin: str,
+        workspace_admin: str | None,
         workspace_domain: str,
     ) -> None:
         """Initialize with explicit dependencies.
@@ -48,21 +48,21 @@ class UserResolver:
             config: Migration configuration.
             state: Shared mutable migration state.
             chat: Admin Google Chat API service.
-            creds_path: Path to service account credentials file.
+            creds_path: Path to service account credentials file (None in dry-run).
             user_map: Slack user ID to Google email mapping.
             unmapped_user_tracker: Tracker for unmapped users.
             export_root: Path to Slack export directory.
-            workspace_admin: Admin email for fallback impersonation.
+            workspace_admin: Admin email for fallback impersonation (None in dry-run).
             workspace_domain: Google Workspace domain for external user detection.
         """
         self.config = config
         self.state = state
         self.chat = chat
-        self.creds_path = creds_path
+        self.creds_path: str | None = creds_path
         self.user_map = user_map
         self.unmapped_user_tracker = unmapped_user_tracker
         self.export_root = export_root
-        self.workspace_admin = workspace_admin
+        self.workspace_admin: str | None = workspace_admin
         self.workspace_domain = workspace_domain
         self._users_data: dict[str, dict[str, Any]] | None = None
 
@@ -78,6 +78,13 @@ class UserResolver:
         """
         if not email:
             return self.chat
+
+        if self.creds_path is None:
+            raise RuntimeError(
+                "get_delegate() called without credentials — "
+                "this should only happen in dry-run mode, "
+                "which should not reach this code path"
+            )
 
         if email not in self.state.users.valid_users:
             try:
@@ -209,7 +216,7 @@ class UserResolver:
             attribution = f"*[From: {user_id}]*"
 
         modified_text = f"{attribution}\n{original_text}"
-        admin_email = self.workspace_admin
+        admin_email = self.workspace_admin or "dry-run-placeholder@example.com"
 
         log_with_context(
             logging.WARNING,

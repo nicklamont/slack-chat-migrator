@@ -162,6 +162,13 @@ def _collect_user_membership_data(
     meta = ctx.channels_meta.get(channel, {})
     active_users = _apply_channel_metadata_members(meta, user_membership)
 
+    # Filter out bot user IDs that were excluded by ignore_bots.
+    # These have no email mapping and would cause ERROR logs in the membership pipeline.
+    if ctx.bot_user_ids:
+        for bot_id in ctx.bot_user_ids:
+            user_membership.pop(bot_id, None)
+            active_users.discard(bot_id)
+
     log_with_context(
         logging.DEBUG,
         f"Identified {len(active_users)} active users for channel {channel}",
@@ -469,24 +476,25 @@ def add_users_to_space(
     # Check if the workspace admin is in the active users
     # Google Chat automatically adds the creator as a member, but we only want them if they were in the channel
     admin_email = ctx.workspace_admin
-    admin_user_id = None
+    if admin_email is not None:
+        admin_user_id = None
 
-    # Look up the admin's Slack user ID if they had one (they'll be in user_map if they were in Slack)
-    for slack_user_id, email in ctx.user_map.items():
-        if email.lower() == admin_email.lower():
-            admin_user_id = slack_user_id
-            break
+        # Look up the admin's Slack user ID if they had one (they'll be in user_map if they were in Slack)
+        for slack_user_id, email in ctx.user_map.items():
+            if email.lower() == admin_email.lower():
+                admin_user_id = slack_user_id
+                break
 
-    # If we found a user ID for the admin, check if they were in the channel
-    admin_in_channel = False
-    if admin_user_id:
-        admin_in_channel = admin_user_id in active_users
+        # If we found a user ID for the admin, check if they were in the channel
+        admin_in_channel = False
+        if admin_user_id:
+            admin_in_channel = admin_user_id in active_users
 
-    log_with_context(
-        logging.DEBUG,
-        f"Workspace admin ({admin_email}) {'was' if admin_in_channel else 'was not'} in original Slack channel {channel}",
-        channel=channel,
-    )
+        log_with_context(
+            logging.DEBUG,
+            f"Workspace admin ({admin_email}) {'was' if admin_in_channel else 'was not'} in original Slack channel {channel}",
+            channel=channel,
+        )
 
     _compute_membership_times(ctx, channel, user_membership)
 

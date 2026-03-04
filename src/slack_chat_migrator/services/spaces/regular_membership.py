@@ -358,6 +358,8 @@ def _verify_and_handle_admin(
         )
 
         admin_email = ctx.workspace_admin
+        if admin_email is None:
+            return
         log_with_context(
             logging.DEBUG,
             f"Checking if workspace admin ({admin_email}) should be in space {space} for channel {channel}",

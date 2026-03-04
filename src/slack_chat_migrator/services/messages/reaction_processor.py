@@ -49,11 +49,12 @@ def process_reactions_batch(
 
     state.progress.migration_summary["reactions_created"] += reaction_count
 
+    # Impersonation in _build_user_batches() requires real credentials
+    # outside the DI boundary, so skip API execution in dry-run mode.
     if ctx.dry_run:
         log_with_context(
             logging.DEBUG,
-            f"{ctx.log_prefix}Would add {reaction_count} reactions from"
-            f" {len(requests_by_user)} users to message {message_id}",
+            f"[DRY RUN] Would add {reaction_count} reactions to message {message_id}",
             message_id=message_id,
             channel=state.context.current_channel,
         )

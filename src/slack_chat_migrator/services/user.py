@@ -118,7 +118,7 @@ def _log_unmapped_users(users_without_email: list[dict[str, Any]]) -> None:
 
 def generate_user_map(
     export_root: Path, config: MigrationConfig
-) -> tuple[dict[str, str], list[dict[str, Any]]]:
+) -> tuple[dict[str, str], list[dict[str, Any]], frozenset[str]]:
     """Generate user mapping from users.json file.
 
     Args:
@@ -126,12 +126,14 @@ def generate_user_map(
         config: Configuration dictionary
 
     Returns:
-        Tuple of (user_map, users_without_email) where:
+        Tuple of (user_map, users_without_email, bot_user_ids) where:
         - user_map is a dictionary mapping Slack user IDs to email addresses
         - users_without_email is a list of dictionaries with info about users without emails
+        - bot_user_ids is a frozenset of Slack user IDs that were ignored as bots
     """
     user_map: dict[str, str] = {}
     users_without_email: list[dict[str, Any]] = []
+    bot_user_ids: set[str] = set()
     users = _load_users_json(export_root / "users.json")
 
     ignored_bots_count = 0
@@ -146,6 +148,9 @@ def generate_user_map(
         )
         if was_bot:
             ignored_bots_count += 1
+            user_id = user.get("id")
+            if user_id:
+                bot_user_ids.add(user_id)
 
     _log_unmapped_users(users_without_email)
 
@@ -168,4 +173,4 @@ def generate_user_map(
             f"Ignored {ignored_bots_count} bot users (ignore_bots enabled)",
         )
 
-    return user_map, users_without_email
+    return user_map, users_without_email, frozenset(bot_user_ids)

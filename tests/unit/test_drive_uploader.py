@@ -16,7 +16,6 @@ from slack_chat_migrator.services.drive.drive_uploader import (
 
 
 def _make_uploader(
-    dry_run=False,
     workspace_domain="example.com",
     service_account_email=None,
 ):
@@ -25,7 +24,6 @@ def _make_uploader(
     return DriveFileUploader(
         drive_service=drive_service,
         workspace_domain=workspace_domain,
-        dry_run=dry_run,
         service_account_email=service_account_email,
     )
 
@@ -214,14 +212,15 @@ class TestPreCacheFolderFileHashes:
         assert count == 0
         uploader.drive_service.list_files.assert_not_called()
 
-    def test_dry_run_returns_zero(self):
-        """Dry run mode returns 0 without API calls."""
-        uploader = _make_uploader(dry_run=True)
+    def test_dry_run_delegates_to_service(self):
+        """Dry run mode delegates to the (injected) drive service."""
+        uploader = _make_uploader()
+        uploader.drive_service.list_files.return_value = {"files": []}
 
         count = uploader.pre_cache_folder_file_hashes("folder1")
 
         assert count == 0
-        uploader.drive_service.list_files.assert_not_called()
+        uploader.drive_service.list_files.assert_called_once()
 
 
 # -------------------------------------------------------------------
@@ -307,17 +306,6 @@ class TestFindFileByHash:
 
 class TestUploadFileToDrive:
     """Tests for upload_file_to_drive."""
-
-    def test_dry_run_returns_mock_response(self):
-        """Dry run returns mock file ID and URL."""
-        uploader = _make_uploader(dry_run=True)
-
-        file_id, url = uploader.upload_file_to_drive(
-            "/tmp/test.txt", "test.txt", "folder1"
-        )
-
-        assert file_id == "DRY_FILE_test.txt"
-        assert "dry-run" in url
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_successful_upload(self, mock_media_cls, tmp_path):
@@ -501,7 +489,6 @@ class TestInit:
         )
 
         assert uploader.workspace_domain == "test.com"
-        assert uploader.dry_run is False
         assert uploader.service_account_email == "sa@test.com"
         assert uploader.file_hash_cache == {}
         assert uploader.folders_pre_cached == set()
@@ -643,14 +630,15 @@ class TestTransferOwnership:
         call_kwargs = uploader.drive_service.create_permission.call_args
         assert call_kwargs.kwargs.get("transfer_ownership") is True
 
-    def test_dry_run_does_not_call_api(self):
-        """Dry run logs but doesn't call API."""
-        uploader = _make_uploader(dry_run=True)
+    def test_dry_run_delegates_to_service(self):
+        """Dry run mode delegates to the (injected) drive service."""
+        uploader = _make_uploader()
+        uploader.drive_service.create_permission.return_value = {}
 
         result = uploader.transfer_ownership("file1", "owner@example.com")
 
         assert result is True
-        uploader.drive_service.create_permission.assert_not_called()
+        uploader.drive_service.create_permission.assert_called_once()
 
     def test_http_error_returns_false(self):
         """HttpError during transfer returns False."""
