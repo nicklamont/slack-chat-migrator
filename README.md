@@ -742,17 +742,20 @@ src/slack_chat_migrator/
 │   │   ├── folder_manager.py      # Drive folder creation and management
 │   │   └── shared_drive_manager.py # Shared drive creation and management
 │   ├── drive_adapter.py           # Typed wrapper over raw Drive API service
-│   ├── discovery.py               # Space discovery and mapping for resumption
-│   ├── file.py                    # FileHandler class (delegates to download/permissions)
-│   ├── file_download.py           # Slack file download logic
-│   ├── file_permissions.py        # Drive file ownership/sharing
-│   ├── historical_membership.py   # Historical member import (createTime/deleteTime)
-│   ├── message_attachments.py     # Attachment processing
-│   ├── message_builder.py         # Message payload construction (Slack → Chat format)
-│   ├── message_sender.py          # Message send logic, error handling, stats
-│   ├── reaction_processor.py      # Batch reaction processing
-│   ├── regular_membership.py      # Regular member addition (post-import)
-│   ├── space_creator.py           # Space creation, listing, import mode cleanup
+│   ├── files/                     # Slack file handling
+│   │   ├── file.py                # FileHandler class (delegates to download/permissions)
+│   │   ├── file_download.py       # Slack file download logic
+│   │   └── file_permissions.py    # Drive file ownership/sharing
+│   ├── messages/                  # Message migration pipeline
+│   │   ├── message_attachments.py # Attachment processing
+│   │   ├── message_builder.py     # Message payload construction (Slack → Chat format)
+│   │   ├── message_sender.py      # Message send logic, error handling, stats
+│   │   └── reaction_processor.py  # Batch reaction processing
+│   ├── spaces/                    # Space lifecycle management
+│   │   ├── discovery.py           # Space discovery and mapping for resumption
+│   │   ├── historical_membership.py # Historical member import (createTime/deleteTime)
+│   │   ├── regular_membership.py  # Regular member addition (post-import)
+│   │   └── space_creator.py       # Space creation, listing, import mode cleanup
 │   ├── user.py                    # User mapping (Slack → Google)
 │   └── user_resolver.py           # User identity resolution and impersonation
 └── utils/                         # Shared utilities

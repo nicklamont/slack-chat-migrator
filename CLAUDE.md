@@ -27,23 +27,30 @@ src/slack_chat_migrator/
 │   ├── migrator.py          # Composition root — wires all deps, owns lifecycle
 │   └── state.py             # MigrationState with typed sub-states (Spaces/Messages/Users/etc.)
 ├── services/       # External API integrations
-│   ├── chat/       # Google Chat API (spaces, messages)
+│   ├── chat/       # Google Chat API
+│   │   ├── chat_uploader.py    # Chat-based media upload
 │   │   └── dry_run_service.py  # No-op Chat API for dry-run mode
 │   ├── chat_adapter.py      # Typed wrapper over raw Chat API service
-│   ├── drive/      # Google Drive API (file uploads, shared drives)
-│   │   └── dry_run_service.py  # No-op Drive API for dry-run mode
+│   ├── drive/      # Google Drive API
+│   │   ├── drive_uploader.py      # Drive file upload logic
+│   │   ├── dry_run_service.py     # No-op Drive API for dry-run mode
+│   │   ├── folder_manager.py      # Drive folder creation and management
+│   │   └── shared_drive_manager.py
 │   ├── drive_adapter.py     # Typed wrapper over raw Drive API service
-│   ├── discovery.py         # Space discovery and mapping for migration resumption
-│   ├── file.py              # FileHandler class (delegates to download/permissions)
-│   ├── file_download.py     # Slack file download logic
-│   ├── file_permissions.py  # Drive file ownership/sharing
-│   ├── historical_membership.py # Historical member import (createTime/deleteTime)
-│   ├── message_attachments.py
-│   ├── message_builder.py   # Message payload construction (Slack → Chat format)
-│   ├── message_sender.py    # Message send logic, error handling, stats
-│   ├── reaction_processor.py # Batch reaction processing
-│   ├── regular_membership.py # Regular member addition (post-import)
-│   ├── space_creator.py     # Space creation, listing, and import mode cleanup
+│   ├── files/      # Slack file handling
+│   │   ├── file.py              # FileHandler class (delegates to download/permissions)
+│   │   ├── file_download.py     # Slack file download logic
+│   │   └── file_permissions.py  # Drive file ownership/sharing
+│   ├── messages/   # Message migration pipeline
+│   │   ├── message_attachments.py
+│   │   ├── message_builder.py   # Message payload construction (Slack → Chat format)
+│   │   ├── message_sender.py    # Message send logic, error handling, stats
+│   │   └── reaction_processor.py # Batch reaction processing
+│   ├── spaces/     # Space lifecycle management
+│   │   ├── discovery.py           # Space discovery and mapping for resumption
+│   │   ├── historical_membership.py # Historical member import (createTime/deleteTime)
+│   │   ├── regular_membership.py  # Regular member addition (post-import)
+│   │   └── space_creator.py      # Space creation, listing, and import mode cleanup
 │   ├── user.py              # User mapping (Slack → Google)
 │   └── user_resolver.py     # User identity resolution and impersonation
 └── utils/          # Shared utilities
