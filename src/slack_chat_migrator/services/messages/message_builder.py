@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from slack_chat_migrator.core.context import MigrationContext
     from slack_chat_migrator.core.state import MigrationState
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
-    from slack_chat_migrator.services.message_attachments import (
+    from slack_chat_migrator.services.messages.message_attachments import (
         MessageAttachmentProcessor,
     )
     from slack_chat_migrator.services.user_resolver import UserResolver

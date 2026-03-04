@@ -11,13 +11,15 @@ from googleapiclient.errors import HttpError
 
 from slack_chat_migrator.constants import BOT_SUBTYPES, SYSTEM_SUBTYPES
 from slack_chat_migrator.services.discovery import should_process_message
-from slack_chat_migrator.services.message_builder import (
+from slack_chat_migrator.services.messages.message_builder import (
     build_message_payload,
     build_user_map_with_overrides,
     generate_message_id,
     process_attachments,
 )
-from slack_chat_migrator.services.reaction_processor import process_reactions_batch
+from slack_chat_migrator.services.messages.reaction_processor import (
+    process_reactions_batch,
+)
 from slack_chat_migrator.types import FailedMessage, MessageResult, SendResult
 from slack_chat_migrator.utils.api import slack_ts_to_rfc3339
 from slack_chat_migrator.utils.formatting import parse_slack_blocks
@@ -30,7 +32,7 @@ if TYPE_CHECKING:
     from slack_chat_migrator.core.context import MigrationContext
     from slack_chat_migrator.core.state import MigrationState
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
-    from slack_chat_migrator.services.message_attachments import (
+    from slack_chat_migrator.services.messages.message_attachments import (
         MessageAttachmentProcessor,
     )
     from slack_chat_migrator.services.user_resolver import UserResolver

@@ -40,7 +40,9 @@ from slack_chat_migrator.services.discovery import (
 from slack_chat_migrator.services.drive.dry_run_service import DryRunDriveService
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
 from slack_chat_migrator.services.file import FileHandler
-from slack_chat_migrator.services.message_attachments import MessageAttachmentProcessor
+from slack_chat_migrator.services.messages.message_attachments import (
+    MessageAttachmentProcessor,
+)
 from slack_chat_migrator.services.user import generate_user_map
 from slack_chat_migrator.services.user_resolver import UserResolver
 from slack_chat_migrator.utils.api import get_gcp_service
