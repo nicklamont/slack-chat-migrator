@@ -357,6 +357,7 @@ def _verify_and_handle_admin(
             channel=channel,
         )
 
+        assert ctx.workspace_admin is not None  # guaranteed in live mode
         admin_email = ctx.workspace_admin
         log_with_context(
             logging.DEBUG,

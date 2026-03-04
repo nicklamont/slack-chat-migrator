@@ -59,9 +59,9 @@ class SlackToChatMigrator:
 
     def __init__(
         self,
-        creds_path: str,
+        creds_path: str | None,
         export_path: str,
-        workspace_admin: str,
+        workspace_admin: str | None,
         config_path: str,
         dry_run: bool = False,
         verbose: bool = False,
@@ -73,10 +73,15 @@ class SlackToChatMigrator:
 
         ``message_error_schedule`` is test-only: maps 1-based message
         ordinal to HTTP status code for error injection in dry-run mode.
+
+        In dry-run mode, ``creds_path`` and ``workspace_admin`` may be
+        ``None`` — no real API calls are made.
         """
         self.creds_path = creds_path
         self.export_root = Path(export_path)
-        self.workspace_admin = workspace_admin.strip()
+        self.workspace_admin: str | None = (
+            workspace_admin.strip() if workspace_admin else None
+        )
         self.config_path = Path(config_path)
         self.dry_run = dry_run
         self.verbose = verbose
@@ -99,19 +104,22 @@ class SlackToChatMigrator:
         ] = []  # List of users without email mappings
         self.progress_file = self.export_root / ".migration_progress.json"
 
-        # Validate workspace admin email format
-        if (
-            "@" not in self.workspace_admin
-            or self.workspace_admin.count("@") != 1
-            or not self.workspace_admin.split("@")[0]
-            or not self.workspace_admin.split("@")[1]
-        ):
-            raise ValueError(
-                f"Invalid workspace_admin email: '{self.workspace_admin}'. Must be a valid email address."
-            )
+        # Validate workspace admin email format (skip when None in dry-run)
+        if self.workspace_admin is not None:
+            if (
+                "@" not in self.workspace_admin
+                or self.workspace_admin.count("@") != 1
+                or not self.workspace_admin.split("@")[0]
+                or not self.workspace_admin.split("@")[1]
+            ):
+                raise ValueError(
+                    f"Invalid workspace_admin email: '{self.workspace_admin}'. Must be a valid email address."
+                )
 
         # Extract workspace domain from admin email for external user detection
-        self.workspace_domain = self.workspace_admin.split("@")[1]
+        self.workspace_domain = (
+            self.workspace_admin.split("@")[1] if self.workspace_admin else ""
+        )
 
         # Initialize API clients
         self._validate_export_format()
@@ -202,6 +210,10 @@ class SlackToChatMigrator:
             self.chat = ChatAdapter(raw_chat)
             self.drive = DriveAdapter(DryRunDriveService())
         else:
+            # Live mode — creds_path and workspace_admin are guaranteed non-None
+            # by CLI validation in validate_prerequisites()
+            assert self.creds_path is not None
+            assert self.workspace_admin is not None
             log_with_context(
                 logging.INFO,
                 "Initializing Google Chat and Drive API services...",

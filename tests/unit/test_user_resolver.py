@@ -13,6 +13,8 @@ from slack_chat_migrator.services.chat_adapter import ChatAdapter
 from slack_chat_migrator.services.user_resolver import UserResolver
 from slack_chat_migrator.utils.user_validation import UnmappedUserTracker
 
+_UNSET = object()  # sentinel to distinguish "not passed" from explicit None
+
 
 def _make_resolver(
     channel="general",
@@ -26,7 +28,7 @@ def _make_resolver(
     config=None,
     chat=None,
     unmapped_user_tracker=None,
-    creds_path=None,
+    creds_path=_UNSET,
 ):
     """Create a UserResolver with explicit dependencies for testing."""
     if state is None:
@@ -45,7 +47,7 @@ def _make_resolver(
     if unmapped_user_tracker is None:
         unmapped_user_tracker = UnmappedUserTracker()
 
-    if creds_path is None:
+    if creds_path is _UNSET:
         creds_path = "/tmp/creds.json"
 
     return UserResolver(
@@ -484,3 +486,24 @@ class TestIsExternalUser:
         assert resolver.is_external_user("alice@example.com") is False
         assert resolver.is_external_user("alice@EXAMPLE.COM") is False
         assert resolver.is_external_user("alice@Example.Com") is False
+
+
+class TestGetDelegateSafetyAssertion:
+    """Tests for the safety assertion when creds_path is None."""
+
+    def test_get_delegate_without_creds_raises(self):
+        """get_delegate() raises RuntimeError when creds_path is None."""
+        import pytest
+
+        resolver = _make_resolver(creds_path=None)
+
+        with pytest.raises(RuntimeError, match=r"get_delegate.*without credentials"):
+            resolver.get_delegate("user@example.com")
+
+    def test_get_delegate_with_empty_email_returns_admin_chat(self):
+        """get_delegate('') returns the admin chat service without checking creds."""
+        resolver = _make_resolver()
+
+        # Empty email should return the admin chat service directly
+        result = resolver.get_delegate("")
+        assert result is resolver.chat

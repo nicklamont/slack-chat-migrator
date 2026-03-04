@@ -3,6 +3,7 @@
 import logging
 from unittest.mock import MagicMock, patch
 
+import click
 from click.testing import CliRunner
 
 from slack_chat_migrator.cli.commands import cli, handle_exception
@@ -65,11 +66,11 @@ class TestMigrateCommand:
         ]:
             assert opt in result.output
 
-    def test_missing_required_options(self):
+    def test_missing_export_path(self):
         runner = CliRunner()
         result = runner.invoke(cli, ["migrate"])
         assert result.exit_code != 0
-        assert "Missing option" in result.output or "Error" in result.output
+        assert "Missing option" in result.output or "export_path" in result.output
 
 
 class TestCheckPermissionsCommand:
@@ -231,17 +232,14 @@ class TestBackwardsCompatibility:
     def test_flags_without_subcommand_route_to_migrate(self):
         """When args start with -- (no subcommand), DefaultGroup prepends migrate."""
         runner = CliRunner()
-        # This should route to migrate, which will fail due to missing options
+        # This should route to migrate, which will fail due to missing --export_path
         # but the error should reference migrate's required options, not
         # an unknown-command error.
-        result = runner.invoke(
-            cli, ["--creds_path", "fake.json", "--export_path", "fake"]
-        )
-        # It should NOT be exit code 0 (missing workspace_admin)
+        result = runner.invoke(cli, ["--creds_path", "fake.json"])
         assert result.exit_code != 0
         # The error should be about a missing required option, not about
         # an invalid subcommand
-        assert "Missing option" in result.output or "workspace_admin" in result.output
+        assert "Missing option" in result.output or "export_path" in result.output
 
 
 class TestHandleException:
@@ -338,3 +336,125 @@ class TestMigrateExceptionPaths:
             ],
         )
         assert result.exit_code == 1
+
+
+class TestCredentialFreeDryRun:
+    """Tests for credential-free dry-run mode."""
+
+    @patch("slack_chat_migrator.cli.migrate_cmd.show_security_warning")
+    @patch("slack_chat_migrator.cli.migrate_cmd.create_migration_output_directory")
+    @patch("slack_chat_migrator.cli.migrate_cmd.setup_logger")
+    @patch("slack_chat_migrator.cli.migrate_cmd.MigrationOrchestrator")
+    def test_dry_run_without_credentials(
+        self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
+    ):
+        """Dry-run mode accepts missing --creds_path and --workspace_admin."""
+        mock_outdir.return_value = "/tmp/fake"
+        mock_orch = MagicMock()
+        mock_orch_cls.return_value = mock_orch
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "migrate",
+                "--export_path",
+                "fake",
+                "--dry_run",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_orch.validate_prerequisites.assert_called_once()
+        mock_orch.run_migration.assert_called_once()
+
+    @patch("slack_chat_migrator.cli.migrate_cmd.show_security_warning")
+    @patch("slack_chat_migrator.cli.migrate_cmd.create_migration_output_directory")
+    @patch("slack_chat_migrator.cli.migrate_cmd.setup_logger")
+    @patch("slack_chat_migrator.cli.migrate_cmd.MigrationOrchestrator")
+    def test_live_run_requires_creds_path(
+        self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
+    ):
+        """Live migration (no --dry_run) rejects missing --creds_path."""
+        mock_outdir.return_value = "/tmp/fake"
+        mock_orch = MagicMock()
+        mock_orch.validate_prerequisites.side_effect = click.UsageError(
+            "--creds_path is required for live migration"
+        )
+        mock_orch_cls.return_value = mock_orch
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "migrate",
+                "--export_path",
+                "fake",
+            ],
+        )
+        assert result.exit_code != 0
+
+    @patch("slack_chat_migrator.cli.validate_cmd.MigrationOrchestrator")
+    @patch("slack_chat_migrator.cli.validate_cmd.setup_logger")
+    @patch("slack_chat_migrator.cli.validate_cmd.create_migration_output_directory")
+    def test_validate_without_credentials(self, mock_outdir, mock_log, mock_orch_cls):
+        """Validate command works without --creds_path or --workspace_admin."""
+        mock_outdir.return_value = "/tmp/fake"
+        mock_orch = MagicMock()
+        mock_orch_cls.return_value = mock_orch
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                "--export_path",
+                "fake",
+            ],
+        )
+        assert result.exit_code == 0
+        args = mock_orch_cls.call_args[0][0]
+        assert args.dry_run is True
+        assert args.creds_path is None
+        assert args.workspace_admin is None
+
+    def test_cleanup_requires_creds_path(self):
+        """Cleanup command rejects missing --creds_path."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["cleanup", "--yes"],
+        )
+        assert result.exit_code != 0
+
+    def test_check_permissions_requires_creds_path(self):
+        """Check-permissions command rejects missing --creds_path."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["check-permissions"],
+        )
+        assert result.exit_code != 0
+
+    def test_dry_run_with_nonexistent_creds_raises(self):
+        """Dry-run with a supplied but nonexistent creds file raises ConfigError."""
+        from types import SimpleNamespace
+
+        from slack_chat_migrator.cli.migrate_cmd import MigrationOrchestrator
+        from slack_chat_migrator.exceptions import ConfigError
+
+        args = SimpleNamespace(
+            creds_path="/nonexistent/fake_creds.json",
+            export_path="fake",
+            workspace_admin="a@b.com",
+            config="config.yaml",
+            verbose=False,
+            debug_api=False,
+            dry_run=True,
+            update_mode=False,
+            skip_permission_check=False,
+        )
+        orchestrator = MigrationOrchestrator(args)
+        import pytest
+
+        with pytest.raises(ConfigError, match="Credentials file not found"):
+            orchestrator.validate_prerequisites()

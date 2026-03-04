@@ -116,16 +116,17 @@ class TestEmailValidation:
                 dry_run=True,
             )
 
-    def test_invalid_email_empty(self, tmp_path):
+    def test_empty_email_treated_as_none_in_dry_run(self, tmp_path):
+        """Empty workspace_admin is treated as None in dry-run mode."""
         _setup_export(tmp_path)
-        with pytest.raises(ValueError, match="Invalid workspace_admin email"):
-            SlackToChatMigrator(
-                creds_path="fake_creds.json",
-                export_path=str(tmp_path),
-                workspace_admin="",
-                config_path=str(tmp_path / "config.yaml"),
-                dry_run=True,
-            )
+        m = SlackToChatMigrator(
+            creds_path="fake_creds.json",
+            export_path=str(tmp_path),
+            workspace_admin="",
+            config_path=str(tmp_path / "config.yaml"),
+            dry_run=True,
+        )
+        assert m.workspace_admin is None
 
     def test_invalid_email_at_only(self, tmp_path):
         _setup_export(tmp_path)

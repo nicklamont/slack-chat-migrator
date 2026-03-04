@@ -26,18 +26,15 @@ class SharedDriveManager:
         self,
         drive_service: DriveAdapter,
         config: MigrationConfig,
-        dry_run: bool = False,
     ) -> None:
         """Initialize the SharedDriveManager.
 
         Args:
             drive_service: Typed Drive API adapter
             config: Migration configuration
-            dry_run: Whether to run in dry run mode
         """
         self.drive_service = drive_service
         self.config = config
-        self.dry_run = dry_run
 
     def validate_shared_drive(self, shared_drive_id: str) -> bool:
         """Validate that a shared drive exists and is accessible.

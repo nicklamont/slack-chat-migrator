@@ -117,16 +117,10 @@ class FileHandler:
         }
 
         # Initialize modular services
-        self.shared_drive_manager = SharedDriveManager(
-            drive_service, config, dry_run=dry_run
-        )
-        self.folder_manager = FolderManager(
-            drive_service, workspace_domain, dry_run=dry_run
-        )
-        self.drive_uploader = DriveFileUploader(
-            drive_service, workspace_domain, dry_run=dry_run
-        )
-        self.chat_uploader = ChatFileUploader(chat_service, dry_run=dry_run)
+        self.shared_drive_manager = SharedDriveManager(drive_service, config)
+        self.folder_manager = FolderManager(drive_service, workspace_domain)
+        self.drive_uploader = DriveFileUploader(drive_service, workspace_domain)
+        self.chat_uploader = ChatFileUploader(chat_service)
 
         # Initialize the root folder and shared drive
         self._shared_drive_id: str | None = None
@@ -701,9 +695,7 @@ class FileHandler:
                 # Use user-specific service if provided, otherwise use default chat uploader
                 if user_service:
                     # Create a temporary chat uploader with the user's service
-                    user_chat_uploader = ChatFileUploader(
-                        user_service, dry_run=self.dry_run
-                    )
+                    user_chat_uploader = ChatFileUploader(user_service)
                     # Set channel context for logging
                     user_chat_uploader.current_channel = (
                         self.state.context.current_channel

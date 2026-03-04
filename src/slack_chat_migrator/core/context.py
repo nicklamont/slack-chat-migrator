@@ -22,10 +22,10 @@ class MigrationContext:
 
     # Paths
     export_root: Path
-    creds_path: str
+    creds_path: str | None
 
     # Workspace identity
-    workspace_admin: str
+    workspace_admin: str | None
     workspace_domain: str
 
     # Mode flags

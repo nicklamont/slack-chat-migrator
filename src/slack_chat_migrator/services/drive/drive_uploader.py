@@ -32,7 +32,6 @@ class DriveFileUploader:
         self,
         drive_service: DriveAdapter,
         workspace_domain: str | None = None,
-        dry_run: bool = False,
         service_account_email: str | None = None,
     ) -> None:
         """Initialize the DriveFileUploader.
@@ -40,12 +39,10 @@ class DriveFileUploader:
         Args:
             drive_service: DriveAdapter instance wrapping the Google Drive API
             workspace_domain: The workspace domain for permissions
-            dry_run: Whether to run in dry run mode
             service_account_email: The email of the service account to grant access to
         """
         self.drive_service = drive_service
         self.workspace_domain = workspace_domain
-        self.dry_run = dry_run
         self.service_account_email = service_account_email
         self.file_hash_cache: dict[str, tuple[str | None, str | None]] = {}
         self.folders_pre_cached: set[str] = set()
