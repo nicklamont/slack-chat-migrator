@@ -12,7 +12,7 @@ from slack_chat_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
-    from slack_chat_migrator.services.file import FileHandler
+    from slack_chat_migrator.services.files.file import FileHandler
 
 
 class MessageAttachmentProcessor:

@@ -34,7 +34,7 @@ from slack_chat_migrator.services.chat.dry_run_service import DryRunChatService
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
 from slack_chat_migrator.services.drive.dry_run_service import DryRunDriveService
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
-from slack_chat_migrator.services.file import FileHandler
+from slack_chat_migrator.services.files.file import FileHandler
 from slack_chat_migrator.services.messages.message_attachments import (
     MessageAttachmentProcessor,
 )

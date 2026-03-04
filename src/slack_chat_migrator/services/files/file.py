@@ -24,15 +24,15 @@ from slack_chat_migrator.services.drive import (
     FolderManager,
     SharedDriveManager,
 )
-from slack_chat_migrator.services.file_download import (
+from slack_chat_migrator.services.files.file_download import (
     DownloadOutcome,
     create_drive_reference,
     download_file,
 )
-from slack_chat_migrator.services.file_permissions import (
+from slack_chat_migrator.services.files.file_permissions import (
     share_file_with_members as _share_file_with_members,
 )
-from slack_chat_migrator.services.file_permissions import (
+from slack_chat_migrator.services.files.file_permissions import (
     transfer_file_ownership,
 )
 from slack_chat_migrator.types import UploadResult

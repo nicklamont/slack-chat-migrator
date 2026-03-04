@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from slack_chat_migrator.core.context import MigrationContext
     from slack_chat_migrator.core.state import MigrationState
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
-    from slack_chat_migrator.services.file import FileHandler
+    from slack_chat_migrator.services.files.file import FileHandler
     from slack_chat_migrator.services.user_resolver import UserResolver
 
 
