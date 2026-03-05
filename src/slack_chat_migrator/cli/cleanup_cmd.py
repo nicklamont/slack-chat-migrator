@@ -36,7 +36,7 @@ def cleanup(
     debug_api: bool,
     yes: bool,
 ) -> None:
-    """Complete import mode on spaces that are stuck.
+    """(Deprecated: use 'migrate --complete') Complete import mode on stuck spaces.
 
     Lists all spaces visible to the service account and calls completeImport()
     on any that are still in import mode.  Does not add members — use

@@ -92,7 +92,8 @@ pip install git+https://github.com/nicklamont/slack-chat-migrator.git
 
 ```bash
 # 1. Set up GCP permissions (one-time, interactive wizard)
-pip install slack-chat-migrator[setup]
+pip install -e ".[setup]"   # from a repo clone
+# pip install "slack-chat-migrator[setup]"  # or from PyPI
 slack-chat-migrator setup
 # Then complete domain-wide delegation in Google Workspace Admin Console
 

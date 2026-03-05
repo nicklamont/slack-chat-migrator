@@ -35,7 +35,7 @@ def check_permissions(
     verbose: bool,
     debug_api: bool,
 ) -> None:
-    """Validate API permissions without running a migration.
+    """(Deprecated: use 'validate') Validate API permissions without running a migration.
 
     Tests that the service account has all required scopes for the Chat and
     Drive APIs.  Does not require a Slack export directory.

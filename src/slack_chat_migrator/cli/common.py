@@ -333,11 +333,7 @@ def common_options(f: Callable[..., None]) -> Callable[..., None]:
 )
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """Slack to Google Chat migration tool.
-
-    Args:
-        ctx: The Click context (injected by ``@click.pass_context``).
-    """
+    """Slack to Google Chat migration tool."""
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
