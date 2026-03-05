@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import functools
 import logging
+import sys
 from collections.abc import Mapping
+from types import TracebackType
 from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
 import click
@@ -171,6 +173,99 @@ def deprecated_command(
 
 
 # ---------------------------------------------------------------------------
+# InterruptHandler context manager
+# ---------------------------------------------------------------------------
+
+
+class InterruptHandler:
+    """Context manager that shows a Rich panel on KeyboardInterrupt.
+
+    Displays a summary of progress made, a copy-pasteable resume command,
+    and a warning about spaces left in import mode.
+
+    The exception is **not** suppressed — it propagates after the panel
+    is printed so the caller's ``except`` block runs normally.
+
+    Args:
+        export_path: The export path used in this run (for resume hint).
+        renderer: Optional renderer to stop before printing the panel.
+    """
+
+    def __init__(
+        self,
+        export_path: str,
+        renderer: Any = None,
+    ) -> None:
+        self._export_path = export_path
+        self._renderer = renderer
+
+    def __enter__(self) -> InterruptHandler:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if exc_type is not KeyboardInterrupt:
+            return
+
+        # Stop the live renderer so its output doesn't conflict
+        if self._renderer is not None:
+            try:
+                self._renderer.stop()
+            except Exception:
+                pass
+
+        self._print_interrupt_summary()
+
+    def _print_interrupt_summary(self) -> None:
+        """Print a summary panel after Ctrl-C."""
+        if sys.stdout.isatty():
+            try:
+                from rich.console import Console
+                from rich.panel import Panel
+
+                console = Console()
+                resume_cmd = (
+                    f"slack-chat-migrator migrate --resume "
+                    f"--export_path {self._export_path}"
+                )
+                lines = [
+                    "[yellow]Migration interrupted.[/yellow]",
+                    "",
+                    "To resume from where you left off:",
+                    f"  [bold]{resume_cmd}[/bold]",
+                    "",
+                    "[red]Spaces in import mode must be completed within 90 days.[/red]",
+                    "Run [bold]migrate --complete[/bold] to finalize all spaces.",
+                ]
+                console.print(
+                    Panel(
+                        "\n".join(lines),
+                        title="Interrupted",
+                        border_style="yellow",
+                    )
+                )
+                return
+            except Exception:
+                pass
+
+        # Fallback to plain text
+        log_with_context(logging.WARNING, "Migration interrupted.")
+        log_with_context(
+            logging.INFO,
+            f"Resume with: slack-chat-migrator migrate --resume "
+            f"--export_path {self._export_path}",
+        )
+        log_with_context(
+            logging.WARNING,
+            "Spaces in import mode must be completed within 90 days.",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Shared option decorator
 # ---------------------------------------------------------------------------
 
@@ -282,7 +377,7 @@ def handle_http_error(e: HttpError) -> None:
         log_with_context(logging.ERROR, f"Rate limit exceeded: {e}")
         log_with_context(
             logging.INFO,
-            "The migration hit API rate limits. Consider using --update_mode to resume.",
+            "The migration hit API rate limits. Consider using --resume to continue.",
         )
     elif e.resp.status >= HTTP_SERVER_ERROR_MIN:
         log_with_context(logging.ERROR, f"Server error from Google API: {e}")
@@ -315,14 +410,10 @@ def handle_exception(e: Exception) -> None:
         log_with_context(logging.WARNING, "Migration interrupted by user.")
         log_with_context(
             logging.INFO,
-            "📋 Check the partial migration report in the output directory.",
+            "Check the partial migration report in the output directory.",
         )
-        log_with_context(
-            logging.INFO, "🔄 You can resume the migration with --update_mode."
-        )
-        log_with_context(
-            logging.INFO, "📝 All progress and logs have been saved to disk."
-        )
+        log_with_context(logging.INFO, "You can resume the migration with --resume.")
+        log_with_context(logging.INFO, "All progress and logs have been saved to disk.")
     else:
         log_with_context(logging.ERROR, f"Migration failed: {e}", exc_info=True)
 

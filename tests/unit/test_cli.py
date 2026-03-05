@@ -60,7 +60,8 @@ class TestMigrateCommand:
             "--workspace_admin",
             "--config",
             "--dry_run",
-            "--update_mode",
+            "--resume",
+            "--complete",
             "--verbose",
             "--debug_api",
             "--skip_permission_check",
@@ -543,6 +544,182 @@ class TestCredentialFreeDryRun:
 
         with pytest.raises(ConfigError, match="Credentials file not found"):
             orchestrator.validate_prerequisites()
+
+
+class TestMigrateResumeFlag:
+    """Tests for --resume flag and --update_mode deprecation."""
+
+    @patch("slack_chat_migrator.cli.migrate_cmd.show_security_warning")
+    @patch("slack_chat_migrator.cli.migrate_cmd.create_migration_output_directory")
+    @patch("slack_chat_migrator.cli.migrate_cmd.setup_logger")
+    @patch("slack_chat_migrator.cli.migrate_cmd.MigrationOrchestrator")
+    def test_resume_maps_to_update_mode(
+        self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
+    ):
+        """--resume sets update_mode=True in the args namespace."""
+        mock_outdir.return_value = "/tmp/fake"
+        mock_orch = MagicMock()
+        mock_orch_cls.return_value = mock_orch
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "migrate",
+                "--creds_path",
+                "fake.json",
+                "--export_path",
+                "fake",
+                "--workspace_admin",
+                "a@b.com",
+                "--resume",
+            ],
+        )
+        assert result.exit_code == 0
+        args = mock_orch_cls.call_args[0][0]
+        assert args.update_mode is True
+
+    @patch("slack_chat_migrator.cli.migrate_cmd.show_security_warning")
+    @patch("slack_chat_migrator.cli.migrate_cmd.create_migration_output_directory")
+    @patch("slack_chat_migrator.cli.migrate_cmd.setup_logger")
+    @patch("slack_chat_migrator.cli.migrate_cmd.MigrationOrchestrator")
+    def test_update_mode_emits_deprecation(
+        self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
+    ):
+        """--update_mode still works but emits a deprecation warning."""
+        mock_outdir.return_value = "/tmp/fake"
+        mock_orch = MagicMock()
+        mock_orch_cls.return_value = mock_orch
+
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(
+            cli,
+            [
+                "migrate",
+                "--creds_path",
+                "fake.json",
+                "--export_path",
+                "fake",
+                "--workspace_admin",
+                "a@b.com",
+                "--update_mode",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "deprecated" in result.stderr.lower()
+        assert "--resume" in result.stderr
+        args = mock_orch_cls.call_args[0][0]
+        assert args.update_mode is True
+
+
+class TestMigrateCompleteFlag:
+    """Tests for --complete flag."""
+
+    def test_complete_runs_cleanup(self):
+        """--complete runs cleanup_import_mode_spaces instead of migration."""
+        runner = CliRunner()
+        # Patch at source — these are deferred imports inside _run_complete_mode
+        with (
+            patch(
+                "slack_chat_migrator.services.spaces.space_creator.cleanup_import_mode_spaces"
+            ) as mock_cleanup,
+            patch(
+                "slack_chat_migrator.utils.api.get_gcp_service",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "slack_chat_migrator.core.config.load_config",
+                return_value=MigrationConfig(),
+            ),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "migrate",
+                    "--export_path",
+                    "fake",
+                    "--creds_path",
+                    "fake.json",
+                    "--workspace_admin",
+                    "a@b.com",
+                    "--complete",
+                ],
+            )
+            assert result.exit_code == 0
+            mock_cleanup.assert_called_once()
+
+    def test_complete_requires_creds(self):
+        """--complete requires --creds_path."""
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "migrate",
+                "--export_path",
+                "fake",
+                "--complete",
+            ],
+        )
+        assert result.exit_code != 0
+
+
+class TestCleanupDeprecation:
+    """Tests for cleanup command deprecation."""
+
+    @patch("slack_chat_migrator.cli.cleanup_cmd.cleanup_import_mode_spaces")
+    @patch("slack_chat_migrator.cli.cleanup_cmd.get_gcp_service")
+    @patch("slack_chat_migrator.cli.cleanup_cmd.load_config")
+    def test_cleanup_emits_deprecation(self, mock_config, mock_svc, mock_cleanup):
+        """cleanup command emits deprecation warning pointing to migrate --complete."""
+        mock_config.return_value = MigrationConfig()
+        mock_svc.return_value = MagicMock()
+
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(
+            cli,
+            [
+                "cleanup",
+                "--creds_path",
+                "fake.json",
+                "--workspace_admin",
+                "a@b.com",
+                "--yes",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "deprecated" in result.stderr.lower()
+        assert "migrate --complete" in result.stderr
+
+
+class TestInterruptHandler:
+    """Tests for the InterruptHandler context manager."""
+
+    def test_no_effect_on_normal_exit(self):
+        """InterruptHandler does nothing when no exception occurs."""
+        from slack_chat_migrator.cli.common import InterruptHandler
+
+        with InterruptHandler(export_path="fake"):
+            pass  # should not raise
+
+    def test_non_keyboard_interrupt_propagates(self):
+        """Non-KeyboardInterrupt exceptions propagate unchanged."""
+        import pytest
+
+        from slack_chat_migrator.cli.common import InterruptHandler
+
+        with pytest.raises(ValueError, match="boom"):
+            with InterruptHandler(export_path="fake"):
+                raise ValueError("boom")
+
+    def test_keyboard_interrupt_propagates(self):
+        """KeyboardInterrupt propagates after printing the summary."""
+        import pytest
+
+        from slack_chat_migrator.cli.common import InterruptHandler
+
+        with pytest.raises(KeyboardInterrupt):
+            with InterruptHandler(export_path="fake"):
+                raise KeyboardInterrupt()
 
 
 class TestDeprecatedOption:

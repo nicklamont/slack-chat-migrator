@@ -12,14 +12,21 @@ from types import SimpleNamespace
 import click
 
 from slack_chat_migrator.cli.common import (
+    InterruptHandler,
     cli,
     common_options,
+    deprecated_option,
     handle_exception,
     show_security_warning,
 )
-from slack_chat_migrator.cli.report import generate_report, print_dry_run_summary
+from slack_chat_migrator.cli.report import (
+    generate_report,
+    print_dry_run_summary,
+    print_rich_summary,
+)
 from slack_chat_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
 from slack_chat_migrator.core.migrator import SlackToChatMigrator
+from slack_chat_migrator.core.progress import ProgressTracker
 from slack_chat_migrator.exceptions import (
     ConfigError,
     MigrationAbortedError,
@@ -51,10 +58,17 @@ logger = logging.getLogger("slack_chat_migrator")
     help="Validation-only mode - performs comprehensive validation without making changes",
 )
 @click.option(
-    "--update_mode",
+    "--resume",
     is_flag=True,
     default=False,
-    help="Update mode - update existing spaces instead of creating new ones",
+    help="Resume a previous migration - reuse existing spaces instead of creating new ones",
+)
+@deprecated_option("--update_mode", "--resume", is_flag=True, default=False)
+@click.option(
+    "--complete",
+    is_flag=True,
+    default=False,
+    help="Complete import mode on all spaces without migrating messages",
 )
 @click.option(
     "--skip_permission_check",
@@ -70,7 +84,8 @@ def migrate(
     verbose: bool,
     debug_api: bool,
     dry_run: bool,
-    update_mode: bool,
+    resume: bool,
+    complete: bool,
     skip_permission_check: bool,
 ) -> None:
     """Run the full Slack-to-Google-Chat migration.
@@ -83,9 +98,14 @@ def migrate(
         verbose: Enable verbose console logging.
         debug_api: Enable detailed API request/response logging.
         dry_run: Validation-only mode.
-        update_mode: Update existing spaces instead of creating new ones.
+        resume: Resume a previous migration (reuse existing spaces).
+        complete: Complete import mode on all spaces without migrating.
         skip_permission_check: Skip permission checks before migration.
     """
+    if complete:
+        _run_complete_mode(creds_path, workspace_admin, config, verbose, debug_api)
+        return
+
     args = SimpleNamespace(
         creds_path=creds_path,
         export_path=export_path,
@@ -94,7 +114,7 @@ def migrate(
         verbose=verbose,
         debug_api=debug_api,
         dry_run=dry_run,
-        update_mode=update_mode,
+        update_mode=resume,
         skip_permission_check=skip_permission_check,
     )
 
@@ -111,15 +131,73 @@ def migrate(
     orchestrator = MigrationOrchestrator(args)
     orchestrator.output_dir = output_dir
 
+    with InterruptHandler(export_path=export_path):
+        try:
+            orchestrator.validate_prerequisites()
+            orchestrator.run_migration()
+        except Exception as e:
+            handle_exception(e)
+            sys.exit(1)
+        finally:
+            orchestrator.cleanup()
+            show_security_warning()
+
+
+def _run_complete_mode(
+    creds_path: str | None,
+    workspace_admin: str | None,
+    config: str,
+    verbose: bool,
+    debug_api: bool,
+) -> None:
+    """Complete import mode on all spaces without migrating messages.
+
+    This is equivalent to the standalone ``cleanup`` command but accessible
+    via ``migrate --complete``.
+    """
+    from slack_chat_migrator.core.config import load_config
+    from slack_chat_migrator.services.chat_adapter import ChatAdapter
+    from slack_chat_migrator.services.spaces.space_creator import (
+        cleanup_import_mode_spaces,
+    )
+    from slack_chat_migrator.utils.api import get_gcp_service
+
+    setup_logger(verbose, debug_api)
+
+    if not creds_path:
+        raise click.UsageError("--creds_path is required for --complete")
+    if not workspace_admin:
+        raise click.UsageError("--workspace_admin is required for --complete")
+
+    log_with_context(logging.INFO, "Completing import mode on all spaces...")
+
+    cfg = load_config(Path(config))
+    chat = get_gcp_service(
+        creds_path,
+        workspace_admin,
+        "chat",
+        "v1",
+        max_retries=cfg.max_retries,
+        retry_delay=cfg.retry_delay,
+    )
+
     try:
-        orchestrator.validate_prerequisites()
-        orchestrator.run_migration()
+        cleanup_import_mode_spaces(ChatAdapter(chat))
     except Exception as e:
         handle_exception(e)
         sys.exit(1)
-    finally:
-        orchestrator.cleanup()
-        show_security_warning()
+
+    log_with_context(logging.INFO, "All spaces completed successfully.")
+    _warn_import_mode_deadline()
+
+
+def _warn_import_mode_deadline() -> None:
+    """Print a reminder about the 90-day import mode deadline."""
+    log_with_context(
+        logging.WARNING,
+        "Reminder: Spaces in import mode must be completed within 90 days "
+        "of creation. Run 'migrate --complete' if any remain.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -252,14 +330,14 @@ class MigrationOrchestrator:
             True if the user chose to proceed despite issues, False otherwise.
         """
         log_with_context(logging.INFO, "")
-        log_with_context(logging.INFO, "🚨 VALIDATION ISSUES DETECTED!")
+        log_with_context(logging.INFO, "VALIDATION ISSUES DETECTED!")
         log_with_context(
             logging.INFO,
             f"Found {migrator_instance.unmapped_user_tracker.get_unmapped_count()} unmapped user(s).",
         )
         log_with_context(logging.INFO, "")
         log_with_context(
-            logging.INFO, "⚠️  WARNING: If you proceed without fixing these mappings:"
+            logging.INFO, "WARNING: If you proceed without fixing these mappings:"
         )
         log_with_context(
             logging.INFO,
@@ -273,7 +351,7 @@ class MigrationOrchestrator:
             "   • Reactions from unmapped users will be skipped and logged",
         )
         log_with_context(logging.INFO, "")
-        log_with_context(logging.INFO, "📋 Recommended steps to fix:")
+        log_with_context(logging.INFO, "Recommended steps to fix:")
         log_with_context(logging.INFO, "1. Review the unmapped users listed above")
         log_with_context(
             logging.INFO, "2. Add them to user_mapping_overrides in your config.yaml"
@@ -317,7 +395,7 @@ class MigrationOrchestrator:
             is_explicit_dry_run: If True, include a hint to re-run without dry_run.
         """
         log_with_context(logging.INFO, "")
-        log_with_context(logging.INFO, "✅ Validation completed successfully!")
+        log_with_context(logging.INFO, "Validation completed successfully!")
         log_with_context(logging.INFO, "   • All users mapped correctly")
         log_with_context(logging.INFO, "   • File attachments accessible")
         log_with_context(logging.INFO, "   • Channel structure validated")
@@ -340,7 +418,7 @@ class MigrationOrchestrator:
         """
         log_with_context(logging.INFO, "")
         log_with_context(
-            logging.INFO, "🔍 STEP 1: Running comprehensive validation (dry run)..."
+            logging.INFO, "STEP 1: Running comprehensive validation (dry run)..."
         )
         log_with_context(
             logging.INFO, "   • Validating user mappings and detecting unmapped users"
@@ -424,9 +502,7 @@ class MigrationOrchestrator:
         Returns:
             True if the user confirms, False otherwise.
         """
-        log_with_context(
-            logging.INFO, "🚀 STEP 2: Ready to proceed with actual migration"
-        )
+        log_with_context(logging.INFO, "STEP 2: Ready to proceed with actual migration")
         log_with_context(logging.INFO, "")
 
         try:
@@ -435,6 +511,68 @@ class MigrationOrchestrator:
             log_with_context(logging.INFO, "\nMigration cancelled by user.")
             return False
 
+    def _run_with_progress(self, m: SlackToChatMigrator) -> None:
+        """Run ``m.migrate()`` with a ProgressTracker and renderer.
+
+        On failure the report is still generated so partial results are
+        available for inspection.
+        """
+        from slack_chat_migrator.cli.renderers import create_renderer
+
+        tracker = ProgressTracker()
+        renderer = create_renderer(tracker)
+        renderer.start()
+        try:
+            m.migrate(progress_tracker=tracker)
+        except BaseException as e:
+            renderer.stop()
+            self._generate_partial_report(m, e)
+            raise
+        renderer.stop()
+
+    @staticmethod
+    def _generate_partial_report(m: SlackToChatMigrator, exc: BaseException) -> None:
+        """Generate a report after a failed or interrupted migration."""
+        try:
+            report_file = generate_report(
+                m.ctx,
+                m.state,
+                m.user_resolver,
+                getattr(m, "file_handler", None),
+            )
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                log_with_context(
+                    logging.INFO,
+                    f"Partial migration report available at: {report_file}",
+                )
+            else:
+                log_with_context(
+                    logging.INFO,
+                    f"Migration report (with partial results) available at: {report_file}",
+                )
+        except Exception as report_error:
+            log_with_context(
+                logging.WARNING,
+                f"Failed to generate migration report after failure: {report_error}",
+            )
+
+    def _print_summary(self, m: SlackToChatMigrator) -> None:
+        """Generate the YAML report and print a console summary."""
+        generate_report(
+            m.ctx,
+            m.state,
+            m.user_resolver,
+            getattr(m, "file_handler", None),
+        )
+        print_rich_summary(
+            m.ctx,
+            m.state,
+            m.user_resolver,
+            getattr(m, "file_handler", None),
+        )
+        if not m.dry_run:
+            _warn_import_mode_deadline()
+
     def run_migration(self) -> None:
         """Execute the main migration logic."""
         if self.args.dry_run:
@@ -442,52 +580,8 @@ class MigrationOrchestrator:
             if self.migrator is None:
                 raise RuntimeError("Migrator not initialized")
             m = self.migrator
-            try:
-                m.migrate()
-            except BaseException as e:
-                # Generate report even on failure to show progress made
-                try:
-                    report_file = generate_report(
-                        m.ctx,
-                        m.state,
-                        m.user_resolver,
-                        getattr(m, "file_handler", None),
-                    )
-                    if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                        log_with_context(
-                            logging.INFO,
-                            f"Partial migration report available at: {report_file}",
-                        )
-                        log_with_context(
-                            logging.INFO,
-                            "This report shows progress made before interruption.",
-                        )
-                    else:
-                        log_with_context(
-                            logging.INFO,
-                            f"Migration report (with partial results) available at: {report_file}",
-                        )
-                except Exception as report_error:
-                    log_with_context(
-                        logging.WARNING,
-                        f"Failed to generate migration report after failure: {report_error}",
-                    )
-                raise
-
-            # Generate report after dry run migration
-            report_file = generate_report(
-                m.ctx,
-                m.state,
-                m.user_resolver,
-                getattr(m, "file_handler", None),
-            )
-            print_dry_run_summary(
-                m.ctx,
-                m.state,
-                m.user_resolver,
-                getattr(m, "file_handler", None),
-                report_file,
-            )
+            self._run_with_progress(m)
+            self._print_summary(m)
 
             if self.check_unmapped_users(self.migrator):
                 self.report_validation_issues(self.migrator, is_explicit_dry_run=True)
@@ -506,44 +600,8 @@ class MigrationOrchestrator:
                     if self.migrator is None:
                         raise RuntimeError("Migrator not initialized")
                     m = self.migrator
-                    try:
-                        m.migrate()
-                    except BaseException as e:
-                        # Generate report even on failure to show progress made
-                        try:
-                            report_file = generate_report(
-                                m.ctx,
-                                m.state,
-                                m.user_resolver,
-                                getattr(m, "file_handler", None),
-                            )
-                            if isinstance(e, (KeyboardInterrupt, SystemExit)):
-                                log_with_context(
-                                    logging.INFO,
-                                    f"Partial migration report available at: {report_file}",
-                                )
-                                log_with_context(
-                                    logging.INFO,
-                                    "This report shows progress made before interruption.",
-                                )
-                            else:
-                                log_with_context(
-                                    logging.INFO,
-                                    f"Migration report (with partial results) available at: {report_file}",
-                                )
-                        except Exception as report_error:
-                            log_with_context(
-                                logging.WARNING,
-                                f"Failed to generate migration report after failure: {report_error}",
-                            )
-                        raise
-                    # Generate report after successful migration
-                    generate_report(
-                        m.ctx,
-                        m.state,
-                        m.user_resolver,
-                        getattr(m, "file_handler", None),
-                    )
+                    self._run_with_progress(m)
+                    self._print_summary(m)
                 else:
                     log_with_context(logging.INFO, "Migration cancelled by user.")
                     return
@@ -621,7 +679,7 @@ def log_startup_info(args: SimpleNamespace) -> None:
     log_with_context(logging.INFO, f"- Workspace admin: {args.workspace_admin}")
     log_with_context(logging.INFO, f"- Config: {config_path}")
     log_with_context(logging.INFO, f"- Dry run: {args.dry_run}")
-    log_with_context(logging.INFO, f"- Update mode: {args.update_mode}")
+    log_with_context(logging.INFO, f"- Resume mode: {args.update_mode}")
     log_with_context(logging.INFO, f"- Verbose logging: {args.verbose}")
     log_with_context(logging.INFO, f"- Debug API calls: {args.debug_api}")
 
