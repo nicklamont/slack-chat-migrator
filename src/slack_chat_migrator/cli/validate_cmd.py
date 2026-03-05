@@ -20,6 +20,7 @@ from slack_chat_migrator.cli.migrate_cmd import (
     create_migration_output_directory,
     log_startup_info,
 )
+from slack_chat_migrator.cli.renderers import error_panel, get_console
 from slack_chat_migrator.utils.logging import log_with_context, setup_logger
 
 # ---------------------------------------------------------------------------
@@ -68,6 +69,31 @@ def validate(
             logging.INFO,
             "Note: --dry_run is redundant with 'validate' (always dry-run).",
         )
+
+    # Check if config file exists; suggest init if missing
+    config_path = Path(config)
+    if not config_path.exists():
+        console = get_console()
+        console.print(
+            error_panel(
+                "Config file not found",
+                f"[bold]{config}[/bold] does not exist.\n\n"
+                "Generate one with:\n"
+                "  [bold]slack-chat-migrator init --export_path "
+                f"{export_path}[/bold]",
+            )
+        )
+        if click.confirm("Run init now?", default=True):
+            from slack_chat_migrator.cli.init_cmd import init
+
+            ctx = click.Context(init)
+            ctx.invoke(init, export_path=export_path)
+            # Re-check after init
+            if not config_path.exists():
+                click.echo("Config file still not found. Aborting.")
+                sys.exit(1)
+        else:
+            sys.exit(1)
 
     args = SimpleNamespace(
         creds_path=creds_path,

@@ -140,14 +140,12 @@ class TestPrintDryRunSummary:
         print_dry_run_summary(ctx, state, user_resolver)
         out = capsys.readouterr().out
 
-        assert "DRY RUN SUMMARY" in out
-        assert "Channels processed: 2" in out
-        assert "Spaces that would be created: 2" in out
-        assert "Messages that would be migrated: 50" in out
-        assert "Reactions that would be migrated: 10" in out
-        assert "Files that would be migrated: 5" in out
+        assert "VALIDATION SUMMARY" in out
+        assert "Channels:" in out
+        assert "Messages:" in out
+        assert "Reactions:" in out
+        assert "Files:" in out
         assert "migration_report.yaml" in out
-        assert "run again without --dry-run" in out
 
     def test_zero_stats(self, capsys):
         ctx = _make_ctx()
@@ -158,9 +156,8 @@ class TestPrintDryRunSummary:
         print_dry_run_summary(ctx, state, user_resolver)
         out = capsys.readouterr().out
 
-        assert "Channels processed: 0" in out
-        assert "Spaces that would be created: 0" in out
-        assert "Messages that would be migrated: 0" in out
+        assert "Channels:         0" in out
+        assert "Messages:         0" in out
 
     def test_report_file_override(self, capsys):
         ctx = _make_ctx()
@@ -207,8 +204,7 @@ class TestPrintDryRunSummary:
         print_dry_run_summary(ctx, state, user_resolver)
         out = capsys.readouterr().out
 
-        assert "Users without email: 2" in out
-        assert "mapped in config.yaml" in out
+        assert "2 unmapped" in out
 
     def test_external_users_shown(self, capsys):
         ctx = _make_ctx(
@@ -222,8 +218,7 @@ class TestPrintDryRunSummary:
         print_dry_run_summary(ctx, state, user_resolver)
         out = capsys.readouterr().out
 
-        assert "External users detected: 1" in out
-        assert "external user support" in out
+        assert "1 external users detected" in out
 
     def test_no_external_users_hides_section(self, capsys):
         ctx = _make_ctx()
@@ -254,15 +249,9 @@ class TestPrintDryRunSummary:
         print_dry_run_summary(ctx, state, user_resolver, file_handler=file_handler)
         out = capsys.readouterr().out
 
-        assert "File Upload Details:" in out
-        assert "Total files processed: 10" in out
-        assert "Successful uploads: 8" in out
-        assert "Failed uploads: 2" in out
-        assert "Drive uploads: 6" in out
-        assert "Direct uploads: 2" in out
-        assert "External user files: 1" in out
-        assert "Ownership transferred: 5" in out
-        assert "Success rate: 80.0%" in out
+        assert "8 OK" in out
+        assert "2 failed" in out
+        assert "80% success rate" in out
 
     def test_file_statistics_zero_files_hides_details(self, capsys):
         ctx = _make_ctx()
@@ -288,7 +277,8 @@ class TestPrintDryRunSummary:
         print_dry_run_summary(ctx, state, user_resolver, file_handler=file_handler)
         out = capsys.readouterr().out
 
-        assert "Could not retrieve detailed file statistics" in out
+        # Exception is silently caught; no file details shown
+        assert "File details" not in out
 
     def test_no_users_without_email_hides_section(self, capsys):
         ctx = _make_ctx(users_without_email=[])

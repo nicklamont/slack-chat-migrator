@@ -74,6 +74,7 @@ class TestValidateMissingUsersJson:
     def test_exit_code_nonzero(self, tmp_path: Path) -> None:
         # Create minimal export WITHOUT users.json
         (tmp_path / "channels.json").write_text(json.dumps([GENERAL_CHANNEL]))
+        (tmp_path / "config.yaml").write_text("{}")
         ch_dir = tmp_path / "general"
         ch_dir.mkdir()
 
@@ -109,5 +110,6 @@ class TestValidateEmptyExportDir:
         # doesn't pollute the "empty" export directory.
         export_dir = tmp_path / "export"
         export_dir.mkdir()
+        (tmp_path / "config.yaml").write_text("{}")
         result = _invoke_validate(tmp_path, export_dir)
         assert result.exit_code != 0
