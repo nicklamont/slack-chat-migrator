@@ -56,6 +56,11 @@ class DefaultGroup(click.Group):
         """
         # If no args at all, let click show help as usual.
         if args and args[0].startswith("-") and args[0] not in self._GROUP_FLAGS:
+            click.echo(
+                "Warning: Implicit 'migrate' subcommand is deprecated. "
+                "Use 'slack-chat-migrator migrate ...' instead.",
+                err=True,
+            )
             args = ["migrate", *args]
         return super().parse_args(ctx, args)
 

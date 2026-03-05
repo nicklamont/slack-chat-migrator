@@ -324,15 +324,23 @@ class TestBackwardsCompatibility:
 
     def test_flags_without_subcommand_route_to_migrate(self):
         """When args start with -- (no subcommand), DefaultGroup prepends migrate."""
-        runner = CliRunner()
+        runner = CliRunner(mix_stderr=False)
         # This should route to migrate, which will fail due to missing --export_path
         # but the error should reference migrate's required options, not
         # an unknown-command error.
         result = runner.invoke(cli, ["--creds_path", "fake.json"])
         assert result.exit_code != 0
-        # The error should be about a missing required option, not about
-        # an invalid subcommand
-        assert "Missing option" in result.output or "export_path" in result.output
+        # With mix_stderr=False, Click error output goes to stderr
+        combined = result.output + result.stderr
+        assert "Missing option" in combined or "export_path" in combined
+
+    def test_implicit_migrate_emits_deprecation_warning(self):
+        """DefaultGroup emits deprecation when implicitly routing to migrate."""
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(cli, ["--creds_path", "fake.json"])
+        assert result.exit_code != 0
+        assert "deprecated" in result.stderr.lower()
+        assert "migrate" in result.stderr.lower()
 
 
 class TestHandleException:

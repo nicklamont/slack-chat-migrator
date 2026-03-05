@@ -301,7 +301,7 @@ def cleanup_import_mode_spaces(chat_service: ChatAdapter) -> None:
     It finds all spaces in import mode and calls ``completeImport()`` on each.
 
     Member-adding is skipped because that requires export data.  Users can
-    run ``slack-chat-migrator migrate --update_mode`` afterwards to add members.
+    run ``slack-chat-migrator migrate --resume`` afterwards to add members.
 
     Args:
         chat_service: An authenticated Google Chat API service resource.

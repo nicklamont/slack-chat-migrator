@@ -361,7 +361,7 @@ class TestLogMigrationFailure:
         log_migration_failure(state, False, KeyboardInterrupt(), duration=5.0)
 
         messages = [call[0][1] for call in mock_log.call_args_list]
-        assert any("--update_mode" in m for m in messages)
+        assert any("--resume" in m for m in messages)
 
     @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_recovery_guidance_interrupt_dry_run(self, mock_log):
@@ -377,7 +377,7 @@ class TestLogMigrationFailure:
         log_migration_failure(state, False, RuntimeError("boom"), duration=5.0)
 
         messages = [call[0][1] for call in mock_log.call_args_list]
-        assert any("--update_mode" in m for m in messages)
+        assert any("--resume" in m for m in messages)
 
     @patch("slack_chat_migrator.core.migration_logging.log_with_context")
     def test_recovery_guidance_error_dry_run(self, mock_log):
