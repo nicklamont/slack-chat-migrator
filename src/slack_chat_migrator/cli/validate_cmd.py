@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import click
@@ -85,6 +86,26 @@ def validate(
 
     log_startup_info(args)
     log_with_context(logging.INFO, f"Output directory: {output_dir}")
+
+    # Run standalone permission check when credentials are provided
+    if creds_path and workspace_admin:
+        from slack_chat_migrator.core.config import load_config
+        from slack_chat_migrator.utils.permissions import check_permissions_standalone
+
+        log_with_context(logging.INFO, "Running permission checks...")
+        try:
+            cfg = load_config(Path(config))
+            check_permissions_standalone(
+                creds_path=creds_path,
+                workspace_admin=workspace_admin,
+                max_retries=cfg.max_retries,
+                retry_delay=cfg.retry_delay,
+            )
+        except Exception as e:
+            log_with_context(
+                logging.WARNING,
+                f"Permission check failed ({e}); continuing with dry-run validation.",
+            )
 
     orchestrator = MigrationOrchestrator(args)
     orchestrator.output_dir = output_dir

@@ -114,6 +114,26 @@ class TestCheckPermissionsCommand:
             retry_delay=2,
         )
 
+    @patch("slack_chat_migrator.cli.permissions_cmd.check_permissions_standalone")
+    @patch("slack_chat_migrator.cli.permissions_cmd.load_config")
+    def test_emits_deprecation_warning(self, mock_load_config, mock_check):
+        """check-permissions emits a deprecation warning."""
+        mock_load_config.return_value = MigrationConfig()
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(
+            cli,
+            [
+                "check-permissions",
+                "--creds_path",
+                "fake.json",
+                "--workspace_admin",
+                "a@b.com",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "deprecated" in result.stderr.lower()
+        assert "validate" in result.stderr.lower()
+
 
 class TestValidateCommand:
     """Tests for the validate subcommand."""
@@ -157,6 +177,70 @@ class TestValidateCommand:
         # The args namespace passed to MigrationOrchestrator must have dry_run=True
         args = mock_orch_cls.call_args[0][0]
         assert args.dry_run is True
+
+    @patch("slack_chat_migrator.cli.validate_cmd.MigrationOrchestrator")
+    @patch("slack_chat_migrator.cli.validate_cmd.setup_logger")
+    @patch("slack_chat_migrator.cli.validate_cmd.create_migration_output_directory")
+    def test_runs_permission_check_when_creds_provided(
+        self, mock_outdir, mock_log, mock_orch_cls
+    ):
+        """When --creds_path and --workspace_admin are provided, runs permission check."""
+        mock_outdir.return_value = "/tmp/fake"
+        mock_orch = MagicMock()
+        mock_orch_cls.return_value = mock_orch
+
+        runner = CliRunner()
+        # Patch at source — these are deferred imports inside the if-block
+        with (
+            patch(
+                "slack_chat_migrator.utils.permissions.check_permissions_standalone"
+            ) as mock_check,
+            patch(
+                "slack_chat_migrator.core.config.load_config",
+                return_value=MigrationConfig(),
+            ),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "validate",
+                    "--creds_path",
+                    "fake.json",
+                    "--export_path",
+                    "fake",
+                    "--workspace_admin",
+                    "a@b.com",
+                ],
+            )
+            assert result.exit_code == 0
+            mock_check.assert_called_once_with(
+                creds_path="fake.json",
+                workspace_admin="a@b.com",
+                max_retries=3,
+                retry_delay=2,
+            )
+
+    @patch("slack_chat_migrator.cli.validate_cmd.MigrationOrchestrator")
+    @patch("slack_chat_migrator.cli.validate_cmd.setup_logger")
+    @patch("slack_chat_migrator.cli.validate_cmd.create_migration_output_directory")
+    def test_skips_permission_check_without_creds(
+        self, mock_outdir, mock_log, mock_orch_cls
+    ):
+        """Without --creds_path, permission check is not run."""
+        mock_outdir.return_value = "/tmp/fake"
+        mock_orch = MagicMock()
+        mock_orch_cls.return_value = mock_orch
+
+        runner = CliRunner()
+        with patch(
+            "slack_chat_migrator.utils.permissions.check_permissions_standalone"
+        ) as mock_check:
+            result = runner.invoke(
+                cli,
+                ["validate", "--export_path", "fake"],
+            )
+        assert result.exit_code == 0
+        mock_check.assert_not_called()
 
 
 class TestCleanupCommand:

@@ -8,9 +8,13 @@ import datetime
 import json
 import logging
 import os
+import sys
 from typing import TYPE_CHECKING, Any
 
 import yaml
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from slack_chat_migrator.types import FailedMessage
 from slack_chat_migrator.utils.logging import log_with_context
@@ -98,6 +102,89 @@ def print_dry_run_summary(
     print("=" * 80)
     print("\nTo perform the actual migration, run again without --dry-run")
     print("=" * 80)
+
+
+def print_rich_summary(
+    ctx: MigrationContext,
+    state: MigrationState,
+    user_resolver: UserResolver,
+    file_handler: FileHandler | None = None,
+) -> None:
+    """Print a Rich-formatted summary to the console.
+
+    Falls back to :func:`print_dry_run_summary` when stdout is not a TTY.
+
+    Args:
+        ctx: Immutable migration context.
+        state: Mutable migration state.
+        user_resolver: User identity resolver.
+        file_handler: Optional file handler with statistics.
+    """
+    if not sys.stdout.isatty():
+        print_dry_run_summary(ctx, state, user_resolver, file_handler)
+        return
+
+    console = Console()
+    summary = state.progress.migration_summary
+    mode = "DRY RUN" if ctx.dry_run else "MIGRATION"
+
+    # --- Stats table ---
+    stats = Table(title=f"{mode} Summary", expand=True)
+    stats.add_column("Metric", style="cyan")
+    stats.add_column("Count", justify="right", style="green")
+    stats.add_row("Channels processed", str(len(summary["channels_processed"])))
+    stats.add_row("Spaces created", str(summary["spaces_created"]))
+    stats.add_row("Messages migrated", str(summary["messages_created"]))
+    stats.add_row("Reactions migrated", str(summary["reactions_created"]))
+    stats.add_row("Files migrated", str(summary["files_created"]))
+
+    failed_count = len(state.messages.failed_messages)
+    if failed_count > 0:
+        stats.add_row("[red]Failed messages[/red]", f"[red]{failed_count}[/red]")
+
+    console.print(stats)
+
+    # --- Unmapped users panel ---
+    if ctx.users_without_email:
+        console.print(
+            Panel(
+                f"[yellow]{len(ctx.users_without_email)} users without email[/yellow]\n"
+                "Add them to user_mapping_overrides in config.yaml",
+                title="Unmapped Users",
+                border_style="yellow",
+            )
+        )
+
+    # --- Failed channels table ---
+    failed_by_channel = state.messages.failed_messages_by_channel
+    if failed_by_channel:
+        fail_table = Table(title="Failed Channels", expand=True)
+        fail_table.add_column("Channel", style="red")
+        fail_table.add_column("Failed Messages", justify="right")
+        for ch, timestamps in failed_by_channel.items():
+            fail_table.add_row(ch, str(len(timestamps)))
+        console.print(fail_table)
+
+    # --- Next step hint ---
+    output_dir = state.context.output_dir or "."
+    report_path = os.path.join(output_dir, "migration_report.yaml")
+    if ctx.dry_run:
+        console.print(
+            Panel(
+                f"Report saved to [bold]{report_path}[/bold]\n"
+                "To perform the actual migration, run again without --dry_run",
+                title="Next Steps",
+                border_style="blue",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                f"Report saved to [bold]{report_path}[/bold]",
+                title="Complete",
+                border_style="green",
+            )
+        )
 
 
 def _group_failed_messages(
