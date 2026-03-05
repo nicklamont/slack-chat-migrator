@@ -44,6 +44,16 @@ class DefaultGroup(click.Group):
     # ``migrate`` default.
     _GROUP_FLAGS: ClassVar[set[str]] = {"--help", "--version", "-h"}
 
+    # Deprecated commands sort last in --help output.
+    _DEPRECATED: ClassVar[set[str]] = {"check-permissions", "cleanup"}
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        """Sort commands alphabetically but push deprecated ones to the end."""
+        commands = super().list_commands(ctx)
+        active = sorted(c for c in commands if c not in self._DEPRECATED)
+        deprecated = sorted(c for c in commands if c in self._DEPRECATED)
+        return active + deprecated
+
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         """Prepend ``migrate`` when the first token is a flag (backwards compat).
 
