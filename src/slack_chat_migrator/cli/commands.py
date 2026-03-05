@@ -21,6 +21,7 @@ from slack_chat_migrator.cli.common import (  # noqa: F401
     handle_http_error,
     show_security_warning,
 )
+from slack_chat_migrator.cli.init_cmd import init  # noqa: F401
 from slack_chat_migrator.cli.migrate_cmd import (  # noqa: F401
     MigrationOrchestrator,
     create_migration_output_directory,

@@ -22,7 +22,7 @@ class TestCLIGroup:
     """Tests for the CLI group structure."""
 
     def test_cli_has_all_subcommands(self):
-        expected = {"migrate", "check-permissions", "validate", "cleanup"}
+        expected = {"migrate", "check-permissions", "validate", "cleanup", "init"}
         assert set(cli.commands.keys()) == expected
 
     def test_version_flag(self):
