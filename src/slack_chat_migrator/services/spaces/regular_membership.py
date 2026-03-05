@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
-from tqdm import tqdm
 
 from slack_chat_migrator.constants import (
     API_THROTTLE_MEMBER_SECONDS,
@@ -23,6 +22,7 @@ from slack_chat_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
     from slack_chat_migrator.core.context import MigrationContext
+    from slack_chat_migrator.core.progress import ProgressTracker
     from slack_chat_migrator.core.state import MigrationState
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
     from slack_chat_migrator.services.files.file import FileHandler
@@ -111,6 +111,7 @@ def _add_regular_members_batch(
     space: str,
     channel: str,
     active_users: set[str] | list[str],
+    progress_tracker: ProgressTracker | None = None,
 ) -> int:
     """Add active users to a Google Chat space as regular members.
 
@@ -135,8 +136,7 @@ def _add_regular_members_batch(
     added_count = 0
     failed_count = 0
 
-    pbar = tqdm(active_users, desc=f"Adding current members to {channel}")
-    for user_id in pbar:
+    for user_id in active_users:
         user_email = ctx.user_map.get(user_id)
         membership_body = {}  # Ensure membership_body is always defined
 
@@ -191,6 +191,8 @@ def _add_regular_members_batch(
             chat.create_membership(parent=space, body=membership_body)
 
             added_count += 1
+            if progress_tracker:
+                progress_tracker.member_added(channel)
             log_with_context(
                 logging.DEBUG,
                 f"Added user {internal_email} to space {space} as regular member",
@@ -207,6 +209,8 @@ def _add_regular_members_batch(
                     channel=channel,
                 )
                 added_count += 1
+                if progress_tracker:
+                    progress_tracker.member_added(channel)
             elif e.resp.status == HTTP_BAD_REQUEST:
                 # Bad request means there's an issue with the format according to API requirements
                 log_with_context(
@@ -490,6 +494,7 @@ def add_regular_members(
     file_handler: FileHandler | None,
     space: str,
     channel: str,
+    progress_tracker: ProgressTracker | None = None,
 ) -> None:
     """Add regular members to a space after import mode is complete.
 
@@ -566,7 +571,7 @@ def add_regular_members(
     )
 
     added_count = _add_regular_members_batch(
-        ctx, state, chat, user_resolver, space, channel, active_users
+        ctx, state, chat, user_resolver, space, channel, active_users, progress_tracker
     )
 
     _verify_and_handle_admin(ctx, chat, space, channel, active_users, added_count)

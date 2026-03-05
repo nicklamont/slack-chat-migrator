@@ -31,7 +31,6 @@ dependencies = [
     "google-api-python-client>=2.177,<3.0",
     "google-auth-httplib2~=0.3",
     "google-auth-oauthlib>=1.2,<2.0",
-    "tqdm>=4.67,<5.0",
     "click>=8.1,<9.0",
     "rich>=13.0,<14.0",
 ]
@@ -106,7 +105,7 @@ no_implicit_optional = true
 strict_optional = true
 
 [[tool.mypy.overrides]]
-module = ["emoji.*", "slackblocks.*", "tqdm.*", "googleapiclient.*"]
+module = ["emoji.*", "slackblocks.*", "googleapiclient.*"]
 ignore_missing_imports = true
 
 [tool.bandit]

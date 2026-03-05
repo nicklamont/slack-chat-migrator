@@ -139,11 +139,10 @@ class TestRichProgressRenderer:
 
         tracker.channel_start("general", total_messages=10)
         assert renderer._current_channel == "general"
-        assert "general" in renderer._channel_progress
+        assert renderer._channel_msg_total == 10
 
         tracker.channel_complete("general")
         assert renderer._channels_complete == 1
-        assert "general" not in renderer._channel_progress
 
 
 class TestRendererFactory:

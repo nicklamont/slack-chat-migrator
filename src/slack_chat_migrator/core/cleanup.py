@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
-from tqdm import tqdm
 
 from slack_chat_migrator.constants import (
     HTTP_FORBIDDEN,
@@ -254,8 +253,7 @@ def _complete_import_mode_spaces(
         f"Current created_spaces mapping: {state.spaces.created_spaces}",
     )
 
-    pbar = tqdm(import_mode_spaces, desc="Completing import mode for spaces")
-    for space_name, space_info in pbar:
+    for space_name, space_info in import_mode_spaces:
         log_with_context(
             logging.WARNING,
             f"Found space in import mode during cleanup: {space_name}",

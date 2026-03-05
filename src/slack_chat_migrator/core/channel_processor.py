@@ -22,7 +22,6 @@ if TYPE_CHECKING:
 
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
-from tqdm import tqdm
 
 from slack_chat_migrator.constants import API_THROTTLE_MESSAGE_SECONDS
 from slack_chat_migrator.core.config import (
@@ -167,6 +166,7 @@ class ChannelProcessor:
                 self.user_resolver,
                 space,
                 channel,
+                self.progress_tracker,
             )
         else:
             log_with_context(
@@ -383,9 +383,7 @@ class ChannelProcessor:
         channel_failures: list[str] = []
         total_sendable = sum(1 for m in msgs if m.get("type") == "message")
 
-        progress_desc = f"{self.ctx.log_prefix}Adding messages to {channel}"
-        pbar = tqdm(msgs, desc=progress_desc)
-        for m in pbar:
+        for m in msgs:
             if m.get("type") != "message":
                 continue
 
@@ -540,6 +538,7 @@ class ChannelProcessor:
                     self.file_handler,
                     space,
                     channel,
+                    self.progress_tracker,
                 )
                 log_with_context(
                     logging.DEBUG,

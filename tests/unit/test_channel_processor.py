@@ -644,6 +644,7 @@ class TestAddMembers:
             processor.file_handler,
             "spaces/S1",
             "general",
+            processor.progress_tracker,
         )
 
     @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
@@ -662,6 +663,7 @@ class TestAddMembers:
             processor.file_handler,
             "spaces/S1",
             "general",
+            processor.progress_tracker,
         )
 
     @patch("slack_chat_migrator.core.channel_processor.add_regular_members")

@@ -32,6 +32,7 @@ class PlainProgressRenderer:
         self._messages_sent = 0
         self._messages_failed = 0
         self._files_uploaded = 0
+        self._members_added = 0
         self._channels_complete = 0
         self._current_phase = "Initializing"
         self._current_channel: str | None = None
@@ -50,6 +51,7 @@ class PlainProgressRenderer:
             f"{self._messages_sent} sent, "
             f"{self._messages_failed} failed, "
             f"{self._files_uploaded} files, "
+            f"{self._members_added} members, "
             f"{self._channels_complete} channels"
         )
 
@@ -74,6 +76,9 @@ class PlainProgressRenderer:
             )
         elif event.event_type == EventType.FILE_UPLOADED:
             self._files_uploaded += 1
+        elif event.event_type == EventType.MEMBER_ADDED:
+            self._members_added += 1
+            self._maybe_print_status()
 
     def _maybe_print_status(self) -> None:
         """Print a status line if enough time has elapsed since the last one."""
