@@ -191,7 +191,7 @@ def print_rich_summary(
 ) -> None:
     """Print a Rich-formatted summary to the console.
 
-    Falls back to :func:`print_dry_run_summary` when stdout is not a TTY.
+    Falls back to plain text when stdout is not a TTY.
 
     Args:
         ctx: Immutable migration context.
@@ -205,31 +205,40 @@ def print_rich_summary(
 
     console = Console()
     summary = state.progress.migration_summary
-    mode = "DRY RUN" if ctx.dry_run else "MIGRATION"
+    is_dry_run = ctx.dry_run
+    title = "Dry Run Complete \u2713" if is_dry_run else "Migration Complete \u2713"
+    border = "blue" if is_dry_run else "green"
 
     # --- Stats table ---
-    stats = Table(title=f"{mode} Summary", expand=True)
-    stats.add_column("Metric", style="cyan")
-    stats.add_column("Count", justify="right", style="green")
-    stats.add_row("Channels processed", str(len(summary["channels_processed"])))
+    stats = Table(expand=True, show_header=False, box=None, padding=(0, 2))
+    stats.add_column("Metric", style="cyan", min_width=18)
+    stats.add_column("Count", justify="right", style="green", min_width=10)
+
+    channels_count = len(summary["channels_processed"])
     stats.add_row("Spaces created", str(summary["spaces_created"]))
-    stats.add_row("Messages migrated", str(summary["messages_created"]))
-    stats.add_row("Reactions migrated", str(summary["reactions_created"]))
-    stats.add_row("Files migrated", str(summary["files_created"]))
+    stats.add_row("Channels processed", str(channels_count))
+    stats.add_row("Messages migrated", f"{summary['messages_created']:,}")
+    stats.add_row("Reactions migrated", f"{summary['reactions_created']:,}")
+    stats.add_row("Files migrated", f"{summary['files_created']:,}")
 
     failed_count = len(state.messages.failed_messages)
     if failed_count > 0:
-        stats.add_row("[red]Failed messages[/red]", f"[red]{failed_count}[/red]")
+        stats.add_row("[red]Messages failed[/red]", f"[red]{failed_count}[/red]")
 
-    console.print(stats)
+    console.print()
+    console.print(Panel(stats, title=title, border_style=border))
 
     # --- Unmapped users panel ---
-    if ctx.users_without_email:
+    non_bot_unmapped = [
+        u
+        for u in ctx.users_without_email
+        if not u.get("is_bot") and not u.get("is_app_user")
+    ]
+    if non_bot_unmapped:
         console.print(
             Panel(
-                f"[yellow]{len(ctx.users_without_email)} users without email[/yellow]\n"
+                f"[yellow]{len(non_bot_unmapped)} unmapped non-bot users[/yellow]\n"
                 "Add them to user_mapping_overrides in config.yaml",
-                title="Unmapped Users",
                 border_style="yellow",
             )
         )
@@ -237,20 +246,20 @@ def print_rich_summary(
     # --- Failed channels table ---
     failed_by_channel = state.messages.failed_messages_by_channel
     if failed_by_channel:
-        fail_table = Table(title="Failed Channels", expand=True)
+        fail_table = Table(title="Issues", expand=True)
         fail_table.add_column("Channel", style="red")
         fail_table.add_column("Failed Messages", justify="right")
         for ch, timestamps in failed_by_channel.items():
-            fail_table.add_row(ch, str(len(timestamps)))
+            fail_table.add_row(f"#{ch}", str(len(timestamps)))
         console.print(fail_table)
 
     # --- Next step hint ---
     output_dir = state.context.output_dir or "."
     report_path = os.path.join(output_dir, "migration_report.yaml")
-    if ctx.dry_run:
+    if is_dry_run:
         console.print(
             Panel(
-                f"Report saved to [bold]{report_path}[/bold]\n"
+                f"Report: [bold]{report_path}[/bold]\n\n"
                 "To perform the actual migration, run again without --dry_run",
                 title="Next Steps",
                 border_style="blue",
@@ -259,7 +268,7 @@ def print_rich_summary(
     else:
         console.print(
             Panel(
-                f"Report saved to [bold]{report_path}[/bold]",
+                f"Report: [bold]{report_path}[/bold]",
                 title="Complete",
                 border_style="green",
             )
@@ -288,9 +297,13 @@ def _print_migration_summary_plain(
     if failed_count > 0:
         print(f"Failed messages:    {failed_count}")
 
-    unmapped_count = len(ctx.users_without_email)
-    if unmapped_count > 0:
-        print(f"\n{unmapped_count} unmapped users")
+    non_bot_unmapped = [
+        u
+        for u in ctx.users_without_email
+        if not u.get("is_bot") and not u.get("is_app_user")
+    ]
+    if non_bot_unmapped:
+        print(f"\n{len(non_bot_unmapped)} unmapped non-bot users")
 
     output_dir = state.context.output_dir or "."
     report_path = os.path.join(output_dir, "migration_report.yaml")

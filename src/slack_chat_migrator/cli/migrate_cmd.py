@@ -193,6 +193,23 @@ def _run_complete_mode(
 
 def _warn_import_mode_deadline() -> None:
     """Print a reminder about the 90-day import mode deadline."""
+    if sys.stdout.isatty():
+        try:
+            from slack_chat_migrator.cli.renderers import get_console, warning_panel
+
+            console = get_console()
+            console.print(
+                warning_panel(
+                    "Import Mode Deadline",
+                    "Spaces in import mode must be completed within "
+                    "[bold]90 days[/bold] of creation.\n"
+                    "Run [bold]slack-chat-migrator migrate --complete[/bold] "
+                    "to finalize all spaces.",
+                )
+            )
+            return
+        except Exception:
+            pass
     log_with_context(
         logging.WARNING,
         "Reminder: Spaces in import mode must be completed within 90 days "
@@ -519,8 +536,9 @@ class MigrationOrchestrator:
         """
         from slack_chat_migrator.cli.renderers import create_renderer
 
+        total_channels = len(m.channels_meta) if m.channels_meta else 0
         tracker = ProgressTracker()
-        renderer = create_renderer(tracker)
+        renderer = create_renderer(tracker, total_channels=total_channels)
         renderer.start()
         try:
             m.migrate(progress_tracker=tracker)
