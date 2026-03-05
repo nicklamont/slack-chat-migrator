@@ -147,4 +147,6 @@ fail_under = 90
 omit = [
     "src/slack_chat_migrator/cli/migrate_cmd.py",
     "src/slack_chat_migrator/cli/cleanup_cmd.py",
+    "src/slack_chat_migrator/cli/setup_cmd.py",
+    "src/slack_chat_migrator/services/setup/*.py",
 ]

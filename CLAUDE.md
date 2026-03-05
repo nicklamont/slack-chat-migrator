@@ -12,12 +12,18 @@ In **dry-run mode**, `DryRunChatService`/`DryRunDriveService` are injected in pl
 src/slack_chat_migrator/
 ├── cli/            # CLI entry points and report generation
 │   ├── commands.py    # CLI facade — re-exports from sub-modules
-│   ├── common.py      # Shared CLI infrastructure (DefaultGroup, options)
+│   ├── common.py      # Shared CLI infrastructure (DefaultGroup, options, InterruptHandler)
 │   ├── migrate_cmd.py # migrate command and MigrationOrchestrator
 │   ├── validate_cmd.py
-│   ├── cleanup_cmd.py
-│   ├── permissions_cmd.py
-│   └── report.py      # Migration report formatting
+│   ├── cleanup_cmd.py   # (deprecated — use migrate --complete)
+│   ├── init_cmd.py      # Interactive config.yaml generator
+│   ├── setup_cmd.py     # GCP setup wizard (requires [setup] extras)
+│   ├── permissions_cmd.py # (deprecated — use validate --creds_path)
+│   ├── report.py      # Migration report formatting
+│   └── renderers/     # Progress output
+│       ├── __init__.py        # Renderer factory (auto-detects TTY)
+│       ├── rich_renderer.py   # Rich live progress display
+│       └── plain_renderer.py  # Plain text fallback
 ├── core/           # Core logic
 │   ├── channel_processor.py # Per-channel migration orchestration
 │   ├── cleanup.py           # Post-migration cleanup (import mode completion, members)
@@ -25,6 +31,7 @@ src/slack_chat_migrator/
 │   ├── context.py           # MigrationContext frozen dataclass (immutable config)
 │   ├── migration_logging.py # Migration success/failure logging
 │   ├── migrator.py          # Composition root — wires all deps, owns lifecycle
+│   ├── progress.py          # ProgressTracker event emitter (pub/sub for renderers)
 │   └── state.py             # MigrationState with typed sub-states (Spaces/Messages/Users/etc.)
 ├── services/       # External API integrations
 │   ├── chat/       # Google Chat API
@@ -37,6 +44,7 @@ src/slack_chat_migrator/
 │   │   ├── folder_manager.py      # Drive folder creation and management
 │   │   └── shared_drive_manager.py
 │   ├── drive_adapter.py     # Typed wrapper over raw Drive API service
+│   ├── export_inspector.py  # Slack export analysis (pure I/O, no API calls)
 │   ├── files/      # Slack file handling
 │   │   ├── file.py              # FileHandler class (delegates to download/permissions)
 │   │   ├── file_download.py     # Slack file download logic
@@ -46,6 +54,12 @@ src/slack_chat_migrator/
 │   │   ├── message_builder.py   # Message payload construction (Slack → Chat format)
 │   │   ├── message_sender.py    # Message send logic, error handling, stats
 │   │   └── reaction_processor.py # Batch reaction processing
+│   ├── setup/      # GCP setup wizard services (optional deps)
+│   │   ├── setup_service.py    # Orchestrator and persistent state
+│   │   ├── gcp_project.py      # Project creation/selection
+│   │   ├── api_enablement.py   # API enablement
+│   │   ├── service_account.py  # SA creation, key download, role grants
+│   │   └── delegation.py       # Domain-wide delegation test
 │   ├── spaces/     # Space lifecycle management
 │   │   ├── discovery.py           # Space discovery and mapping for resumption
 │   │   ├── historical_membership.py # Historical member import (createTime/deleteTime)
