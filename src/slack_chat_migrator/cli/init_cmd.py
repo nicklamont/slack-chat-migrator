@@ -29,7 +29,8 @@ from slack_chat_migrator.services.export_inspector import ExportInspector
     show_default=True,
     help="Output path for generated config file",
 )
-def init(export_path: str, output: str) -> None:
+@click.pass_context
+def init(ctx: click.Context, export_path: str, output: str) -> None:
     """Generate a config.yaml from a Slack export directory.
 
     Analyzes the export structure, shows a summary, and interactively
@@ -78,10 +79,27 @@ def init(export_path: str, output: str) -> None:
         yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
     click.echo(f"\nConfig written to {output_path}")
-    click.echo(
-        "Next step: run 'slack-chat-migrator validate --export_path "
-        f"{export_path}' to verify"
-    )
+
+    if click.confirm("Run validation now?", default=True):
+        from slack_chat_migrator.cli.validate_cmd import validate
+
+        click.echo("")
+        ctx.invoke(
+            validate,
+            export_path=export_path,
+            creds_path=None,
+            workspace_admin=None,
+            config=str(output_path),
+            verbose=False,
+            debug_api=False,
+            dry_run=False,
+        )
+    else:
+        quoted = f'"{export_path}"' if " " in export_path else export_path
+        click.echo(
+            "Next step: run 'slack-chat-migrator validate --export_path "
+            f"{quoted}' to verify"
+        )
 
 
 def _print_export_summary(inspector: ExportInspector) -> None:
