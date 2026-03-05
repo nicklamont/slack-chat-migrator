@@ -127,7 +127,7 @@ class TestCheckPermissionsCommand:
     def test_emits_deprecation_warning(self, mock_load_config, mock_check):
         """check-permissions emits a deprecation warning."""
         mock_load_config.return_value = MigrationConfig()
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(
             cli,
             [
@@ -139,8 +139,8 @@ class TestCheckPermissionsCommand:
             ],
         )
         assert result.exit_code == 0
-        assert "deprecated" in result.stderr.lower()
-        assert "validate" in result.stderr.lower()
+        assert "deprecated" in result.output.lower()
+        assert "validate" in result.output.lower()
 
 
 class TestValidateCommand:
@@ -324,23 +324,21 @@ class TestBackwardsCompatibility:
 
     def test_flags_without_subcommand_route_to_migrate(self):
         """When args start with -- (no subcommand), DefaultGroup prepends migrate."""
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         # This should route to migrate, which will fail due to missing --export_path
         # but the error should reference migrate's required options, not
         # an unknown-command error.
         result = runner.invoke(cli, ["--creds_path", "fake.json"])
         assert result.exit_code != 0
-        # With mix_stderr=False, Click error output goes to stderr
-        combined = result.output + result.stderr
-        assert "Missing option" in combined or "export_path" in combined
+        assert "Missing option" in result.output or "export_path" in result.output
 
     def test_implicit_migrate_emits_deprecation_warning(self):
         """DefaultGroup emits deprecation when implicitly routing to migrate."""
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(cli, ["--creds_path", "fake.json"])
         assert result.exit_code != 0
-        assert "deprecated" in result.stderr.lower()
-        assert "migrate" in result.stderr.lower()
+        assert "deprecated" in result.output.lower()
+        assert "migrate" in result.output.lower()
 
 
 class TestHandleException:
@@ -606,7 +604,7 @@ class TestMigrateResumeFlag:
         mock_orch = MagicMock()
         mock_orch_cls.return_value = mock_orch
 
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(
             cli,
             [
@@ -621,8 +619,8 @@ class TestMigrateResumeFlag:
             ],
         )
         assert result.exit_code == 0
-        assert "deprecated" in result.stderr.lower()
-        assert "--resume" in result.stderr
+        assert "deprecated" in result.output.lower()
+        assert "--resume" in result.output
         args = mock_orch_cls.call_args[0][0]
         assert args.update_mode is True
 
@@ -689,7 +687,7 @@ class TestCleanupDeprecation:
         mock_config.return_value = MigrationConfig()
         mock_svc.return_value = MagicMock()
 
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(
             cli,
             [
@@ -702,8 +700,8 @@ class TestCleanupDeprecation:
             ],
         )
         assert result.exit_code == 0
-        assert "deprecated" in result.stderr.lower()
-        assert "migrate --complete" in result.stderr
+        assert "deprecated" in result.output.lower()
+        assert "migrate --complete" in result.output
 
 
 class TestInterruptHandler:
@@ -754,11 +752,11 @@ class TestDeprecatedOption:
         def cmd(resume: bool) -> None:
             click.echo(f"resume={resume}")
 
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(cmd, ["--update_mode"])
         assert result.exit_code == 0
-        assert "deprecated" in result.stderr.lower()
-        assert "--resume" in result.stderr
+        assert "deprecated" in result.output.lower()
+        assert "--resume" in result.output
         assert "resume=True" in result.output
 
     def test_deprecated_flag_passes_value(self):
@@ -770,11 +768,11 @@ class TestDeprecatedOption:
         def cmd(output: str) -> None:
             click.echo(f"output={output}")
 
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(cmd, ["--old_output", "custom.yaml"])
         assert result.exit_code == 0
         assert "output=custom.yaml" in result.output
-        assert "deprecated" in result.stderr.lower()
+        assert "deprecated" in result.output.lower()
 
     def test_no_warning_when_new_flag_used(self):
         """No warning when the canonical flag is used."""
@@ -785,10 +783,10 @@ class TestDeprecatedOption:
         def cmd(resume: bool) -> None:
             click.echo(f"resume={resume}")
 
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(cmd, ["--resume"])
         assert result.exit_code == 0
-        assert result.stderr == ""
+        assert "deprecated" not in result.output.lower()
         assert "resume=True" in result.output
 
     def test_no_warning_when_flag_not_used(self):
@@ -800,10 +798,10 @@ class TestDeprecatedOption:
         def cmd(resume: bool) -> None:
             click.echo(f"resume={resume}")
 
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(cmd, [])
         assert result.exit_code == 0
-        assert result.stderr == ""
+        assert "deprecated" not in result.output.lower()
         assert "resume=False" in result.output
 
     def test_new_flag_wins_when_both_provided(self):
@@ -815,10 +813,10 @@ class TestDeprecatedOption:
         def cmd(resume: bool) -> None:
             click.echo(f"resume={resume}")
 
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(cmd, ["--update_mode", "--resume"])
         assert result.exit_code == 0
-        assert "deprecated" in result.stderr.lower()
+        assert "deprecated" in result.output.lower()
         # New flag was explicitly provided, so its value prevails
         assert "resume=True" in result.output
 
@@ -838,9 +836,9 @@ class TestDeprecatedCommand:
         def old_cmd() -> None:
             click.echo("ran old command")
 
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         result = runner.invoke(grp, ["old-cmd"])
         assert result.exit_code == 0
-        assert "deprecated" in result.stderr.lower()
-        assert "new-cmd" in result.stderr
+        assert "deprecated" in result.output.lower()
+        assert "new-cmd" in result.output
         assert "ran old command" in result.output
