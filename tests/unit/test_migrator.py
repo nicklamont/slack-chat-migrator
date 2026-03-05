@@ -1903,3 +1903,51 @@ class TestMigrate:
         mock_log_failure.assert_called_once()
         args = mock_log_failure.call_args[0]
         assert isinstance(args[2], KeyboardInterrupt)
+
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
+    def test_progress_tracker_receives_phase_events(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        """When a progress_tracker is passed, migrate() emits phase change events."""
+        from slack_chat_migrator.core.progress import (
+            EventType,
+            ProgressEvent,
+            ProgressTracker,
+        )
+
+        tracker = ProgressTracker()
+        received: list[ProgressEvent] = []
+        tracker.subscribe(received.append)
+
+        m = _make_migrator_for_migrate(tmp_path)
+        mock_cp = MagicMock()
+        mock_cp.process_channel.return_value = MagicMock(
+            should_abort=False, had_errors=False
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        m.migrate(progress_tracker=tracker)
+
+        phase_events = [e for e in received if e.event_type == EventType.PHASE_CHANGE]
+        phases = [e.detail for e in phase_events]
+        assert "Initializing" in phases
+        assert "Migrating channels" in phases
+        assert "Finalizing" in phases
+
+        # Tracker should be passed to ChannelProcessor
+        _, kwargs = mock_cp_cls.call_args
+        assert kwargs["progress_tracker"] is tracker
