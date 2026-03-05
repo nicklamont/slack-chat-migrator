@@ -52,6 +52,10 @@ def init(export_path: str, output: str) -> None:
             sys.exit(0)
 
     export = Path(export_path)
+    if not export.is_dir():
+        click.echo(f"Error: Export path does not exist or is not a directory: {export}")
+        sys.exit(1)
+
     inspector = ExportInspector(export)
 
     # Validate export structure

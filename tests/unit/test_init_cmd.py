@@ -205,6 +205,30 @@ class TestInitCommand:
         config = yaml.safe_load(output.read_text())
         assert config["abort_on_error"] is True
 
+    def test_nonexistent_export_path_exits_immediately(self, tmp_path: Path) -> None:
+        """init exits with error if export path does not exist."""
+        output = tmp_path / "config.yaml"
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["init", "--export_path", "/nonexistent/path", "--output", str(output)],
+        )
+        assert result.exit_code == 1
+        assert "does not exist" in result.output
+
+    def test_file_as_export_path_exits_immediately(self, tmp_path: Path) -> None:
+        """init exits with error if export path is a file, not a directory."""
+        some_file = tmp_path / "not_a_dir.txt"
+        some_file.write_text("hello")
+        output = tmp_path / "config.yaml"
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["init", "--export_path", str(some_file), "--output", str(output)],
+        )
+        assert result.exit_code == 1
+        assert "not a directory" in result.output
+
     def test_registered_in_cli(self) -> None:
         """init command is registered on the CLI group."""
         assert "init" in cli.commands
