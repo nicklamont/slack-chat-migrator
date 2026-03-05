@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import functools
 import logging
-from typing import TYPE_CHECKING, Callable, ClassVar
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
 import click
 
@@ -54,6 +56,118 @@ class DefaultGroup(click.Group):
         if args and args[0].startswith("-") and args[0] not in self._GROUP_FLAGS:
             args = ["migrate", *args]
         return super().parse_args(ctx, args)
+
+
+# ---------------------------------------------------------------------------
+# Deprecation helpers
+# ---------------------------------------------------------------------------
+
+
+class _DeprecatedAlias(click.Option):
+    """A hidden Click option that forwards its value to a canonical option.
+
+    When the deprecated flag is used, a warning is emitted to stderr and
+    the value is transferred to the canonical option's key in ``opts``.
+    The deprecated option uses ``expose_value=False`` so it never appears
+    in the command function's signature — Click handles everything natively.
+    """
+
+    def __init__(
+        self,
+        param_decls: list[str],
+        canonical_name: str,
+        deprecated_flag: str,
+        **kwargs: Any,
+    ) -> None:
+        self._canonical_name = canonical_name
+        self._deprecated_flag = deprecated_flag
+        kwargs["hidden"] = True
+        kwargs["expose_value"] = False
+        super().__init__(param_decls, **kwargs)
+
+    def handle_parse_result(
+        self,
+        ctx: click.Context,
+        opts: Mapping[str, Any],
+        args: list[str],
+    ) -> tuple[Any, list[str]]:
+        # Click's type stubs declare opts as Mapping but pass a dict at
+        # runtime.  We need mutation access to forward the value.
+        mutable_opts: dict[str, Any] = opts  # type: ignore[assignment]
+        if self.name in mutable_opts:
+            click.echo(
+                f"Warning: {self._deprecated_flag} is deprecated, "
+                f"use --{self._canonical_name} instead.",
+                err=True,
+            )
+            # Forward to canonical only if the user didn't also provide it.
+            if self._canonical_name not in mutable_opts:
+                mutable_opts[self._canonical_name] = mutable_opts[self.name]
+            del mutable_opts[self.name]
+        return super().handle_parse_result(ctx, mutable_opts, args)
+
+
+def deprecated_option(
+    old_name: str,
+    new_name: str,
+    **click_kwargs: Any,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Add a deprecated alias for a Click option.
+
+    Creates a hidden option for *old_name* that, when used, emits a
+    deprecation warning and forwards the value to the canonical option
+    *new_name*.  The canonical option must be declared separately via
+    a normal ``@click.option(new_name, ...)``.
+
+    Args:
+        old_name: The deprecated flag (e.g. ``"--update_mode"``).
+        new_name: The replacement flag (e.g. ``"--resume"``).
+        **click_kwargs: Extra keyword arguments forwarded to ``click.option``
+            (e.g. ``is_flag=True``, ``default=False``).
+
+    Returns:
+        A decorator that attaches the hidden deprecated option.
+    """
+    canonical = new_name.lstrip("-").replace("-", "_")
+    return click.option(
+        old_name,
+        cls=_DeprecatedAlias,
+        canonical_name=canonical,
+        deprecated_flag=old_name,
+        **click_kwargs,
+    )
+
+
+def deprecated_command(
+    old_name: str,
+    new_hint: str,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Decorator that marks a command as deprecated.
+
+    When invoked the command still runs but first prints a deprecation warning
+    to stderr.
+
+    Args:
+        old_name: The deprecated command name.
+        new_hint: Human-readable replacement instruction
+                  (e.g. ``"Use 'migrate --complete' instead."``).
+
+    Returns:
+        A decorator that wraps the command function.
+    """
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            click.echo(
+                f"Warning: '{old_name}' is deprecated. {new_hint}",
+                err=True,
+            )
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 # ---------------------------------------------------------------------------

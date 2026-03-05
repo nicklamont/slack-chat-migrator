@@ -7,6 +7,7 @@ import click
 from click.testing import CliRunner
 
 from slack_chat_migrator.cli.commands import cli, handle_exception
+from slack_chat_migrator.cli.common import deprecated_command, deprecated_option
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.exceptions import (
     ConfigError,
@@ -458,3 +459,112 @@ class TestCredentialFreeDryRun:
 
         with pytest.raises(ConfigError, match="Credentials file not found"):
             orchestrator.validate_prerequisites()
+
+
+class TestDeprecatedOption:
+    """Tests for the deprecated_option helper.
+
+    ``deprecated_option`` creates a hidden Click option that forwards its
+    value to the canonical option when used, emitting a deprecation warning.
+    The canonical option must be declared separately.
+    """
+
+    def test_deprecated_flag_emits_warning(self):
+        """Using the deprecated flag emits a warning to stderr."""
+
+        @click.command()
+        @click.option("--resume", is_flag=True, default=False)
+        @deprecated_option("--update_mode", "--resume", is_flag=True, default=False)
+        def cmd(resume: bool) -> None:
+            click.echo(f"resume={resume}")
+
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(cmd, ["--update_mode"])
+        assert result.exit_code == 0
+        assert "deprecated" in result.stderr.lower()
+        assert "--resume" in result.stderr
+        assert "resume=True" in result.output
+
+    def test_deprecated_flag_passes_value(self):
+        """Deprecated flag value is forwarded to the canonical parameter."""
+
+        @click.command()
+        @click.option("--output", default="default.yaml")
+        @deprecated_option("--old_output", "--output", default=None)
+        def cmd(output: str) -> None:
+            click.echo(f"output={output}")
+
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(cmd, ["--old_output", "custom.yaml"])
+        assert result.exit_code == 0
+        assert "output=custom.yaml" in result.output
+        assert "deprecated" in result.stderr.lower()
+
+    def test_no_warning_when_new_flag_used(self):
+        """No warning when the canonical flag is used."""
+
+        @click.command()
+        @click.option("--resume", is_flag=True, default=False)
+        @deprecated_option("--update_mode", "--resume", is_flag=True, default=False)
+        def cmd(resume: bool) -> None:
+            click.echo(f"resume={resume}")
+
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(cmd, ["--resume"])
+        assert result.exit_code == 0
+        assert result.stderr == ""
+        assert "resume=True" in result.output
+
+    def test_no_warning_when_flag_not_used(self):
+        """No warning when neither flag is used."""
+
+        @click.command()
+        @click.option("--resume", is_flag=True, default=False)
+        @deprecated_option("--update_mode", "--resume", is_flag=True, default=False)
+        def cmd(resume: bool) -> None:
+            click.echo(f"resume={resume}")
+
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(cmd, [])
+        assert result.exit_code == 0
+        assert result.stderr == ""
+        assert "resume=False" in result.output
+
+    def test_new_flag_wins_when_both_provided(self):
+        """When both old and new flags are given, the new flag takes priority."""
+
+        @click.command()
+        @click.option("--resume", is_flag=True, default=False)
+        @deprecated_option("--update_mode", "--resume", is_flag=True, default=False)
+        def cmd(resume: bool) -> None:
+            click.echo(f"resume={resume}")
+
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(cmd, ["--update_mode", "--resume"])
+        assert result.exit_code == 0
+        assert "deprecated" in result.stderr.lower()
+        # New flag was explicitly provided, so its value prevails
+        assert "resume=True" in result.output
+
+
+class TestDeprecatedCommand:
+    """Tests for the deprecated_command helper."""
+
+    def test_deprecated_command_emits_warning(self):
+        """Running a deprecated command emits a warning to stderr."""
+
+        @click.group()
+        def grp() -> None:
+            pass
+
+        @grp.command("old-cmd")
+        @deprecated_command("old-cmd", "Use 'new-cmd' instead.")
+        def old_cmd() -> None:
+            click.echo("ran old command")
+
+        runner = CliRunner(mix_stderr=False)
+        result = runner.invoke(grp, ["old-cmd"])
+        assert result.exit_code == 0
+        assert "deprecated" in result.stderr.lower()
+        assert "new-cmd" in result.stderr
+        assert "ran old command" in result.output
