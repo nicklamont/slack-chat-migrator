@@ -10,6 +10,13 @@ import click
 import yaml
 
 from slack_chat_migrator.cli.common import cli
+from slack_chat_migrator.cli.renderers import (
+    error_panel,
+    get_console,
+    next_step_panel,
+    success_panel,
+    warning_panel,
+)
 from slack_chat_migrator.services.export_inspector import ExportInspector
 
 # ---------------------------------------------------------------------------
@@ -41,9 +48,15 @@ def init(ctx: click.Context, export_path: str, output: str) -> None:
         export_path: Path to Slack export directory.
         output: Output path for generated config file.
     """
+    console = get_console()
     output_path = Path(output)
+
     if not output_path.parent.exists():
-        click.echo(f"Error: Output directory does not exist: {output_path.parent}")
+        console.print(
+            error_panel(
+                "Invalid path", f"Output directory does not exist: {output_path.parent}"
+            )
+        )
         sys.exit(1)
     if output_path.exists():
         if not click.confirm(
@@ -54,7 +67,12 @@ def init(ctx: click.Context, export_path: str, output: str) -> None:
 
     export = Path(export_path)
     if not export.is_dir():
-        click.echo(f"Error: Export path does not exist or is not a directory: {export}")
+        console.print(
+            error_panel(
+                "Invalid export path",
+                f"Export path does not exist or is not a directory: {export}",
+            )
+        )
         sys.exit(1)
 
     inspector = ExportInspector(export)
@@ -62,9 +80,8 @@ def init(ctx: click.Context, export_path: str, output: str) -> None:
     # Validate export structure
     issues = inspector.get_structure_issues()
     if issues:
-        click.echo("Export structure issues found:")
-        for issue in issues:
-            click.echo(f"  - {issue}")
+        issue_list = "\n".join(f"  - {issue}" for issue in issues)
+        console.print(warning_panel("Export structure issues", issue_list))
         if not click.confirm("Continue anyway?", default=False):
             sys.exit(1)
 
@@ -78,12 +95,15 @@ def init(ctx: click.Context, export_path: str, output: str) -> None:
     with open(output_path, "w") as f:
         yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
-    click.echo(f"\nConfig written to {output_path}")
+    console.print()
+    console.print(
+        success_panel("Config created", f"Written to [bold]{output_path}[/bold]")
+    )
 
     if click.confirm("Run validation now?", default=True):
         from slack_chat_migrator.cli.validate_cmd import validate
 
-        click.echo("")
+        console.print()
         ctx.invoke(
             validate,
             export_path=export_path,
@@ -96,34 +116,43 @@ def init(ctx: click.Context, export_path: str, output: str) -> None:
         )
     else:
         quoted = f'"{export_path}"' if " " in export_path else export_path
-        click.echo(
-            "Next step: run 'slack-chat-migrator validate --export_path "
-            f"{quoted}' to verify"
+        console.print(
+            next_step_panel(f"slack-chat-migrator validate --export_path {quoted}")
         )
 
 
 def _print_export_summary(inspector: ExportInspector) -> None:
-    """Print a summary of the export contents."""
-    click.echo("")
-    click.echo("Export summary:")
-    click.echo(f"  Channels: {inspector.get_channel_count()}")
-    click.echo(f"  Users: {inspector.get_user_count()}")
-    click.echo(f"  Messages: {inspector.get_total_message_count()}")
-    click.echo(f"  Files: {inspector.get_total_file_count()}")
+    """Print a Rich table summarizing the export contents."""
+    from rich.table import Table
+
+    console = get_console()
+    table = Table(show_header=False, expand=True, box=None, padding=(0, 2))
+    table.add_column("Metric", style="cyan", min_width=18)
+    table.add_column("Value", justify="right", style="green", min_width=10)
+
+    table.add_row("Channels", str(inspector.get_channel_count()))
+    table.add_row("Users", str(inspector.get_user_count()))
+    table.add_row("Messages", f"{inspector.get_total_message_count():,}")
+    table.add_row("Files", f"{inspector.get_total_file_count():,}")
 
     date_range = inspector.get_export_date_range()
     if date_range:
-        click.echo(f"  Date range: {date_range[0]} to {date_range[1]}")
+        table.add_row("Date range", f"{date_range[0]} to {date_range[1]}")
 
     bots = inspector.get_bot_users()
     if bots:
-        click.echo(f"  Bot users: {len(bots)}")
+        table.add_row("Bot users", str(len(bots)))
 
     no_email = inspector.get_users_without_email()
     if no_email:
-        click.echo(f"  Users without email: {len(no_email)}")
+        table.add_row(
+            "[yellow]Users without email[/yellow]", f"[yellow]{len(no_email)}[/yellow]"
+        )
 
-    click.echo("")
+    from rich.panel import Panel
+
+    console.print()
+    console.print(Panel(table, title="Export Summary", border_style="blue"))
 
 
 def _build_config(inspector: ExportInspector) -> dict[str, Any]:
@@ -137,7 +166,10 @@ def _build_config(inspector: ExportInspector) -> dict[str, Any]:
     bots = inspector.get_bot_users()
     if bots:
         bot_names = [b.get("name", b.get("id", "?")) for b in bots]
-        click.echo(f"Found {len(bots)} bot users: {', '.join(bot_names)}")
+        console = get_console()
+        console.print(
+            f"\nFound [bold]{len(bots)}[/bold] bot users: {', '.join(bot_names)}"
+        )
         if click.confirm("Ignore bot users during migration?", default=True):
             config["ignore_bots"] = True
 
@@ -159,14 +191,18 @@ def _build_config(inspector: ExportInspector) -> dict[str, Any]:
 
 def _ask_channel_selection(inspector: ExportInspector) -> dict[str, Any]:
     """Ask the user about channel inclusion/exclusion."""
+    from rich.columns import Columns
+    from rich.text import Text
+
     result: dict[str, Any] = {}
     channel_dirs = inspector.get_channel_dirs()
     channel_names = [d.name for d in channel_dirs]
 
-    click.echo(f"Channels found ({len(channel_names)}):")
-    for name in channel_names:
-        click.echo(f"  - {name}")
-    click.echo("")
+    console = get_console()
+    items = [Text(f"#{name}", style="cyan") for name in channel_names]
+    console.print(f"\nChannels found ([bold]{len(channel_names)}[/bold]):")
+    console.print(Columns(items, padding=(0, 3)))
+    console.print()
 
     mode = click.prompt(
         "Channel selection mode",
@@ -198,22 +234,30 @@ def _ask_channel_selection(inspector: ExportInspector) -> dict[str, Any]:
 
 def _ask_user_mapping(inspector: ExportInspector) -> dict[str, Any]:
     """Ask about user mapping overrides."""
+    from rich.table import Table
+
     result: dict[str, Any] = {}
     no_email = inspector.get_users_without_email()
 
     if not no_email:
         return result
 
-    click.echo(f"\n{len(no_email)} users lack email addresses and need manual mapping:")
-    for u in no_email:
-        uid = u.get("id", "?")
-        name = u.get("name", "?")
-        real_name = u.get("real_name", "")
-        suffix = f" ({real_name})" if real_name else ""
-        click.echo(f"  {uid}: {name}{suffix}")
+    console = get_console()
+    table = Table(title=f"{len(no_email)} Users Need Manual Mapping", expand=True)
+    table.add_column("User ID", style="dim")
+    table.add_column("Name", style="bold")
+    table.add_column("Real Name")
 
-    click.echo("")
-    click.echo("You can add mappings now or edit config.yaml later.")
+    for u in no_email:
+        table.add_row(
+            u.get("id", "?"),
+            u.get("name", "?"),
+            u.get("real_name", ""),
+        )
+
+    console.print()
+    console.print(table)
+    console.print("[dim]You can add mappings now or edit config.yaml later.[/dim]")
 
     if click.confirm("Add user mappings now?", default=False):
         overrides: dict[str, str] = {}

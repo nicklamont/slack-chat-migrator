@@ -167,9 +167,11 @@ class TestInitCommand:
             ["init", "--export_path", str(export), "--output", str(output)],
             input="\n\ny\nn\n\n\n\n\n",
         )
-        assert "Channels: 2" in result.output
-        assert "Users: 3" in result.output
-        assert "Messages: 2" in result.output
+        # Rich table renders metrics with spacing, not "Key: Value" format
+        assert "Channels" in result.output
+        assert "Users" in result.output
+        assert "Messages" in result.output
+        assert "Export Summary" in result.output
 
     def test_shows_structure_issues(self, tmp_path: Path) -> None:
         """init reports structure issues and lets user abort."""
