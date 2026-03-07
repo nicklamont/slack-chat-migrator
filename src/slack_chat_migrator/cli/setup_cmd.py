@@ -483,7 +483,7 @@ def _prompt_email(prompt_text: str, default: str = "") -> str:
     """Prompt for a valid email address, looping until one is provided."""
     console = get_console()
     while True:
-        value = click.prompt(prompt_text, default=default)
+        value: str = click.prompt(prompt_text, default=default)
         if value and "@" in value:
             return value
         console.print("[red]A valid email address is required.[/red]")
