@@ -89,7 +89,7 @@ def validate(
             from slack_chat_migrator.cli.init_cmd import init
 
             ctx = click.Context(init)
-            ctx.invoke(init, export_path=export_path)
+            ctx.invoke(init, export_path=export_path, output=config)
             # Re-check after init
             if not config_path.exists():
                 click.echo("Config file still not found. Aborting.")

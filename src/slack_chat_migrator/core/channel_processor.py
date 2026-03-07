@@ -139,6 +139,8 @@ class ChannelProcessor:
                 f"Skipping channel {channel} due to space creation permission error",
                 channel=channel,
             )
+            if self.progress_tracker:
+                self.progress_tracker.channel_complete(channel)
             return ChannelResult(should_abort=False, had_errors=True)
 
         # Set current space

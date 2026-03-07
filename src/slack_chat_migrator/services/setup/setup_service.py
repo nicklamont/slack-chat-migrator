@@ -62,7 +62,7 @@ def load_state(path: Path | None = None) -> SetupState | None:
         if not isinstance(data, dict):
             return None
         return SetupState(**data)
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError, OSError):
         return None
 
 

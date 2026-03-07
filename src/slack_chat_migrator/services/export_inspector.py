@@ -36,8 +36,11 @@ class ExportInspector:
         if self._channels_data is None:
             channels_file = self.export_path / "channels.json"
             if channels_file.exists():
-                with open(channels_file) as f:
-                    self._channels_data = json.load(f)
+                try:
+                    with open(channels_file) as f:
+                        self._channels_data = json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    self._channels_data = []
             else:
                 self._channels_data = []
         return self._channels_data
@@ -46,8 +49,11 @@ class ExportInspector:
         if self._users_data is None:
             users_file = self.export_path / "users.json"
             if users_file.exists():
-                with open(users_file) as f:
-                    self._users_data = json.load(f)
+                try:
+                    with open(users_file) as f:
+                        self._users_data = json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    self._users_data = []
             else:
                 self._users_data = []
         return self._users_data
