@@ -52,14 +52,28 @@ class TestStatePersistence:
         assert state_file.exists()
 
         loaded = load_state(path=state_file)
+        assert loaded is not None
         assert loaded.project_id == "my-project"
         assert loaded.step_status("project") == StepStatus.COMPLETE
 
     def test_load_missing_file(self, tmp_path: Path) -> None:
         state_file = tmp_path / "nonexistent.json"
-        state = load_state(path=state_file)
-        assert state.project_id is None
-        assert state.steps == {}
+        assert load_state(path=state_file) is None
+
+    def test_load_empty_file(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "state.json"
+        state_file.write_text("")
+        assert load_state(path=state_file) is None
+
+    def test_load_invalid_json(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "state.json"
+        state_file.write_text("{bad json")
+        assert load_state(path=state_file) is None
+
+    def test_load_non_dict_json(self, tmp_path: Path) -> None:
+        state_file = tmp_path / "state.json"
+        state_file.write_text('"just a string"')
+        assert load_state(path=state_file) is None
 
     def test_save_creates_parent_dirs(self, tmp_path: Path) -> None:
         state_file = tmp_path / "sub" / "dir" / "state.json"
@@ -78,6 +92,7 @@ class TestStatePersistence:
         )
         save_state(state, path=state_file)
         loaded = load_state(path=state_file)
+        assert loaded is not None
         assert loaded.project_id == state.project_id
         assert loaded.apis_enabled == state.apis_enabled
         assert loaded.service_account_email == state.service_account_email
@@ -90,28 +105,24 @@ class TestApiEnablement:
 
     def test_enable_required_apis_skips_enabled(self) -> None:
         from slack_chat_migrator.services.setup.api_enablement import (
+            REQUIRED_APIS,
             enable_required_apis,
         )
 
-        mock_sm = MagicMock()
-        mock_client = MagicMock()
-        mock_sm.ServiceManagerClient.return_value = mock_client
-
-        # Simulate all APIs already enabled
-        mock_service1 = MagicMock()
-        mock_service1.service_name = "chat.googleapis.com"
-        mock_service2 = MagicMock()
-        mock_service2.service_name = "drive.googleapis.com"
-        mock_service3 = MagicMock()
-        mock_service3.service_name = "admin.googleapis.com"
-        mock_client.list_services.return_value = [
-            mock_service1,
-            mock_service2,
-            mock_service3,
-        ]
+        # Mock the discovery-based service
+        mock_service = MagicMock()
+        mock_list = mock_service.services().list
+        mock_list.return_value.execute.return_value = {
+            "services": [{"config": {"name": api}} for api in REQUIRED_APIS],
+        }
+        # No next page
+        mock_service.services().list_next.return_value = None
 
         progress_calls: list[tuple[str, str]] = []
-        with patch.dict("sys.modules", {"google.cloud.servicemanagement_v1": mock_sm}):
+        with patch(
+            "slack_chat_migrator.services.setup.api_enablement._build_service",
+            return_value=mock_service,
+        ):
             newly = enable_required_apis(
                 MagicMock(),
                 "test-proj",
@@ -160,6 +171,63 @@ class TestSetupCommand:
         result = runner.invoke(cli, ["setup"])
         assert result.exit_code == 1
         assert "No credentials found" in result.output
+
+
+class TestServiceAccount:
+    """Tests for service account REST operations."""
+
+    @patch(
+        "slack_chat_migrator.services.setup.service_account._build_iam_service",
+    )
+    def test_create_service_account(self, mock_build: MagicMock) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            create_service_account,
+        )
+
+        mock_service = mock_build.return_value
+        mock_service.projects().serviceAccounts().create().execute.return_value = {
+            "email": "sa@proj.iam.gserviceaccount.com",
+            "name": "projects/proj/serviceAccounts/sa@proj.iam.gserviceaccount.com",
+        }
+
+        result = create_service_account(MagicMock(), "proj", "sa", "SA Display")
+        assert result["email"] == "sa@proj.iam.gserviceaccount.com"
+
+
+class TestGcpProject:
+    """Tests for GCP project REST operations."""
+
+    @patch(
+        "slack_chat_migrator.services.setup.gcp_project._build_crm_service",
+    )
+    def test_list_projects(self, mock_build: MagicMock) -> None:
+        from slack_chat_migrator.services.setup.gcp_project import list_projects
+
+        mock_service = mock_build.return_value
+        mock_service.projects().list().execute.return_value = {
+            "projects": [
+                {"projectId": "proj-1", "name": "Project One"},
+                {"projectId": "proj-2", "name": "Project Two"},
+            ],
+        }
+        mock_service.projects().list_next.return_value = None
+
+        projects = list_projects(MagicMock())
+        assert len(projects) == 2
+        assert projects[0]["project_id"] == "proj-1"
+        assert projects[0]["display_name"] == "Project One"
+
+    @patch(
+        "slack_chat_migrator.services.setup.gcp_project._build_crm_service",
+    )
+    def test_create_project(self, mock_build: MagicMock) -> None:
+        from slack_chat_migrator.services.setup.gcp_project import create_project
+
+        mock_service = mock_build.return_value
+        mock_service.projects().create().execute.return_value = {"done": True}
+
+        result = create_project(MagicMock(), "my-proj", "My Project")
+        assert result == "my-proj"
 
 
 class TestDelegation:

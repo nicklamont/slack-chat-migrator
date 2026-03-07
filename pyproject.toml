@@ -57,9 +57,8 @@ dev = [
     "commitizen>=3.0",
 ]
 setup = [
-    "google-cloud-resource-manager>=1.12,<2.0",
-    "google-cloud-service-management>=1.8,<2.0",
-    "google-iam>=2.14,<3.0",
+    # All setup operations use the REST discovery API (google-api-python-client),
+    # which is already a core dependency. This extra is kept for forward compatibility.
 ]
 docs = [
     "mkdocs>=1.6",
