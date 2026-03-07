@@ -74,7 +74,7 @@ jobs:
 
     environment:
       name: pypi
-      url: https://pypi.org/project/slack-chat-migrator/${{ github.ref_name }}
+      url: https://pypi.org/project/slack-chat-migrator/
 
     steps:
       - name: Retrieve release distributions
