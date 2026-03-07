@@ -4,12 +4,14 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -23,7 +25,8 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           VERSION="${TAG#v}"
           # Get content between this version header and the next version header
-          NOTES=$(awk "/^## ${VERSION//./\\.}/ {found=1; next} /^## [0-9]/ {if(found) exit} found {print}" CHANGELOG.md)
+          # Handles formats: "## v0.4.0 (2026-03-06)", "## 0.4.0", "## v0.4.0"
+          NOTES=$(awk "/^## v?${VERSION//./\\.}/ {found=1; next} /^## / {if(found) exit} found {print}" CHANGELOG.md)
           if [ -z "$NOTES" ]; then
             NOTES="Release ${TAG}"
           fi
@@ -37,3 +40,50 @@ jobs:
         with:
           body: ${{ steps.changelog.outputs.notes }}
           generate_release_notes: false
+
+  pypi-build:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Build release distributions
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-dists
+          path: dist/
+
+  pypi-publish:
+    runs-on: ubuntu-latest
+    needs:
+      - github-release
+      - pypi-build
+    permissions:
+      contents: read
+      # IMPORTANT: this permission is mandatory for trusted publishing
+      id-token: write
+
+    environment:
+      name: pypi
+      url: https://pypi.org/project/slack-chat-migrator/
+
+    steps:
+      - name: Retrieve release distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: release-dists
+          path: dist/
+
+      - name: Publish release distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
