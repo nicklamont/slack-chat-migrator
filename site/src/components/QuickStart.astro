@@ -1,0 +1,59 @@
+---
+import CopyButton from './CopyButton.tsx';
+
+const steps = [
+  {
+    number: '1',
+    title: 'Install',
+    description: 'Install from PyPI. Python 3.9+ required.',
+    code: 'pip install slack-chat-migrator',
+  },
+  {
+    number: '2',
+    title: 'Setup GCP',
+    description: 'Interactive wizard creates your GCP project, enables APIs, and configures a service account.',
+    code: 'pip install "slack-chat-migrator[setup]"\nslack-chat-migrator setup',
+  },
+  {
+    number: '3',
+    title: 'Generate Config & Validate',
+    description: 'Analyse your Slack export, generate config, then dry-run to check everything.',
+    code: 'slack-chat-migrator init --export_path ./slack_export\nslack-chat-migrator validate --export_path ./slack_export',
+  },
+  {
+    number: '4',
+    title: 'Migrate',
+    description: 'Run the full migration. Validation runs automatically first, then you confirm to proceed.',
+    code: 'slack-chat-migrator migrate \\\n  --creds_path ./key.json \\\n  --export_path ./slack_export \\\n  --workspace_admin admin@company.com',
+  },
+];
+---
+
+<section id="quick-start" class="py-20 sm:py-28">
+  <div class="mx-auto max-w-3xl px-4 sm:px-6 lg:px-8">
+    <div class="mb-16 text-center">
+      <h2 class="text-3xl font-bold sm:text-4xl">Quick Start</h2>
+      <p class="mt-4 text-lg text-muted">
+        From zero to migrated in four steps.
+      </p>
+    </div>
+
+    <div class="space-y-8">
+      {steps.map(step => (
+        <div class="flex gap-4 sm:gap-6">
+          <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-sm font-bold text-accent-contrast">
+            {step.number}
+          </div>
+          <div class="flex-1 min-w-0">
+            <h3 class="text-lg font-semibold">{step.title}</h3>
+            <p class="mt-1 text-sm text-muted">{step.description}</p>
+            <div class="relative mt-3">
+              <pre class="overflow-x-auto rounded-lg bg-code p-4 pr-10 font-mono text-sm text-[#E8E6E3]"><code>{step.code}</code></pre>
+              <CopyButton text={step.code} client:visible />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>

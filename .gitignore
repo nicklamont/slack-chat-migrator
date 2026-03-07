@@ -32,8 +32,15 @@ env/
 
 # Credentials and secrets
 *.json
+!site/*.json
+!site/package-lock.json
 secrets/
 config.yaml
+
+# Site build artifacts
+site/node_modules/
+site/dist/
+site/.astro/
 
 # Output files
 # Migration logs and output
