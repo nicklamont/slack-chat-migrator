@@ -209,24 +209,31 @@ def print_rich_summary(
     title = "Dry Run Complete \u2713" if is_dry_run else "Migration Complete \u2713"
     border = "blue" if is_dry_run else "green"
 
-    # --- Stats table ---
-    stats = Table(expand=True, show_header=False, box=None, padding=(0, 2))
-    stats.add_column("Metric", style="cyan", min_width=18)
-    stats.add_column("Count", justify="right", style="green", min_width=10)
+    # --- Compact completion banner (stats already visible in progress display) ---
+    output_dir = state.context.output_dir or "."
+    report_path = os.path.join(output_dir, "migration_report.yaml")
 
     channels_count = len(summary["channels_processed"])
-    stats.add_row("Spaces created", str(summary["spaces_created"]))
-    stats.add_row("Channels processed", str(channels_count))
-    stats.add_row("Messages migrated", f"{summary['messages_created']:,}")
-    stats.add_row("Reactions migrated", f"{summary['reactions_created']:,}")
-    stats.add_row("Files migrated", f"{summary['files_created']:,}")
-
+    summary_line = (
+        f"{channels_count} channels \u2022 "
+        f"{summary['messages_created']:,} messages \u2022 "
+        f"{summary['files_created']:,} files"
+    )
     failed_count = len(state.messages.failed_messages)
     if failed_count > 0:
-        stats.add_row("[red]Messages failed[/red]", f"[red]{failed_count}[/red]")
+        summary_line += f" \u2022 [red]{failed_count} failed[/red]"
+
+    if is_dry_run:
+        body = (
+            f"{summary_line}\n\n"
+            f"Report: [bold]{report_path}[/bold]\n"
+            "To perform the actual migration, run again without --dry_run"
+        )
+    else:
+        body = f"{summary_line}\n\nReport: [bold]{report_path}[/bold]"
 
     console.print()
-    console.print(Panel(stats, title=title, border_style=border))
+    console.print(Panel(body, title=title, border_style=border))
 
     # --- Unmapped users panel ---
     non_bot_unmapped = [
@@ -252,27 +259,6 @@ def print_rich_summary(
         for ch, timestamps in failed_by_channel.items():
             fail_table.add_row(f"#{ch}", str(len(timestamps)))
         console.print(fail_table)
-
-    # --- Next step hint ---
-    output_dir = state.context.output_dir or "."
-    report_path = os.path.join(output_dir, "migration_report.yaml")
-    if is_dry_run:
-        console.print(
-            Panel(
-                f"Report: [bold]{report_path}[/bold]\n\n"
-                "To perform the actual migration, run again without --dry_run",
-                title="Next Steps",
-                border_style="blue",
-            )
-        )
-    else:
-        console.print(
-            Panel(
-                f"Report: [bold]{report_path}[/bold]",
-                title="Complete",
-                border_style="green",
-            )
-        )
 
 
 def _print_migration_summary_plain(

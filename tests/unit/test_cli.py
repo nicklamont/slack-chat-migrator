@@ -4,6 +4,7 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import click
+import pytest
 from click.testing import CliRunner
 
 from slack_chat_migrator.cli.commands import cli, handle_exception
@@ -189,66 +190,30 @@ class TestValidateCommand:
     @patch("slack_chat_migrator.cli.validate_cmd.MigrationOrchestrator")
     @patch("slack_chat_migrator.cli.validate_cmd.setup_logger")
     @patch("slack_chat_migrator.cli.validate_cmd.create_migration_output_directory")
-    def test_runs_permission_check_when_creds_provided(
+    def test_delegates_to_orchestrator_validate_prerequisites(
         self, mock_outdir, mock_log, mock_orch_cls
     ):
-        """When --creds_path and --workspace_admin are provided, runs permission check."""
+        """Validate command delegates permission checks to orchestrator."""
         mock_outdir.return_value = "/tmp/fake"
         mock_orch = MagicMock()
         mock_orch_cls.return_value = mock_orch
 
         runner = CliRunner()
-        # Patch at source — these are deferred imports inside the if-block
-        with (
-            patch(
-                "slack_chat_migrator.utils.permissions.check_permissions_standalone"
-            ) as mock_check,
-            patch(
-                "slack_chat_migrator.core.config.load_config",
-                return_value=MigrationConfig(),
-            ),
-        ):
-            result = runner.invoke(
-                cli,
-                [
-                    "validate",
-                    "--creds_path",
-                    "fake.json",
-                    "--export_path",
-                    "fake",
-                    "--workspace_admin",
-                    "a@b.com",
-                ],
-            )
-            assert result.exit_code == 0
-            mock_check.assert_called_once_with(
-                creds_path="fake.json",
-                workspace_admin="a@b.com",
-                max_retries=3,
-                retry_delay=2,
-            )
-
-    @patch("slack_chat_migrator.cli.validate_cmd.MigrationOrchestrator")
-    @patch("slack_chat_migrator.cli.validate_cmd.setup_logger")
-    @patch("slack_chat_migrator.cli.validate_cmd.create_migration_output_directory")
-    def test_skips_permission_check_without_creds(
-        self, mock_outdir, mock_log, mock_orch_cls
-    ):
-        """Without --creds_path, permission check is not run."""
-        mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
-        mock_orch_cls.return_value = mock_orch
-
-        runner = CliRunner()
-        with patch(
-            "slack_chat_migrator.utils.permissions.check_permissions_standalone"
-        ) as mock_check:
-            result = runner.invoke(
-                cli,
-                ["validate", "--export_path", "fake"],
-            )
+        result = runner.invoke(
+            cli,
+            [
+                "validate",
+                "--creds_path",
+                "fake.json",
+                "--export_path",
+                "fake",
+                "--workspace_admin",
+                "a@b.com",
+            ],
+        )
         assert result.exit_code == 0
-        mock_check.assert_not_called()
+        mock_orch.validate_prerequisites.assert_called_once()
+        mock_orch.run_migration.assert_called_once()
 
 
 class TestCleanupCommand:
@@ -842,3 +807,95 @@ class TestDeprecatedCommand:
         assert "deprecated" in result.output.lower()
         assert "new-cmd" in result.output
         assert "ran old command" in result.output
+
+
+class TestQuietConsole:
+    """Tests for _quiet_console context manager."""
+
+    def test_suppresses_console_handler(self):
+        """_quiet_console raises console handler level to ERROR."""
+        from slack_chat_migrator.cli.migrate_cmd import _quiet_console
+
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.DEBUG)
+        test_logger = logging.getLogger("test_quiet_console")
+        test_logger.addHandler(handler)
+
+        # Temporarily add to root logger to be detected
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            with _quiet_console():
+                assert handler.level == logging.ERROR
+            assert handler.level == logging.DEBUG
+        finally:
+            root.removeHandler(handler)
+            test_logger.removeHandler(handler)
+
+    def test_restores_level_on_exception(self):
+        """_quiet_console restores level even if body raises."""
+        from slack_chat_migrator.cli.migrate_cmd import _quiet_console
+
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            with pytest.raises(RuntimeError):
+                with _quiet_console():
+                    raise RuntimeError("boom")
+            assert handler.level == logging.INFO
+        finally:
+            root.removeHandler(handler)
+
+    def test_noop_when_no_console_handler(self):
+        """_quiet_console is a no-op when there are no console handlers."""
+        from slack_chat_migrator.cli.migrate_cmd import _quiet_console
+
+        # Just ensure it doesn't error
+        with _quiet_console():
+            pass
+
+
+class TestPrintConfigPanel:
+    """Tests for _print_config_panel."""
+
+    @patch("sys.stdout")
+    def test_prints_panel_on_tty(self, mock_stdout):
+        """_print_config_panel prints Rich panel when TTY."""
+        mock_stdout.isatty.return_value = True
+        from types import SimpleNamespace
+
+        from slack_chat_migrator.cli.migrate_cmd import _print_config_panel
+
+        args = SimpleNamespace(
+            export_path="/tmp/export",
+            workspace_admin="admin@example.com",
+            config="config.yaml",
+            dry_run=True,
+            update_mode=False,
+            verbose=False,
+            debug_api=False,
+        )
+        # Should not raise
+        _print_config_panel(args, "/tmp/logs")
+
+    @patch("sys.stdout")
+    def test_no_panel_on_non_tty(self, mock_stdout):
+        """_print_config_panel skips panel when not TTY."""
+        mock_stdout.isatty.return_value = False
+        from types import SimpleNamespace
+
+        from slack_chat_migrator.cli.migrate_cmd import _print_config_panel
+
+        args = SimpleNamespace(
+            export_path="/tmp/export",
+            workspace_admin="admin@example.com",
+            config="config.yaml",
+            dry_run=False,
+            update_mode=False,
+            verbose=False,
+            debug_api=False,
+        )
+        # Should not raise (just logs)
+        _print_config_panel(args, "/tmp/logs")

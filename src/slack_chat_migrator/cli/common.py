@@ -402,13 +402,28 @@ def handle_http_error(e: HttpError) -> None:
 def handle_exception(e: Exception) -> None:
     """Handle different types of exceptions.
 
+    On TTY, shows a Rich error panel.  Log lines always go to the log file.
+
     Args:
         e: The exception to handle.
     """
     from googleapiclient.errors import HttpError
 
+    is_tty = sys.stdout.isatty()
+
     if isinstance(e, MigratorError):
-        log_with_context(logging.ERROR, str(e))
+        if is_tty:
+            try:
+                from slack_chat_migrator.cli.renderers import error_panel, get_console
+
+                get_console().print(error_panel("Error", str(e)))
+            except Exception:
+                is_tty = False
+        if not is_tty:
+            log_with_context(logging.ERROR, str(e))
+        else:
+            # Still log to file, suppress console
+            _log_quiet(logging.ERROR, str(e))
     elif isinstance(e, HttpError):
         handle_http_error(e)
     elif isinstance(e, FileNotFoundError):
@@ -429,8 +444,55 @@ def handle_exception(e: Exception) -> None:
         log_with_context(logging.ERROR, f"Migration failed: {e}", exc_info=True)
 
 
+def _log_quiet(level: int, msg: str) -> None:
+    """Log a message to file only (suppress console handlers)."""
+    restored: list[tuple[logging.Handler, int]] = []
+    for lgr in (logging.getLogger(), logging.getLogger("slack_chat_migrator")):
+        for h in lgr.handlers:
+            if isinstance(h, logging.StreamHandler) and not isinstance(
+                h, logging.FileHandler
+            ):
+                restored.append((h, h.level))
+                h.setLevel(logging.CRITICAL + 1)
+    log_with_context(level, msg)
+    for h, old_level in restored:
+        h.setLevel(old_level)
+
+
 def show_security_warning() -> None:
-    """Show security warning about tokens in export files."""
+    """Show security warning about tokens in export files.
+
+    On TTY, prints a compact Rich panel.  The detailed log lines still go to the
+    log file regardless of TTY status.
+    """
+    is_tty = sys.stdout.isatty()
+    if is_tty:
+        try:
+            from slack_chat_migrator.cli.renderers import get_console, warning_panel
+
+            console = get_console()
+            console.print(
+                warning_panel(
+                    "Security",
+                    "Your Slack export files contain authentication tokens.\n"
+                    "Consider securing or deleting them after migration.",
+                )
+            )
+        except Exception:
+            is_tty = False  # Fall through to log-based warning
+
+    # Always log to file; suppress from console on TTY (Rich panel replaces it)
+    if is_tty:
+        # Temporarily raise console handler levels so log lines go to file only
+        restored: list[tuple[logging.Handler, int]] = []
+        for lgr in (logging.getLogger(), logging.getLogger("slack_chat_migrator")):
+            for h in lgr.handlers:
+                if isinstance(h, logging.StreamHandler) and not isinstance(
+                    h, logging.FileHandler
+                ):
+                    restored.append((h, h.level))
+                    h.setLevel(logging.CRITICAL + 1)
+
     log_with_context(
         logging.WARNING,
         "\nSECURITY WARNING: Your Slack export files contain authentication tokens in the URLs.",
@@ -443,3 +505,7 @@ def show_security_warning() -> None:
         logging.WARNING,
         "See README.md for more information on security best practices.",
     )
+
+    if is_tty:
+        for h, old_level in restored:
+            h.setLevel(old_level)

@@ -218,12 +218,12 @@ slack-chat-migrator cleanup           # Complete import mode (deprecated — use
 
 ##### `setup`
 
-Interactive wizard that guides you through GCP project setup: creating a project, enabling APIs, creating a service account, downloading credentials, and testing domain-wide delegation. Progress is saved between runs so you can resume if interrupted.
+Interactive wizard that guides you through GCP project setup: creating a project, enabling APIs, creating a service account, downloading credentials, configuring the Chat app, and testing domain-wide delegation. Progress is saved between runs so you can resume if interrupted.
 
 Requires the optional `setup` dependencies:
 
 ```bash
-pip install slack-chat-migrator[setup]
+pip install "slack-chat-migrator[setup]"
 ```
 
 ##### `init`
@@ -359,7 +359,7 @@ For a successful migration, follow this recommended workflow:
 
 1. **Set up GCP permissions** (one-time, interactive wizard):
    ```bash
-   pip install slack-chat-migrator[setup]
+   pip install "slack-chat-migrator[setup]"
    slack-chat-migrator setup
    ```
 
@@ -679,14 +679,13 @@ If you prefer not to use the setup script, follow these steps manually:
    - Search for and enable these APIs:
      - Google Chat API
      - Google Drive API
+     - Admin SDK API
 
 2. **Create a Service Account**:
    - Go to "IAM & Admin" > "Service Accounts"
    - Click "Create Service Account"
    - Give it a name (e.g., "slack-chat-migrator")
-   - Grant these roles:
-     - Chat Service Agent
-     - Drive File Organizer
+   - No project-level IAM roles are needed (permissions come from delegation)
 
 3. **Create and Download a Key**:
    - In the service account details page, go to the "Keys" tab
@@ -694,17 +693,25 @@ If you prefer not to use the setup script, follow these steps manually:
    - Select JSON format and download it
    - Save this file as `slack-chat-migrator-sa-key.json` in your project directory
 
-4. **Set Up Domain-Wide Delegation**:
-   - Go to your Google Workspace Admin Console
+4. **Configure the Chat App**:
+   - Go to the [Chat API Configuration](https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat) page in the GCP Console
+   - Set an App name (e.g. "Slack Migrator")
+   - Set Avatar URL (e.g. `https://developers.google.com/chat/images/quickstart-app-avatar.png`)
+   - Set Description (e.g. "Slack to Google Chat migration")
+   - Leave Interactive features **disabled** (the migration uses server-to-server API calls, not a bot)
+   - Click Save
+
+5. **Set Up Domain-Wide Delegation**:
+   - Go to your [Google Workspace Admin Console](https://admin.google.com/ac/owl/domainwidedelegation)
    - Navigate to Security > API Controls > Domain-wide Delegation
-   - Add a new API client with the client ID from your service account
+   - Add a new API client with the client ID from your service account key file
    - Grant these OAuth scopes:
-     - https://www.googleapis.com/auth/chat.import
-     - https://www.googleapis.com/auth/chat.spaces
-     - https://www.googleapis.com/auth/chat.messages
-     - https://www.googleapis.com/auth/chat.spaces.readonly
-     - https://www.googleapis.com/auth/chat.memberships.readonly
-     - https://www.googleapis.com/auth/drive
+     - `https://www.googleapis.com/auth/chat.import`
+     - `https://www.googleapis.com/auth/chat.spaces`
+     - `https://www.googleapis.com/auth/chat.messages`
+     - `https://www.googleapis.com/auth/chat.spaces.readonly`
+     - `https://www.googleapis.com/auth/chat.memberships.readonly`
+     - `https://www.googleapis.com/auth/drive`
 
 #### Migration Issues
 
@@ -802,16 +809,17 @@ tests/
 Before running your first migration, you need to set up the Google Cloud permissions. The recommended approach is the interactive `setup` command:
 
 ```bash
-pip install slack-chat-migrator[setup]
+pip install "slack-chat-migrator[setup]"
 slack-chat-migrator setup
 ```
 
-The wizard guides you through five steps:
+The wizard guides you through six steps:
 1. **GCP project** — create or select a project
 2. **Enable APIs** — enable Chat, Drive, and Admin APIs
-3. **Service account** — create a service account with required roles
+3. **Service account** — create a service account for delegation
 4. **Download key** — download credentials JSON (saved with restricted permissions)
-5. **Test delegation** — verify domain-wide delegation works
+5. **Configure Chat app** — set up the Chat app in GCP Console (required by the Chat API)
+6. **Test delegation** — verify domain-wide delegation works
 
 Progress is saved between runs, so you can resume if interrupted.
 
