@@ -490,20 +490,18 @@ def _prompt_email(prompt_text: str, default: str = "") -> str:
 
 
 def _step_chat_app(state):  # type: ignore[no-untyped-def]
-    """Step 5: Configure and verify Google Chat app in GCP Console."""
+    """Step 5: Configure Google Chat app in GCP Console (manual).
+
+    This is a manual configuration step — we show instructions and ask
+    the user to confirm. Actual verification happens in Step 6 (delegation),
+    which can detect ``chat_app_missing`` once delegation credentials work.
+    """
     from rich.panel import Panel
 
     from slack_chat_migrator.services.setup.setup_service import StepStatus
 
     console = get_console()
     console.print("\n[bold][5/6] Configure Chat App[/bold]")
-
-    if not state.key_path:
-        console.print(
-            "[yellow]No key file available. Skipping Chat app verification.[/yellow]"
-        )
-        state.mark_step("chat_app", StepStatus.SKIPPED)
-        return state
 
     config_url = (
         "https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat"
@@ -521,7 +519,8 @@ def _step_chat_app(state):  # type: ignore[no-untyped-def]
             '  4. Set Description (e.g. "Slack to Google Chat migration")\n'
             "  5. Leave Interactive features [bold]disabled[/bold]\n"
             "  6. Click [bold]Save[/bold]\n\n"
-            "[dim]This cannot be automated — it requires the GCP Console.[/dim]",
+            "[dim]This cannot be automated — it requires the GCP Console.\n"
+            "The next step (delegation) will verify the Chat app is working.[/dim]",
             title="Instructions",
             border_style="blue",
         )
@@ -530,40 +529,14 @@ def _step_chat_app(state):  # type: ignore[no-untyped-def]
     click.echo(config_url)
     console.print()
 
-    # We need a workspace admin email to verify via delegation
-    workspace_admin = _prompt_email(
-        "Workspace admin email (for verification)",
-        default=state.workspace_admin or "",
-    )
-    state.workspace_admin = workspace_admin
-
-    while True:
-        if not click.confirm("Ready to verify Chat app?", default=True):
-            console.print(
-                "[dim]Skipped. Configure the Chat app before migrating.[/dim]"
-            )
-            state.mark_step("chat_app", StepStatus.SKIPPED)
-            return state
-
-        from slack_chat_migrator.services.setup.delegation import verify_chat_app
-
-        result = verify_chat_app(Path(state.key_path), workspace_admin)
-
-        if result["configured"]:
-            console.print("[green]Chat app verified.[/green]")
-            state.mark_step("chat_app", StepStatus.COMPLETE)
-            return state
-
+    if click.confirm("Have you configured the Chat app?", default=True):
+        state.mark_step("chat_app", StepStatus.COMPLETE)
+    else:
         console.print(
-            warning_panel(
-                "Chat app not found",
-                "The Chat app is not configured yet.\n"
-                f"Open {config_url} and follow the instructions above.",
-            )
+            "[dim]Skipped. Configure the Chat app before running the next step.[/dim]"
         )
-        if not click.confirm("Retry?", default=True):
-            state.mark_step("chat_app", StepStatus.SKIPPED)
-            return state
+        state.mark_step("chat_app", StepStatus.SKIPPED)
+    return state
 
 
 def _step_delegation(state):  # type: ignore[no-untyped-def]

@@ -20,44 +20,6 @@ def _read_key_info(creds_path: Path) -> dict[str, str]:
         return {}
 
 
-def verify_chat_app(
-    creds_path: Path,
-    workspace_admin: str,
-) -> dict[str, Any]:
-    """Check if the Chat app is configured by making a test API call.
-
-    Uses the service account with delegation to make a Chat API call.
-    If the Chat app isn't configured, the API returns a specific 404.
-
-    Returns:
-        Dict with 'configured' bool and 'detail' message.
-    """
-    if not workspace_admin or "@" not in workspace_admin:
-        return {
-            "configured": True,
-            "detail": "Skipped — no workspace admin email provided.",
-        }
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-
-        scopes = ["https://www.googleapis.com/auth/chat.spaces.readonly"]
-        sa_creds = service_account.Credentials.from_service_account_file(
-            str(creds_path), scopes=scopes
-        )
-        delegated = sa_creds.with_subject(workspace_admin)
-        service = build("chat", "v1", credentials=delegated)
-        service.spaces().list(pageSize=1).execute()
-        return {"configured": True, "detail": "Chat app is configured."}
-    except Exception as e:
-        error_str = str(e)
-        if "Chat app not found" in error_str:
-            return {"configured": False, "detail": error_str}
-        # Other errors (e.g. delegation not set up) — can't determine
-        # Chat app status, so skip this check
-        return {"configured": True, "detail": f"Could not verify: {error_str}"}
-
-
 def test_delegation(
     creds_path: Path,
     workspace_admin: str,
