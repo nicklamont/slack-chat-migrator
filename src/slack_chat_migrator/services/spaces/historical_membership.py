@@ -335,6 +335,9 @@ def _add_historical_members_batch(
             (must already have ``join_time`` and ``leave_time`` populated).
         active_users: Set of user IDs considered active (used for summary log).
     """
+    if progress_tracker and user_membership:
+        progress_tracker.member_phase_start(channel, total=len(user_membership))
+
     added_count = 0
     failed_count = 0
 

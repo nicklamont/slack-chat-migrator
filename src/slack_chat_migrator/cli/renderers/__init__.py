@@ -19,6 +19,7 @@ ProgressRenderer = Union[RichProgressRenderer, PlainProgressRenderer]
 def create_renderer(
     tracker: ProgressTracker,
     total_channels: int = 0,
+    dry_run: bool = False,
 ) -> ProgressRenderer:
     """Create the appropriate renderer based on terminal capabilities.
 
@@ -26,8 +27,10 @@ def create_renderer(
     otherwise a :class:`PlainProgressRenderer`.
     """
     if sys.stdout.isatty():
-        return RichProgressRenderer(tracker, total_channels=total_channels)
-    return PlainProgressRenderer(tracker)
+        return RichProgressRenderer(
+            tracker, total_channels=total_channels, dry_run=dry_run
+        )
+    return PlainProgressRenderer(tracker, dry_run=dry_run)
 
 
 # ------------------------------------------------------------------

@@ -287,8 +287,12 @@ class ChannelProcessor:
         msgs = self._load_and_sort_messages(channel)
         msgs = self._deduplicate_messages(msgs, channel)
 
+        # Emit message phase start so renderers can create a progress bar
+        message_count = sum(1 for m in msgs if m.get("type") == "message")
+        if self.progress_tracker and message_count > 0:
+            self.progress_tracker.message_phase_start(channel, total=message_count)
+
         if self.ctx.dry_run:
-            message_count = sum(1 for m in msgs if m.get("type") == "message")
             log_with_context(
                 logging.INFO,
                 f"{self.ctx.log_prefix}Found {message_count} messages in channel {channel}",

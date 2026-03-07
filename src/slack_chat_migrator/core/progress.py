@@ -27,6 +27,8 @@ class EventType(Enum):
     REACTION_ADDED = auto()
     SPACE_CREATED = auto()
     MEMBER_ADDED = auto()
+    MEMBER_PHASE_START = auto()
+    MESSAGE_PHASE_START = auto()
     PHASE_CHANGE = auto()
 
 
@@ -176,6 +178,26 @@ class ProgressTracker:
             ProgressEvent(
                 event_type=EventType.MEMBER_ADDED,
                 channel=channel,
+            )
+        )
+
+    def member_phase_start(self, channel: str, total: int) -> None:
+        """Signal the start of the member-addition phase for *channel*."""
+        self.emit(
+            ProgressEvent(
+                event_type=EventType.MEMBER_PHASE_START,
+                channel=channel,
+                total=total,
+            )
+        )
+
+    def message_phase_start(self, channel: str, total: int) -> None:
+        """Signal the start of the message-sending phase for *channel*."""
+        self.emit(
+            ProgressEvent(
+                event_type=EventType.MESSAGE_PHASE_START,
+                channel=channel,
+                total=total,
             )
         )
 

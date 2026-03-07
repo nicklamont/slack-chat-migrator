@@ -21,10 +21,12 @@ class PlainProgressRenderer:
         tracker: ProgressTracker,
         output: TextIO | None = None,
         interval: float = 5.0,
+        dry_run: bool = False,
     ) -> None:
         self._tracker = tracker
         self._output = output or sys.stderr
         self._interval = interval
+        self._dry_run = dry_run
         self._start_time: float = 0.0
         self._last_print: float = 0.0
 
@@ -79,21 +81,36 @@ class PlainProgressRenderer:
         elif event.event_type == EventType.MEMBER_ADDED:
             self._members_added += 1
             self._maybe_print_status()
+        elif event.event_type == EventType.MEMBER_PHASE_START:
+            self._print(
+                f"Adding members to #{event.channel} ({event.total or 0} users)"
+            )
+        elif event.event_type == EventType.MESSAGE_PHASE_START:
+            self._print(
+                f"Sending messages in #{event.channel} ({event.total or 0} messages)"
+            )
 
     def _maybe_print_status(self) -> None:
         """Print a status line if enough time has elapsed since the last one."""
         now = time.time()
         if now - self._last_print >= self._interval:
+            elapsed = now - self._start_time if self._start_time else 0
+            throughput = ""
+            if elapsed > 0 and self._messages_sent > 0:
+                rate = self._messages_sent / elapsed
+                throughput = f" ({rate:.0f}/sec)"
             self._print(
-                f"Progress: {self._messages_sent} messages sent, "
-                f"{self._messages_failed} failed, "
-                f"{self._channels_complete} channels complete"
+                f"Messages: {self._messages_sent}{throughput}, "
+                f"Files: {self._files_uploaded}, "
+                f"Errors: {self._messages_failed}, "
+                f"Channels: {self._channels_complete}"
             )
 
     def _print(self, message: str) -> None:
         """Write a timestamped line to the output stream."""
         elapsed = time.time() - self._start_time if self._start_time else 0
         minutes, seconds = divmod(int(elapsed), 60)
-        self._output.write(f"[{minutes:02d}:{seconds:02d}] {message}\n")
+        prefix = "[DRY RUN] " if self._dry_run else ""
+        self._output.write(f"[{minutes:02d}:{seconds:02d}] {prefix}{message}\n")
         self._output.flush()
         self._last_print = time.time()

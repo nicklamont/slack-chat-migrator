@@ -112,6 +112,28 @@ class TestProgressTracker:
 
         assert received[0].event_type == EventType.MEMBER_ADDED
 
+    def test_member_phase_start_convenience(self):
+        tracker = ProgressTracker()
+        received: list[ProgressEvent] = []
+        tracker.subscribe(received.append)
+
+        tracker.member_phase_start("general", total=24)
+
+        assert received[0].event_type == EventType.MEMBER_PHASE_START
+        assert received[0].channel == "general"
+        assert received[0].total == 24
+
+    def test_message_phase_start_convenience(self):
+        tracker = ProgressTracker()
+        received: list[ProgressEvent] = []
+        tracker.subscribe(received.append)
+
+        tracker.message_phase_start("general", total=100)
+
+        assert received[0].event_type == EventType.MESSAGE_PHASE_START
+        assert received[0].channel == "general"
+        assert received[0].total == 100
+
     def test_phase_change_convenience(self):
         tracker = ProgressTracker()
         received: list[ProgressEvent] = []

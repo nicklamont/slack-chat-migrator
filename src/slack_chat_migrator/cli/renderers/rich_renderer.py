@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 
-from rich.console import Console, Group
+from rich.columns import Columns
+from rich.console import Console, Group, RenderableType
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TaskID, TextColumn
+from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
@@ -40,11 +43,13 @@ class RichProgressRenderer:
         tracker: ProgressTracker,
         console: Console | None = None,
         total_channels: int = 0,
+        dry_run: bool = False,
     ) -> None:
         self._tracker = tracker
         self._console = console or Console()
         self._live: Live | None = None
         self._start_time: float = 0.0
+        self._dry_run = dry_run
 
         # Stats counters
         self._messages_sent = 0
@@ -64,16 +69,23 @@ class RichProgressRenderer:
 
         self._saved_console_level: int | None = None
 
-        # Rich Progress bars (embedded in layout, NOT standalone)
-        self._progress = Progress(
+        # Rolling window for throughput (last 10 seconds)
+        self._recent_msg_times: deque[float] = deque()
+
+        # Two separate Progress widgets for visual hierarchy
+        _bar_columns = [
             TextColumn("[bold]{task.description}"),
             BarColumn(bar_width=40),
             TextColumn("{task.percentage:>3.0f}%"),
             TextColumn("{task.completed}/{task.total}"),
-            console=self._console,
-        )
+        ]
+        self._overall_progress = Progress(*_bar_columns, console=self._console)
+        self._channel_progress = Progress(*_bar_columns, console=self._console)
         self._overall_task: TaskID | None = None
         self._message_task: TaskID | None = None
+        self._member_task: TaskID | None = None
+        self._member_done: int = 0
+        self._member_total: int = 0
 
         tracker.subscribe(self.handle_event)
 
@@ -84,8 +96,8 @@ class RichProgressRenderer:
 
         # Create overall channel progress bar
         if self._total_channels > 0:
-            self._overall_task = self._progress.add_task(
-                "Overall", total=self._total_channels
+            self._overall_task = self._overall_progress.add_task(
+                "Channels", total=self._total_channels
             )
 
         self._live = Live(
@@ -158,24 +170,39 @@ class RichProgressRenderer:
         return layout
 
     def _build_header_panel(self) -> Panel:
-        """Build the header panel showing phase name."""
+        """Build the header panel showing phase name, mode, and spinner."""
+        if self._dry_run:
+            title = "Validating Slack Export"
+            border = "blue"
+            phase_text = f"[DRY RUN] {self._current_phase}"
+        else:
+            title = "Migrating Slack \u2192 Google Chat"
+            border = "green"
+            phase_text = self._current_phase
+        content = Columns(
+            [Spinner("dots"), Text(phase_text, style="bold")],
+            padding=(0, 1),
+        )
         return Panel(
-            Text(self._current_phase, style="bold"),
-            title="Migrating Slack \u2192 Google Chat",
+            content,
+            title=title,
             subtitle=f"Elapsed: {self._elapsed_str()}",
-            border_style="blue",
+            border_style=border,
         )
 
     def _build_progress_section(self) -> Panel:
-        """Build the progress bars section."""
-        channel_label = (
-            f"Current: #{self._current_channel}" if self._current_channel else ""
-        )
+        """Build the progress bars section with visual hierarchy."""
+        from rich.padding import Padding
+        from rich.rule import Rule
+
+        parts: list[RenderableType] = [self._overall_progress]
+        # Channel sub-section: separator + name + channel-specific bars
+        if self._current_channel:
+            parts.append(Rule(style="dim"))
+            parts.append(Text(f"#{self._current_channel}", style="bold cyan"))
+            parts.append(Padding(self._channel_progress, (0, 0, 0, 2)))
         return Panel(
-            Group(
-                self._progress,
-                Text(channel_label, style="dim"),
-            ),
+            Group(*parts),
             border_style="dim",
         )
 
@@ -187,11 +214,33 @@ class RichProgressRenderer:
 
         table.add_row("Spaces created", f"{self._spaces_created:,}")
         table.add_row("Messages sent", f"{self._messages_sent:,}")
+
+        # Throughput (rolling window — last 10 seconds)
+        now = time.time()
+        if self._recent_msg_times:
+            cutoff = now - 10.0
+            while self._recent_msg_times and self._recent_msg_times[0] < cutoff:
+                self._recent_msg_times.popleft()
+            if len(self._recent_msg_times) >= 2:
+                window = now - self._recent_msg_times[0]
+                if window > 0:
+                    rate = len(self._recent_msg_times) / window
+                    table.add_row("Throughput", f"{rate:.1f} msgs/sec")
+
+        # Error rate with percentage
         if self._messages_failed > 0:
-            table.add_row(
-                Text("Messages failed", style="red"),
-                Text(f"{self._messages_failed:,}", style="red"),
+            total_attempted = self._messages_sent + self._messages_failed
+            pct = (
+                (self._messages_failed / total_attempted * 100)
+                if total_attempted
+                else 0
             )
+            style = "bold red" if pct > 5 else "red"
+            table.add_row(
+                Text("Messages failed", style=style),
+                Text(f"{self._messages_failed:,} ({pct:.1f}%)", style=style),
+            )
+
         table.add_row("Files uploaded", f"{self._files_uploaded:,}")
         table.add_row("Reactions added", f"{self._reactions_added:,}")
         table.add_row("Members added", f"{self._members_added:,}")
@@ -210,32 +259,46 @@ class RichProgressRenderer:
     def _on_channel_start(self, event: ProgressEvent) -> None:
         self._current_channel = event.channel
         self._channel_msg_done = 0
-        self._channel_msg_total = event.total or 0
+        self._channel_msg_total = 0
 
-        # Reset or create message progress bar for this channel
+        # Clear stale bars from previous channel
+        if self._member_task is not None:
+            self._channel_progress.remove_task(self._member_task)
+            self._member_task = None
+            self._member_done = 0
         if self._message_task is not None:
-            self._progress.remove_task(self._message_task)
-        if self._channel_msg_total > 0:
-            self._message_task = self._progress.add_task(
-                "Messages", total=self._channel_msg_total
-            )
-        else:
+            self._channel_progress.remove_task(self._message_task)
             self._message_task = None
 
     def _on_channel_complete(self, event: ProgressEvent) -> None:
         self._channels_complete += 1
         if self._overall_task is not None:
-            self._progress.update(self._overall_task, completed=self._channels_complete)
+            self._overall_progress.update(
+                self._overall_task, completed=self._channels_complete
+            )
         # Remove message bar for completed channel
         if self._message_task is not None:
-            self._progress.remove_task(self._message_task)
+            self._channel_progress.remove_task(self._message_task)
             self._message_task = None
+        # Remove member bar for completed channel
+        if self._member_task is not None:
+            self._channel_progress.remove_task(self._member_task)
+            self._member_task = None
+            self._member_done = 0
 
     def _on_message_sent(self, event: ProgressEvent) -> None:
         self._messages_sent += 1
         self._channel_msg_done += 1
+        now = time.time()
+        self._recent_msg_times.append(now)
+        # Prune entries older than 10 seconds
+        cutoff = now - 10.0
+        while self._recent_msg_times and self._recent_msg_times[0] < cutoff:
+            self._recent_msg_times.popleft()
         if self._message_task is not None:
-            self._progress.update(self._message_task, completed=self._channel_msg_done)
+            self._channel_progress.update(
+                self._message_task, completed=self._channel_msg_done
+            )
 
     def _on_message_failed(self, event: ProgressEvent) -> None:
         self._messages_failed += 1
@@ -251,6 +314,47 @@ class RichProgressRenderer:
 
     def _on_member_added(self, event: ProgressEvent) -> None:
         self._members_added += 1
+        if self._member_task is not None:
+            self._member_done += 1
+            self._channel_progress.update(
+                self._member_task, completed=self._member_done
+            )
+            # Auto-remove when complete so it doesn't linger during message phase
+            if self._member_total and self._member_done >= self._member_total:
+                self._channel_progress.remove_task(self._member_task)
+                self._member_task = None
+
+    def _on_member_phase_start(self, event: ProgressEvent) -> None:
+        # Remove any existing member bar
+        if self._member_task is not None:
+            self._channel_progress.remove_task(self._member_task)
+        self._member_done = 0
+        self._member_total = event.total or 0
+        if self._member_total > 0:
+            self._member_task = self._channel_progress.add_task(
+                "Members", total=self._member_total
+            )
+        else:
+            self._member_task = None
+
+    def _on_message_phase_start(self, event: ProgressEvent) -> None:
+        # Clean up member bar — member phase is over once messages start
+        if self._member_task is not None:
+            self._channel_progress.remove_task(self._member_task)
+            self._member_task = None
+            self._member_done = 0
+        # Remove any existing message bar and create a fresh one
+        if self._message_task is not None:
+            self._channel_progress.remove_task(self._message_task)
+        self._channel_msg_done = 0
+        total = event.total or 0
+        if total > 0:
+            self._channel_msg_total = total
+            self._message_task = self._channel_progress.add_task(
+                "Messages", total=total
+            )
+        else:
+            self._message_task = None
 
     def _on_phase_change(self, event: ProgressEvent) -> None:
         self._current_phase = event.detail or "Unknown"
@@ -266,5 +370,7 @@ _EVENT_HANDLERS = {
     EventType.REACTION_ADDED: RichProgressRenderer._on_reaction_added,
     EventType.SPACE_CREATED: RichProgressRenderer._on_space_created,
     EventType.MEMBER_ADDED: RichProgressRenderer._on_member_added,
+    EventType.MEMBER_PHASE_START: RichProgressRenderer._on_member_phase_start,
+    EventType.MESSAGE_PHASE_START: RichProgressRenderer._on_message_phase_start,
     EventType.PHASE_CHANGE: RichProgressRenderer._on_phase_change,
 }

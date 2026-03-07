@@ -133,6 +133,9 @@ def _add_regular_members_batch(
         The number of members successfully added (including 409 conflicts
         treated as already present).
     """
+    if progress_tracker and active_users:
+        progress_tracker.member_phase_start(channel, total=len(active_users))
+
     added_count = 0
     failed_count = 0
 
