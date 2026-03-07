@@ -479,6 +479,16 @@ def _get_required_scopes() -> list[str]:
     return list(REQUIRED_SCOPES)
 
 
+def _prompt_email(prompt_text: str, default: str = "") -> str:
+    """Prompt for a valid email address, looping until one is provided."""
+    console = get_console()
+    while True:
+        value = click.prompt(prompt_text, default=default)
+        if value and "@" in value:
+            return value
+        console.print("[red]A valid email address is required.[/red]")
+
+
 def _step_chat_app(state):  # type: ignore[no-untyped-def]
     """Step 5: Configure and verify Google Chat app in GCP Console."""
     from rich.panel import Panel
@@ -521,7 +531,7 @@ def _step_chat_app(state):  # type: ignore[no-untyped-def]
     console.print()
 
     # We need a workspace admin email to verify via delegation
-    workspace_admin = click.prompt(
+    workspace_admin = _prompt_email(
         "Workspace admin email (for verification)",
         default=state.workspace_admin or "",
     )
@@ -624,7 +634,7 @@ def _step_delegation(state):  # type: ignore[no-untyped-def]
         state.mark_step("delegation", StepStatus.SKIPPED)
         return state
 
-    workspace_admin = click.prompt(
+    workspace_admin = _prompt_email(
         "Workspace admin email to impersonate",
         default=state.workspace_admin or "",
     )

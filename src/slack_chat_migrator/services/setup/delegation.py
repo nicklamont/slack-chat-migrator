@@ -32,6 +32,11 @@ def verify_chat_app(
     Returns:
         Dict with 'configured' bool and 'detail' message.
     """
+    if not workspace_admin or "@" not in workspace_admin:
+        return {
+            "configured": True,
+            "detail": "Skipped — no workspace admin email provided.",
+        }
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
@@ -67,6 +72,13 @@ def test_delegation(
         Dict with 'success' bool, 'detail' message, and 'key_info' diagnostics.
     """
     key_info = _read_key_info(creds_path)
+
+    if not workspace_admin or "@" not in workspace_admin:
+        return {
+            "success": False,
+            "detail": "A valid workspace admin email is required for delegation test.",
+            "key_info": key_info,
+        }
 
     try:
         from google.oauth2 import service_account
