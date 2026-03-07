@@ -1,5 +1,11 @@
 import { useState, useCallback } from 'react';
 
+declare global {
+  interface Window {
+    gtag?: (...args: unknown[]) => void;
+  }
+}
+
 interface Props {
   text: string;
 }
@@ -8,6 +14,9 @@ export default function CopyButton({ text }: Props) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(async () => {
+    if (typeof window.gtag === 'function') {
+      window.gtag('event', 'copy_command', { command_text: text });
+    }
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);

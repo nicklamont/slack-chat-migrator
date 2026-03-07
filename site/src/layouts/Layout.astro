@@ -18,6 +18,19 @@ const ogImage = new URL('/slack-chat-migrator/og-image.png', Astro.site);
 <!doctype html>
 <html lang="en" class="dark">
   <head>
+    <!-- Google Analytics -->
+    <script is:inline async src="https://www.googletagmanager.com/gtag/js?id=G-1F5723EMRV"></script>
+    <script is:inline>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('consent', 'default', {
+        analytics_storage: 'denied',
+        ad_storage: 'denied',
+      });
+      gtag('js', new Date());
+      gtag('config', 'G-1F5723EMRV');
+    </script>
+
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/svg+xml" href={`${import.meta.env.BASE_URL}/favicon.svg`} />
@@ -82,5 +95,30 @@ const ogImage = new URL('/slack-chat-migrator/og-image.png', Astro.site);
   </head>
   <body class="min-h-screen">
     <slot />
+
+    <!-- Analytics: custom event tracking -->
+    <script is:inline>
+      document.addEventListener('click', function(e) {
+        var target = e.target;
+        while (target && !target.closest) {
+          target = target.parentElement;
+        }
+        if (!target) return;
+        var el = target.closest('[data-ga-event]');
+        if (el && typeof gtag === 'function') {
+          gtag('event', el.dataset.gaEvent, {
+            link_text: el.dataset.gaLabel || undefined
+          });
+        }
+      });
+      document.addEventListener('toggle', function(e) {
+        var el = e.target;
+        if (el && el.open && el.dataset.gaEvent && typeof gtag === 'function') {
+          gtag('event', el.dataset.gaEvent, {
+            faq_question: el.dataset.gaLabel || undefined
+          });
+        }
+      }, true);
+    </script>
   </body>
 </html>
