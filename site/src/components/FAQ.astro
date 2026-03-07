@@ -18,7 +18,7 @@ const faqs = [
   },
   {
     question: 'Is this tool safe to run with domain-wide delegation?',
-    answer: 'The tool is MIT licensed and fully open source — read every line before you run it. It makes no external network calls beyond the Google APIs required for migration. Your service account credentials are used locally and never transmitted anywhere. There is no telemetry, analytics, or phoning home. The scopes required (chat.import, drive, etc.) are the minimum needed by the Google Chat Import API itself.',
+    answer: 'The tool is MIT licensed and fully open source — read every line before you run it. It makes no external network calls beyond the Google APIs required for migration. Your service account credentials are used locally and never transmitted anywhere. The tool itself has no telemetry, analytics, or phoning home. This website uses cookieless Google Analytics to understand visitor traffic. The scopes required (chat.import, drive, etc.) are the minimum needed by the Google Chat Import API itself.',
   },
   {
     question: 'Is this tool free and open source?',
@@ -39,7 +39,7 @@ const faqs = [
 
     <div class="space-y-4">
       {faqs.map(faq => (
-        <details class="group rounded-xl border border-border bg-bg">
+        <details class="group rounded-xl border border-border bg-bg" data-ga-event="faq_open" data-ga-label={faq.question}>
           <summary class="flex cursor-pointer items-center justify-between px-6 py-4 text-left font-medium transition-colors hover:text-accent [&::-webkit-details-marker]:hidden">
             {faq.question}
             <svg
