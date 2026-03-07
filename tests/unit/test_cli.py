@@ -163,11 +163,15 @@ class TestValidateCommand:
     @patch("slack_chat_migrator.cli.validate_cmd.MigrationOrchestrator")
     @patch("slack_chat_migrator.cli.validate_cmd.setup_logger")
     @patch("slack_chat_migrator.cli.validate_cmd.create_migration_output_directory")
-    def test_always_sets_dry_run_true(self, mock_outdir, mock_log, mock_orch_cls):
+    def test_always_sets_dry_run_true(
+        self, mock_outdir, mock_log, mock_orch_cls, tmp_path
+    ):
         """Validate always passes dry_run=True to the orchestrator."""
         mock_outdir.return_value = "/tmp/fake"
         mock_orch = MagicMock()
         mock_orch_cls.return_value = mock_orch
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("{}")
 
         runner = CliRunner()
         result = runner.invoke(
@@ -180,9 +184,11 @@ class TestValidateCommand:
                 "fake",
                 "--workspace_admin",
                 "a@b.com",
+                "--config",
+                str(config_file),
             ],
         )
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         # The args namespace passed to MigrationOrchestrator must have dry_run=True
         args = mock_orch_cls.call_args[0][0]
         assert args.dry_run is True
@@ -191,12 +197,14 @@ class TestValidateCommand:
     @patch("slack_chat_migrator.cli.validate_cmd.setup_logger")
     @patch("slack_chat_migrator.cli.validate_cmd.create_migration_output_directory")
     def test_delegates_to_orchestrator_validate_prerequisites(
-        self, mock_outdir, mock_log, mock_orch_cls
+        self, mock_outdir, mock_log, mock_orch_cls, tmp_path
     ):
         """Validate command delegates permission checks to orchestrator."""
         mock_outdir.return_value = "/tmp/fake"
         mock_orch = MagicMock()
         mock_orch_cls.return_value = mock_orch
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("{}")
 
         runner = CliRunner()
         result = runner.invoke(
@@ -209,9 +217,11 @@ class TestValidateCommand:
                 "fake",
                 "--workspace_admin",
                 "a@b.com",
+                "--config",
+                str(config_file),
             ],
         )
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         mock_orch.validate_prerequisites.assert_called_once()
         mock_orch.run_migration.assert_called_once()
 
@@ -460,11 +470,15 @@ class TestCredentialFreeDryRun:
     @patch("slack_chat_migrator.cli.validate_cmd.MigrationOrchestrator")
     @patch("slack_chat_migrator.cli.validate_cmd.setup_logger")
     @patch("slack_chat_migrator.cli.validate_cmd.create_migration_output_directory")
-    def test_validate_without_credentials(self, mock_outdir, mock_log, mock_orch_cls):
+    def test_validate_without_credentials(
+        self, mock_outdir, mock_log, mock_orch_cls, tmp_path
+    ):
         """Validate command works without --creds_path or --workspace_admin."""
         mock_outdir.return_value = "/tmp/fake"
         mock_orch = MagicMock()
         mock_orch_cls.return_value = mock_orch
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("{}")
 
         runner = CliRunner()
         result = runner.invoke(
@@ -473,9 +487,11 @@ class TestCredentialFreeDryRun:
                 "validate",
                 "--export_path",
                 "fake",
+                "--config",
+                str(config_file),
             ],
         )
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         args = mock_orch_cls.call_args[0][0]
         assert args.dry_run is True
         assert args.creds_path is None

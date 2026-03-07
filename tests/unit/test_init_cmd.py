@@ -76,7 +76,7 @@ class TestInitCommand:
         result = runner.invoke(
             cli,
             ["init", "--export_path", str(export), "--output", str(output)],
-            input="\n\ny\nn\n\n\n\n\n",
+            input="\n\ny\nn\n\n\n\n\nn\n",
         )
         assert result.exit_code == 0, result.output
         assert output.exists()
@@ -97,7 +97,7 @@ class TestInitCommand:
         result = runner.invoke(
             cli,
             ["init", "--export_path", str(export), "--output", str(output)],
-            input="exclude\nrandom\ny\nn\n\n\n\n\n",
+            input="exclude\nrandom\ny\nn\n\n\n\n\nn\n",
         )
         assert result.exit_code == 0, result.output
 
@@ -113,7 +113,7 @@ class TestInitCommand:
         result = runner.invoke(
             cli,
             ["init", "--export_path", str(export), "--output", str(output)],
-            input="include\ngeneral\ny\nn\n\n\n\n\n",
+            input="include\ngeneral\ny\nn\n\n\n\n\nn\n",
         )
         assert result.exit_code == 0, result.output
 
@@ -132,7 +132,7 @@ class TestInitCommand:
         result = runner.invoke(
             cli,
             ["init", "--export_path", str(export), "--output", str(output)],
-            input="\n\ny\nbob@example.com\n\n\n\n\n",
+            input="\n\ny\nbob@example.com\n\n\n\n\nn\n",
         )
         assert result.exit_code == 0, result.output
 
@@ -165,7 +165,7 @@ class TestInitCommand:
         result = runner.invoke(
             cli,
             ["init", "--export_path", str(export), "--output", str(output)],
-            input="\n\ny\nn\n\n\n\n\n",
+            input="\n\ny\nn\n\n\n\n\nn\n",
         )
         # Rich table renders metrics with spacing, not "Key: Value" format
         assert "Channels" in result.output
@@ -200,7 +200,7 @@ class TestInitCommand:
         result = runner.invoke(
             cli,
             ["init", "--export_path", str(export), "--output", str(output)],
-            input="\n\ny\nn\ny\n\n\n",
+            input="\n\ny\nn\ny\n\n\nn\n",
         )
         assert result.exit_code == 0, result.output
 

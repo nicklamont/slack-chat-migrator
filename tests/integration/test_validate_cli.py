@@ -36,6 +36,9 @@ def _invoke_validate(
     creds_file = tmp_path / "creds.json"
     if not creds_file.exists():
         creds_file.write_text("{}")
+    config_file = tmp_path / "config.yaml"
+    if not config_file.exists():
+        config_file.write_text("{}")
 
     args = [
         "validate",
