@@ -890,26 +890,6 @@ def _print_preflight_status(label: str, status: str = "ok", detail: str = "") ->
     console.print(msg)
 
 
-def log_startup_info(args: SimpleNamespace) -> None:
-    """Log startup information.
-
-    Args:
-        args: Parsed CLI arguments containing migration parameters.
-    """
-    config_path = Path(args.config)
-    if not config_path.is_absolute():
-        config_path = Path.cwd() / args.config
-
-    log_with_context(logging.INFO, "Starting migration with the following parameters:")
-    log_with_context(logging.INFO, f"- Export path: {args.export_path}")
-    log_with_context(logging.INFO, f"- Workspace admin: {args.workspace_admin}")
-    log_with_context(logging.INFO, f"- Config: {config_path}")
-    log_with_context(logging.INFO, f"- Dry run: {args.dry_run}")
-    log_with_context(logging.INFO, f"- Resume mode: {args.update_mode}")
-    log_with_context(logging.INFO, f"- Verbose logging: {args.verbose}")
-    log_with_context(logging.INFO, f"- Debug API calls: {args.debug_api}")
-
-
 def create_migration_output_directory() -> str:
     """Create output directory for migration with timestamp.
 

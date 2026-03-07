@@ -23,7 +23,6 @@ from slack_chat_migrator.cli.init_cmd import init  # noqa: F401
 from slack_chat_migrator.cli.migrate_cmd import (  # noqa: F401
     MigrationOrchestrator,
     create_migration_output_directory,
-    log_startup_info,
     migrate,
 )
 from slack_chat_migrator.cli.permissions_cmd import check_permissions  # noqa: F401

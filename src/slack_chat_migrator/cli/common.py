@@ -493,19 +493,20 @@ def show_security_warning() -> None:
                     restored.append((h, h.level))
                     h.setLevel(logging.CRITICAL + 1)
 
-    log_with_context(
-        logging.WARNING,
-        "\nSECURITY WARNING: Your Slack export files contain authentication tokens in the URLs.",
-    )
-    log_with_context(
-        logging.WARNING,
-        "Consider securing or deleting these files after the migration is complete.",
-    )
-    log_with_context(
-        logging.WARNING,
-        "See README.md for more information on security best practices.",
-    )
-
-    if is_tty:
-        for h, old_level in restored:
-            h.setLevel(old_level)
+    try:
+        log_with_context(
+            logging.WARNING,
+            "\nSECURITY WARNING: Your Slack export files contain authentication tokens in the URLs.",
+        )
+        log_with_context(
+            logging.WARNING,
+            "Consider securing or deleting these files after the migration is complete.",
+        )
+        log_with_context(
+            logging.WARNING,
+            "See README.md for more information on security best practices.",
+        )
+    finally:
+        if is_tty:
+            for h, old_level in restored:
+                h.setLevel(old_level)
