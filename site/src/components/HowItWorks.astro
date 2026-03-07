@@ -1,0 +1,79 @@
+---
+const steps = [
+  { number: '1', label: 'Setup', description: 'GCP project, APIs, service account, and domain-wide delegation (requires Workspace admin approval)', command: 'slack-chat-migrator setup' },
+  { number: '2', label: 'Init', description: 'Generate config from your Slack export', command: 'slack-chat-migrator init' },
+  { number: '3', label: 'Validate', description: 'Dry-run validates users, files, and permissions', command: 'slack-chat-migrator validate' },
+  { number: '4', label: 'Migrate', description: 'Run the full migration', command: 'slack-chat-migrator migrate' },
+  { number: '5', label: 'Complete', description: 'Spaces go live for users', command: 'Automatic' },
+];
+---
+
+<section id="how-it-works" class="bg-surface py-20 sm:py-28">
+  <div class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
+    <div class="mb-16 text-center">
+      <h2 class="text-3xl font-bold sm:text-4xl">How It Works</h2>
+      <p class="mt-4 text-lg text-muted">
+        Five steps from Slack export to live Google Chat spaces.
+      </p>
+    </div>
+
+    <!-- Desktop: horizontal pipeline -->
+    <div class="hidden lg:block">
+      <div class="relative flex items-start justify-between">
+        {/* Connecting line */}
+        <div class="absolute top-8 left-[10%] right-[10%] h-0.5 bg-border" aria-hidden="true">
+          <div class="absolute inset-0 bg-gradient-to-r from-accent/60 via-accent to-accent/60" />
+        </div>
+
+        {steps.map(step => (
+          <div class="relative flex w-1/5 flex-col items-center text-center">
+            <div class="z-10 flex h-16 w-16 items-center justify-center rounded-full border-2 border-accent bg-bg text-lg font-bold text-accent">
+              {step.number}
+            </div>
+            <h3 class="mt-4 text-base font-semibold">{step.label}</h3>
+            <p class="mt-1 text-sm text-muted">{step.description}</p>
+            <code class="mt-2 rounded bg-code px-2 py-1 font-mono text-[11px] text-[#E8E6E3]">
+              {step.command}
+            </code>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    <!-- Mobile/Tablet: vertical pipeline -->
+    <div class="lg:hidden">
+      <div class="relative space-y-8 pl-10">
+        {/* Vertical connecting line */}
+        <div class="absolute bottom-0 left-5 top-0 w-0.5 bg-gradient-to-b from-accent to-accent/60" aria-hidden="true" />
+
+        {steps.map(step => (
+          <div class="relative flex items-start gap-4">
+            <div class="absolute left-[-20px] z-10 flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-2 border-accent bg-bg text-sm font-bold text-accent">
+              {step.number}
+            </div>
+            <div class="ml-6">
+              <h3 class="text-base font-semibold">{step.label}</h3>
+              <p class="mt-1 text-sm text-muted">{step.description}</p>
+              <code class="mt-1 inline-block rounded bg-code px-2 py-1 font-mono text-xs text-[#E8E6E3]">
+                {step.command}
+              </code>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    <!-- DWD callout -->
+    <div class="mt-12 rounded-xl border border-secondary/20 bg-secondary/5 p-5 text-sm">
+      <p class="font-medium text-secondary">
+        About Step 1: Domain-wide delegation
+      </p>
+      <p class="mt-1 text-muted">
+        The setup wizard automates GCP configuration, but domain-wide delegation requires a Google Workspace admin to approve OAuth scopes in the Admin Console.
+        This is typically the longest step &mdash; plan for internal approval time. The tool needs <code class="rounded bg-code/10 px-1 py-0.5 font-mono text-xs">chat.import</code>,
+        <code class="rounded bg-code/10 px-1 py-0.5 font-mono text-xs">drive</code>, and four other scopes. See the
+        <a href="https://github.com/nicklamont/slack-chat-migrator#setting-up-permissions" target="_blank" rel="noopener noreferrer" class="underline hover:text-accent">setup docs</a> for the full list.
+      </p>
+    </div>
+  </div>
+</section>
