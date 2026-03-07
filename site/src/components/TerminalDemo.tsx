@@ -68,7 +68,7 @@ function ProgressBar({ done, total, label }: { done: number; total: number; labe
 export default function TerminalDemo() {
   const [frame, setFrame] = useState(0);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
-  const intervalRef = useRef<ReturnType<typeof setInterval>>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
