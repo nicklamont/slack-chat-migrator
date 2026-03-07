@@ -8,9 +8,13 @@ import datetime
 import json
 import logging
 import os
+import sys
 from typing import TYPE_CHECKING, Any
 
 import yaml
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from slack_chat_migrator.types import FailedMessage
 from slack_chat_migrator.utils.logging import log_with_context
@@ -30,7 +34,9 @@ def print_dry_run_summary(
     file_handler: FileHandler | None = None,
     report_file: str | None = None,
 ) -> None:
-    """Print a summary of the dry run to the console.
+    """Print a Rich-formatted validation summary to the console.
+
+    Falls back to plain text when stdout is not a TTY.
 
     Args:
         ctx: Immutable migration context.
@@ -39,65 +45,258 @@ def print_dry_run_summary(
         file_handler: Optional file handler with statistics.
         report_file: Optional override path for the report file location.
     """
-    print("\n" + "=" * 80)
-    print("DRY RUN SUMMARY")
-    print("=" * 80)
-    print(
-        f"Channels processed: {len(state.progress.migration_summary['channels_processed'])}"
-    )
-    print(
-        f"Spaces that would be created: {state.progress.migration_summary['spaces_created']}"
-    )
-    print(
-        f"Messages that would be migrated: {state.progress.migration_summary['messages_created']}"
-    )
-    print(
-        f"Reactions that would be migrated: {state.progress.migration_summary['reactions_created']}"
-    )
-    print(
-        f"Files that would be migrated: {state.progress.migration_summary['files_created']}"
+    summary = state.progress.migration_summary
+    channels_count = len(summary["channels_processed"])
+    messages_count = summary["messages_created"]
+    files_count = summary["files_created"]
+
+    total_mapped = len(ctx.user_map)
+    unmapped_count = len(ctx.users_without_email)
+    total_users = total_mapped + unmapped_count
+
+    if report_file is None:
+        output_dir = state.context.output_dir or "."
+        report_file = os.path.join(output_dir, "migration_report.yaml")
+
+    if not sys.stdout.isatty():
+        _print_dry_run_plain(
+            ctx,
+            state,
+            user_resolver,
+            file_handler,
+            report_file,
+            channels_count,
+            messages_count,
+            files_count,
+            total_mapped,
+            unmapped_count,
+            total_users,
+        )
+        return
+
+    console = Console()
+
+    # --- Main summary table ---
+    table = Table(title="Migration Preview", expand=True)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right", style="green")
+    table.add_row("Channels", str(channels_count))
+    table.add_row("Messages", f"{messages_count:,}")
+    table.add_row("Reactions", f"{summary['reactions_created']:,}")
+    table.add_row("Files", f"{files_count:,}")
+
+    if total_users > 0:
+        user_label = f"{total_mapped:,}/{total_users:,}"
+        if unmapped_count > 0:
+            user_label += f" ({unmapped_count} unmapped)"
+        table.add_row("Users mapped", user_label)
+
+    console.print()
+    console.print(
+        Panel(table, title="Validation Complete \u2713", border_style="green")
     )
 
-    # Show file upload details if available
+    # --- Unmapped users warning ---
+    non_bot_unmapped = [
+        u
+        for u in ctx.users_without_email
+        if not u.get("is_bot") and not u.get("is_app_user")
+    ]
+    if non_bot_unmapped:
+        console.print(
+            Panel(
+                f"[yellow]{len(non_bot_unmapped)} unmapped non-bot users[/yellow]\n"
+                "Run [bold]slack-chat-migrator init[/bold] to map them",
+                border_style="yellow",
+            )
+        )
+
+    # --- Next step ---
+    console.print(
+        Panel(
+            f"Report: [bold]{report_file}[/bold]\n\n"
+            "Ready to migrate:\n"
+            f"  [bold]slack-chat-migrator migrate --export_path {ctx.export_root}[/bold]",
+            title="Next Steps",
+            border_style="blue",
+        )
+    )
+
+
+def _print_dry_run_plain(
+    ctx: MigrationContext,
+    state: MigrationState,
+    user_resolver: UserResolver,
+    file_handler: FileHandler | None,
+    report_file: str,
+    channels_count: int,
+    messages_count: int,
+    files_count: int,
+    total_mapped: int,
+    unmapped_count: int,
+    total_users: int,
+) -> None:
+    """Plain text fallback for non-TTY environments."""
+    summary = state.progress.migration_summary
+    print("\n" + "=" * 60)
+    print("VALIDATION SUMMARY")
+    print("=" * 60)
+    print(f"Channels:         {channels_count}")
+    print(f"Messages:         {messages_count:,}")
+    print(f"Reactions:        {summary['reactions_created']:,}")
+    print(f"Files:            {files_count:,}")
+    if total_users > 0:
+        print(
+            f"Users mapped:     {total_mapped}/{total_users} ({unmapped_count} unmapped)"
+        )
+
     if file_handler is not None and hasattr(file_handler, "get_file_statistics"):
         try:
             file_stats = file_handler.get_file_statistics()
             if file_stats["total_files_processed"] > 0:
-                print("\nFile Upload Details:")
-                print(f"  Total files processed: {file_stats['total_files_processed']}")
-                print(f"  Successful uploads: {file_stats['successful_uploads']}")
-                print(f"  Failed uploads: {file_stats['failed_uploads']}")
-                print(f"  Drive uploads: {file_stats['drive_uploads']}")
-                print(f"  Direct uploads: {file_stats['direct_uploads']}")
-                print(f"  External user files: {file_stats['external_user_files']}")
-                print(f"  Ownership transferred: {file_stats['ownership_transferred']}")
-                print(f"  Success rate: {file_stats['success_rate']:.1f}%")
-        except Exception as e:
-            print(f"  (Could not retrieve detailed file statistics: {e})")
+                print(
+                    f"\nFile details: {file_stats['successful_uploads']} OK, "
+                    f"{file_stats['failed_uploads']} failed, "
+                    f"{file_stats['success_rate']:.0f}% success rate"
+                )
+        except Exception:
+            pass
 
-    # Show users without email
-    if ctx.users_without_email:
-        print(f"\nUsers without email: {len(ctx.users_without_email)}")
-        print("These users need to be mapped in config.yaml")
+    non_bot_unmapped = [
+        u
+        for u in ctx.users_without_email
+        if not u.get("is_bot") and not u.get("is_app_user")
+    ]
+    if non_bot_unmapped:
+        print(
+            f"\n{len(non_bot_unmapped)} unmapped non-bot users"
+            " - run 'slack-chat-migrator init' to map them"
+        )
 
-    # Count external users
     external_users = sum(
         1 for _, email in ctx.user_map.items() if user_resolver.is_external_user(email)
     )
     if external_users > 0:
-        print(f"\nExternal users detected: {external_users}")
-        print("These users will be handled with external user support")
+        print(f"{external_users} external users detected")
 
-    # Get the report file path
-    if report_file is None:
-        # Get the output directory
-        output_dir = state.context.output_dir or "."
-        report_file = os.path.join(output_dir, "migration_report.yaml")
+    print(f"\nReport: {report_file}")
+    print("=" * 60)
 
-    print(f"\nDetailed report saved to {report_file}")
-    print("=" * 80)
-    print("\nTo perform the actual migration, run again without --dry-run")
-    print("=" * 80)
+
+def print_rich_summary(
+    ctx: MigrationContext,
+    state: MigrationState,
+    user_resolver: UserResolver,
+    file_handler: FileHandler | None = None,
+) -> None:
+    """Print a Rich-formatted summary to the console.
+
+    Falls back to plain text when stdout is not a TTY.
+
+    Args:
+        ctx: Immutable migration context.
+        state: Mutable migration state.
+        user_resolver: User identity resolver.
+        file_handler: Optional file handler with statistics.
+    """
+    if not sys.stdout.isatty():
+        _print_migration_summary_plain(ctx, state, user_resolver, file_handler)
+        return
+
+    console = Console()
+    summary = state.progress.migration_summary
+    is_dry_run = ctx.dry_run
+    title = "Dry Run Complete \u2713" if is_dry_run else "Migration Complete \u2713"
+    border = "blue" if is_dry_run else "green"
+
+    # --- Compact completion banner (stats already visible in progress display) ---
+    output_dir = state.context.output_dir or "."
+    report_path = os.path.join(output_dir, "migration_report.yaml")
+
+    channels_count = len(summary["channels_processed"])
+    summary_line = (
+        f"{channels_count} channels \u2022 "
+        f"{summary['messages_created']:,} messages \u2022 "
+        f"{summary['files_created']:,} files"
+    )
+    failed_count = len(state.messages.failed_messages)
+    if failed_count > 0:
+        summary_line += f" \u2022 [red]{failed_count} failed[/red]"
+
+    if is_dry_run:
+        body = (
+            f"{summary_line}\n\n"
+            f"Report: [bold]{report_path}[/bold]\n"
+            "To perform the actual migration, run again without --dry_run"
+        )
+    else:
+        body = f"{summary_line}\n\nReport: [bold]{report_path}[/bold]"
+
+    console.print()
+    console.print(Panel(body, title=title, border_style=border))
+
+    # --- Unmapped users panel ---
+    non_bot_unmapped = [
+        u
+        for u in ctx.users_without_email
+        if not u.get("is_bot") and not u.get("is_app_user")
+    ]
+    if non_bot_unmapped:
+        console.print(
+            Panel(
+                f"[yellow]{len(non_bot_unmapped)} unmapped non-bot users[/yellow]\n"
+                "Add them to user_mapping_overrides in config.yaml",
+                border_style="yellow",
+            )
+        )
+
+    # --- Failed channels table ---
+    failed_by_channel = state.messages.failed_messages_by_channel
+    if failed_by_channel:
+        fail_table = Table(title="Issues", expand=True)
+        fail_table.add_column("Channel", style="red")
+        fail_table.add_column("Failed Messages", justify="right")
+        for ch, timestamps in failed_by_channel.items():
+            fail_table.add_row(f"#{ch}", str(len(timestamps)))
+        console.print(fail_table)
+
+
+def _print_migration_summary_plain(
+    ctx: MigrationContext,
+    state: MigrationState,
+    user_resolver: UserResolver,
+    file_handler: FileHandler | None,
+) -> None:
+    """Plain text fallback for print_rich_summary in non-TTY environments."""
+    summary = state.progress.migration_summary
+    mode = "DRY RUN" if ctx.dry_run else "MIGRATION"
+    print("\n" + "=" * 60)
+    print(f"{mode} SUMMARY")
+    print("=" * 60)
+    print(f"Channels processed: {len(summary['channels_processed'])}")
+    print(f"Spaces created:     {summary['spaces_created']}")
+    print(f"Messages migrated:  {summary['messages_created']:,}")
+    print(f"Reactions migrated: {summary['reactions_created']:,}")
+    print(f"Files migrated:     {summary['files_created']:,}")
+
+    failed_count = len(state.messages.failed_messages)
+    if failed_count > 0:
+        print(f"Failed messages:    {failed_count}")
+
+    non_bot_unmapped = [
+        u
+        for u in ctx.users_without_email
+        if not u.get("is_bot") and not u.get("is_app_user")
+    ]
+    if non_bot_unmapped:
+        print(f"\n{len(non_bot_unmapped)} unmapped non-bot users")
+
+    output_dir = state.context.output_dir or "."
+    report_path = os.path.join(output_dir, "migration_report.yaml")
+    print(f"\nReport: {report_path}")
+    if ctx.dry_run:
+        print("To perform the actual migration, run again without --dry_run")
+    print("=" * 60)
 
 
 def _group_failed_messages(

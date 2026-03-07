@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from slack_chat_migrator.core.context import MigrationContext
+    from slack_chat_migrator.core.progress import ProgressTracker
     from slack_chat_migrator.core.state import MigrationState
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
     from slack_chat_migrator.services.files.file import FileHandler
@@ -21,7 +22,6 @@ if TYPE_CHECKING:
 
 from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
-from tqdm import tqdm
 
 from slack_chat_migrator.constants import API_THROTTLE_MESSAGE_SECONDS
 from slack_chat_migrator.core.config import (
@@ -66,6 +66,7 @@ class ChannelProcessor:
         user_resolver: UserResolver,
         file_handler: FileHandler | None,
         attachment_processor: MessageAttachmentProcessor,
+        progress_tracker: ProgressTracker | None = None,
     ) -> None:
         self.ctx = ctx
         self.state = state
@@ -73,6 +74,7 @@ class ChannelProcessor:
         self.user_resolver = user_resolver
         self.file_handler = file_handler
         self.attachment_processor = attachment_processor
+        self.progress_tracker = progress_tracker
 
     def process_channel(self, ch_dir: Path) -> ChannelResult:
         """Process a single channel directory.
@@ -121,6 +123,10 @@ class ChannelProcessor:
         # Setup channel-specific logging
         self._setup_channel_logging(channel)
 
+        # Emit CHANNEL_START only after we know we'll actually process this channel
+        if self.progress_tracker:
+            self.progress_tracker.channel_start(channel)
+
         # Initialize error tracking
         channel_had_errors = False
 
@@ -133,6 +139,8 @@ class ChannelProcessor:
                 f"Skipping channel {channel} due to space creation permission error",
                 channel=channel,
             )
+            if self.progress_tracker:
+                self.progress_tracker.channel_complete(channel)
             return ChannelResult(should_abort=False, had_errors=True)
 
         # Set current space
@@ -160,6 +168,7 @@ class ChannelProcessor:
                 self.user_resolver,
                 space,
                 channel,
+                self.progress_tracker,
             )
         else:
             log_with_context(
@@ -198,12 +207,16 @@ class ChannelProcessor:
                 "Aborting import after first channel due to errors",
                 channel=channel,
             )
+            if self.progress_tracker:
+                self.progress_tracker.channel_complete(channel)
             return ChannelResult(should_abort=True, had_errors=True)
 
         # Delete space if errors
         if channel_had_errors and not self.ctx.update_mode:
             self._delete_space_if_errors(space, channel)
 
+        if self.progress_tracker:
+            self.progress_tracker.channel_complete(channel)
         return ChannelResult(should_abort=False, had_errors=channel_had_errors)
 
     def _setup_channel_logging(self, channel: str) -> None:
@@ -254,6 +267,8 @@ class ChannelProcessor:
                 channel,
             )
             self.state.spaces.space_cache[channel] = space
+            if self.progress_tracker:
+                self.progress_tracker.space_created(channel)
             return space, True
 
     def _process_messages(
@@ -274,8 +289,12 @@ class ChannelProcessor:
         msgs = self._load_and_sort_messages(channel)
         msgs = self._deduplicate_messages(msgs, channel)
 
+        # Emit message phase start so renderers can create a progress bar
+        message_count = sum(1 for m in msgs if m.get("type") == "message")
+        if self.progress_tracker and message_count > 0:
+            self.progress_tracker.message_phase_start(channel, total=message_count)
+
         if self.ctx.dry_run:
-            message_count = sum(1 for m in msgs if m.get("type") == "message")
             log_with_context(
                 logging.INFO,
                 f"{self.ctx.log_prefix}Found {message_count} messages in channel {channel}",
@@ -368,10 +387,9 @@ class ChannelProcessor:
         failed_count = 0
         max_failure_percentage = self.ctx.config.max_failure_percentage
         channel_failures: list[str] = []
+        total_sendable = sum(1 for m in msgs if m.get("type") == "message")
 
-        progress_desc = f"{self.ctx.log_prefix}Adding messages to {channel}"
-        pbar = tqdm(msgs, desc=progress_desc)
-        for m in pbar:
+        for m in msgs:
             if m.get("type") != "message":
                 continue
 
@@ -403,6 +421,8 @@ class ChannelProcessor:
             if result.failed:
                 failed_count += 1
                 channel_failures.append(ts)
+                if self.progress_tracker:
+                    self.progress_tracker.message_failed(channel, detail=result.error)
 
                 if processed_count > 0:
                     failure_percentage = (
@@ -421,6 +441,10 @@ class ChannelProcessor:
             elif result.skipped != MessageResult.SKIPPED:
                 processed_ts.append(ts)
                 processed_count += 1
+                if self.progress_tracker:
+                    self.progress_tracker.message_sent(
+                        channel, count=processed_count, total=total_sendable
+                    )
 
             time.sleep(
                 API_THROTTLE_MESSAGE_SECONDS
@@ -520,6 +544,7 @@ class ChannelProcessor:
                     self.file_handler,
                     space,
                     channel,
+                    self.progress_tracker,
                 )
                 log_with_context(
                     logging.DEBUG,

@@ -7,7 +7,12 @@ from pathlib import Path
 
 import click
 
-from slack_chat_migrator.cli.common import cli, common_options, handle_exception
+from slack_chat_migrator.cli.common import (
+    cli,
+    common_options,
+    deprecated_command,
+    handle_exception,
+)
 from slack_chat_migrator.core.config import load_config
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
 from slack_chat_migrator.services.spaces.space_creator import cleanup_import_mode_spaces
@@ -22,6 +27,7 @@ from slack_chat_migrator.utils.logging import setup_logger
 @cli.command()
 @common_options
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+@deprecated_command("cleanup", "Use 'migrate --complete' instead.")
 def cleanup(
     creds_path: str | None,
     workspace_admin: str | None,
@@ -30,11 +36,11 @@ def cleanup(
     debug_api: bool,
     yes: bool,
 ) -> None:
-    """Complete import mode on spaces that are stuck.
+    """(Deprecated: use 'migrate --complete') Complete import mode on stuck spaces.
 
     Lists all spaces visible to the service account and calls completeImport()
     on any that are still in import mode.  Does not add members — use
-    ``migrate --update_mode`` for that.
+    ``migrate --resume`` for that.
 
     Args:
         creds_path: Path to service account credentials JSON.

@@ -160,14 +160,11 @@ class TestCleanupChannelHandlers:
 # ===================================================================
 
 
-@patch("slack_chat_migrator.core.cleanup.tqdm", side_effect=lambda x, **kw: x)
 @patch("slack_chat_migrator.core.cleanup.add_regular_members")
 class TestRunCleanup:
     """Tests for run_cleanup."""
 
-    def test_dry_run_skips_cleanup(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
-    ) -> None:
+    def test_dry_run_skips_cleanup(self, mock_members: MagicMock) -> None:
         """In dry_run mode, cleanup returns immediately without API calls."""
         ctx = _make_ctx(dry_run=True)
         state = MigrationState()
@@ -178,9 +175,7 @@ class TestRunCleanup:
         assert state.context.current_channel is None
         mock_members.assert_not_called()
 
-    def test_chat_is_none_logs_error(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
-    ) -> None:
+    def test_chat_is_none_logs_error(self, mock_members: MagicMock) -> None:
         """When chat is None, the RuntimeError is caught and logged."""
         ctx = _make_ctx()
         state = MigrationState()
@@ -191,7 +186,7 @@ class TestRunCleanup:
         mock_members.assert_not_called()
 
     def test_empty_spaces_list_logs_no_import_mode(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
+        self, mock_members: MagicMock
     ) -> None:
         """When no spaces exist, logs 'no spaces in import mode'."""
         ctx = _make_ctx()
@@ -204,9 +199,7 @@ class TestRunCleanup:
             log_messages = [c.args[1] for c in mock_log.call_args_list]
             assert any("No spaces found in import mode" in msg for msg in log_messages)
 
-    def test_http_error_listing_spaces_5xx(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
-    ) -> None:
+    def test_http_error_listing_spaces_5xx(self, mock_members: MagicMock) -> None:
         """A 5xx HttpError listing spaces logs a server error warning and returns."""
         ctx = _make_ctx()
         state = MigrationState()
@@ -218,9 +211,7 @@ class TestRunCleanup:
             log_messages = [c.args[1] for c in mock_log.call_args_list]
             assert any("Server error listing spaces" in msg for msg in log_messages)
 
-    def test_refresh_error_listing_spaces(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
-    ) -> None:
+    def test_refresh_error_listing_spaces(self, mock_members: MagicMock) -> None:
         """A RefreshError listing spaces logs an error and returns."""
         ctx = _make_ctx()
         state = MigrationState()
@@ -232,9 +223,7 @@ class TestRunCleanup:
             log_messages = [c.args[1] for c in mock_log.call_args_list]
             assert any("Failed to list spaces" in msg for msg in log_messages)
 
-    def test_transport_error_listing_spaces(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
-    ) -> None:
+    def test_transport_error_listing_spaces(self, mock_members: MagicMock) -> None:
         """A TransportError listing spaces logs an error and returns."""
         ctx = _make_ctx()
         state = MigrationState()
@@ -246,9 +235,7 @@ class TestRunCleanup:
             log_messages = [c.args[1] for c in mock_log.call_args_list]
             assert any("Failed to list spaces" in msg for msg in log_messages)
 
-    def test_space_in_import_mode_delegates(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
-    ) -> None:
+    def test_space_in_import_mode_delegates(self, mock_members: MagicMock) -> None:
         """A space in import mode is passed to _complete_import_mode_spaces."""
         ctx = _make_ctx()
         state = MigrationState()
@@ -275,7 +262,7 @@ class TestRunCleanup:
             assert import_mode_spaces[0][0] == "spaces/abc"
 
     def test_http_error_checking_individual_space_continues(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
+        self, mock_members: MagicMock
     ) -> None:
         """HttpError on one space check doesn't stop checking other spaces."""
         ctx = _make_ctx()
@@ -302,7 +289,7 @@ class TestRunCleanup:
             assert any("No spaces found in import mode" in msg for msg in log_messages)
 
     def test_outer_http_error_403_logs_permission(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
+        self, mock_members: MagicMock
     ) -> None:
         """An outer 403 HttpError logs a permission warning."""
         ctx = _make_ctx()
@@ -333,7 +320,7 @@ class TestRunCleanup:
                 )
 
     def test_outer_http_error_429_logs_rate_limit(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
+        self, mock_members: MagicMock
     ) -> None:
         """An outer 429 HttpError logs a rate limit warning."""
         ctx = _make_ctx()
@@ -359,7 +346,7 @@ class TestRunCleanup:
                 )
 
     def test_outer_http_error_5xx_logs_server_error(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
+        self, mock_members: MagicMock
     ) -> None:
         """An outer 5xx HttpError logs a server error warning."""
         ctx = _make_ctx()
@@ -382,9 +369,7 @@ class TestRunCleanup:
                 log_messages = [c.args[1] for c in mock_log.call_args_list]
                 assert any("Server error during cleanup" in msg for msg in log_messages)
 
-    def test_current_channel_cleared(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
-    ) -> None:
+    def test_current_channel_cleared(self, mock_members: MagicMock) -> None:
         """run_cleanup always clears state.context.current_channel."""
         ctx = _make_ctx()
         state = MigrationState()
@@ -395,9 +380,7 @@ class TestRunCleanup:
 
         assert state.context.current_channel is None
 
-    def test_space_without_name_skipped(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
-    ) -> None:
+    def test_space_without_name_skipped(self, mock_members: MagicMock) -> None:
         """A space dict with empty/missing name is skipped."""
         ctx = _make_ctx()
         state = MigrationState()
@@ -411,9 +394,7 @@ class TestRunCleanup:
             log_messages = [c.args[1] for c in mock_log.call_args_list]
             assert any("No spaces found in import mode" in msg for msg in log_messages)
 
-    def test_unexpected_exception_caught(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
-    ) -> None:
+    def test_unexpected_exception_caught(self, mock_members: MagicMock) -> None:
         """An unexpected exception in the outer try block is caught and logged."""
         ctx = _make_ctx()
         state = MigrationState()
@@ -428,7 +409,7 @@ class TestRunCleanup:
             assert any("Unexpected error during cleanup" in msg for msg in log_messages)
 
     def test_refresh_error_checking_individual_space(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
+        self, mock_members: MagicMock
     ) -> None:
         """RefreshError on individual space check logs warning and continues."""
         ctx = _make_ctx()
@@ -542,14 +523,11 @@ class TestListSpacesInImportModePagination:
 # ===================================================================
 
 
-@patch("slack_chat_migrator.core.cleanup.tqdm", side_effect=lambda x, **kw: x)
 @patch("slack_chat_migrator.core.cleanup.add_regular_members")
 class TestCompleteImportModeSpaces:
     """Tests for _complete_import_mode_spaces."""
 
-    def test_single_space_completed(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
-    ) -> None:
+    def test_single_space_completed(self, mock_members: MagicMock) -> None:
         """A single space is passed through to _complete_single_space."""
         ctx = _make_ctx()
         state = MigrationState()
@@ -568,7 +546,7 @@ class TestCompleteImportModeSpaces:
             mock_single.assert_called_once()
 
     def test_http_error_one_space_continues_to_next(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
+        self, mock_members: MagicMock
     ) -> None:
         """HttpError for one space does not stop processing the next."""
         ctx = _make_ctx()
@@ -599,7 +577,7 @@ class TestCompleteImportModeSpaces:
         assert call_count == 2
 
     def test_refresh_error_one_space_continues_to_next(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
+        self, mock_members: MagicMock
     ) -> None:
         """RefreshError for one space does not stop processing the next."""
         ctx = _make_ctx()
@@ -630,7 +608,7 @@ class TestCompleteImportModeSpaces:
         assert call_count == 2
 
     def test_transport_error_one_space_continues_to_next(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
+        self, mock_members: MagicMock
     ) -> None:
         """TransportError for one space does not stop processing the next."""
         ctx = _make_ctx()
@@ -660,9 +638,7 @@ class TestCompleteImportModeSpaces:
 
         assert call_count == 2
 
-    def test_logs_count_of_import_mode_spaces(
-        self, mock_members: MagicMock, mock_tqdm: MagicMock
-    ) -> None:
+    def test_logs_count_of_import_mode_spaces(self, mock_members: MagicMock) -> None:
         """Logs how many spaces were found in import mode."""
         ctx = _make_ctx()
         state = MigrationState()

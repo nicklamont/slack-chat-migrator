@@ -36,6 +36,9 @@ def _invoke_validate(
     creds_file = tmp_path / "creds.json"
     if not creds_file.exists():
         creds_file.write_text("{}")
+    config_file = tmp_path / "config.yaml"
+    if not config_file.exists():
+        config_file.write_text("{}")
 
     args = [
         "validate",
@@ -74,6 +77,7 @@ class TestValidateMissingUsersJson:
     def test_exit_code_nonzero(self, tmp_path: Path) -> None:
         # Create minimal export WITHOUT users.json
         (tmp_path / "channels.json").write_text(json.dumps([GENERAL_CHANNEL]))
+        (tmp_path / "config.yaml").write_text("{}")
         ch_dir = tmp_path / "general"
         ch_dir.mkdir()
 
@@ -109,5 +113,6 @@ class TestValidateEmptyExportDir:
         # doesn't pollute the "empty" export directory.
         export_dir = tmp_path / "export"
         export_dir.mkdir()
+        (tmp_path / "config.yaml").write_text("{}")
         result = _invoke_validate(tmp_path, export_dir)
         assert result.exit_code != 0

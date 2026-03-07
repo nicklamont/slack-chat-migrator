@@ -11,8 +11,6 @@ from __future__ import annotations
 # --- subcommand registrations (importing these modules registers
 #     each @cli.command() on the ``cli`` group) ---
 from slack_chat_migrator.cli.cleanup_cmd import cleanup  # noqa: F401
-
-# --- shared infrastructure (group, decorators, error handlers) ---
 from slack_chat_migrator.cli.common import (  # noqa: F401
     DefaultGroup,
     cli,
@@ -21,13 +19,14 @@ from slack_chat_migrator.cli.common import (  # noqa: F401
     handle_http_error,
     show_security_warning,
 )
+from slack_chat_migrator.cli.init_cmd import init  # noqa: F401
 from slack_chat_migrator.cli.migrate_cmd import (  # noqa: F401
     MigrationOrchestrator,
     create_migration_output_directory,
-    log_startup_info,
     migrate,
 )
 from slack_chat_migrator.cli.permissions_cmd import check_permissions  # noqa: F401
+from slack_chat_migrator.cli.setup_cmd import setup  # noqa: F401
 from slack_chat_migrator.cli.validate_cmd import validate  # noqa: F401
 
 # --- re-export names that tests patch via ``slack_chat_migrator.cli.commands.X`` ---

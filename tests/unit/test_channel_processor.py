@@ -13,6 +13,7 @@ from httplib2 import Response
 from slack_chat_migrator.core.channel_processor import ChannelProcessor
 from slack_chat_migrator.core.config import ImportCompletionStrategy, MigrationConfig
 from slack_chat_migrator.core.context import MigrationContext
+from slack_chat_migrator.core.progress import EventType, ProgressEvent, ProgressTracker
 from slack_chat_migrator.core.state import MigrationState, _default_migration_summary
 from slack_chat_migrator.exceptions import SpacePermissionError
 from slack_chat_migrator.types import SendResult
@@ -57,6 +58,7 @@ def _make_processor(
     import_completion_strategy: ImportCompletionStrategy = ImportCompletionStrategy.SKIP_ON_ERROR,
     max_failure_percentage: int = 10,
     export_root: Path | None = None,
+    progress_tracker: ProgressTracker | None = None,
 ) -> ChannelProcessor:
     """Create a ChannelProcessor with sensible test defaults."""
     config = MigrationConfig(
@@ -85,6 +87,7 @@ def _make_processor(
         user_resolver=MagicMock(),
         file_handler=MagicMock(),
         attachment_processor=MagicMock(),
+        progress_tracker=progress_tracker,
     )
 
 
@@ -641,6 +644,7 @@ class TestAddMembers:
             processor.file_handler,
             "spaces/S1",
             "general",
+            processor.progress_tracker,
         )
 
     @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
@@ -659,6 +663,7 @@ class TestAddMembers:
             processor.file_handler,
             "spaces/S1",
             "general",
+            processor.progress_tracker,
         )
 
     @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
@@ -837,3 +842,145 @@ class TestDiscoverChannelResources:
         processor._discover_channel_resources("general")
 
         assert processor.state.messages.thread_map == {}
+
+
+# ---------------------------------------------------------------------------
+# ProgressTracker integration
+# ---------------------------------------------------------------------------
+class TestProgressTrackerIntegration:
+    """Tests that ChannelProcessor emits progress events when a tracker is provided."""
+
+    @patch("slack_chat_migrator.core.channel_processor.track_message_stats")
+    @patch(
+        "slack_chat_migrator.core.channel_processor.send_message",
+        return_value=SendResult(message_name="spaces/S/messages/M1"),
+    )
+    @patch("slack_chat_migrator.core.channel_processor.add_users_to_space")
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
+    @patch(
+        "slack_chat_migrator.core.channel_processor.create_space",
+        return_value="spaces/SPACE1",
+    )
+    @patch(
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
+        return_value=True,
+    )
+    def test_emits_channel_and_message_events(
+        self,
+        mock_should,
+        mock_create,
+        mock_add_reg,
+        mock_add_hist,
+        mock_send,
+        mock_track,
+        tmp_path,
+    ):
+        """A full channel process emits CHANNEL_START, MESSAGE_SENT, SPACE_CREATED, CHANNEL_COMPLETE."""
+        tracker = ProgressTracker()
+        received: list[ProgressEvent] = []
+        tracker.subscribe(received.append)
+
+        processor = _make_processor(export_root=tmp_path, progress_tracker=tracker)
+
+        ch_dir = tmp_path / "general"
+        ch_dir.mkdir()
+        (ch_dir / "2024-01-01.json").write_text(
+            json.dumps([{"type": "message", "ts": "1000.0", "text": "hello"}])
+        )
+
+        with (
+            patch.object(processor, "_setup_channel_logging"),
+            patch.object(processor, "_discover_channel_resources"),
+        ):
+            processor.process_channel(ch_dir)
+
+        event_types = [e.event_type for e in received]
+        assert EventType.CHANNEL_START in event_types
+        assert EventType.CHANNEL_COMPLETE in event_types
+        assert EventType.MESSAGE_SENT in event_types
+        assert EventType.SPACE_CREATED in event_types
+
+        # Verify channel name is set on events
+        start_event = next(
+            e for e in received if e.event_type == EventType.CHANNEL_START
+        )
+        assert start_event.channel == "general"
+
+    @patch("slack_chat_migrator.core.channel_processor.track_message_stats")
+    @patch(
+        "slack_chat_migrator.core.channel_processor.send_message",
+        return_value=SendResult(error="API error"),
+    )
+    @patch("slack_chat_migrator.core.channel_processor.add_users_to_space")
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
+    @patch(
+        "slack_chat_migrator.core.channel_processor.create_space",
+        return_value="spaces/SPACE1",
+    )
+    @patch(
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
+        return_value=True,
+    )
+    def test_emits_message_failed_event(
+        self,
+        mock_should,
+        mock_create,
+        mock_add_reg,
+        mock_add_hist,
+        mock_send,
+        mock_track,
+        tmp_path,
+    ):
+        """Failed messages emit MESSAGE_FAILED events with error detail."""
+        tracker = ProgressTracker()
+        received: list[ProgressEvent] = []
+        tracker.subscribe(received.append)
+
+        processor = _make_processor(export_root=tmp_path, progress_tracker=tracker)
+
+        ch_dir = tmp_path / "general"
+        ch_dir.mkdir()
+        (ch_dir / "2024-01-01.json").write_text(
+            json.dumps([{"type": "message", "ts": "1000.0", "text": "hello"}])
+        )
+
+        with (
+            patch.object(processor, "_setup_channel_logging"),
+            patch.object(processor, "_discover_channel_resources"),
+        ):
+            processor.process_channel(ch_dir)
+
+        failed_events = [
+            e for e in received if e.event_type == EventType.MESSAGE_FAILED
+        ]
+        assert len(failed_events) == 1
+        assert failed_events[0].detail == "API error"
+        assert failed_events[0].channel == "general"
+
+    @patch(
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
+        return_value=True,
+    )
+    def test_no_tracker_does_not_error(self, mock_should, tmp_path):
+        """Without a tracker, process_channel runs without errors (backwards compat)."""
+        processor = _make_processor(export_root=tmp_path)
+        assert processor.progress_tracker is None
+
+        ch_dir = tmp_path / "general"
+        ch_dir.mkdir()
+        (ch_dir / "2024-01-01.json").write_text(json.dumps([]))
+
+        with (
+            patch.object(processor, "_setup_channel_logging"),
+            patch.object(processor, "_process_messages", return_value=(0, 0, False)),
+            patch.object(processor, "_complete_import_mode", return_value=False),
+            patch.object(processor, "_add_members", return_value=False),
+            patch(
+                "slack_chat_migrator.core.channel_processor.create_space",
+                return_value="spaces/S1",
+            ),
+        ):
+            should_abort, had_errors = processor.process_channel(ch_dir)
+
+        assert should_abort is False
+        assert had_errors is False

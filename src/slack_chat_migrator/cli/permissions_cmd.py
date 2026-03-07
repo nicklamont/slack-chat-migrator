@@ -7,7 +7,12 @@ from pathlib import Path
 
 import click
 
-from slack_chat_migrator.cli.common import cli, common_options, handle_exception
+from slack_chat_migrator.cli.common import (
+    cli,
+    common_options,
+    deprecated_command,
+    handle_exception,
+)
 from slack_chat_migrator.core.config import load_config
 from slack_chat_migrator.utils.logging import setup_logger
 from slack_chat_migrator.utils.permissions import check_permissions_standalone
@@ -19,6 +24,10 @@ from slack_chat_migrator.utils.permissions import check_permissions_standalone
 
 @cli.command("check-permissions")
 @common_options
+@deprecated_command(
+    "check-permissions",
+    "Use 'validate --creds_path <path> --workspace_admin <email>' instead.",
+)
 def check_permissions(
     creds_path: str | None,
     workspace_admin: str | None,
@@ -26,7 +35,7 @@ def check_permissions(
     verbose: bool,
     debug_api: bool,
 ) -> None:
-    """Validate API permissions without running a migration.
+    """(Deprecated: use 'validate') Validate API permissions without running a migration.
 
     Tests that the service account has all required scopes for the Chat and
     Drive APIs.  Does not require a Slack export directory.

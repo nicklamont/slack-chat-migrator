@@ -29,6 +29,7 @@ from slack_chat_migrator.core.migration_logging import (
     log_migration_failure,
     log_migration_success,
 )
+from slack_chat_migrator.core.progress import ProgressTracker
 from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.services.chat.dry_run_service import DryRunChatService
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
@@ -155,6 +156,7 @@ class SlackToChatMigrator:
         self.drive: Any = None
         self._api_services_initialized = False
         self._dry_run_chat_service: DryRunChatService | None = None
+        self._progress_tracker: ProgressTracker | None = None
 
         # UserResolver is created in _initialize_api_services() after chat
         # is available, avoiding the two-phase init pattern (create with
@@ -359,12 +361,22 @@ class SlackToChatMigrator:
         """Get a list of all channel names from the export directory."""
         return [d.name for d in self.export_root.iterdir() if d.is_dir()]
 
-    def migrate(self) -> bool:
+    def _emit_phase(self, phase: str) -> None:
+        """Emit a phase-change event if a progress tracker is active."""
+        if self._progress_tracker:
+            self._progress_tracker.phase_change(phase)
+
+    def migrate(self, progress_tracker: ProgressTracker | None = None) -> bool:
         """Main migration function that orchestrates the entire process.
+
+        Args:
+            progress_tracker: Optional tracker for emitting progress events
+                to renderers (Rich, plain text).
 
         Returns:
             True on successful completion.
         """
+        self._progress_tracker = progress_tracker
         migration_start_time = time.time()
         log_with_context(logging.INFO, "Starting migration process")
 
@@ -385,6 +397,8 @@ class SlackToChatMigrator:
         old_signal_handler = signal.signal(signal.SIGINT, signal_handler)
 
         try:
+            self._emit_phase("Initializing")
+
             # Ensure API services are initialized (if not done during permission checks)
             self._initialize_api_services()
 
@@ -454,6 +468,8 @@ class SlackToChatMigrator:
             )
 
             # Process each channel
+            self._emit_phase("Migrating channels")
+
             self.channel_processor = ChannelProcessor(
                 ctx=self.ctx,
                 state=self.state,
@@ -461,6 +477,7 @@ class SlackToChatMigrator:
                 user_resolver=self.user_resolver,
                 file_handler=getattr(self, "file_handler", None),
                 attachment_processor=self.attachment_processor,
+                progress_tracker=self._progress_tracker,
             )
             for ch in all_channel_dirs:
                 channel_name = ch.name
@@ -479,6 +496,8 @@ class SlackToChatMigrator:
                 if not result.had_errors:
                     checkpoint.completed_channels[channel_name] = now_iso()
                     save_checkpoint(checkpoint_path, checkpoint)
+
+            self._emit_phase("Finalizing")
 
             # Log any space mapping conflicts that should be added to config
             log_space_mapping_conflicts(self.state, self.ctx.dry_run)

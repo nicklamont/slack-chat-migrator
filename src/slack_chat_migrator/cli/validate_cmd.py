@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import click
@@ -16,9 +18,11 @@ from slack_chat_migrator.cli.common import (
 )
 from slack_chat_migrator.cli.migrate_cmd import (
     MigrationOrchestrator,
+    _print_config_panel,
+    _quiet_console,
     create_migration_output_directory,
-    log_startup_info,
 )
+from slack_chat_migrator.cli.renderers import error_panel, get_console
 from slack_chat_migrator.utils.logging import log_with_context, setup_logger
 
 # ---------------------------------------------------------------------------
@@ -68,6 +72,31 @@ def validate(
             "Note: --dry_run is redundant with 'validate' (always dry-run).",
         )
 
+    # Check if config file exists; suggest init if missing
+    config_path = Path(config)
+    if not config_path.exists():
+        console = get_console()
+        console.print(
+            error_panel(
+                "Config file not found",
+                f"[bold]{config}[/bold] does not exist.\n\n"
+                "Generate one with:\n"
+                "  [bold]slack-chat-migrator init --export_path "
+                f"{export_path}[/bold]",
+            )
+        )
+        if click.confirm("Run init now?", default=True):
+            from slack_chat_migrator.cli.init_cmd import init
+
+            ctx = click.Context(init)
+            ctx.invoke(init, export_path=export_path, output=config)
+            # Re-check after init
+            if not config_path.exists():
+                click.echo("Config file still not found. Aborting.")
+                sys.exit(1)
+        else:
+            sys.exit(1)
+
     args = SimpleNamespace(
         creds_path=creds_path,
         export_path=export_path,
@@ -81,11 +110,16 @@ def validate(
     )
 
     output_dir = create_migration_output_directory()
-    setup_logger(args.verbose, args.debug_api, output_dir)
+    with _quiet_console() if sys.stdout.isatty() else contextlib.nullcontext():
+        setup_logger(args.verbose, args.debug_api, output_dir)
 
-    log_startup_info(args)
-    log_with_context(logging.INFO, f"Output directory: {output_dir}")
+    # Show config panel (Rich on TTY, log lines otherwise)
+    _print_config_panel(args, output_dir)
+    with _quiet_console() if sys.stdout.isatty() else contextlib.nullcontext():
+        log_with_context(logging.INFO, f"Output directory: {output_dir}")
 
+    # Standalone permission check is handled by orchestrator.validate_prerequisites()
+    # which prints its own preflight status lines.
     orchestrator = MigrationOrchestrator(args)
     orchestrator.output_dir = output_dir
 

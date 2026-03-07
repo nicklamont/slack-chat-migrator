@@ -337,7 +337,7 @@ def log_migration_failure(
             log_with_context(
                 logging.WARNING,
                 "Migration interrupted."
-                " Use --update_mode to resume from where you left off.",
+                " Use --resume to resume from where you left off.",
             )
     else:
         if is_dry_run:
@@ -348,6 +348,5 @@ def log_migration_failure(
         else:
             log_with_context(
                 logging.ERROR,
-                "Migration failed."
-                " Check the error details and try --update_mode to resume.",
+                "Migration failed. Check the error details and try --resume to resume.",
             )

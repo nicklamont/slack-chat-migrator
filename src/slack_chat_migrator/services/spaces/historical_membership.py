@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
-from tqdm import tqdm
 
 from slack_chat_migrator.constants import (
     API_THROTTLE_MEMBER_SECONDS,
@@ -28,6 +27,7 @@ from slack_chat_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
     from slack_chat_migrator.core.context import MigrationContext
+    from slack_chat_migrator.core.progress import ProgressTracker
     from slack_chat_migrator.core.state import MigrationState
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
     from slack_chat_migrator.services.user_resolver import UserResolver
@@ -316,6 +316,7 @@ def _add_historical_members_batch(
     channel: str,
     user_membership: dict[str, dict[str, Any]],
     active_users: set[str],
+    progress_tracker: ProgressTracker | None = None,
 ) -> None:
     """Add historical memberships to a Google Chat space via the API.
 
@@ -334,11 +335,13 @@ def _add_historical_members_batch(
             (must already have ``join_time`` and ``leave_time`` populated).
         active_users: Set of user IDs considered active (used for summary log).
     """
+    if progress_tracker and user_membership:
+        progress_tracker.member_phase_start(channel, total=len(user_membership))
+
     added_count = 0
     failed_count = 0
 
-    pbar = tqdm(user_membership.items(), desc=f"Adding historical members to {channel}")
-    for user_id, membership in pbar:
+    for user_id, membership in user_membership.items():
         user_email = ctx.user_map.get(user_id)
 
         if not user_email:
@@ -386,6 +389,8 @@ def _add_historical_members_batch(
             chat.create_membership(parent=space, body=membership_body)
 
             added_count += 1
+            if progress_tracker:
+                progress_tracker.member_added(channel)
             log_with_context(
                 logging.DEBUG,
                 f"Added user {internal_email} to space {space} as historical membership",
@@ -402,6 +407,8 @@ def _add_historical_members_batch(
                     channel=channel,
                 )
                 added_count += 1
+                if progress_tracker:
+                    progress_tracker.member_added(channel)
             else:
                 log_with_context(
                     logging.WARNING,
@@ -445,6 +452,7 @@ def add_users_to_space(
     user_resolver: UserResolver,
     space: str,
     channel: str,
+    progress_tracker: ProgressTracker | None = None,
 ) -> None:
     """Add users to a space as historical members.
 
@@ -455,6 +463,7 @@ def add_users_to_space(
         user_resolver: UserResolver for email lookups.
         space: Google Chat space resource name (e.g. ``spaces/AAAA``).
         channel: Slack channel name used for log context and data lookup.
+        progress_tracker: Optional progress tracker for emitting events.
     """
     log_with_context(
         logging.DEBUG,
@@ -499,5 +508,13 @@ def add_users_to_space(
     _compute_membership_times(ctx, channel, user_membership)
 
     _add_historical_members_batch(
-        ctx, state, chat, user_resolver, space, channel, user_membership, active_users
+        ctx,
+        state,
+        chat,
+        user_resolver,
+        space,
+        channel,
+        user_membership,
+        active_users,
+        progress_tracker,
     )

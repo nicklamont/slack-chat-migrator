@@ -31,8 +31,8 @@ dependencies = [
     "google-api-python-client>=2.177,<3.0",
     "google-auth-httplib2~=0.3",
     "google-auth-oauthlib>=1.2,<2.0",
-    "tqdm>=4.67,<5.0",
     "click>=8.1,<9.0",
+    "rich>=13.0,<14.0",
 ]
 
 [project.urls]
@@ -55,6 +55,10 @@ dev = [
     "coverage>=7.0",
     "pre-commit>=3.0",
     "commitizen>=3.0",
+]
+setup = [
+    # All setup operations use the REST discovery API (google-api-python-client),
+    # which is already a core dependency. This extra is kept for forward compatibility.
 ]
 docs = [
     "mkdocs>=1.6",
@@ -100,7 +104,7 @@ no_implicit_optional = true
 strict_optional = true
 
 [[tool.mypy.overrides]]
-module = ["emoji.*", "slackblocks.*", "tqdm.*", "googleapiclient.*"]
+module = ["emoji.*", "slackblocks.*", "googleapiclient.*"]
 ignore_missing_imports = true
 
 [tool.bandit]
@@ -108,7 +112,8 @@ exclude_dirs = ["tests"]
 # B101: assert used for type narrowing
 # B110/B112: intentional error suppression in migration recovery logic
 # B324: MD5 used for file deduplication, not security
-skips = ["B101", "B110", "B112", "B324"]
+# B404/B603: subprocess used for gcloud bootstrap and clipboard (hardcoded commands)
+skips = ["B101", "B110", "B112", "B324", "B404", "B603"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -141,4 +146,6 @@ fail_under = 90
 omit = [
     "src/slack_chat_migrator/cli/migrate_cmd.py",
     "src/slack_chat_migrator/cli/cleanup_cmd.py",
+    "src/slack_chat_migrator/cli/setup_cmd.py",
+    "src/slack_chat_migrator/services/setup/*.py",
 ]
