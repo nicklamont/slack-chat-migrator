@@ -1,16 +1,14 @@
 ---
+import stuckInSlack from '../assets/illustrations/stuck-in-slack.svg';
+import importApiHandled from '../assets/illustrations/import-api-handled.svg';
 ---
 
 <section class="py-20 sm:py-28">
   <div class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
     <div class="grid gap-12 lg:grid-cols-2 lg:gap-16">
       <!-- Problem -->
-      <div class="rounded-2xl border border-border bg-surface p-8 sm:p-10">
-        <div class="mb-4 inline-flex rounded-lg bg-danger/10 p-3 text-danger">
-          <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
-          </svg>
-        </div>
+      <div class="rounded-2xl border border-border bg-surface p-8 sm:p-10 text-center">
+        <img src={stuckInSlack.src} alt="" class="mx-auto mb-6 h-28 w-28 sm:h-32 sm:w-32" />
         <h2 class="mb-3 text-xl font-bold sm:text-2xl">Stuck in Slack with No Way Out</h2>
         <p class="text-muted">
           You've moved to Google Workspace but years of conversation history, files, and institutional knowledge are still locked in Slack.
@@ -21,12 +19,8 @@
       </div>
 
       <!-- Solution -->
-      <div class="rounded-2xl border border-accent/20 bg-accent/5 p-8 sm:p-10">
-        <div class="mb-4 inline-flex rounded-lg bg-accent/10 p-3 text-accent">
-          <svg class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-        </div>
+      <div class="rounded-2xl border border-accent/20 bg-accent/5 p-8 sm:p-10 text-center">
+        <img src={importApiHandled.src} alt="" class="mx-auto mb-6 h-28 w-28 sm:h-32 sm:w-32" />
         <h2 class="mb-3 text-xl font-bold sm:text-2xl">The Import API, Handled For You</h2>
         <p class="text-muted">
           <code class="rounded bg-code/10 px-1.5 py-0.5 font-mono text-sm">slack-chat-migrator</code> automates
