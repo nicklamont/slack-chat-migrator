@@ -21,7 +21,9 @@ class TestUtf8Encoding:
         # U+2019 RIGHT SINGLE QUOTATION MARK — encoded as 0xE2 0x80 0x99 in UTF-8
         # Byte 0x9D in Windows-1252 maps to this, causing charmap codec errors
         msg = [{"type": "message", "ts": "1.0", "text": "it\u2019s a test"}]
-        (ch_dir / "2024-01-01.json").write_text(json.dumps(msg), encoding="utf-8")
+        (ch_dir / "2024-01-01.json").write_text(
+            json.dumps(msg, ensure_ascii=False), encoding="utf-8"
+        )
 
         inspector = ExportInspector(tmp_path)
         counts = inspector.get_message_counts()
@@ -36,7 +38,9 @@ class TestUtf8Encoding:
                 "profile": {"email": "jose@example.com"},
             }
         ]
-        (tmp_path / "users.json").write_text(json.dumps(users), encoding="utf-8")
+        (tmp_path / "users.json").write_text(
+            json.dumps(users, ensure_ascii=False), encoding="utf-8"
+        )
         (tmp_path / "channels.json").write_text("[]", encoding="utf-8")
 
         inspector = ExportInspector(tmp_path)
