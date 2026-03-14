@@ -164,6 +164,23 @@ class TestProcessChannel:
 
     @patch(
         "slack_chat_migrator.core.channel_processor.should_process_channel",
+        return_value=False,
+    )
+    def test_skipped_channel_not_in_channels_processed(self, mock_should, tmp_path):
+        """Skipped channels should not appear in channels_processed list."""
+        processor = _make_processor()
+        ch_dir = tmp_path / "random"
+        ch_dir.mkdir()
+
+        processor.process_channel(ch_dir)
+
+        assert (
+            "random"
+            not in processor.state.progress.migration_summary["channels_processed"]
+        )
+
+    @patch(
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
         return_value=True,
     )
     def test_channel_with_space_conflict(self, mock_should, tmp_path):

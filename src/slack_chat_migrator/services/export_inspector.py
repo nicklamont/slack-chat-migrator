@@ -37,7 +37,7 @@ class ExportInspector:
             channels_file = self.export_path / "channels.json"
             if channels_file.exists():
                 try:
-                    with open(channels_file) as f:
+                    with open(channels_file, encoding="utf-8") as f:
                         self._channels_data = json.load(f)
                 except (json.JSONDecodeError, OSError):
                     self._channels_data = []
@@ -50,7 +50,7 @@ class ExportInspector:
             users_file = self.export_path / "users.json"
             if users_file.exists():
                 try:
-                    with open(users_file) as f:
+                    with open(users_file, encoding="utf-8") as f:
                         self._users_data = json.load(f)
                 except (json.JSONDecodeError, OSError):
                     self._users_data = []
@@ -89,7 +89,7 @@ class ExportInspector:
             total = 0
             for jf in ch_dir.glob("*.json"):
                 try:
-                    with open(jf) as f:
+                    with open(jf, encoding="utf-8") as f:
                         msgs = json.load(f)
                     total += sum(1 for m in msgs if m.get("type") == "message")
                 except (OSError, ValueError):
@@ -110,7 +110,7 @@ class ExportInspector:
         for ch_dir in self.get_channel_dirs():
             for jf in ch_dir.glob("*.json"):
                 try:
-                    with open(jf) as f:
+                    with open(jf, encoding="utf-8") as f:
                         msgs = json.load(f)
                     for m in msgs:
                         files = m.get("files", [])

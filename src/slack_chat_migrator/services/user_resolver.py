@@ -167,7 +167,7 @@ class UserResolver:
             users_file = Path(self.export_root) / "users.json"
             if users_file.exists():
                 try:
-                    with open(users_file) as f:
+                    with open(users_file, encoding="utf-8") as f:
                         users_list = json.load(f)
                     self._users_data = {user["id"]: user for user in users_list}
                 except (OSError, json.JSONDecodeError) as e:

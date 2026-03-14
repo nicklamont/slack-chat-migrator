@@ -356,7 +356,7 @@ def _write_failure_log(
 
     try:
         mode = "a" if os.path.exists(log_file) else "w"
-        with open(log_file, mode) as f:
+        with open(log_file, mode, encoding="utf-8") as f:
             f.write(f"\n\n{'=' * 50}\nFAILED MESSAGES DETAILS\n{'=' * 50}\n\n")
             for failed_msg in failures:
                 f.write(f"Timestamp: {failed_msg.get('ts')}\n")
@@ -640,7 +640,7 @@ def generate_report(
             external_mappings.append(f'  "{user_id}": ""  # {email}')
         report["external_user_mappings_for_config"] = external_mappings
 
-    with open(report_path, "w") as f:
+    with open(report_path, "w", encoding="utf-8") as f:
         yaml.dump(report, f, default_flow_style=False)
 
     log_with_context(logging.INFO, f"Migration report generated: {report_path}")

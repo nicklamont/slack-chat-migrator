@@ -346,7 +346,7 @@ class SlackToChatMigrator:
         id_to_name = {}
 
         if channels_file.exists():
-            with open(channels_file) as f_in:
+            with open(channels_file, encoding="utf-8") as f_in:
                 channels = json.load(f_in)
                 name_to_data = {ch["name"]: ch for ch in channels}
                 id_to_name = {ch["id"]: ch["name"] for ch in channels}

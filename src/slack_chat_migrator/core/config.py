@@ -162,7 +162,7 @@ def load_config(config_path: Path) -> MigrationConfig:
 
     if config_path.exists():
         try:
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 loaded_config = yaml.safe_load(f)
                 # Handle None result from empty file
                 if loaded_config is not None:
@@ -199,7 +199,7 @@ def load_space_mapping(config_path: Path) -> dict[str, str]:
     if not config_path.exists():
         return {}
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             raw = yaml.safe_load(f)
         if raw and isinstance(raw, dict):
             return raw.get("space_mapping") or {}
@@ -252,7 +252,7 @@ def create_default_config(output_path: Path) -> bool:
     }
 
     try:
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(default_config, f, default_flow_style=False)
         log_with_context(logging.INFO, f"Created default config file at {output_path}")
         return True
@@ -278,7 +278,8 @@ def should_process_channel(channel_name: str, config: MigrationConfig) -> bool:
         True if the channel should be processed, False if it should be skipped
     """
     # Check include list (if specified, only those channels are processed)
-    include_channels = set(config.include_channels)
+    # Normalize: strip '#' prefix that users may accidentally include
+    include_channels = {ch.lstrip("#") for ch in config.include_channels}
     if include_channels:
         should_process = channel_name in include_channels
         log_with_context(
@@ -289,7 +290,7 @@ def should_process_channel(channel_name: str, config: MigrationConfig) -> bool:
         return should_process
 
     # Check exclude list
-    exclude_channels = set(config.exclude_channels)
+    exclude_channels = {ch.lstrip("#") for ch in config.exclude_channels}
     if channel_name in exclude_channels:
         log_with_context(
             logging.DEBUG,

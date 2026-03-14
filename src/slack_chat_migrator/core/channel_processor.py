@@ -97,7 +97,6 @@ class ChannelProcessor:
             f"{self.ctx.log_prefix}Processing channel: {channel}",
             channel=channel,
         )
-        self.state.progress.migration_summary["channels_processed"].append(channel)
 
         # Check if channel should be processed
         if not should_process_channel(channel, self.ctx.config):
@@ -107,6 +106,8 @@ class ChannelProcessor:
                 channel=channel,
             )
             return ChannelResult(should_abort=False, had_errors=False)
+
+        self.state.progress.migration_summary["channels_processed"].append(channel)
 
         # Check for unresolved space conflicts
         if channel in self.state.errors.channel_conflicts:
@@ -328,7 +329,7 @@ class ChannelProcessor:
         msgs: list[dict[str, Any]] = []
         for jf in sorted(msg_dir.glob("*.json")):
             try:
-                with open(jf) as f:
+                with open(jf, encoding="utf-8") as f:
                     msgs.extend(json.load(f))
             except (OSError, ValueError) as e:
                 log_with_context(

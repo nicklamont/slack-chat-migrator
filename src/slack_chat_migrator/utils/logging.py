@@ -446,7 +446,7 @@ def ensure_channel_log_created(
     # Create an empty log file or write a header if it doesn't exist
     if not os.path.exists(log_file):
         try:
-            with open(log_file, "w") as f:
+            with open(log_file, "w", encoding="utf-8") as f:
                 if dry_run:
                     f.write(f"# Channel migration log for {channel} (DRY RUN)\n")
                     f.write(

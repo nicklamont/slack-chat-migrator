@@ -46,7 +46,7 @@ def _scan_message_files_for_membership(
 
     for jf in sorted(ch_dir.glob("*.json")):
         try:
-            with open(jf) as f:
+            with open(jf, encoding="utf-8") as f:
                 msgs = json.load(f)
             for m in msgs:
                 if m.get("type") != "message":

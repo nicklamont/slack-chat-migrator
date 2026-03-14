@@ -267,7 +267,7 @@ def analyze_unmapped_users(
             )
             return analysis
 
-        with open(users_file) as f:
+        with open(users_file, encoding="utf-8") as f:
             users_data = json.load(f)
 
         # Create lookup map for user data
@@ -395,7 +395,7 @@ def scan_channel_members_for_unmapped_users(
             )
             return
 
-        with open(channels_file) as f:
+        with open(channels_file, encoding="utf-8") as f:
             channels_data = json.load(f)
 
         channels_to_check = []
@@ -424,7 +424,7 @@ def scan_channel_members_for_unmapped_users(
             try:
                 users_file = Path(export_root) / "users.json"
                 if users_file.exists():
-                    with open(users_file) as f:
+                    with open(users_file, encoding="utf-8") as f:
                         users_data = json.load(f)
                     user_lookup = {user["id"]: user for user in users_data}
             except (OSError, json.JSONDecodeError) as e:

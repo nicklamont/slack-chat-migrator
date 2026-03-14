@@ -92,7 +92,7 @@ def init(ctx: click.Context, export_path: str, output: str) -> None:
     config = _build_config(inspector)
 
     # Write config file
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
     console.print()
@@ -197,6 +197,7 @@ def _ask_channel_selection(inspector: ExportInspector) -> dict[str, Any]:
     result: dict[str, Any] = {}
     channel_dirs = inspector.get_channel_dirs()
     channel_names = [d.name for d in channel_dirs]
+    valid_names = set(channel_names)
 
     console = get_console()
     items = [Text(f"#{name}", style="cyan") for name in channel_names]
@@ -216,20 +217,40 @@ def _ask_channel_selection(inspector: ExportInspector) -> dict[str, Any]:
             default="",
         )
         if selected.strip():
-            result["include_channels"] = [
-                c.strip() for c in selected.split(",") if c.strip()
-            ]
+            parsed = _parse_channel_names(selected)
+            _warn_unrecognized_channels(parsed, valid_names, console)
+            result["include_channels"] = parsed
     elif mode == "exclude":
         excluded = click.prompt(
             "Channels to exclude (comma-separated)",
             default="",
         )
         if excluded.strip():
-            result["exclude_channels"] = [
-                c.strip() for c in excluded.split(",") if c.strip()
-            ]
+            parsed = _parse_channel_names(excluded)
+            _warn_unrecognized_channels(parsed, valid_names, console)
+            result["exclude_channels"] = parsed
 
     return result
+
+
+def _parse_channel_names(raw: str) -> list[str]:
+    """Parse comma-separated channel names, stripping '#' prefixes and whitespace."""
+    return [c.strip().lstrip("#") for c in raw.split(",") if c.strip()]
+
+
+def _warn_unrecognized_channels(
+    parsed: list[str], valid_names: set[str], console: Any
+) -> None:
+    """Warn about channel names that don't match any export directory."""
+    unrecognized = [name for name in parsed if name not in valid_names]
+    if unrecognized:
+        console.print(
+            warning_panel(
+                "Unrecognized channels",
+                "The following channels were not found in the export:\n"
+                + "\n".join(f"  - {name}" for name in unrecognized),
+            )
+        )
 
 
 def _ask_user_mapping(inspector: ExportInspector) -> dict[str, Any]:
