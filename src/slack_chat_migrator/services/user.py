@@ -22,7 +22,7 @@ def _load_users_json(users_file: Path) -> list[dict[str, Any]]:
     if not users_file.exists():
         raise ExportError("users.json not found in export directory")
     try:
-        with users_file.open() as f:
+        with users_file.open(encoding="utf-8") as f:
             result: list[dict[str, Any]] = json.load(f)
             return result
     except json.JSONDecodeError as e:

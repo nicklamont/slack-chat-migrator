@@ -92,7 +92,7 @@ def init(ctx: click.Context, export_path: str, output: str) -> None:
     config = _build_config(inspector)
 
     # Write config file
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
 
     console.print()

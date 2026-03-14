@@ -118,6 +118,6 @@ def download_key(
     )
     key_data = json.loads(base64.b64decode(key["privateKeyData"]))
     fd = os.open(str(output_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(key_data, f, indent=2)
     return output_path

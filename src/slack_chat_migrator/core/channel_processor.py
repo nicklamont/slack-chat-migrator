@@ -329,7 +329,7 @@ class ChannelProcessor:
         msgs: list[dict[str, Any]] = []
         for jf in sorted(msg_dir.glob("*.json")):
             try:
-                with open(jf) as f:
+                with open(jf, encoding="utf-8") as f:
                     msgs.extend(json.load(f))
             except (OSError, ValueError) as e:
                 log_with_context(

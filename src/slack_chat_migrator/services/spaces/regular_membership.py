@@ -532,7 +532,7 @@ def add_regular_members(
             channels_file = export_root / "channels.json"
 
             if channels_file.exists():
-                with open(channels_file) as f:
+                with open(channels_file, encoding="utf-8") as f:
                     channels_data = json.load(f)
 
                 for ch in channels_data:
