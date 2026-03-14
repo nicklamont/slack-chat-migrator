@@ -156,6 +156,18 @@ def test_should_process_channel_no_lists():
     assert should_process_channel("anything", config) is True
 
 
+def test_should_process_channel_normalizes_hash_prefix():
+    """should_process_channel handles '#' prefix in config channel names."""
+    config = MigrationConfig(exclude_channels=["#general", "random"])
+    assert should_process_channel("general", config) is False
+    assert should_process_channel("random", config) is False
+    assert should_process_channel("other", config) is True
+
+    config = MigrationConfig(include_channels=["#general"])
+    assert should_process_channel("general", config) is True
+    assert should_process_channel("random", config) is False
+
+
 def test_load_config_nonexistent_path():
     """Test loading config from a nonexistent path returns defaults."""
     config = load_config(Path("/nonexistent/path/config.yaml"))

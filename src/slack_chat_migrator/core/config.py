@@ -278,7 +278,8 @@ def should_process_channel(channel_name: str, config: MigrationConfig) -> bool:
         True if the channel should be processed, False if it should be skipped
     """
     # Check include list (if specified, only those channels are processed)
-    include_channels = set(config.include_channels)
+    # Normalize: strip '#' prefix that users may accidentally include
+    include_channels = {ch.lstrip("#") for ch in config.include_channels}
     if include_channels:
         should_process = channel_name in include_channels
         log_with_context(
@@ -289,7 +290,7 @@ def should_process_channel(channel_name: str, config: MigrationConfig) -> bool:
         return should_process
 
     # Check exclude list
-    exclude_channels = set(config.exclude_channels)
+    exclude_channels = {ch.lstrip("#") for ch in config.exclude_channels}
     if channel_name in exclude_channels:
         log_with_context(
             logging.DEBUG,

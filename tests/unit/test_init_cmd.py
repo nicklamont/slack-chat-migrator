@@ -231,6 +231,52 @@ class TestInitCommand:
         assert result.exit_code == 1
         assert "not a directory" in result.output
 
+    def test_exclude_channels_strips_hash_prefix(self, tmp_path: Path) -> None:
+        """init strips '#' prefix from channel names entered by user."""
+        export = _make_export(tmp_path)
+        output = tmp_path / "config.yaml"
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["init", "--export_path", str(export), "--output", str(output)],
+            input="exclude\n#random\ny\nn\n\n\n\n\nn\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        config = yaml.safe_load(output.read_text())
+        assert config["exclude_channels"] == ["random"]
+
+    def test_include_channels_strips_hash_prefix(self, tmp_path: Path) -> None:
+        """init strips '#' prefix from included channel names too."""
+        export = _make_export(tmp_path)
+        output = tmp_path / "config.yaml"
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["init", "--export_path", str(export), "--output", str(output)],
+            input="include\n#general\ny\nn\n\n\n\n\nn\n",
+        )
+        assert result.exit_code == 0, result.output
+
+        config = yaml.safe_load(output.read_text())
+        assert config["include_channels"] == ["general"]
+
+    def test_warns_about_unrecognized_channels(self, tmp_path: Path) -> None:
+        """init warns when user enters channel names not in the export."""
+        export = _make_export(tmp_path)
+        output = tmp_path / "config.yaml"
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["init", "--export_path", str(export), "--output", str(output)],
+            input="exclude\nrandom, nonexistent\ny\nn\n\n\n\n\nn\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "nonexistent" in result.output
+
     def test_registered_in_cli(self) -> None:
         """init command is registered on the CLI group."""
         assert "init" in cli.commands
