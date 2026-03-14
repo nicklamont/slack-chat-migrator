@@ -127,14 +127,12 @@ export default function TerminalDemo() {
           )}
         </div>
 
-        {/* Progress bars */}
+        {/* Progress bars — always rendered to maintain consistent height */}
         <ProgressBar done={f.channels.done} total={f.channels.total} label="Channels" />
-        {f.channel && f.channelProgress && (
-          <div className="mt-1">
-            <div className="text-[13px] text-cyan-400 mb-1">#{f.channel}</div>
-            <ProgressBar done={f.channelProgress.done} total={f.channelProgress.total} label="  Messages" />
-          </div>
-        )}
+        <div className={`mt-1 ${f.channel && f.channelProgress ? '' : 'invisible'}`}>
+          <div className="text-[13px] text-cyan-400 mb-1">#{f.channel || 'general'}</div>
+          <ProgressBar done={f.channelProgress?.done ?? 0} total={f.channelProgress?.total ?? 1} label="  Messages" />
+        </div>
 
         {/* Stats table */}
         <div className="mt-4 border-t border-white/10 pt-3">
@@ -159,21 +157,17 @@ export default function TerminalDemo() {
               <span className="text-cyan-400">Members added</span>
               <span className="text-green-400 tabular-nums">{f.stats.members.toLocaleString()}</span>
             </div>
-            {!isComplete && (
-              <div className="flex justify-between">
-                <span className="text-cyan-400">Throughput</span>
-                <span className="text-green-400 tabular-nums">4.2 msgs/sec</span>
-              </div>
-            )}
+            <div className={`flex justify-between ${isComplete ? 'invisible' : ''}`}>
+              <span className="text-cyan-400">Throughput</span>
+              <span className="text-green-400 tabular-nums">4.2 msgs/sec</span>
+            </div>
           </div>
         </div>
 
-        {/* Completion message */}
-        {isComplete && (
-          <div className="mt-4 border-t border-white/10 pt-3 text-[13px] text-green-400">
-            {'\u2714'} 47 channels migrated successfully in 1h42m
-          </div>
-        )}
+        {/* Completion message — always rendered to maintain consistent height */}
+        <div className={`mt-4 border-t border-white/10 pt-3 text-[13px] text-green-400 ${isComplete ? '' : 'invisible'}`}>
+          {'\u2714'} 47 channels migrated successfully in 1h42m
+        </div>
       </div>
     </div>
   );
