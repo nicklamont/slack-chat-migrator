@@ -97,7 +97,6 @@ class ChannelProcessor:
             f"{self.ctx.log_prefix}Processing channel: {channel}",
             channel=channel,
         )
-        self.state.progress.migration_summary["channels_processed"].append(channel)
 
         # Check if channel should be processed
         if not should_process_channel(channel, self.ctx.config):
@@ -107,6 +106,8 @@ class ChannelProcessor:
                 channel=channel,
             )
             return ChannelResult(should_abort=False, had_errors=False)
+
+        self.state.progress.migration_summary["channels_processed"].append(channel)
 
         # Check for unresolved space conflicts
         if channel in self.state.errors.channel_conflicts:
