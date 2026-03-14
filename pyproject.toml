@@ -128,7 +128,7 @@ markers = [
 [tool.commitizen]
 name = "cz_conventional_commits"
 tag_format = "v$version"
-version = "0.4.0"
+version = "0.4.1"
 version_files = ["src/slack_chat_migrator/__init__.py:__version__"]
 update_changelog_on_bump = true
 
