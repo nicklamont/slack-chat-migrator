@@ -804,6 +804,24 @@ class TestShouldAbortImport:
 
         assert processor._should_abort_import("general", 5, 3) is True
 
+    def test_channel_had_errors_with_no_message_failures(self):
+        """With channel_had_errors=True (e.g. membership failure) and abort_on_error, aborts."""
+        processor = _make_processor(abort_on_error=True)
+
+        assert (
+            processor._should_abort_import("general", 0, 0, channel_had_errors=True)
+            is True
+        )
+
+    def test_channel_had_errors_without_abort_on_error(self):
+        """With channel_had_errors=True but abort_on_error=False, does not abort."""
+        processor = _make_processor(abort_on_error=False)
+
+        assert (
+            processor._should_abort_import("general", 0, 0, channel_had_errors=True)
+            is False
+        )
+
 
 # ---------------------------------------------------------------------------
 # _delete_space_if_errors

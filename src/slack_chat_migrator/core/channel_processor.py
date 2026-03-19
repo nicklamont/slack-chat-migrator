@@ -217,7 +217,9 @@ class ChannelProcessor:
         )
 
         # Check if we should abort
-        if self._should_abort_import(channel, processed_count, failed_count):
+        if self._should_abort_import(
+            channel, processed_count, failed_count, channel_had_errors
+        ):
             log_with_context(
                 logging.WARNING,
                 "Aborting import after first channel due to errors",
@@ -603,14 +605,22 @@ class ChannelProcessor:
         return channel_had_errors
 
     def _should_abort_import(
-        self, channel: str, processed_count: int, failed_count: int
+        self,
+        channel: str,
+        processed_count: int,
+        failed_count: int,
+        channel_had_errors: bool = False,
     ) -> bool:
         """Determine if the migration should abort after errors in a channel."""
-        # Only consider aborting if we had failures
-        if failed_count > 0:
+        # Only consider aborting if we had failures (messages or memberships)
+        if failed_count > 0 or channel_had_errors:
+            if failed_count > 0:
+                detail = f"{failed_count} message import errors"
+            else:
+                detail = "errors during migration (e.g. membership failures)"
             log_with_context(
                 logging.WARNING,
-                f"Channel '{channel}' had {failed_count} message import errors.",
+                f"Channel '{channel}' had {detail}.",
                 channel=channel,
             )
 

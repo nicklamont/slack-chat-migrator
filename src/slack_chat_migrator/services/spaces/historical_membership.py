@@ -354,7 +354,7 @@ def _add_historical_members_batch(
                 user_id=user_id,
                 channel=channel,
             )
-            # This will be automatically tracked in _get_internal_email when user lookup fails
+            failed_count += 1
             continue
 
         # Get the internal email for this user (handles external users)
