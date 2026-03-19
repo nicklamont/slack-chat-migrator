@@ -1,3 +1,16 @@
+## v0.4.2 (2026-03-19)
+
+### Feat
+
+- replace value prop card icons with custom SVG illustrations
+
+### Fix
+
+- address review feedback on membership failure handling
+- include error details in regular membership failure log messages
+- improve diagnostics and skip messages when all memberships fail
+- prevent layout shift in landing page terminal demo animation
+
 ## v0.4.1 (2026-03-14)
 
 ### Fix
