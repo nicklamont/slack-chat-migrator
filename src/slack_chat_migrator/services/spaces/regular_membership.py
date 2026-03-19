@@ -218,18 +218,15 @@ def _add_regular_members_batch(
                 # Bad request means there's an issue with the format according to API requirements
                 log_with_context(
                     logging.ERROR,
-                    f"Bad request (400) when adding user {internal_email} - check API documentation for correct format",
-                    error_message=str(e),
+                    f"Bad request (400) when adding user {internal_email}: {e}",
                     channel=channel,
                 )
                 failed_count += 1
             else:
                 log_with_context(
                     logging.WARNING,
-                    f"Failed to add user {internal_email} as regular member to space {space}",
-                    error_code=e.resp.status,
-                    error_message=str(e),
-                    request_body=json.dumps(membership_body),
+                    f"Failed to add user {internal_email} as regular member "
+                    f"to space {space}: HTTP {e.resp.status} - {e}",
                     channel=channel,
                 )
                 failed_count += 1

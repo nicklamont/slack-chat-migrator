@@ -349,6 +349,7 @@ def _handle_send_error(
     message: dict[str, Any],
     ts: str,
     channel: str | None,
+    payload: dict[str, Any] | None = None,
 ) -> SendResult:
     """Log and record an ``HttpError`` that occurred while sending a message.
 
@@ -369,6 +370,26 @@ def _handle_send_error(
         error_code=error_code_display,
         error_details=error_details[:500] + ("..." if len(error_details) > 500 else ""),
     )
+
+    # Provide actionable diagnostics for the generic 400 error.
+    # Use the built payload (what was actually sent to the API) when available,
+    # falling back to the Slack message dict for user context.
+    if status_code == 400 and "Possible causes" in error_details:
+        user_id = message.get("user", "unknown")
+        diag_source = payload if payload is not None else message
+        sender_info = diag_source.get("sender", {})
+        sender_name = sender_info.get("name", "unknown") if sender_info else "unknown"
+        thread_info = diag_source.get("thread", {})
+        has_thread = bool(thread_info) or message.get("thread_ts") is not None
+        log_with_context(
+            logging.WARNING,
+            f"400 diagnostic: sender={sender_name}, user_id={user_id}, "
+            f"has_thread={has_thread}, "
+            f"has_text={bool(diag_source.get('text', '').strip())}, "
+            f"has_cards={bool(diag_source.get('cardsV2'))}",
+            channel=channel,
+            ts=ts,
+        )
 
     # Add to failed messages list for reporting
     failed_msg = FailedMessage(
@@ -596,7 +617,7 @@ def send_message(
 
         return SendResult(message_name=message_name)
     except HttpError as e:
-        return _handle_send_error(state, e, message, ts, channel)
+        return _handle_send_error(state, e, message, ts, channel, payload=payload)
 
 
 def track_message_stats(

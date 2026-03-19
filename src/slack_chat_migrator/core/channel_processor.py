@@ -156,13 +156,14 @@ class ChannelProcessor:
         )
 
         # Add historical memberships for newly created spaces
+        all_memberships_failed = False
         if is_newly_created:
             log_with_context(
                 logging.INFO,
                 f"{self.ctx.log_prefix}Step 2/6: Adding historical memberships for {channel}",
                 channel=channel,
             )
-            add_users_to_space(
+            members_added, members_failed = add_users_to_space(
                 self.ctx,
                 self.state,
                 self.chat,
@@ -171,6 +172,9 @@ class ChannelProcessor:
                 channel,
                 self.progress_tracker,
             )
+            if members_failed > 0 and members_added == 0:
+                channel_had_errors = True
+                all_memberships_failed = True
         else:
             log_with_context(
                 logging.INFO,
@@ -178,10 +182,21 @@ class ChannelProcessor:
                 channel=channel,
             )
 
-        # Process messages
-        processed_count, failed_count, channel_had_errors = self._process_messages(
-            ch_dir, space, channel_had_errors
-        )
+        # Skip message processing if all memberships failed — every message
+        # would fail with a 400 because the impersonated users aren't in the space.
+        if all_memberships_failed:
+            log_with_context(
+                logging.WARNING,
+                f"Skipping message processing for {channel} — all historical "
+                "memberships failed, so messages sent via impersonation would fail",
+                channel=channel,
+            )
+            processed_count, failed_count = 0, 0
+        else:
+            # Process messages
+            processed_count, failed_count, channel_had_errors = self._process_messages(
+                ch_dir, space, channel_had_errors
+            )
 
         # Complete import mode for newly created spaces
         if is_newly_created:
@@ -202,7 +217,9 @@ class ChannelProcessor:
         )
 
         # Check if we should abort
-        if self._should_abort_import(channel, processed_count, failed_count):
+        if self._should_abort_import(
+            channel, processed_count, failed_count, channel_had_errors
+        ):
             log_with_context(
                 logging.WARNING,
                 "Aborting import after first channel due to errors",
@@ -588,14 +605,22 @@ class ChannelProcessor:
         return channel_had_errors
 
     def _should_abort_import(
-        self, channel: str, processed_count: int, failed_count: int
+        self,
+        channel: str,
+        processed_count: int,
+        failed_count: int,
+        channel_had_errors: bool = False,
     ) -> bool:
         """Determine if the migration should abort after errors in a channel."""
-        # Only consider aborting if we had failures
-        if failed_count > 0:
+        # Only consider aborting if we had failures (messages or memberships)
+        if failed_count > 0 or channel_had_errors:
+            if failed_count > 0:
+                detail = f"{failed_count} message import errors"
+            else:
+                detail = "errors during migration (e.g. membership failures)"
             log_with_context(
                 logging.WARNING,
-                f"Channel '{channel}' had {failed_count} message import errors.",
+                f"Channel '{channel}' had {detail}.",
                 channel=channel,
             )
 

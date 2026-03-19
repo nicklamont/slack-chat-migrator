@@ -317,7 +317,7 @@ def _add_historical_members_batch(
     user_membership: dict[str, dict[str, Any]],
     active_users: set[str],
     progress_tracker: ProgressTracker | None = None,
-) -> None:
+) -> tuple[int, int]:
     """Add historical memberships to a Google Chat space via the API.
 
     Iterates over *user_membership*, resolves each Slack user ID to an
@@ -334,6 +334,9 @@ def _add_historical_members_batch(
         user_membership: Mapping of Slack user IDs to membership dicts
             (must already have ``join_time`` and ``leave_time`` populated).
         active_users: Set of user IDs considered active (used for summary log).
+
+    Returns:
+        A tuple of ``(added_count, failed_count)``.
     """
     if progress_tracker and user_membership:
         progress_tracker.member_phase_start(channel, total=len(user_membership))
@@ -351,7 +354,7 @@ def _add_historical_members_batch(
                 user_id=user_id,
                 channel=channel,
             )
-            # This will be automatically tracked in _get_internal_email when user lookup fails
+            failed_count += 1
             continue
 
         # Get the internal email for this user (handles external users)
@@ -412,9 +415,8 @@ def _add_historical_members_batch(
             else:
                 log_with_context(
                     logging.WARNING,
-                    f"Failed to add user {internal_email} to space {space}",
-                    error_code=e.resp.status,
-                    error_message=str(e),
+                    f"Failed to add user {internal_email} to space {space}: "
+                    f"HTTP {e.resp.status} - {e}",
                     channel=channel,
                 )
                 failed_count += 1
@@ -433,16 +435,27 @@ def _add_historical_members_batch(
 
     # Log summary
     active_count = len(active_users)
+    total_attempted = added_count + failed_count
     log_with_context(
         logging.INFO,
         f"Added {added_count} users to space {space} as historical memberships, {failed_count} failed",
         channel=channel,
     )
+    if failed_count > 0 and added_count == 0 and total_attempted > 0:
+        log_with_context(
+            logging.ERROR,
+            f"All {total_attempted} historical membership additions failed for {channel}. "
+            "Messages sent via user impersonation will likely fail because the "
+            "impersonated users are not members of the space. Check the warnings "
+            "above for specific error details per user.",
+            channel=channel,
+        )
     log_with_context(
         logging.DEBUG,
         f"Tracked {active_count} active users to add back after import completes",
         channel=channel,
     )
+    return added_count, failed_count
 
 
 def add_users_to_space(
@@ -453,7 +466,7 @@ def add_users_to_space(
     space: str,
     channel: str,
     progress_tracker: ProgressTracker | None = None,
-) -> None:
+) -> tuple[int, int]:
     """Add users to a space as historical members.
 
     Args:
@@ -464,6 +477,9 @@ def add_users_to_space(
         space: Google Chat space resource name (e.g. ``spaces/AAAA``).
         channel: Slack channel name used for log context and data lookup.
         progress_tracker: Optional progress tracker for emitting events.
+
+    Returns:
+        A tuple of ``(added_count, failed_count)``.
     """
     log_with_context(
         logging.DEBUG,
@@ -507,7 +523,7 @@ def add_users_to_space(
 
     _compute_membership_times(ctx, channel, user_membership)
 
-    _add_historical_members_batch(
+    return _add_historical_members_batch(
         ctx,
         state,
         chat,
