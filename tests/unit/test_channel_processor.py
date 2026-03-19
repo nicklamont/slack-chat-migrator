@@ -102,7 +102,10 @@ class TestProcessChannel:
         "slack_chat_migrator.core.channel_processor.send_message",
         return_value=SendResult(message_name="spaces/SPACE1/messages/MSG1"),
     )
-    @patch("slack_chat_migrator.core.channel_processor.add_users_to_space")
+    @patch(
+        "slack_chat_migrator.core.channel_processor.add_users_to_space",
+        return_value=(4, 0),
+    )
     @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     @patch(
         "slack_chat_migrator.core.channel_processor.create_space",
@@ -220,7 +223,10 @@ class TestProcessChannel:
         assert should_abort is False
         assert had_errors is True
 
-    @patch("slack_chat_migrator.core.channel_processor.add_users_to_space")
+    @patch(
+        "slack_chat_migrator.core.channel_processor.add_users_to_space",
+        return_value=(4, 0),
+    )
     @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     @patch(
         "slack_chat_migrator.core.channel_processor.create_space",
@@ -255,7 +261,10 @@ class TestProcessChannel:
         assert should_abort is True
         assert had_errors is True
 
-    @patch("slack_chat_migrator.core.channel_processor.add_users_to_space")
+    @patch(
+        "slack_chat_migrator.core.channel_processor.add_users_to_space",
+        return_value=(4, 0),
+    )
     @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     @patch(
         "slack_chat_migrator.core.channel_processor.create_space",
@@ -286,6 +295,43 @@ class TestProcessChannel:
             processor.process_channel(ch_dir)
 
         mock_delete.assert_called_once_with("spaces/SPACE1", "general")
+
+    @patch(
+        "slack_chat_migrator.core.channel_processor.add_users_to_space",
+        return_value=(0, 4),
+    )
+    @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
+    @patch(
+        "slack_chat_migrator.core.channel_processor.create_space",
+        return_value="spaces/SPACE1",
+    )
+    @patch(
+        "slack_chat_migrator.core.channel_processor.should_process_channel",
+        return_value=True,
+    )
+    def test_all_memberships_failed_skips_messages(
+        self, mock_should, mock_create, mock_add_reg, mock_add_hist, tmp_path
+    ):
+        """When all memberships fail, message processing is skipped entirely."""
+        processor = _make_processor(export_root=tmp_path)
+
+        ch_dir = tmp_path / "general"
+        ch_dir.mkdir()
+        (ch_dir / "2024-01-01.json").write_text(
+            json.dumps([{"type": "message", "ts": "1000.0", "text": "hello"}])
+        )
+
+        with (
+            patch.object(processor, "_setup_channel_logging"),
+            patch.object(processor, "_process_messages") as mock_process,
+            patch.object(processor, "_complete_import_mode", return_value=True),
+            patch.object(processor, "_add_members", return_value=True),
+        ):
+            should_abort, had_errors = processor.process_channel(ch_dir)
+
+        assert should_abort is False
+        assert had_errors is True
+        mock_process.assert_not_called()
 
     @patch(
         "slack_chat_migrator.core.channel_processor.should_process_channel",
@@ -872,7 +918,10 @@ class TestProgressTrackerIntegration:
         "slack_chat_migrator.core.channel_processor.send_message",
         return_value=SendResult(message_name="spaces/S/messages/M1"),
     )
-    @patch("slack_chat_migrator.core.channel_processor.add_users_to_space")
+    @patch(
+        "slack_chat_migrator.core.channel_processor.add_users_to_space",
+        return_value=(4, 0),
+    )
     @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     @patch(
         "slack_chat_migrator.core.channel_processor.create_space",
@@ -928,7 +977,10 @@ class TestProgressTrackerIntegration:
         "slack_chat_migrator.core.channel_processor.send_message",
         return_value=SendResult(error="API error"),
     )
-    @patch("slack_chat_migrator.core.channel_processor.add_users_to_space")
+    @patch(
+        "slack_chat_migrator.core.channel_processor.add_users_to_space",
+        return_value=(4, 0),
+    )
     @patch("slack_chat_migrator.core.channel_processor.add_regular_members")
     @patch(
         "slack_chat_migrator.core.channel_processor.create_space",

@@ -156,13 +156,14 @@ class ChannelProcessor:
         )
 
         # Add historical memberships for newly created spaces
+        all_memberships_failed = False
         if is_newly_created:
             log_with_context(
                 logging.INFO,
                 f"{self.ctx.log_prefix}Step 2/6: Adding historical memberships for {channel}",
                 channel=channel,
             )
-            add_users_to_space(
+            members_added, members_failed = add_users_to_space(
                 self.ctx,
                 self.state,
                 self.chat,
@@ -171,6 +172,9 @@ class ChannelProcessor:
                 channel,
                 self.progress_tracker,
             )
+            if members_failed > 0 and members_added == 0:
+                channel_had_errors = True
+                all_memberships_failed = True
         else:
             log_with_context(
                 logging.INFO,
@@ -178,10 +182,21 @@ class ChannelProcessor:
                 channel=channel,
             )
 
-        # Process messages
-        processed_count, failed_count, channel_had_errors = self._process_messages(
-            ch_dir, space, channel_had_errors
-        )
+        # Skip message processing if all memberships failed — every message
+        # would fail with a 400 because the impersonated users aren't in the space.
+        if all_memberships_failed:
+            log_with_context(
+                logging.WARNING,
+                f"Skipping message processing for {channel} — all historical "
+                "memberships failed, so messages sent via impersonation would fail",
+                channel=channel,
+            )
+            processed_count, failed_count = 0, 0
+        else:
+            # Process messages
+            processed_count, failed_count, channel_had_errors = self._process_messages(
+                ch_dir, space, channel_had_errors
+            )
 
         # Complete import mode for newly created spaces
         if is_newly_created:

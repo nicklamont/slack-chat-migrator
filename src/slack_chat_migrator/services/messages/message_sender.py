@@ -370,6 +370,22 @@ def _handle_send_error(
         error_details=error_details[:500] + ("..." if len(error_details) > 500 else ""),
     )
 
+    # Provide actionable diagnostics for the generic 400 error
+    if status_code == 400 and "Possible causes" in error_details:
+        user_id = message.get("user", "unknown")
+        sender_info = message.get("sender", {})
+        sender_name = sender_info.get("name", "unknown") if sender_info else "unknown"
+        thread_ts = message.get("thread_ts")
+        log_with_context(
+            logging.WARNING,
+            f"400 diagnostic: sender={sender_name}, user_id={user_id}, "
+            f"has_thread_ts={thread_ts is not None}, "
+            f"has_text={bool(message.get('text', '').strip())}, "
+            f"has_cards={bool(message.get('cardsV2'))}",
+            channel=channel,
+            ts=ts,
+        )
+
     # Add to failed messages list for reporting
     failed_msg = FailedMessage(
         channel=channel or "unknown",
