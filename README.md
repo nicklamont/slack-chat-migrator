@@ -204,6 +204,8 @@ space_mapping:
   "random": "AAAABbTr456"   # Use this space ID for the random channel
 ```
 
+Keys are channel names (a leading `#` is ignored) and values are space IDs, with or without the `spaces/` prefix. A `space_mapping` that isn't a mapping, an entry without a space ID, or a channel listed twice is a config error.
+
 When duplicate spaces are found, the tool will:
 1. Skip those specific channels (not abort the entire migration)
 2. Mark these channels as failed in the migration report

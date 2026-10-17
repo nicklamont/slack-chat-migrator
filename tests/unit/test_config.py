@@ -456,7 +456,60 @@ class TestMappingOptions:
         path = tmp_path / "config.yaml"
         path.write_text("space_mapping:\n  123: spaces/X\n  '#general': AAA\n")
         load_config(path)  # valid
-        assert load_space_mapping(path) == {"123": "spaces/X", "general": "AAA"}
+        # The "spaces/" prefix is optional: discovery compares bare IDs.
+        assert load_space_mapping(path) == {"123": "X", "general": "AAA"}
+
+    def test_space_mapping_with_only_comments_is_empty(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("space_mapping:\n  # general: AAA\n")
+        load_config(path)
+        assert load_space_mapping(path) == {}
+
+    @pytest.mark.parametrize(
+        ("text", "match"),
+        [
+            ("space_mapping: general\n", "must be a mapping"),
+            ("space_mapping:\n  general:\n", "'general' must be a space ID"),
+            ("space_mapping:\n  general: ''\n", "'general' must be a space ID"),
+            ("space_mapping:\n  general: [AAA]\n", "'general' must be a space ID"),
+            ("space_mapping:\n  general: 12\n", "'general' must be a space ID"),
+            ("space_mapping:\n  true: AAA\n", "must be a channel name"),
+            ("space_mapping:\n  '#': AAA\n", "is not a channel name"),
+            ("space_mapping:\n  general: spaces/A/B\n", "invalid space ID"),
+            ("space_mapping:\n  general: AA AA\n", "invalid space ID"),
+            ("space_mapping:\n  general: 'spaces/'\n", "invalid space ID"),
+            (
+                "space_mapping:\n  general: AAA\n  '#general': BBB\n",
+                "'general' more than once",
+            ),
+        ],
+    )
+    def test_malformed_space_mapping_is_an_error(self, tmp_path, text, match):
+        path = tmp_path / "config.yaml"
+        path.write_text(text)
+        with pytest.raises(ConfigError, match=match):
+            load_config(path)
+        # A library caller that passes its own MigrationConfig still gets the
+        # error from the config file's space_mapping.
+        with pytest.raises(ConfigError, match=match):
+            load_space_mapping(path)
+
+    def test_load_space_mapping_reports_unreadable_files(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("space_mapping: {general: AAA\n")
+        with pytest.raises(ConfigError, match="not valid YAML"):
+            load_space_mapping(path)
+        path.write_text("- general\n")
+        with pytest.raises(ConfigError, match="top level must be a mapping"):
+            load_space_mapping(path)
+
+    def test_load_space_mapping_without_file_or_option(self, tmp_path):
+        assert load_space_mapping(tmp_path / "missing.yaml") == {}
+        path = tmp_path / "config.yaml"
+        path.write_text("")
+        assert load_space_mapping(path) == {}
+        path.write_text("max_retries: 2\n")
+        assert load_space_mapping(path) == {}
 
 
 class TestUnknownKeys:

@@ -30,7 +30,7 @@ exclude_channels:
 #
 # You can then add the mappings below and re-run the migration for just those channels.
 space_mapping:
-  # Format: "channel_name": "space_id"  (without the "spaces/" prefix)
+  # Format: "channel_name": "space_id"  (the "spaces/" prefix is optional)
   # Example for channel "general" with space ID "AAAAAgcE123":
   # "general": "AAAAAgcE123"
 

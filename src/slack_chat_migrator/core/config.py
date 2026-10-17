@@ -196,9 +196,9 @@ class MigrationConfig:
             )
         _check_unknown_keys(data, cls)
 
-        # ``space_mapping`` lives on MigrationState, but validate its shape
-        # here so a malformed value fails before any API call.
-        _get_mapping(data, "space_mapping")
+        # ``space_mapping`` lives on MigrationState, but validate it here so a
+        # malformed value fails before any API call.
+        parse_space_mapping(data.get("space_mapping"))
 
         try:
             return cls(
@@ -483,14 +483,7 @@ def load_config(config_path: Path, *, required: bool = False) -> MigrationConfig
         )
         return MigrationConfig.from_dict({})
 
-    try:
-        with open(config_path, encoding="utf-8") as f:
-            loaded = yaml.safe_load(f)
-    except yaml.YAMLError as e:
-        raise ConfigError(f"Config file {config_path} is not valid YAML: {e}") from e
-    except (OSError, UnicodeDecodeError) as e:
-        raise ConfigError(f"Could not read config file {config_path}: {e}") from e
-
+    loaded = _read_yaml(config_path)
     try:
         config = MigrationConfig.from_dict({} if loaded is None else loaded)
     except ConfigError as e:
@@ -500,6 +493,82 @@ def load_config(config_path: Path, *, required: bool = False) -> MigrationConfig
     return config
 
 
+def _read_yaml(config_path: Path) -> Any:
+    """Read and parse a YAML config file.
+
+    Raises:
+        ConfigError: If the file can't be read or isn't valid YAML.
+    """
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise ConfigError(f"Config file {config_path} is not valid YAML: {e}") from e
+    except (OSError, UnicodeDecodeError) as e:
+        raise ConfigError(f"Could not read config file {config_path}: {e}") from e
+
+
+#: Prefix of Chat space resource names; ``space_mapping`` values are bare IDs.
+_SPACE_NAME_PREFIX = "spaces/"
+
+
+def parse_space_mapping(value: Any) -> dict[str, str]:
+    """Validate a raw ``space_mapping`` value (channel name to space ID).
+
+    Channel names are coerced to strings (so ``123:`` matches channel
+    ``"123"``) and lose a leading ``#``.  Space IDs are the bare ID shown in
+    the duplicate-space report (``AAAAAgcE123``); a ``spaces/`` prefix is
+    removed.
+
+    Args:
+        value: The ``space_mapping`` value from the config file.
+
+    Returns:
+        A dict mapping channel names to space IDs (empty for an empty value).
+
+    Raises:
+        ConfigError: If *value* isn't a mapping, a channel name is empty or
+            not a name, a space ID is missing or malformed, or a channel is
+            listed twice.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ConfigError(
+            "Config option 'space_mapping' must be a mapping of channel name:"
+            f" space ID, got {_describe(value)}"
+        )
+    result: dict[str, str] = {}
+    for raw_channel, raw_space in value.items():
+        if isinstance(raw_channel, bool) or not isinstance(raw_channel, (str, int)):
+            raise ConfigError(
+                f"space_mapping key {raw_channel!r} must be a channel name"
+            )
+        channel = normalize_channel_name(str(raw_channel))
+        if not channel:
+            raise ConfigError(
+                f"space_mapping key {raw_channel!r} is not a channel name"
+            )
+        if not isinstance(raw_space, str) or not raw_space.strip():
+            raise ConfigError(
+                f"space_mapping entry {channel!r} must be a space ID such as"
+                f" 'AAAAAgcE123', got {_describe(raw_space)}"
+            )
+        space_id = raw_space.strip()
+        if space_id.startswith(_SPACE_NAME_PREFIX):
+            space_id = space_id[len(_SPACE_NAME_PREFIX) :]
+        if not space_id or "/" in space_id or any(c.isspace() for c in space_id):
+            raise ConfigError(
+                f"space_mapping entry {channel!r} has an invalid space ID"
+                f" {raw_space!r}; use the ID shown in the duplicate-space"
+                " report, such as 'AAAAAgcE123'"
+            )
+        if channel in result:
+            raise ConfigError(f"space_mapping lists channel {channel!r} more than once")
+        result[channel] = space_id
+    return result
+
+
 def load_space_mapping(config_path: Path) -> dict[str, str]:
     """Load space_mapping overrides from a YAML config file.
 
@@ -507,31 +576,33 @@ def load_space_mapping(config_path: Path) -> dict[str, str]:
     conflicts during migration.  It is stored on
     :class:`~slack_chat_migrator.core.state.MigrationState`, not on
     :class:`MigrationConfig`, but is still authored by users in their
-    config YAML.  Channel names are coerced to strings (so ``123:`` matches
-    channel ``"123"``) and a leading ``#`` is stripped.
+    config YAML.  See :func:`parse_space_mapping` for the accepted shape.
 
     Args:
         config_path: Path to the config YAML file.
 
     Returns:
-        A dict mapping channel names to space IDs, or an empty dict.
+        A dict mapping channel names to space IDs; empty when the file
+        doesn't exist or has no ``space_mapping``.
+
+    Raises:
+        ConfigError: If the file can't be read, isn't valid YAML, or its
+            ``space_mapping`` is malformed.
     """
     if not config_path.exists():
         return {}
+    raw = _read_yaml(config_path)
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ConfigError(
+            f"Invalid config file {config_path}: the top level must be a"
+            f" mapping of option: value pairs, got {_describe(raw)}"
+        )
     try:
-        with open(config_path, encoding="utf-8") as f:
-            raw = yaml.safe_load(f)
-        if raw and isinstance(raw, Mapping):
-            mapping = raw.get("space_mapping") or {}
-            if isinstance(mapping, Mapping):
-                return {
-                    normalize_channel_name(str(channel)): str(space).strip()
-                    for channel, space in mapping.items()
-                    if space is not None
-                }
-    except (yaml.YAMLError, OSError, UnicodeDecodeError):
-        pass
-    return {}
+        return parse_space_mapping(raw.get("space_mapping"))
+    except ConfigError as e:
+        raise ConfigError(f"Invalid config file {config_path}: {e}") from e
 
 
 def should_process_channel(channel_name: str, config: MigrationConfig) -> bool:
