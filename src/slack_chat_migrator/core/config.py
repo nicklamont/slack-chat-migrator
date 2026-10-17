@@ -464,7 +464,10 @@ def _get_mapping(data: Mapping[str, Any], key: str) -> dict[str, str]:
                 f"Config option '{key}' entry {raw_key!r} must be a string,"
                 f" got {_describe(raw_value)}"
             )
-        result[_mapping_key(raw_key, f"Config option '{key}'")] = str(raw_value)
+        name = _mapping_key(raw_key, f"Config option '{key}'")
+        if name in result:
+            raise ConfigError(f"Config option '{key}' lists {name!r} more than once")
+        result[name] = str(raw_value)
     return result
 
 
@@ -516,9 +519,12 @@ def _check_field_types(config: Any) -> None:
 def _mapping_key(raw_key: Any, option: str) -> str:
     """Return a mapping key from the config as a string.
 
-    YAML turns some unquoted keys into other types: ``yes``/``no``/``on``/
-    ``off`` into booleans and ``2024-01-01`` into a date.  Their text can't
-    be recovered, so they are rejected with a hint to quote them.
+    Config files are read with :class:`_UniqueKeyLoader`, which keeps
+    integer-looking keys (``007``, ``+1``) as the text written.  YAML still
+    reads unquoted ``yes``/``no``/``on``/``off`` as booleans, ``null``/``~``
+    as null, ``2024-01-01`` as a date and ``1.5`` as a number; their text
+    can't be recovered, so they are rejected with a hint to quote them.
+    An integer passed in directly (not from YAML) becomes its digits.
 
     Args:
         raw_key: The key as YAML parsed it.
@@ -546,8 +552,20 @@ def _mapping_key(raw_key: Any, option: str) -> str:
             f" {raw_key.isoformat()}; quote it, for example"
             f" '{raw_key.isoformat()}': ..."
         )
+    if raw_key is None:
+        raise ConfigError(
+            f"{option} has a key that YAML read as null (written as null, ~"
+            " or nothing before the colon); quote it if it is a name, for"
+            " example 'null': ..."
+        )
+    if isinstance(raw_key, float):
+        raise ConfigError(
+            f"{option} has a key that YAML read as the number {raw_key};"
+            " quote it as written, for example '1.50': ..."
+        )
     raise ConfigError(
-        f"{option} key {raw_key!r} isn't a name; quote it, for example '{raw_key}': ..."
+        f"{option} key {raw_key!r} isn't a name; quote it as written, for"
+        " example 'name': ..."
     )
 
 
@@ -667,28 +685,69 @@ def load_config(config_path: Path, *, required: bool = False) -> MigrationConfig
     return config
 
 
-class _UniqueKeyLoader(yaml.SafeLoader):
-    """A ``SafeLoader`` that rejects a key repeated in the same mapping.
+_YAML_STR_TAG = "tag:yaml.org,2002:str"
+_YAML_INT_TAG = "tag:yaml.org,2002:int"
+_YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
+_YAML_VALUE_TAG = "tag:yaml.org,2002:value"
 
-    PyYAML keeps the last of two identical keys without a word, so pasting
-    the duplicate-space block the tool logs (one ``"general": ...`` line per
-    candidate space) or writing an option twice would silently pick one.
-    Keys pulled in with a ``<<`` merge may still be overridden.
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """A ``SafeLoader`` for config files: keys as written, none repeated.
+
+    - **Duplicates.** PyYAML keeps the last of two identical keys without a
+      word, so pasting the duplicate-space block the tool logs (one
+      ``"general": ...`` line per candidate space) or writing an option
+      twice would silently pick one.  A key repeated in the same mapping is
+      an error that names both lines.  Keys pulled in with a ``<<`` merge
+      may still be overridden.
+    - **Integer keys keep their text.** YAML 1.1 reads unquoted ``007``,
+      ``0x10``, ``1_000``, ``+1`` and ``1:30`` as numbers (7, 16, 1000, 1,
+      90), which would rename a channel or emoji silently.  A plain key
+      that resolves to an integer is kept as the text written, so ``1``
+      and ``"1"`` are the same (duplicate) key.  Booleans, dates and nulls
+      as keys are left for ``_mapping_key`` to reject with a quoting hint.
+
+    The check runs in ``flatten_mapping``, once per mapping node and before
+    merges are applied, so a merge source is checked as written, both when
+    it is merged in and when it is used on its own.
     """
 
-    def construct_mapping(
-        self, node: yaml.MappingNode, deep: bool = False
-    ) -> dict[Any, Any]:
-        """Construct a mapping, raising on a repeated key.
+    def __init__(self, stream: Any) -> None:
+        super().__init__(stream)
+        self._checked_nodes: set[int] = set()
+
+    def flatten_mapping(self, node: yaml.MappingNode) -> None:
+        """Check *node*'s own keys once, then apply ``<<`` merges.
 
         Raises:
             yaml.constructor.ConstructorError: If a key appears twice.
         """
+        if id(node) not in self._checked_nodes:
+            self._checked_nodes.add(id(node))
+            self._check_keys(node)
+        super().flatten_mapping(node)
+
+    def _check_keys(self, node: yaml.MappingNode) -> None:
         first_line: dict[Any, int] = {}
-        for key_node, _ in node.value:
-            if key_node.tag == "tag:yaml.org,2002:merge":
+        for index, (key_node, value_node) in enumerate(node.value):
+            if key_node.tag == _YAML_MERGE_TAG:
                 continue
-            key = self.construct_object(key_node, deep=deep)
+            if key_node.tag == _YAML_VALUE_TAG:
+                key_node.tag = _YAML_STR_TAG  # "=", as SafeLoader reads it
+            if (
+                isinstance(key_node, yaml.ScalarNode)
+                and key_node.style is None
+                and key_node.tag == _YAML_INT_TAG
+            ):
+                # A new node: an anchored scalar may be used elsewhere too.
+                key_node = yaml.ScalarNode(
+                    _YAML_STR_TAG,
+                    key_node.value,
+                    key_node.start_mark,
+                    key_node.end_mark,
+                )
+                node.value[index] = (key_node, value_node)
+            key = self.construct_object(key_node, deep=True)
             try:
                 seen = key in first_line
             except TypeError:  # unhashable; the base class reports it
@@ -702,7 +761,6 @@ class _UniqueKeyLoader(yaml.SafeLoader):
                     key_node.start_mark,
                 )
             first_line[key] = key_node.start_mark.line + 1
-        return super().construct_mapping(node, deep=deep)
 
 
 def _read_yaml(config_path: Path) -> Any:

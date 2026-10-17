@@ -603,7 +603,8 @@ class TestMappingOptions:
             ("space_mapping:\n  on: AAA\n", "boolean True.*quote it"),
             ("space_mapping:\n  2024-01-01: AAA\n", "date 2024-01-01; quote it"),
             ("space_mapping:\n  1.5: AAA\n", "quote it"),
-            ("space_mapping:\n  ~: AAA\n", "isn't a name"),
+            ("space_mapping:\n  ~: AAA\n", "read as null.*'null'"),
+            ("space_mapping:\n  1: AAA\n  true: BBB\n", "boolean True"),
             ("space_mapping:\n  '#': AAA\n", "is not a channel name"),
             ("space_mapping:\n  general: spaces/A/B\n", "invalid space ID"),
             ("space_mapping:\n  general: AA AA\n", "invalid space ID"),
@@ -642,6 +643,40 @@ class TestMappingOptions:
         assert load_space_mapping(path) == {}
 
 
+class TestIntegerLookingKeys:
+    """YAML 1.1 reads 007, 0x10, 1_000, +1 and 1:30 as numbers; keep the text."""
+
+    def test_space_mapping_keys_keep_their_text(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "space_mapping:\n  007: AAA\n  0x10: BBB\n  1_000: CCC\n"
+            "  1:30: DDD\n  123: EEE\n"
+        )
+        assert load_space_mapping(path) == {
+            "007": "AAA",
+            "0x10": "BBB",
+            "1_000": "CCC",
+            "1:30": "DDD",
+            "123": "EEE",
+        }
+
+    def test_plus_one_emoji_can_be_overridden(self, tmp_path):
+        from slack_chat_migrator.utils.emoji import slack_emoji_to_unicode
+
+        config = _load(tmp_path, "custom_emoji_map:\n  +1: ':tada:'\n  007: x\n")
+        assert config.custom_emoji_map == {"+1": ":tada:", "007": "x"}
+        assert slack_emoji_to_unicode("+1", config.custom_emoji_map) == "\U0001f389"
+
+    def test_numeric_values_are_unchanged(self, tmp_path):
+        config = _load(tmp_path, "max_retries: 0x3\nretry_delay: 1_0\n")
+        assert config.max_retries == 3
+        assert config.retry_delay == 10
+
+    def test_direct_mapping_with_colliding_keys(self):
+        with pytest.raises(ConfigError, match="'1' more than once"):
+            MigrationConfig.from_dict({"user_mapping_overrides": {1: "a", "1": "b"}})
+
+
 class TestDuplicateKeys:
     """A key repeated in the same mapping is an error, not "last one wins"."""
 
@@ -674,6 +709,35 @@ class TestDuplicateKeys:
     def test_repeated_options_are_errors(self, tmp_path, text):
         with pytest.raises(ConfigError, match="duplicate key"):
             _load(tmp_path, text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "custom_emoji_map:\n  1: a\n  '1': b\n",
+            "user_mapping_overrides:\n  123: a@x.com\n  '123': b@x.com\n",
+            "space_mapping:\n  007: AAA\n  '007': BBB\n",
+        ],
+    )
+    def test_number_and_quoted_text_are_the_same_key(self, tmp_path, text):
+        with pytest.raises(ConfigError, match="duplicate key"):
+            _load(tmp_path, text)
+
+    def test_merge_source_with_its_own_merge_is_not_a_duplicate(self, tmp_path):
+        config = _load(
+            tmp_path,
+            "x-defs:\n  inner: &b\n    <<: {name: A}\n    name: B\n"
+            "shared_drive:\n  <<: *b\n",
+        )
+        assert config.shared_drive.name == "B"
+
+    def test_duplicates_inside_an_inline_merge_source_are_caught(self, tmp_path):
+        with pytest.raises(ConfigError, match="duplicate key 'name'"):
+            _load(tmp_path, "shared_drive:\n  <<: {name: A, name: B}\n")
+
+    def test_equals_sign_key_still_loads(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="slack_chat_migrator"):
+            _load(tmp_path, "=: x\nmax_retries: 2\n")
+        assert "Ignoring unknown config option(s): =" in caplog.text
 
     def test_merge_keys_may_still_be_overridden(self, tmp_path):
         config = _load(
