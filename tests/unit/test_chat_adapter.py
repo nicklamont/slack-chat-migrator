@@ -89,8 +89,24 @@ class TestCreateMessage:
         body = {"text": "hello"}
         adapter.create_message("spaces/AAA", body)
         mock_service.spaces().messages().create.assert_called_once_with(
-            parent="spaces/AAA", body=body
+            parent="spaces/AAA",
+            body={"text": "hello", "markupSyntax": "MARKUP_SYNTAX_CHAT"},
         )
+
+    def test_pins_chat_markup_syntax_without_mutating_caller(
+        self, adapter, mock_service
+    ):
+        body = {"text": "*bold*"}
+        adapter.create_message("spaces/AAA", body)
+        sent = mock_service.spaces().messages().create.call_args.kwargs["body"]
+        assert sent["markupSyntax"] == "MARKUP_SYNTAX_CHAT"
+        assert "markupSyntax" not in body
+
+    def test_respects_explicit_markup_syntax(self, adapter, mock_service):
+        body = {"text": "**bold**", "markupSyntax": "MARKUP_SYNTAX_MARKDOWN"}
+        adapter.create_message("spaces/AAA", body)
+        sent = mock_service.spaces().messages().create.call_args.kwargs["body"]
+        assert sent["markupSyntax"] == "MARKUP_SYNTAX_MARKDOWN"
 
     def test_with_message_id_and_reply_option(self, adapter, mock_service):
         body = {"text": "reply"}
@@ -102,7 +118,7 @@ class TestCreateMessage:
         )
         mock_service.spaces().messages().create.assert_called_once_with(
             parent="spaces/AAA",
-            body=body,
+            body={**body, "markupSyntax": "MARKUP_SYNTAX_CHAT"},
             messageId="client-123",
             messageReplyOption="REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
         )

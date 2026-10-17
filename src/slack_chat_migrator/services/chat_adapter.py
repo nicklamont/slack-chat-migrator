@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from slack_chat_migrator.constants import MARKUP_SYNTAX
+
 
 class ChatAdapter:
     """Thin typed wrapper around the Google Chat API service."""
@@ -131,6 +133,12 @@ class ChatAdapter:
         Returns:
             Created message resource dict.
         """
+        # Pin the markup syntax explicitly: newly created Chat apps and
+        # config-less Cloud projects default to Markdown, which would render
+        # the Chat-syntax text we generate (``*bold*``, ``<url|text>``,
+        # ``<users/...>``) incorrectly.
+        if "markupSyntax" not in body:
+            body = {**body, "markupSyntax": MARKUP_SYNTAX}
         kwargs: dict[str, Any] = {"parent": parent, "body": body}
         if message_id is not None:
             kwargs["messageId"] = message_id

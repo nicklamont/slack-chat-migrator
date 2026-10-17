@@ -36,6 +36,9 @@ IMPORT_MODE_DAYS_LIMIT = 90
 
 # --- Google Chat API ---
 MEMBER_TYPE_HUMAN = "HUMAN"
+# Message text is generated in Chat markup syntax (``*bold*``, ``<url|text>``).
+# New Chat apps default to Markdown, so every create request pins this value.
+MARKUP_SYNTAX = "MARKUP_SYNTAX_CHAT"
 
 # --- Google Drive Roles ---
 DRIVE_ROLE_EDITOR = "editor"
