@@ -9,7 +9,6 @@ import click
 
 from slack_chat_migrator.cli.common import (
     EXIT_FAILURE,
-    EXIT_INTERRUPTED,
     cli,
     common_options,
     config_was_given,
@@ -50,10 +49,10 @@ def cleanup(
     mode, asks for confirmation (skip with --yes), and calls completeImport()
     on each.  Does not add members — use ``migrate --resume`` for that.
     Exits 1 if the config, the credentials or the list of spaces can't be
-    loaded, if the user declines or presses Ctrl-C at the prompt, if a
-    confirmation is needed without a terminal (use --yes), or if any space
-    could not be completed.  Exits 130 on Ctrl-C while spaces are being
-    listed or completed.
+    loaded, if the user declines at the prompt, if a confirmation is
+    needed without a terminal (use --yes), or if any space could not be
+    completed.  Exits 130 on Ctrl-C (also at the prompt) or end of input
+    at the prompt.
 
     Args:
         creds_path: Path to service account credentials JSON.
@@ -83,11 +82,7 @@ def cleanup(
         result = cleanup_import_mode_spaces(
             ChatAdapter(chat), confirm=completion_confirmer(yes)
         )
-    except KeyboardInterrupt:
-        # Without this, click turns Ctrl-C into "Aborted!" with exit 1.
-        click.echo("\nInterrupted.", err=True)
-        sys.exit(EXIT_INTERRUPTED)
-    except Exception as e:
+    except Exception as e:  # Ctrl-C is left to the CLI group (exit 130)
         handle_exception(e)
         sys.exit(EXIT_FAILURE)
 

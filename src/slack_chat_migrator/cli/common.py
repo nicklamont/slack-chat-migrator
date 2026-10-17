@@ -33,14 +33,31 @@ logger = logging.getLogger("slack_chat_migrator")
 
 #: The run succeeded with no errors.
 EXIT_OK = 0
-#: The run failed, was aborted or cancelled, or completed with errors
-#: (channels with errors, incomplete imports, failed completions,
+#: The run failed, was aborted, declined at a prompt, or completed with
+#: errors (channels with errors, incomplete imports, failed completions,
 #: unmapped users in validation).
 EXIT_FAILURE = 1
 #: Click usage errors (missing or invalid options) exit with 2.
 EXIT_USAGE = 2
-#: Interrupted with Ctrl-C (128 + SIGINT).
+#: Interrupted with Ctrl-C (128 + SIGINT), also at a prompt, or end of
+#: input at a prompt.
 EXIT_INTERRUPTED = 130
+
+
+class PromptCancelled(KeyboardInterrupt):
+    """Ctrl-C or end of input (Ctrl-D) at a prompt.
+
+    It is a :class:`KeyboardInterrupt`, so every command stops as it does
+    for Ctrl-C, and the CLI group exits with :data:`EXIT_INTERRUPTED`.
+    """
+
+    def __init__(self, message: str = "Cancelled.") -> None:
+        super().__init__(message)
+
+
+def _is_prompt_cancel(error: click.Abort) -> bool:
+    """True if click raised *error* for Ctrl-C or end of input at a prompt."""
+    return isinstance(error.__context__, (KeyboardInterrupt, EOFError))
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +105,27 @@ class DefaultGroup(click.Group):
             )
             args = ["migrate", *args]
         return super().parse_args(ctx, args)
+
+    def invoke(self, ctx: click.Context) -> Any:
+        """Run the command; Ctrl-C anywhere, even at a prompt, exits 130.
+
+        Click turns Ctrl-C (and end of input) at a prompt into
+        ``click.Abort``, and Ctrl-C elsewhere into the same "Aborted!" with
+        exit 1.  Handling both here gives every command one behaviour: a
+        short line on stderr and exit :data:`EXIT_INTERRUPTED`.  An Abort
+        raised on purpose (a declined ``abort=True`` prompt) is left alone.
+        """
+        try:
+            return super().invoke(ctx)
+        except click.Abort as e:
+            if not _is_prompt_cancel(e):
+                raise
+            click.echo("\nCancelled.", err=True)
+            raise click.exceptions.Exit(EXIT_INTERRUPTED) from None
+        except KeyboardInterrupt as e:
+            cancelled = isinstance(e, PromptCancelled)
+            click.echo("\nCancelled." if cancelled else "\nInterrupted.", err=True)
+            raise click.exceptions.Exit(EXIT_INTERRUPTED) from None
 
 
 # ---------------------------------------------------------------------------
@@ -348,12 +386,13 @@ def confirm_action(prompt: str, *, assume_yes: bool, default: bool = False) -> b
         default: The default answer at the prompt.
 
     Returns:
-        True to proceed, False if the user declined (or pressed Ctrl-D/Ctrl-C
-        at the prompt).
+        True to proceed, False if the user declined.
 
     Raises:
         ConfirmationRequiredError: If stdin isn't interactive and
             *assume_yes* is False, so nobody can answer.
+        PromptCancelled: On Ctrl-C or end of input at the prompt (a
+            KeyboardInterrupt: the command stops and exits 130).
     """
     if assume_yes:
         log_with_context(logging.INFO, f"{prompt} [yes: --yes given]")
@@ -366,8 +405,8 @@ def confirm_action(prompt: str, *, assume_yes: bool, default: bool = False) -> b
         )
     try:
         return click.confirm(prompt, default=default)
-    except click.Abort:
-        return False
+    except click.Abort as e:
+        raise PromptCancelled() from e
 
 
 # ---------------------------------------------------------------------------

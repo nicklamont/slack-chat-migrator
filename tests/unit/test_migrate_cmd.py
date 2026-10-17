@@ -213,14 +213,21 @@ class TestConfirmAction:
             with pytest.raises(ConfirmationRequiredError, match="--yes"):
                 confirm_action("Go?", assume_yes=False)
 
-    def test_eof_at_prompt_is_a_no(self) -> None:
+    def test_ctrl_c_or_eof_at_prompt_cancels(self) -> None:
+        """Ctrl-C/Ctrl-D at the prompt stops the command (exit 130), not "no"."""
         import click
+
+        from slack_chat_migrator.cli.common import PromptCancelled
 
         with (
             patch(INTERACTIVE, return_value=True),
             patch("click.confirm", side_effect=click.Abort()),
+            # Caught as KeyboardInterrupt so a regression fails this test
+            # instead of interrupting the pytest session.
+            pytest.raises(KeyboardInterrupt) as raised,
         ):
-            assert confirm_action("Go?", assume_yes=False) is False
+            confirm_action("Go?", assume_yes=False)
+        assert isinstance(raised.value, PromptCancelled)
 
 
 # ---------------------------------------------------------------------------

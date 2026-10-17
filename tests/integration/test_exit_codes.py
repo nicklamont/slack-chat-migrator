@@ -147,9 +147,11 @@ class TestLivePrompts:
         assert result.exit_code == 1, result.output
         assert "Migration cancelled" in result.output
 
-    def test_eof_at_prompt_exits_1(self, tmp_path: Path) -> None:
+    def test_eof_at_prompt_exits_130(self, tmp_path: Path) -> None:
+        """End of input (Ctrl-D) at a prompt is a cancel, like Ctrl-C."""
         result = _live(tmp_path, _export(tmp_path), stdin="")
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 130, result.output
+        assert "Migration cancelled" not in result.output
 
     def test_no_tty_without_yes_exits_1_before_doing_anything(
         self, tmp_path: Path

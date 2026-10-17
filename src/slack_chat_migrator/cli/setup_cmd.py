@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 from rich.markup import escape
 
-from slack_chat_migrator.cli.common import EXIT_INTERRUPTED, cli
+from slack_chat_migrator.cli.common import cli
 from slack_chat_migrator.cli.renderers import (
     error_panel,
     get_console,
@@ -93,12 +93,8 @@ def setup() -> None:
     service account setup, and delegation verification.
     Requires: pip install "slack-chat-migrator[setup]"
     """
-    try:
-        _run_setup()
-    except KeyboardInterrupt:
-        # Without this, click turns Ctrl-C into "Aborted!" with exit 1.
-        click.echo("\nInterrupted.", err=True)
-        sys.exit(EXIT_INTERRUPTED)
+    # Ctrl-C, here or at a prompt, exits 130 (handled by the CLI group).
+    _run_setup()
 
 
 def _run_setup() -> None:
