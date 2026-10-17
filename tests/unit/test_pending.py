@@ -136,6 +136,11 @@ class TestFindFlagged:
         queries = [kw for name, kw in fake.calls if name == "files.list"]
         assert {kw["driveId"] for kw in queries} == {"SD"}
         assert all(kw["pageSize"] == 1000 for kw in queries)
+        # Drive requires both flags with corpora=drive (FakeDrive checks too).
+        for kw in queries:
+            assert kw["corpora"] == "drive"
+            assert kw["includeItemsFromAllDrives"] is True
+            assert kw["supportsAllDrives"] is True
         assert {kw["q"] for kw in queries} == {
             "appProperties has { key='slackGrantPending' and value='true' }"
             " and trashed=false",

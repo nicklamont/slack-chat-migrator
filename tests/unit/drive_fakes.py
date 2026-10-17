@@ -4,6 +4,11 @@ It understands just enough of the API for the attachment pipeline: the
 ``q`` clauses the code sends, pagination, roles, ownership transfer,
 permission listing, shared drives and batch requests.  Every call is logged
 in ``calls`` as ``(method, kwargs)`` so tests can count round trips.
+
+Like Drive, it answers 404 for a shared drive's file (or for creating a file
+in a shared drive's folder) unless ``supportsAllDrives=True`` is passed,
+lists shared drive items only with ``includeItemsFromAllDrives=True``, and
+rejects ``corpora="drive"`` without ``driveId`` and both of those flags.
 """
 
 from __future__ import annotations
@@ -112,6 +117,26 @@ class FakeDrive:
             file_id, name=name, parents=[parent], mimeType=FOLDER_MIME, **fields
         )
 
+    def drive_of(self, file_id: str) -> str | None:
+        """The shared drive that holds *file_id* (or is it), if any."""
+        drive_ids = {d["id"] for d in self.drives_db}
+        seen: set[str] = set()
+        pending = [file_id]
+        while pending:
+            current = pending.pop()
+            if current in drive_ids:
+                return current
+            if current in seen:
+                continue
+            seen.add(current)
+            pending.extend((self.files_db.get(current) or {}).get("parents", []))
+        return None
+
+    def check_access(self, file_id: str, kw: dict[str, Any]) -> None:
+        """Answer 404 for a shared drive's file without supportsAllDrives."""
+        if self.drive_of(file_id) and kw.get("supportsAllDrives") is not True:
+            raise http_error(404, f"File not found: {file_id}.")
+
     def count(self, method: str) -> int:
         return sum(1 for name, _ in self.calls if name == method)
 
@@ -211,10 +236,32 @@ class _Files:
         def run():
             q = kw.get("q", "")
             _check_file_query(q)
+            all_drives = kw.get("includeItemsFromAllDrives") is True
+            corpus_drive = None
+            if kw.get("corpora") == "drive":
+                if not (
+                    kw.get("driveId")
+                    and all_drives
+                    and kw.get("supportsAllDrives") is True
+                ):
+                    raise http_error(
+                        400,
+                        "corpora=drive needs driveId, includeItemsFromAllDrives"
+                        " and supportsAllDrives",
+                    )
+                corpus_drive = kw["driveId"]
             error = self.d.fail_query(q) if self.d.fail_query else None
             if error is not None:
                 raise error
-            matched = [dict(f) for f in self.d.files_db.values() if _matches(f, q)]
+            matched = []
+            for f in self.d.files_db.values():
+                drive = self.d.drive_of(f["id"])
+                if corpus_drive is not None and drive != corpus_drive:
+                    continue
+                if drive and not all_drives:
+                    continue
+                if _matches(f, q):
+                    matched.append(dict(f))
             page, token = _page(matched, kw, 100, self.d.file_page_cap)
             out: dict[str, Any] = {"files": page}
             if token:
@@ -228,6 +275,8 @@ class _Files:
 
         def run():
             body = kw["body"]
+            for parent in body.get("parents", []):
+                self.d.check_access(parent, kw)
             target = body.get("mimeType")
             if (
                 self.d.fail_conversion
@@ -282,6 +331,7 @@ class _Files:
             record = self.d.files_db.get(kw["fileId"])
             if not record:
                 raise http_error(404, "not found")
+            self.d.check_access(kw["fileId"], kw)
             return dict(record)
 
         return Req(run, "files.get", kw, self.d)
@@ -293,6 +343,7 @@ class _Files:
             record = self.d.files_db.get(kw["fileId"])
             if not record:
                 raise http_error(404, "not found")
+            self.d.check_access(kw["fileId"], kw)
             body = kw.get("body", {})
             if self.d.fail_restriction and "inheritedPermissionsDisabled" in body:
                 raise http_error(403, "insufficient role to limit access")
@@ -326,6 +377,7 @@ class _Permissions:
         self.d.calls.append(("permissions.create", kw))
 
         def run():
+            self.d.check_access(kw["fileId"], kw)
             body = kw["body"]
             if body["role"] not in VALID_ROLES:
                 raise http_error(400, "The provided role is not valid")
@@ -357,6 +409,7 @@ class _Permissions:
         self.d.calls.append(("permissions.list", kw))
 
         def run():
+            self.d.check_access(kw["fileId"], kw)
             perms = list(self.d.permissions_db.get(kw["fileId"], []))
             page, token = _page(perms, kw, 100, None)
             out: dict[str, Any] = {"permissions": page}
@@ -370,6 +423,7 @@ class _Permissions:
         self.d.calls.append(("permissions.delete", kw))
 
         def run():
+            self.d.check_access(kw["fileId"], kw)
             perms = self.d.permissions_db.get(kw["fileId"], [])
             self.d.permissions_db[kw["fileId"]] = [
                 p for p in perms if p["id"] != kw["permissionId"]

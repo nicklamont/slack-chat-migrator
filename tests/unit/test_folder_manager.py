@@ -656,7 +656,8 @@ class TestTrashedFolders:
     """Folder lookups ignore trashed folders and share one cache (I37)."""
 
     def test_permission_lookup_skips_trashed_folder(self):
-        fake = FakeDrive()
+        fake = FakeDrive(drives=[{"id": "SD", "name": "Attachments"}])
+        fake.add_folder("ROOT", "root", "SD")
         fake.add_folder("T", "general", "ROOT", trashed=True)
         fake.add_folder("L", "general", "ROOT")
         fm = FolderManager(DriveAdapter(fake))
@@ -666,7 +667,8 @@ class TestTrashedFolders:
         assert "trashed = false" in query
 
     def test_upload_and_permission_paths_share_the_cache(self):
-        fake = FakeDrive()
+        fake = FakeDrive(drives=[{"id": "SD", "name": "Attachments"}])
+        fake.add_folder("ROOT", "root", "SD")
         fake.add_folder("L", "general", "ROOT")
         fm = FolderManager(DriveAdapter(fake))
 

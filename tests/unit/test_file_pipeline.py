@@ -997,6 +997,56 @@ class TestPendingSweep:
 
         assert handler.get_file_statistics()["pending_retried"] == 1
 
+    @pytest.mark.parametrize("shared", [True, False], ids=["shared", "my_drive"])
+    def test_sweep_reads_every_page(self, tmp_path, downloads, shared):
+        """Every page of flagged files is retried, not only the first (TA S3)."""
+        fake = FakeDrive(file_page_cap=2)
+        run1 = make_handler(fake, tmp_path, shared=shared)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        for i in range(5):
+            upload(run1, downloads, "c", f"F{i}", "UA", bytes([i]))
+        del fake.failing["permissions.create"]
+
+        run2 = make_handler(fake, tmp_path, shared=shared)  # a --resume run
+        run2.retry_pending_permissions()
+
+        assert run2.get_file_statistics()["pending_retried"] == 5
+        assert not any(
+            "slackGrantPending" in (f.get("appProperties") or {})
+            for f in fake.files_db.values()
+        )
+
+    def test_still_failing_transfer_is_counted_and_kept(self, tmp_path, downloads):
+        fake = FakeDrive(fail_transfer=True)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        result = upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        handler.retry_pending_permissions()
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 0
+        assert stats["pending_retry_failed"] == 1
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackOwnerPending"] == "true"
+        assert props["slackOwner"].endswith("alice@example.com")
+
+    def test_shared_drive_retry_supports_all_drives(self, tmp_path, downloads):
+        """Without supportsAllDrives Drive answers 404 for a shared drive file."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)  # shared drive SD1
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+        fake.calls.clear()
+
+        handler.retry_pending_permissions()
+
+        (retry,) = fake.permission_calls()
+        assert retry["supportsAllDrives"] is True
+        clears = [kw for name, kw in fake.calls if name == "files.update"]
+        assert clears and all(kw["supportsAllDrives"] is True for kw in clears)
+        assert handler.get_file_statistics()["pending_retried"] == 1
+
     def test_nothing_to_do_without_drive(self, tmp_path):
         handler = make_handler(FakeDrive(), tmp_path)
         handler.folder_id = None

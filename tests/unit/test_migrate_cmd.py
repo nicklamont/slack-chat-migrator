@@ -16,6 +16,7 @@ from slack_chat_migrator.cli.common import confirm_action
 from slack_chat_migrator.cli.migrate_cmd import MigrationOrchestrator
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.exceptions import (
+    APIError,
     ConfirmationRequiredError,
     PermissionCheckError,
 )
@@ -352,3 +353,23 @@ class TestConfigForGating:
         cfg = orch.load_config()
         assert isinstance(cfg, MigrationConfig)
         assert orch.load_config() is cfg
+
+
+class TestDrivePreflight:
+    """The preflight stops when Drive can't be set up (TA FC11)."""
+
+    def test_preflight_stops_when_drive_cannot_be_set_up(self) -> None:
+        orch = _orchestrator()
+        orch.migrator.file_handler.ensure_drive_initialized.side_effect = APIError(
+            "Google Drive can't be used for attachments: connection reset"
+        )
+
+        with (
+            patch(
+                "slack_chat_migrator.cli.migrate_cmd._print_preflight_status"
+            ) as status,
+            pytest.raises(APIError, match="connection reset"),
+        ):
+            orch._initialize_drive()
+
+        status.assert_not_called()
