@@ -28,7 +28,10 @@ from slack_chat_migrator.services.drive import (
     SharedDriveManager,
 )
 from slack_chat_migrator.services.drive.drive_uploader import SOURCE_SLACK_ID
-from slack_chat_migrator.services.drive.folder_manager import FolderLookup
+from slack_chat_migrator.services.drive.folder_manager import (
+    FolderLookup,
+    FolderSyncResult,
+)
 from slack_chat_migrator.services.files.file_download import (
     AUTH_FAILURE_REASONS,
     REASON_EXTERNAL,
@@ -186,6 +189,9 @@ class FileHandler:
             "ownership_transferred": 0,
             "ownership_transfer_failed": 0,
             "external_folder_grant_failures": 0,
+            "folder_sync_failures": 0,
+            "folder_grant_failures": 0,
+            "folder_removal_failures": 0,
             "restricted_folder_failures": 0,
             "download_auth_failures": 0,
             "files_by_channel": {},
@@ -203,7 +209,7 @@ class FileHandler:
             workspace_domain,
             is_external=self._is_external_email,
             protected_emails=self._protected_emails,
-            on_external_grant_failure=self._count_external_folder_grant_failure,
+            on_sync_result=self._count_folder_sync,
         )
         self.drive_uploader = DriveFileUploader(drive_service, workspace_domain)
         self.chat_uploader = ChatFileUploader(chat_service)
@@ -1246,9 +1252,43 @@ class FileHandler:
         """
         return bool(self.user_resolver.is_external_user(email))
 
-    def _count_external_folder_grant_failure(self, email: str) -> None:
-        """Count a channel-folder grant to an external member that failed."""
-        self._increment_stat("external_folder_grant_failures")
+    def _count_folder_sync(self, channel: str, result: FolderSyncResult) -> None:
+        """Count what failed in a channel-folder permission sync."""
+        if not result.ok:
+            self._increment_stat("folder_sync_failures")
+        self._increment_stat("folder_grant_failures", len(result.failed_grants))
+        self._increment_stat("folder_removal_failures", len(result.failed_removals))
+        self._increment_stat(
+            "external_folder_grant_failures", len(result.external_failures)
+        )
+
+    def sync_channel_folder_permissions(
+        self, channel: str, user_emails: list[str]
+    ) -> FolderSyncResult:
+        """Give a channel's current members, and only them, its folder.
+
+        Looks the channel folder up under the attachment root (a channel
+        without a folder needs no sync) and syncs its permissions.  Failures,
+        including a failed lookup or a Drive that couldn't be set up, are
+        counted in the file statistics.
+
+        Args:
+            channel: Channel name.
+            user_emails: Emails of the channel's current members.
+
+        Returns:
+            See :class:`~slack_chat_migrator.services.drive.FolderSyncResult`.
+        """
+        root_folder_id = self.folder_id  # initializes Drive if needed
+        if not root_folder_id:
+            result = FolderSyncResult(
+                lookup_error="Drive is not set up (no attachment folder)"
+            )
+            self._count_folder_sync(channel, result)
+            return result
+        return self.folder_manager.sync_channel_folder(
+            channel, root_folder_id, user_emails, self._shared_drive_id
+        )
 
     def _protected_emails(self) -> list[str]:
         """Accounts whose channel-folder access a permission sync never removes."""
@@ -1439,6 +1479,9 @@ class FileHandler:
             "external_folder_grant_failures": self.file_stats[
                 "external_folder_grant_failures"
             ],
+            "folder_sync_failures": self.file_stats["folder_sync_failures"],
+            "folder_grant_failures": self.file_stats["folder_grant_failures"],
+            "folder_removal_failures": self.file_stats["folder_removal_failures"],
             "restricted_folder_failures": self.file_stats["restricted_folder_failures"],
             "download_auth_failures": self.file_stats["download_auth_failures"],
             "files_by_channel": dict(self.file_stats["files_by_channel"]),

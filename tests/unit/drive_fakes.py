@@ -26,12 +26,16 @@ def http_error(status: int, message: str = "error") -> HttpError:
 class Req:
     """A request whose ``execute()`` runs the stored function."""
 
-    def __init__(self, fn, method: str, kwargs: dict[str, Any]):
+    def __init__(self, fn, method: str, kwargs: dict[str, Any], drive=None):
         self._fn = fn
         self.method = method
         self.kwargs = kwargs
+        self._drive = drive
 
     def execute(self):
+        error = self._drive.failing.get(self.method) if self._drive else None
+        if error is not None:
+            raise error
         return self._fn()
 
 
@@ -89,6 +93,8 @@ class FakeDrive:
         self.reject_grants_to = set(reject_grants_to or ())
         # Restricting a folder (files.update) fails with 403 while set.
         self.fail_restriction = fail_restriction
+        # Method name ("files.list", ...) -> error every call raises while set.
+        self.failing: dict[str, BaseException] = {}
 
     # -- helpers ------------------------------------------------------------
 
@@ -168,7 +174,7 @@ class _Files:
                 out["nextPageToken"] = token
             return out
 
-        return Req(run, "files.list", kw)
+        return Req(run, "files.list", kw, self.d)
 
     def create(self, **kw):
         self.d.calls.append(("files.create", kw))
@@ -220,7 +226,7 @@ class _Files:
             self.d.files_db[file_id] = record
             return {k: v for k, v in record.items() if k != "media_mimetype"}
 
-        return Req(run, "files.create", kw)
+        return Req(run, "files.create", kw, self.d)
 
     def get(self, **kw):
         self.d.calls.append(("files.get", kw))
@@ -231,7 +237,7 @@ class _Files:
                 raise http_error(404, "not found")
             return dict(record)
 
-        return Req(run, "files.get", kw)
+        return Req(run, "files.get", kw, self.d)
 
     def update(self, **kw):
         self.d.calls.append(("files.update", kw))
@@ -246,7 +252,7 @@ class _Files:
             record.update(body)
             return dict(record)
 
-        return Req(run, "files.update", kw)
+        return Req(run, "files.update", kw, self.d)
 
     def delete(self, **kw):
         self.d.calls.append(("files.delete", kw))
@@ -288,7 +294,7 @@ class _Permissions:
             perms.append(perm)
             return {"id": perm["id"]}
 
-        return Req(run, "permissions.create", kw)
+        return Req(run, "permissions.create", kw, self.d)
 
     def list(self, **kw):
         self.d.calls.append(("permissions.list", kw))
@@ -301,7 +307,7 @@ class _Permissions:
                 out["nextPageToken"] = token
             return out
 
-        return Req(run, "permissions.list", kw)
+        return Req(run, "permissions.list", kw, self.d)
 
     def delete(self, **kw):
         self.d.calls.append(("permissions.delete", kw))
@@ -313,7 +319,7 @@ class _Permissions:
             ]
             return {}
 
-        return Req(run, "permissions.delete", kw)
+        return Req(run, "permissions.delete", kw, self.d)
 
 
 class _Drives:
@@ -335,7 +341,7 @@ class _Drives:
                 out["nextPageToken"] = token
             return out
 
-        return Req(run, "drives.list", kw)
+        return Req(run, "drives.list", kw, self.d)
 
     def get(self, **kw):
         self.d.calls.append(("drives.get", kw))
@@ -346,7 +352,7 @@ class _Drives:
                     return dict(drive)
             raise http_error(404, "Shared drive not found")
 
-        return Req(run, "drives.get", kw)
+        return Req(run, "drives.get", kw, self.d)
 
     def create(self, **kw):
         self.d.calls.append(("drives.create", kw))
@@ -359,4 +365,4 @@ class _Drives:
             self.d.drives_db.append(drive)
             return dict(drive)
 
-        return Req(run, "drives.create", kw)
+        return Req(run, "drives.create", kw, self.d)

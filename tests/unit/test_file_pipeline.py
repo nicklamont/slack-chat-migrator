@@ -19,7 +19,7 @@ from slack_chat_migrator.services.files.file_download import (
     DownloadResult,
     DownloadStatus,
 )
-from tests.unit.drive_fakes import FakeDrive
+from tests.unit.drive_fakes import FakeDrive, http_error
 
 USERS = {
     "UA": "alice@example.com",
@@ -779,9 +779,46 @@ class TestLimitedAccessFolders:
             handler.shared_drive_id,
         )
 
-        assert ok is True
-        assert handler.get_file_statistics()["external_folder_grant_failures"] == 1
-        assert handler.get_file_statistics()["failed_uploads"] == 0
+        assert ok  # truthy: external failures don't fail the sync
+        stats = handler.get_file_statistics()
+        assert stats["external_folder_grant_failures"] == 1
+        assert stats["folder_sync_failures"] == 0
+        assert stats["failed_uploads"] == 0
+
+    def test_failed_internal_folder_grants_are_counted(self, tmp_path, downloads):
+        fake = FakeDrive(reject_grants_to={"bob@example.com"})
+        handler = make_meta_handler(fake, tmp_path)
+        upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
+
+        result = handler.sync_channel_folder_permissions(
+            "hr", ["alice@example.com", "bob@example.com"]
+        )
+
+        assert not result
+        assert result.failed_grants == ("bob@example.com",)
+        stats = handler.get_file_statistics()
+        assert stats["folder_sync_failures"] == 1
+        assert stats["folder_grant_failures"] == 1
+        assert stats["external_folder_grant_failures"] == 0
+
+    def test_failed_folder_lookup_is_counted(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path)
+        fake.failing["files.list"] = http_error(403)
+
+        result = handler.sync_channel_folder_permissions("hr", ["alice@example.com"])
+
+        assert result.lookup_error
+        assert handler.get_file_statistics()["folder_sync_failures"] == 1
+
+    def test_channel_without_folder_needs_no_sync(self, tmp_path):
+        handler = make_meta_handler(FakeDrive(), tmp_path)
+
+        result = handler.sync_channel_folder_permissions("hr", ["alice@example.com"])
+
+        assert result.ok
+        assert result.folder_id is None
+        assert handler.get_file_statistics()["folder_sync_failures"] == 0
 
     def test_private_files_never_fall_back_to_the_root(self, tmp_path, downloads):
         fake = FakeDrive()

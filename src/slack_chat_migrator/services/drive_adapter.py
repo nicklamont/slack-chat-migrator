@@ -28,8 +28,10 @@ from slack_chat_migrator.utils.api import (
     RETRYABLE_NETWORK_ERRORS,
 )
 
-#: Errors that apply_permission_changes returns instead of raising.
-_PERMISSION_ERRORS: tuple[type[BaseException], ...] = (
+#: Errors a Drive call raises once retries are spent: API errors, credentials
+#: that can't be refreshed and network errors.  apply_permission_changes
+#: returns them instead of raising.
+DRIVE_CALL_ERRORS: tuple[type[BaseException], ...] = (
     HttpError,
     RefreshError,
     *RETRYABLE_NETWORK_ERRORS,
@@ -388,7 +390,7 @@ class DriveAdapter:
                     )
                 try:
                     batch.execute()
-                except _PERMISSION_ERRORS as e:
+                except DRIVE_CALL_ERRORS as e:
                     # The whole batch request failed: each call in it gets the
                     # error, then the re-send rule applies.
                     for offset in range(len(chunk)):
@@ -405,7 +407,7 @@ class DriveAdapter:
             try:
                 requests[index].execute()
                 results[index] = None
-            except _PERMISSION_ERRORS as e:
+            except DRIVE_CALL_ERRORS as e:
                 results[index] = e
         return results
 
