@@ -348,6 +348,7 @@ class DriveFileUploader:
         file_hash: str | None = None,
         slack_file_id: str | None = None,
         channel: str | None = None,
+        target_mime_type: str | None = None,
     ) -> DriveUpload | None:
         """Upload a file to Google Drive, or reuse an identical one.
 
@@ -370,6 +371,9 @@ class DriveFileUploader:
             slack_file_id: Slack file ID, stored in ``appProperties`` so a
                 re-run can find the upload without downloading the file
             channel: Slack channel, stored in ``appProperties`` for reference
+            target_mime_type: A Google Workspace type (e.g. a Google Doc) to
+                convert the upload into.  Converted files skip MD5 dedup,
+                since their content differs from the uploaded bytes.
 
         Returns:
             The DriveUpload, or None if the upload failed
@@ -399,8 +403,10 @@ class DriveFileUploader:
                     return existing
 
             # Check if this file already exists in the folder by its hash
-            existing_file_id, existing_url = self._find_file_by_hash(
-                file_hash, filename, folder_id, shared_drive_id
+            existing_file_id, existing_url = (
+                self._find_file_by_hash(file_hash, filename, folder_id, shared_drive_id)
+                if not target_mime_type
+                else (None, None)
             )
 
             # If the file already exists, reuse it instead of uploading again
@@ -422,6 +428,8 @@ class DriveFileUploader:
             )
 
             file_metadata: dict[str, Any] = {"name": filename, "parents": [folder_id]}
+            if target_mime_type:
+                file_metadata["mimeType"] = target_mime_type
             if slack_file_id:
                 app_properties = {DRIVE_APP_PROPERTY_SLACK_FILE_ID: slack_file_id}
                 if channel:
@@ -448,7 +456,11 @@ class DriveFileUploader:
                 return None
             url = file.get("webViewLink")
             self.remember_file(
-                folder_id, file_id, url, md5=file_hash, slack_file_id=slack_file_id
+                folder_id,
+                file_id,
+                url,
+                md5=None if target_mime_type else file_hash,
+                slack_file_id=slack_file_id,
             )
 
             log_with_context(

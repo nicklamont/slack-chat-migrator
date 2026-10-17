@@ -8,12 +8,17 @@ import dataclasses
 import logging
 import mimetypes
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import requests
 from googleapiclient.errors import HttpError
 
-from slack_chat_migrator.constants import DIRECT_UPLOAD_MAX_BYTES
+from slack_chat_migrator.constants import (
+    DIRECT_UPLOAD_MAX_BYTES,
+    GOOGLE_DOCS_MIME_TYPE,
+    GOOGLE_SHEETS_MIME_TYPE,
+)
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.services.chat import ChatFileUploader
@@ -43,7 +48,11 @@ from slack_chat_migrator.services.files.temp_files import (
 )
 from slack_chat_migrator.types import UploadResult
 from slack_chat_migrator.utils.logging import log_with_context
-from slack_chat_migrator.utils.mime import resolve_drive_mime_type
+from slack_chat_migrator.utils.mime import (
+    is_slack_canvas,
+    is_slack_list,
+    resolve_drive_mime_type,
+)
 
 if TYPE_CHECKING:
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
@@ -57,6 +66,43 @@ logger = logging.getLogger("slack_chat_migrator")
 #: ``metadata["unavailable_reason"]``.  Such files are not failures.
 SKIP_REASON_UNAVAILABLE = "unavailable"
 SKIP_REASON_GOOGLE_DOCS_LINK = "google_docs_link"
+
+
+@dataclass(frozen=True)
+class SlackDocument:
+    """How a Slack canvas or list is fetched and stored on Drive.
+
+    Attributes:
+        kind: ``"canvas"`` or ``"list"``.
+        source_mime: Type of the downloaded content (HTML or CSV).
+        extension: File extension for a plain (unconverted) upload.
+        target_mime: Google Docs/Sheets type to convert into, or None to
+            upload the HTML/CSV file as is.
+        url: Download URL to use instead of the usual choice (list CSV).
+        title: File name without extension.
+    """
+
+    kind: str
+    source_mime: str
+    extension: str
+    target_mime: str | None
+    url: str | None
+    title: str
+
+    @property
+    def plain_name(self) -> str:
+        """File name for an unconverted upload."""
+        return self.title + self.extension
+
+
+def _document_title(file_obj: dict[str, Any], extension: str) -> str:
+    """A readable Drive name for a canvas or list: its title, tidied up."""
+    raw = file_obj.get("title") or file_obj.get("name") or ""
+    title = " ".join(str(raw).split())  # collapse whitespace, drop newlines
+    title = "".join(ch for ch in title if ch.isprintable())
+    if title.lower().endswith(extension):
+        title = title[: -len(extension)].rstrip()
+    return title[:200] or f"file_{file_obj.get('id') or 'unknown'}"
 
 
 class FileHandler:
@@ -397,7 +443,18 @@ class FileHandler:
             if existing is not None:
                 return existing
 
-        download = self._download_file(file_obj)
+        document = self.slack_document(file_obj)
+        if document is None:
+            download = self._download_file(file_obj)
+        else:
+            # Canvases export as HTML and lists as CSV; their recorded
+            # ``size`` is not the size of that rendering.
+            download = self._download_file(
+                file_obj,
+                url=document.url,
+                allow_html=document.kind == "canvas",
+                check_size=False,
+            )
         try:
             outcome = self._handle_download_outcome(
                 download, file_obj, name, channel, file_id
@@ -405,6 +462,11 @@ class FileHandler:
             if outcome is not None:
                 return outcome
             assert download.path is not None
+
+            if document is not None:
+                return self._upload_document(
+                    file_obj, document, download, channel, sender_email, folder_id
+                )
 
             mime_type = self._resolve_mime_type(file_obj, name, channel, file_id)
 
@@ -440,6 +502,86 @@ class FileHandler:
             return UploadResult(error="Upload failed", name=name)
         finally:
             remove_temp_file(download.path)
+
+    def slack_document(self, file_obj: dict[str, Any]) -> SlackDocument | None:
+        """Plan the upload of a Slack canvas or list; None for other files.
+
+        With ``config.convert_canvases`` set, canvases become Google Docs and
+        lists become Google Sheets; otherwise (and when conversion fails)
+        they are uploaded as ``.html``/``.csv`` files.
+
+        Args:
+            file_obj: Slack file object.
+
+        Returns:
+            The plan, or None for ordinary files.
+        """
+        convert = self.config.convert_canvases
+        if is_slack_canvas(file_obj):
+            return SlackDocument(
+                kind="canvas",
+                source_mime="text/html",
+                extension=".html",
+                target_mime=GOOGLE_DOCS_MIME_TYPE if convert else None,
+                url=None,
+                title=_document_title(file_obj, ".html"),
+            )
+        if is_slack_list(file_obj):
+            csv_url = file_obj.get("list_csv_download_url")
+            return SlackDocument(
+                kind="list",
+                source_mime="text/csv",
+                extension=".csv",
+                target_mime=GOOGLE_SHEETS_MIME_TYPE if convert else None,
+                url=csv_url if isinstance(csv_url, str) and csv_url else None,
+                title=_document_title(file_obj, ".csv"),
+            )
+        return None
+
+    def _upload_document(
+        self,
+        file_obj: dict[str, Any],
+        document: SlackDocument,
+        download: DownloadResult,
+        channel: str | None,
+        sender_email: str | None,
+        folder_id: str | None,
+    ) -> UploadResult:
+        """Upload a downloaded canvas or list, converting it when planned.
+
+        A failed conversion falls back to a plain ``.html``/``.csv`` upload.
+        """
+        file_id = file_obj.get("id") or "unknown"
+        assert download.path is not None
+        attempts: list[tuple[str, str | None]] = []
+        if document.target_mime:
+            attempts.append((document.title, document.target_mime))
+        attempts.append((document.plain_name, None))
+
+        for drive_name, target_mime in attempts:
+            result = self._upload_to_drive(
+                file_obj,
+                download.path,
+                channel,
+                sender_email,
+                file_hash=download.md5,
+                folder_id=folder_id,
+                name=drive_name,
+                mime_type=document.source_mime,
+                target_mime_type=target_mime,
+            )
+            if result is not None:
+                return result
+            if target_mime:
+                log_with_context(
+                    logging.WARNING,
+                    f"Could not convert {document.kind} {document.title!r} to a"
+                    " Google file; uploading it as"
+                    f" {document.extension.lstrip('.').upper()} instead",
+                    channel=channel,
+                    file_id=file_id,
+                )
+        return UploadResult(error="Upload failed", name=document.plain_name)
 
     def _sync_channel_context(self) -> None:
         """Propagate current channel to sub-uploaders for logging context."""
@@ -805,6 +947,9 @@ class FileHandler:
         sender_email: str | None = None,
         file_hash: str | None = None,
         folder_id: str | None = None,
+        name: str | None = None,
+        mime_type: str | None = None,
+        target_mime_type: str | None = None,
     ) -> UploadResult | None:
         """Upload a downloaded file to Google Drive.
 
@@ -816,16 +961,21 @@ class FileHandler:
             file_hash: MD5 computed while downloading, so the file isn't
                 read again just to hash it
             folder_id: Target folder, if already resolved
+            name: Drive file name, if not the Slack name
+            mime_type: Content type, if not resolved from the Slack file
+            target_mime_type: Google type to convert the upload into
 
         Returns:
             UploadResult with drive upload details if successful, None otherwise
         """
         file_id = file_obj.get("id") or "unknown"
-        name = file_obj.get("name") or f"file_{file_id}"
+        name = name or file_obj.get("name") or f"file_{file_id}"
         try:
             user_id = file_obj.get("user")
 
-            mime_type = resolve_drive_mime_type(file_obj, name, channel, file_id)
+            mime_type = mime_type or resolve_drive_mime_type(
+                file_obj, name, channel, file_id
+            )
 
             log_with_context(
                 logging.DEBUG,
@@ -850,6 +1000,7 @@ class FileHandler:
                 user_email,
                 sender_email,
                 file_hash=file_hash,
+                target_mime_type=target_mime_type,
             )
 
         except (HttpError, OSError) as e:
@@ -945,6 +1096,7 @@ class FileHandler:
         user_email: str | None,
         sender_email: str | None,
         file_hash: str | None = None,
+        target_mime_type: str | None = None,
     ) -> UploadResult | None:
         """Upload a temp file to Drive and handle permissions.
 
@@ -960,6 +1112,7 @@ class FileHandler:
             sender_email: Email of the message sender, who gets ``writer``
                 access.  Callers pass None for external senders.
             file_hash: MD5 of the content, if known.
+            target_mime_type: Google type to convert the upload into.
 
         Returns:
             The UploadResult or None on failure.
@@ -973,6 +1126,7 @@ class FileHandler:
             file_hash=file_hash,
             slack_file_id=None if file_id == "unknown" else file_id,
             channel=channel,
+            target_mime_type=target_mime_type,
         )
 
         if upload is None:
@@ -1008,8 +1162,12 @@ class FileHandler:
             url=upload.url or f"https://drive.google.com/file/d/{upload.file_id}/view",
             drive_id=upload.file_id,
             name=name,
-            mime_type=mime_type,
-            metadata={"reused": upload.reused, "source": upload.source},
+            mime_type=target_mime_type or mime_type,
+            metadata={
+                "reused": upload.reused,
+                "source": upload.source,
+                **({"converted_to": target_mime_type} if target_mime_type else {}),
+            },
         )
 
     def _is_internal_email(self, email: str | None) -> bool:
@@ -1197,10 +1355,18 @@ class FileHandler:
         """
         return transfer_file_ownership(self.drive_service, file_id, new_owner_email)
 
-    def _download_file(self, file_obj: dict[str, Any]) -> DownloadResult:
+    def _download_file(
+        self,
+        file_obj: dict[str, Any],
+        *,
+        url: str | None = None,
+        allow_html: bool | None = None,
+        check_size: bool = True,
+    ) -> DownloadResult:
         """Download a Slack file into this run's temp directory.
 
-        Delegates to :func:`file_download.download_file`.
+        Delegates to :func:`file_download.download_file`; the keyword
+        arguments are passed through.
         """
         needs_download = (
             google_link_status(file_obj) is None
@@ -1213,6 +1379,9 @@ class FileHandler:
             dest_dir,
             self._get_current_channel(),
             slack_token=self.config.slack_token,
+            url=url,
+            allow_html=allow_html,
+            check_size=check_size,
         )
 
     def _create_drive_reference(

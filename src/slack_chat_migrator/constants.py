@@ -70,6 +70,9 @@ DRIVE_ROLE_WRITER = "writer"
 DRIVE_ROLE_READER = "reader"
 DRIVES_PAGE_SIZE = 100  # drives.list maximum (the API default is 10)
 DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+# Targets for converting Slack canvases (HTML) and lists (CSV) on upload.
+GOOGLE_DOCS_MIME_TYPE = "application/vnd.google-apps.document"
+GOOGLE_SHEETS_MIME_TYPE = "application/vnd.google-apps.spreadsheet"
 # Roles a folder permission sync never removes.
 DRIVE_PROTECTED_ROLES = frozenset({"owner", "organizer", "fileOrganizer"})
 DRIVE_BATCH_MAX_REQUESTS = 100  # calls per Drive batch request

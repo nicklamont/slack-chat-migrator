@@ -685,3 +685,163 @@ class TestLimitedAccessFolders:
 
         assert not result.success
         assert fake.count("files.create") == 0
+
+
+# ---------------------------------------------------------------------------
+# Canvases -> Google Docs, Lists -> Google Sheets (F9)
+# ---------------------------------------------------------------------------
+
+# Shape from Slack's "How to read Slack data exports" (canvases.json).
+CANVAS = {
+    "id": "F05UA7XQXHS",
+    "name": "This_canvas_is_shared_in_General",
+    "title": "This canvas is shared in General",
+    "mimetype": "application/vnd.slack-docs",
+    "filetype": "quip",
+    "pretty_type": "Canvas",
+    "user": "UA",
+    "editable": True,
+    "size": 48,  # not the size of the HTML rendering
+    "mode": "quip",
+    "is_tombstoned": False,
+    "url_private_download": "https://files.slack.com/files-pri/T019B299WNQ-F05UA7XQXHS/download/canvas",
+}
+SLACK_LIST = {
+    "id": "F0LIST",
+    "name": "Roadmap",
+    "title": "Roadmap",
+    "filetype": "list",
+    "mimetype": "application/vnd.slack-list",
+    "user": "UA",
+    "size": 9,
+    "list_csv_download_url": "https://files.slack.com/files-pri/T1-F0LIST/download/list.csv",
+}
+CANVAS_HTML = b"<html><body><h1>Plan</h1><p>Ship it.</p></body></html>"
+LIST_CSV = b"Task,Owner\nShip,Alice\n"
+
+
+class DocumentDownloads(Downloads):
+    """Records the URL and validation options each download used."""
+
+    def __init__(self):
+        super().__init__()
+        self.kwargs: list[dict] = []
+
+    def __call__(self, file_obj, dest_dir, channel=None, **kwargs):
+        self.kwargs.append(kwargs)
+        return super().__call__(file_obj, dest_dir, channel, **kwargs)
+
+
+@pytest.fixture
+def doc_downloads():
+    fake = DocumentDownloads()
+    fake.content.update({CANVAS["id"]: CANVAS_HTML, SLACK_LIST["id"]: LIST_CSV})
+    with patch.object(file_mod, "download_file", fake):
+        yield fake
+
+
+def post_document(handler, file_obj, channel="general"):
+    handler.state.context.current_channel = channel
+    return handler.upload_attachment(
+        dict(file_obj), channel, "spaces/S", None, "alice@example.com"
+    )
+
+
+class TestCanvasConversion:
+    def test_canvas_becomes_a_google_doc(self, tmp_path, doc_downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+
+        result = post_document(handler, CANVAS)
+
+        assert result.success
+        assert result.upload_type == "drive"
+        record = fake.files_db[result.drive_id]
+        assert record["name"] == "This canvas is shared in General"
+        assert record["mimeType"] == "application/vnd.google-apps.document"
+        assert record["media_mimetype"] == "text/html"
+        assert record["appProperties"]["slackFileId"] == CANVAS["id"]
+        assert result.metadata["converted_to"] == "application/vnd.google-apps.document"
+        # HTML is the expected body, and the recorded size isn't checked.
+        assert doc_downloads.kwargs[-1]["allow_html"] is True
+        assert doc_downloads.kwargs[-1]["check_size"] is False
+
+    def test_list_becomes_a_google_sheet_from_its_csv(self, tmp_path, doc_downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+
+        result = post_document(handler, SLACK_LIST)
+
+        record = fake.files_db[result.drive_id]
+        assert record["name"] == "Roadmap"
+        assert record["mimeType"] == "application/vnd.google-apps.spreadsheet"
+        assert record["media_mimetype"] == "text/csv"
+        assert doc_downloads.kwargs[-1]["url"] == SLACK_LIST["list_csv_download_url"]
+
+    def test_failed_conversion_falls_back_to_plain_upload(
+        self, tmp_path, doc_downloads
+    ):
+        fake = FakeDrive(fail_conversion=True)
+        handler = make_handler(fake, tmp_path)
+
+        canvas = post_document(handler, CANVAS)
+        sheet = post_document(handler, SLACK_LIST)
+
+        assert canvas.success and sheet.success
+        assert (
+            fake.files_db[canvas.drive_id]["name"]
+            == "This canvas is shared in General.html"
+        )
+        assert fake.files_db[canvas.drive_id]["mimeType"] == "text/html"
+        assert fake.files_db[sheet.drive_id]["name"] == "Roadmap.csv"
+        assert fake.files_db[sheet.drive_id]["mimeType"] == "text/csv"
+        assert "converted_to" not in canvas.metadata
+
+    def test_conversion_can_be_turned_off(self, tmp_path, doc_downloads):
+        fake = FakeDrive()
+        config = MigrationConfig(
+            shared_drive=SharedDriveConfig(name=DRIVE_NAME), convert_canvases=False
+        )
+        handler = make_handler(fake, tmp_path, config=config)
+
+        result = post_document(handler, CANVAS)
+
+        create = next(
+            kw
+            for name, kw in fake.calls
+            if name == "files.create" and kw.get("media_body") is not None
+        )
+        assert "mimeType" not in create["body"]
+        assert (
+            fake.files_db[result.drive_id]["name"]
+            == "This canvas is shared in General.html"
+        )
+        assert fake.files_db[result.drive_id]["mimeType"] == "text/html"
+
+    def test_converted_canvas_is_found_again_on_rerun(self, tmp_path, doc_downloads):
+        fake = FakeDrive()
+        first = post_document(make_handler(fake, tmp_path), CANVAS)
+
+        rerun = make_handler(fake, tmp_path)
+        doc_downloads.calls.clear()
+        again = post_document(rerun, CANVAS)
+
+        assert again.drive_id == first.drive_id
+        assert doc_downloads.calls == []
+
+    def test_plain_csv_attachment_is_not_converted(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        result = upload(
+            handler,
+            downloads,
+            "c",
+            "F1",
+            "UA",
+            b"a,b\n",
+            name="data.csv",
+            mime="text/csv",
+            space=None,
+        )
+        assert fake.files_db[result.drive_id]["mimeType"] == "text/csv"
+        assert fake.files_db[result.drive_id]["name"] == "data.csv"

@@ -1,7 +1,8 @@
 """MIME type resolution utilities for file uploads.
 
 Pure functions that determine MIME types for Slack files being uploaded
-to Google Drive, including special handling for Google Docs/Sheets/Slides links.
+to Google Drive, including special handling for Google Docs/Sheets/Slides
+links and Slack's own document types (canvases and lists).
 """
 
 from __future__ import annotations
@@ -92,3 +93,46 @@ def resolve_google_docs_mime_type(
             guessed_type, _ = mimetypes.guess_type(name)
             return guessed_type or "application/vnd.google-apps.document"
     return current_mime
+
+
+#: Slack ``filetype``/``mimetype`` values of canvases (exported as HTML).
+CANVAS_FILETYPES = frozenset({"quip", "canvas"})
+CANVAS_MIME_TYPES = frozenset({"application/vnd.slack-docs"})
+#: Slack ``filetype``/``mimetype`` values of lists (downloadable as CSV).
+LIST_FILETYPES = frozenset({"list", "slack_list"})
+LIST_MIME_TYPES = frozenset({"application/vnd.slack-list"})
+
+
+def is_slack_canvas(file_obj: dict[str, Any]) -> bool:
+    """Whether a Slack file is a canvas (``filetype`` quip/canvas).
+
+    Args:
+        file_obj: Slack file object.
+
+    Returns:
+        True for canvases, whose download is an HTML rendering.
+    """
+    return (
+        str(file_obj.get("filetype") or "").lower() in CANVAS_FILETYPES
+        or str(file_obj.get("mimetype") or "").lower() in CANVAS_MIME_TYPES
+    )
+
+
+def is_slack_list(file_obj: dict[str, Any]) -> bool:
+    """Whether a Slack file is a Slack List.
+
+    Recognised by ``filetype`` list/slack_list, the
+    ``application/vnd.slack-list`` MIME type or a ``list_csv_download_url``.
+    Plain CSV attachments are not lists.
+
+    Args:
+        file_obj: Slack file object.
+
+    Returns:
+        True for Slack Lists.
+    """
+    return (
+        str(file_obj.get("filetype") or "").lower() in LIST_FILETYPES
+        or str(file_obj.get("mimetype") or "").lower() in LIST_MIME_TYPES
+        or bool(file_obj.get("list_csv_download_url"))
+    )

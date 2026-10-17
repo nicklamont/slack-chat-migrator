@@ -691,3 +691,36 @@ def test_peak_memory_is_independent_of_file_size(dest):
     assert result.size == total
     assert peak < 64 * 1024 * 1024
     os.unlink(result.path)
+
+
+class TestExportFlags:
+    """Boolean deletion/limit flags and inaccessible files (Slack file object)."""
+
+    @pytest.mark.parametrize(
+        ("file_obj", "reason"),
+        [
+            ({"is_tombstoned": True, "url_private": SLACK_URL}, fd.REASON_DELETED),
+            ({"is_deleted": True, "url_private": SLACK_URL}, fd.REASON_DELETED),
+            (
+                {"is_hidden_by_limit": 1, "url_private": SLACK_URL},
+                fd.REASON_HIDDEN_BY_LIMIT,
+            ),
+            (
+                {"mode": "file_access", "file_access": "check_file_info"},
+                fd.REASON_NO_ACCESS,
+            ),
+        ],
+    )
+    def test_reasons(self, file_obj, reason):
+        assert unavailable_reason(file_obj) == reason
+
+    def test_false_flags_are_ignored(self):
+        file_obj = {
+            "is_tombstoned": False,
+            "is_hidden_by_limit": 0,
+            "url_private": SLACK_URL,
+        }
+        assert unavailable_reason(file_obj) is None
+
+    def test_list_csv_url_counts_as_a_url(self):
+        assert unavailable_reason({"list_csv_download_url": SLACK_DL_URL}) is None

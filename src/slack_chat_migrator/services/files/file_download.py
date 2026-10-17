@@ -66,6 +66,7 @@ class DownloadStatus(str, enum.Enum):
 REASON_DELETED = "deleted"
 REASON_HIDDEN_BY_LIMIT = "hidden_by_limit"
 REASON_EXTERNAL = "external"
+REASON_NO_ACCESS = "no_access"
 REASON_NO_URL = "no_url"
 REASON_DISALLOWED_URL = "disallowed_url"
 REASON_TOO_MANY_REDIRECTS = "too_many_redirects"
@@ -234,8 +235,10 @@ def unavailable_reason(file_obj: dict[str, Any]) -> str | None:
     """Return why a file cannot be downloaded, judging by its metadata alone.
 
     Covers deleted (``tombstone``) and ``hidden_by_limit`` files, files
-    hosted outside Slack (``mode: external``), and files without a URL.
-    Google links are not covered; check :func:`google_link_status` first.
+    hosted outside Slack (``mode: external``), files the exporting workspace
+    can't read (``mode: file_access``, e.g. Slack Connect), and files
+    without a URL.  Google links are not covered; check
+    :func:`google_link_status` first.
 
     Args:
         file_obj: Slack file object.
@@ -244,10 +247,16 @@ def unavailable_reason(file_obj: dict[str, Any]) -> str | None:
         One of the ``REASON_*`` constants, or None if a download can be tried.
     """
     mode = file_obj.get("mode")
-    if mode == "tombstone":
+    if (
+        mode == "tombstone"
+        or file_obj.get("is_tombstoned")
+        or file_obj.get("is_deleted")
+    ):
         return REASON_DELETED
-    if mode == "hidden_by_limit":
+    if mode == "hidden_by_limit" or file_obj.get("is_hidden_by_limit"):
         return REASON_HIDDEN_BY_LIMIT
+    if mode == "file_access":
+        return REASON_NO_ACCESS
     if mode == "external" or file_obj.get("is_external"):
         return REASON_EXTERNAL
     if not select_download_url(file_obj):
@@ -256,9 +265,16 @@ def unavailable_reason(file_obj: dict[str, Any]) -> str | None:
 
 
 def select_download_url(file_obj: dict[str, Any]) -> str | None:
-    """Pick the URL to download: ``url_private_download``, else ``url_private``."""
-    url = file_obj.get("url_private_download") or file_obj.get("url_private")
-    return url if isinstance(url, str) and url else None
+    """Pick the URL to download.
+
+    ``url_private_download``, else ``url_private``, else (Slack Lists)
+    ``list_csv_download_url``.
+    """
+    for key in ("url_private_download", "url_private", "list_csv_download_url"):
+        url = file_obj.get(key)
+        if isinstance(url, str) and url:
+            return url
+    return None
 
 
 def external_link(file_obj: dict[str, Any]) -> str | None:
