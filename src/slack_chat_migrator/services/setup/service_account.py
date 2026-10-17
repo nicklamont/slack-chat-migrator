@@ -35,7 +35,7 @@ from google.auth.exceptions import GoogleAuthError
 from googleapiclient.errors import HttpError
 from httplib2 import HttpLib2Error
 
-from slack_chat_migrator.utils.api import RETRYABLE_NETWORK_ERRORS
+from slack_chat_migrator.utils.api import RETRYABLE_NETWORK_ERRORS, http_status
 from slack_chat_migrator.utils.logging import log_with_context
 
 
@@ -290,7 +290,7 @@ def _find_key(
 def _describe_list_error(error: BaseException, service_account_email: str) -> str:
     """Explain why listing the account's keys failed."""
     if isinstance(error, HttpError):
-        status = error.resp.status
+        status = http_status(error)
         detail = getattr(error, "reason", "") or ""
         # keys.list addresses the account as projects/-/serviceAccounts/...,
         # so a missing account is a 403; 404 is only a fallback.
@@ -656,11 +656,12 @@ def _create_failure(
             + _maybe_created_advice(email, requested_at)
         )
     if isinstance(error, HttpError):
-        status = error.resp.status
-        detail = f"HTTP {status}" + (
+        status = http_status(error)
+        detail = f"HTTP {status if status is not None else 'error'}" + (
             f": {error.reason}" if getattr(error, "reason", "") else ""
         )
-        if status == 408 or status >= 500:
+        # Without a status nothing says IAM refused, so a key may exist.
+        if status is None or status == 408 or status >= 500:
             return KeyCreateError(
                 f"Creating a key failed ({detail}). {_maybe_created_advice(email, requested_at)}",
                 maybe_created=True,

@@ -1669,3 +1669,78 @@ class TestDocumentedRetryLimits:
             RetryWrapper(inner, max_retries=3, retry_delay=2).execute()
         assert inner.execute.call_count == 1
         mock_sleep.assert_not_called()
+
+
+class TestHttpClientErrorsAndBatchErrors:
+    """http.client errors are retried; a BatchError without resp never crashes."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            http.client.BadStatusLine("garbage"),
+            http.client.ResponseNotReady("Request-sent"),
+            http.client.CannotSendRequest("Request-sent"),
+            http.client.IncompleteRead(b"partial"),
+            http.client.RemoteDisconnected("closed"),
+        ],
+    )
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_http_client_errors_are_retried(self, mock_sleep, error):
+        inner = MagicMock()
+        inner.execute.side_effect = [error, "ok"]
+        assert RetryWrapper(inner, max_retries=3, retry_delay=0).execute() == "ok"
+        assert inner.execute.call_count == 2
+        mock_sleep.assert_called_once()
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_http_client_errors_give_up_after_max_retries(self, mock_sleep):
+        inner = MagicMock()
+        inner.execute.side_effect = http.client.BadStatusLine("garbage")
+        with pytest.raises(http.client.BadStatusLine):
+            RetryWrapper(inner, max_retries=2, retry_delay=0).execute()
+        assert inner.execute.call_count == 3
+
+    def test_batch_error_without_resp_is_classified(self):
+        from googleapiclient.errors import BatchError
+
+        from slack_chat_migrator.utils.api import (
+            http_status,
+            is_retryable_http_error,
+        )
+
+        error = BatchError("Invalid value for Content-ID: <x>")
+        assert error.resp is None
+        assert http_status(error) is None
+        assert is_retryable_http_error(error) is False
+        assert is_rate_limit_error(error) is False
+        assert retry_after_seconds(error) is None
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_batch_error_without_resp_is_raised_not_crashed(self, mock_sleep):
+        from googleapiclient.errors import BatchError
+
+        error = BatchError("Invalid value for Content-ID: <x>")
+        inner = MagicMock()
+        inner.execute.side_effect = error
+        with pytest.raises(BatchError) as raised:
+            RetryWrapper(inner, max_retries=3, retry_delay=0).execute()
+        assert raised.value is error
+        assert inner.execute.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_batch_error_with_a_5xx_resp_is_retried(self, mock_sleep):
+        from googleapiclient.errors import BatchError
+
+        resp = httplib2.Response({"status": "503"})
+        error = BatchError("Response not in multipart/mixed format.", resp=resp)
+        inner = MagicMock()
+        inner.execute.side_effect = [error, "ok"]
+        assert RetryWrapper(inner, max_retries=3, retry_delay=0).execute() == "ok"
+
+    def test_cli_error_handler_survives_a_batch_error(self):
+        from googleapiclient.errors import BatchError
+
+        from slack_chat_migrator.cli.common import handle_http_error
+
+        handle_http_error(BatchError("Invalid value for Content-ID: <x>"))

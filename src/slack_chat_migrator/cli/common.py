@@ -508,8 +508,11 @@ def handle_http_error(e: HttpError) -> None:
     Args:
         e: The Google API HTTP error to handle.
     """
+    from slack_chat_migrator.utils.api import http_status
 
-    if e.resp.status == HTTP_FORBIDDEN and PERMISSION_DENIED_ERROR in str(e):
+    # A BatchError can have no response; treat it as a plain API error.
+    status = http_status(e) or 0
+    if status == HTTP_FORBIDDEN and PERMISSION_DENIED_ERROR in str(e):
         log_with_context(logging.ERROR, f"Permission denied error: {e}")
         log_with_context(
             logging.INFO,
@@ -533,13 +536,13 @@ def handle_http_error(e: HttpError) -> None:
             logging.INFO, "   - https://www.googleapis.com/auth/chat.spaces"
         )
         log_with_context(logging.INFO, "   - https://www.googleapis.com/auth/drive")
-    elif e.resp.status == HTTP_RATE_LIMIT:
+    elif status == HTTP_RATE_LIMIT:
         log_with_context(logging.ERROR, f"Rate limit exceeded: {e}")
         log_with_context(
             logging.INFO,
             "The migration hit API rate limits. Consider using --resume to continue.",
         )
-    elif e.resp.status >= HTTP_SERVER_ERROR_MIN:
+    elif status >= HTTP_SERVER_ERROR_MIN:
         log_with_context(logging.ERROR, f"Server error from Google API: {e}")
         log_with_context(
             logging.INFO, "This is likely a temporary issue. Please try again later."

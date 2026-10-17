@@ -152,14 +152,16 @@ RATE_LIMIT_REASONS = frozenset(
 
 #: Network-level failures worth retrying.  Deliberately not a bare
 #: ``OSError``: local errors such as ``PermissionError`` or
-#: ``FileNotFoundError`` won't go away on retry.
+#: ``FileNotFoundError`` won't go away on retry.  ``http.client``'s own
+#: errors (BadStatusLine, RemoteDisconnected, IncompleteRead,
+#: ResponseNotReady, CannotSendRequest) reach us through httplib2 when a
+#: connection breaks mid-request.
 RETRYABLE_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
     TransportError,
     ConnectionError,
     TimeoutError,  # also socket.timeout
     ssl.SSLError,
-    http.client.IncompleteRead,
-    http.client.RemoteDisconnected,
+    http.client.HTTPException,
     httplib2.ServerNotFoundError,
     httplib2.HttpLib2Error,
 )
@@ -208,6 +210,26 @@ def http_error_reasons(error: HttpError) -> set[str]:
     return reasons
 
 
+def http_status(error: BaseException) -> int | None:
+    """Return the HTTP status of *error*, or None when it has no response.
+
+    googleapiclient's ``BatchError`` (an ``HttpError``) can carry
+    ``resp=None``, for example when a batch response can't be parsed, so
+    ``error.resp.status`` isn't safe on every ``HttpError``.
+
+    Args:
+        error: Any exception.
+
+    Returns:
+        The status code, or None.
+    """
+    status = getattr(getattr(error, "resp", None), "status", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def is_rate_limit_error(error: BaseException) -> bool:
     """Return True for 429s and 403s whose reason is a rate limit or quota.
 
@@ -219,7 +241,7 @@ def is_rate_limit_error(error: BaseException) -> bool:
     """
     if not isinstance(error, HttpError):
         return False
-    status = error.resp.status
+    status = http_status(error)
     if status == HTTP_RATE_LIMIT:
         return True
     return status == HTTP_FORBIDDEN and bool(
@@ -230,13 +252,19 @@ def is_rate_limit_error(error: BaseException) -> bool:
 def is_retryable_http_error(error: HttpError) -> bool:
     """Return True for 408, 429, 5xx and rate-limit 403 responses.
 
+    An error without a response (a ``BatchError`` whose batch reply couldn't
+    be parsed) has nothing that says a retry would help, so it isn't
+    retried.
+
     Args:
         error: The HTTP error to classify.
 
     Returns:
         True if the request is worth retrying.
     """
-    status = error.resp.status
+    status = http_status(error)
+    if status is None:
+        return False
     return (
         status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
         or status >= HTTP_SERVER_ERROR_MIN
@@ -310,8 +338,9 @@ class RetryWrapper:
       ``Retry-After`` is used as sent: only that budget limits it.
     - Other retryable errors are retried ``max_retries`` times, and their
       ``Retry-After`` is capped at :data:`MAX_BACKOFF_SECONDS`.
-    - Other 4xx errors, 409 conflicts included, are raised at once (a 401
-      also clears the service cache).
+    - Other 4xx errors, 409 conflicts included, and HTTP errors without a
+      response (a ``BatchError`` with ``resp=None``) are raised at once (a
+      401 also clears the service cache).
     """
 
     def __init__(
@@ -408,9 +437,11 @@ class RetryWrapper:
         if isinstance(error, HttpError):
             reasons = ", ".join(sorted(http_error_reasons(error)))
             detail = f" ({reasons})" if reasons else ""
+            status = http_status(error)
+            reason = getattr(getattr(error, "resp", None), "reason", "") or ""
             log_with_context(
                 logging.WARNING,
-                f"Encountered {error.resp.status} {error.resp.reason}{detail}",
+                f"Encountered {status} {reason}{detail}",
                 **log_kwargs,
             )
         else:
@@ -470,15 +501,17 @@ class RetryWrapper:
                     return result
                 except HttpError as e:
                     if not is_retryable_http_error(e):
-                        if e.resp.status == HTTP_UNAUTHORIZED:
+                        status = http_status(e)
+                        if status == HTTP_UNAUTHORIZED:
                             clear_service_cache()
                         if request_details:
                             self._log_api_response(
-                                e.resp.status, request_details, None, channel_context
+                                status or 0, request_details, None, channel_context
                             )
+                        shown = status if status is not None else "no response"
                         log_with_context(
                             logging.WARNING,
-                            f"Client error ({e.resp.status}) not retried: {e}",
+                            f"Client error ({shown}) not retried: {e}",
                             **log_kwargs,
                         )
                         raise
@@ -501,7 +534,10 @@ class RetryWrapper:
                 if exhausted:
                     if request_details and isinstance(error, HttpError):
                         self._log_api_response(
-                            error.resp.status, request_details, None, channel_context
+                            http_status(error) or 0,
+                            request_details,
+                            None,
+                            channel_context,
                         )
                     log_with_context(
                         logging.ERROR,
