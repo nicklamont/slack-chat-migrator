@@ -1648,6 +1648,8 @@ class TestMigrate:
         assert m.migrate() is True
         # Channel "general" should be skipped — process_channel not called
         mock_cp.process_channel.assert_not_called()
+        # Pending Drive grants are still retried at the end (#98).
+        m.file_handler.retry_pending_permissions.assert_called_once_with()
 
     @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
     @patch("slack_chat_migrator.core.migrator.log_migration_success")

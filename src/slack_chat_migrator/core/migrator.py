@@ -554,6 +554,12 @@ class SlackToChatMigrator:
 
             self._emit_phase("Finalizing")
 
+            # Retry Drive grants and transfers that failed, in this run or an
+            # earlier one (a resumed run never links already-sent files).
+            file_handler = getattr(self, "file_handler", None)
+            if file_handler is not None:
+                file_handler.retry_pending_permissions()
+
             # Log any space mapping conflicts that should be added to config
             log_space_mapping_conflicts(self.state, self.ctx.dry_run)
 
