@@ -1794,6 +1794,77 @@ class TestReadClientId:
         assert "Can't read the key file" in capsys.readouterr().out
 
 
+def _run_saved_setup(
+    saved: dict[str, SetupState], stdin: str = "y\n", **steps: Any
+) -> Any:
+    """Run the real ``setup`` command on *saved*["state"], resuming it.
+
+    Each run loads the saved state and saves it back into *saved*, like the
+    state file.  *steps* replaces step helpers of ``setup_cmd`` by name.
+    """
+    import dataclasses
+
+    from click.testing import CliRunner
+
+    from slack_chat_migrator.cli import setup_cmd
+    from slack_chat_migrator.cli.commands import cli
+    from slack_chat_migrator.services.setup import setup_service
+
+    def _load() -> SetupState:
+        state = saved["state"]
+        return dataclasses.replace(state, steps=dict(state.steps))
+
+    def _save(state: SetupState) -> None:
+        saved["state"] = dataclasses.replace(state, steps=dict(state.steps))
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(
+            patch.object(setup_cmd, "_check_setup_deps", return_value=True)
+        )
+        stack.enter_context(patch.object(setup_service, "load_state", _load))
+        stack.enter_context(patch.object(setup_service, "save_state", _save))
+        stack.enter_context(
+            patch.object(
+                setup_cmd, "_get_and_validate_credentials", return_value=MagicMock()
+            )
+        )
+        for name, replacement in steps.items():
+            stack.enter_context(patch.object(setup_cmd, name, replacement))
+        # "y": resume from the previous session
+        return CliRunner().invoke(cli, ["setup"], input=stdin)
+
+
+def _saved_state(key_path: str, *, delegation_verified: bool = False) -> SetupState:
+    """A session whose steps 1-5 are complete, with *key_path* as the key."""
+    state = SetupState(
+        project_id="p",
+        service_account_email=SA,
+        key_path=key_path,
+        delegation_verified=delegation_verified,
+    )
+    for step in ("project", "apis", "service_account", "key", "chat_app"):
+        state.mark_step(step, StepStatus.COMPLETE)
+    if delegation_verified:
+        state.mark_step("delegation", StepStatus.COMPLETE)
+    return state
+
+
+class TestSetupRun:
+    """The whole wizard, resumed from a saved session."""
+
+    @pytest.mark.parametrize("verified", [True, False], ids=["complete", "almost"])
+    def test_summary_prints_the_key_path_literally(self, verified: bool) -> None:
+        key_path = "k[/x]/[bold]key.json"
+        saved = {"state": _saved_state(key_path, delegation_verified=verified)}
+        result = _run_saved_setup(
+            saved, _step_delegation=MagicMock(side_effect=lambda state: state)
+        )
+        assert result.exit_code == 0, result.output
+        title = "Setup complete!" if verified else "Almost Done"
+        assert title in result.output
+        assert f"Credentials file: {key_path}" in result.output
+
+
 class TestSetupCommandInterrupt:
     def test_ctrl_c_exits_130(self) -> None:
         from click.testing import CliRunner

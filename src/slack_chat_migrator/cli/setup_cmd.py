@@ -219,7 +219,9 @@ def _run_setup() -> None:
     if state.delegation_verified:
         lines = ["[bold]Setup complete![/bold]"]
         if state.key_path:
-            lines.append(f"\nCredentials file: [bold]{state.key_path}[/bold]")
+            lines.append(
+                f"\nCredentials file: [bold]{escape(str(state.key_path))}[/bold]"
+            )
         console.print(success_panel("GCP Setup", "\n".join(lines)))
         console.print(next_step_panel("slack-chat-migrator init --export_path <dir>"))
     else:
@@ -229,7 +231,9 @@ def _run_setup() -> None:
             "Re-run [bold]slack-chat-migrator setup[/bold] after configuring delegation.",
         ]
         if state.key_path:
-            lines.insert(1, f"\nCredentials file: [bold]{state.key_path}[/bold]")
+            lines.insert(
+                1, f"\nCredentials file: [bold]{escape(str(state.key_path))}[/bold]"
+            )
         console.print(warning_panel("GCP Setup — Almost Done", "\n".join(lines)))
 
 
