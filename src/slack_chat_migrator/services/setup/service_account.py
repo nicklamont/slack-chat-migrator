@@ -541,7 +541,7 @@ def _delete_key_command(key_name: str, service_account_email: str) -> str:
 def _created_around(requested_at: datetime) -> str:
     """How to recognise a key created by a request sent at *requested_at*."""
     return (
-        "its CREATED_AT is about"
+        "CREATED_AT is about"
         f" {requested_at.astimezone(timezone.utc):%Y-%m-%d %H:%M} UTC"
     )
 

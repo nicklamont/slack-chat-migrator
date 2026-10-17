@@ -810,9 +810,10 @@ class TestDownloadKey:
         assert not key.exists()
         # Only the key this request made, recognised by its creation time.
         assert re.search(
-            r"CREATED_AT is about \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC", message
+            r"a key created by this request is one whose CREATED_AT is about"
+            r" \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\. Delete only that key,",
+            message,
         )
-        assert "Delete only that key" in message
         assert "don't delete the account's other keys" in message
         assert "no file for" not in message
 
@@ -899,8 +900,11 @@ class TestDownloadKey:
         assert raised.value.deleted is False
         self._keys(service).delete.assert_not_called()
         assert f"keys list --iam-account={SA} --managed-by=user" in str(raised.value)
-        assert "CREATED_AT is about" in str(raised.value)
-        assert "don't delete the account's other keys" in str(raised.value)
+        assert re.search(
+            r"it is the key whose CREATED_AT is about \d{4}-\d{2}-\d{2}"
+            r" \d{2}:\d{2} UTC; don't delete the account's other keys\)",
+            str(raised.value),
+        )
 
     def test_key_that_cannot_be_deleted_is_named(self, tmp_path: Path) -> None:
         from slack_chat_migrator.services.setup.service_account import (
