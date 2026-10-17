@@ -1,4 +1,11 @@
-"""Service account creation and key download.
+"""Service account creation, key download, and checks of existing key files.
+
+:func:`check_existing_key` decides whether a key file from an earlier run
+can be reused.  It reports a key it couldn't check (unreadable file, IAM
+API or network failure, unparseable timestamp) as such, never as inactive,
+so the wizard never offers to replace a key that may still work.
+:func:`download_key` reserves the output file before it asks IAM for a new
+key, and deletes the new key again if it can't be saved.
 
 Uses the REST-based discovery API (google-api-python-client) instead of the
 gRPC client to avoid billing routing through the ADC quota project.
@@ -11,7 +18,9 @@ Workspace Admin Console.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -23,6 +32,8 @@ from typing import Any
 from google.auth.exceptions import GoogleAuthError
 from googleapiclient.errors import HttpError
 from httplib2 import HttpLib2Error
+
+from slack_chat_migrator.utils.api import RETRYABLE_NETWORK_ERRORS
 
 
 def _build_iam_service(credentials: Any) -> Any:
@@ -109,11 +120,14 @@ class KeyStatus(str, Enum):
     #: The file holds a key of the account that is deleted, disabled or
     #: expired.
     INACTIVE = "inactive"
-    #: The file isn't a key of this service account (unreadable, not a key
-    #: file, or another account's key).
+    #: The file was read but isn't a key of this service account (not JSON,
+    #: not a key file, or another account's key).
     NOT_A_KEY = "not_a_key"
-    #: The account's keys couldn't be listed (IAM API not enabled, missing
-    #: permission, network error), so nothing is known about the key.
+    #: The file can't be read (a directory, permission denied, an I/O
+    #: error), so nothing is known about what it holds.
+    UNREADABLE = "unreadable"
+    #: The key couldn't be checked (IAM API not enabled, missing
+    #: permission, network error, unparseable timestamp).
     UNKNOWN = "unknown"
 
 
@@ -124,38 +138,67 @@ class KeyCheck:
     Attributes:
         status: What the check found.
         reason: Why the key isn't usable, or why it couldn't be checked;
-            empty when *status* is ``ACTIVE``.
+            empty exactly when *status* is ``ACTIVE``.
     """
 
     status: KeyStatus
     reason: str = ""
 
-    @property
-    def active(self) -> bool:
-        """True when the key file can be reused."""
-        return self.status is KeyStatus.ACTIVE
+    def __post_init__(self) -> None:
+        """Enforce "reason is empty iff the key is active".
+
+        Raises:
+            ValueError: If an ``ACTIVE`` result has a reason, or any other
+                result has none.
+        """
+        if not isinstance(self.status, KeyStatus):
+            raise ValueError(f"KeyCheck.status must be a KeyStatus: {self.status!r}")
+        if (self.status is KeyStatus.ACTIVE) == bool(self.reason):
+            raise ValueError(
+                "KeyCheck.reason must be empty for an ACTIVE key and given"
+                f" otherwise (status={self.status.value}, reason={self.reason!r})"
+            )
 
 
-def _parse_key_time(value: Any) -> datetime | None:
-    """Parse an IAM timestamp such as ``2026-01-31T12:00:00Z``."""
-    if not isinstance(value, str) or not value:
-        return None
+#: Errors that mean "the keys couldn't be listed", not "the key is bad":
+#: HTTP errors, credential errors and network failures.  Anything else (a
+#: bug) propagates.
+_LIST_ERRORS: tuple[type[BaseException], ...] = (
+    HttpError,
+    GoogleAuthError,
+    HttpLib2Error,
+    OSError,
+    http.client.HTTPException,
+    *RETRYABLE_NETWORK_ERRORS,
+)
+
+_FRACTION_RE = re.compile(r"(T\d{2}:\d{2}:\d{2})\.(\d+)")
+
+
+def _parse_key_time(value: str) -> datetime:
+    """Parse an IAM timestamp such as ``2026-01-31T12:00:00.123456789Z``.
+
+    Raises:
+        ValueError: If *value* isn't an RFC 3339 timestamp.
+    """
     text = value.strip()
-    if text.endswith("Z"):
+    if text.endswith(("Z", "z")):
         text = text[:-1] + "+00:00"
-    # Python 3.10's fromisoformat() accepts at most 6 fractional digits.
-    text = re.sub(r"(\.\d{6})\d+", r"\1", text)
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
+    # Before Python 3.11, fromisoformat() accepts only 0, 3 or 6 fractional
+    # digits, and IAM sends 0, 3, 6 or 9: pad or cut every fraction to 6.
+    text = _FRACTION_RE.sub(
+        lambda m: f"{m.group(1)}.{(m.group(2) + '000000')[:6]}", text
+    )
+    parsed = datetime.fromisoformat(text)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def key_inactive_reason(
-    key: Mapping[str, Any] | None, now: datetime | None = None
-) -> str | None:
-    """Say why an IAM ``ServiceAccountKey`` can't be used, or None if it can.
+def _assess_key(key: Mapping[str, Any] | None, now: datetime | None = None) -> KeyCheck:
+    """Assess a listed IAM ``ServiceAccountKey``.
+
+    ``validAfterTime`` is not checked: for user-managed keys it is the
+    creation time, and a local clock that runs behind IAM's must not make a
+    working key look unusable.
 
     Args:
         key: The key resource from ``keys.list``, or None when the key isn't
@@ -163,21 +206,26 @@ def key_inactive_reason(
         now: The current time (for tests); defaults to now, in UTC.
 
     Returns:
-        A short reason ("it was deleted", "it is disabled", "it expired on
-        ...", "it isn't valid until ..."), or None when the key is active.
+        ``ACTIVE``; ``INACTIVE`` when the key is deleted, disabled or
+        expired; ``UNKNOWN`` when its expiry time can't be parsed.
     """
     if key is None:
-        return "it was deleted"
+        return KeyCheck(KeyStatus.INACTIVE, "it was deleted")
     if key.get("disabled") is True:
-        return "it is disabled"
-    now = now or datetime.now(timezone.utc)
-    valid_before = _parse_key_time(key.get("validBeforeTime"))
-    if valid_before is not None and valid_before <= now:
-        return f"it expired on {key.get('validBeforeTime')}"
-    valid_after = _parse_key_time(key.get("validAfterTime"))
-    if valid_after is not None and valid_after > now:
-        return f"it isn't valid until {key.get('validAfterTime')}"
-    return None
+        return KeyCheck(KeyStatus.INACTIVE, "it is disabled")
+    raw_expiry = key.get("validBeforeTime")
+    if raw_expiry in (None, ""):
+        return KeyCheck(KeyStatus.ACTIVE)
+    try:
+        expiry = _parse_key_time(str(raw_expiry))
+    except ValueError:
+        return KeyCheck(
+            KeyStatus.UNKNOWN,
+            f"its expiry time {raw_expiry!r} from IAM couldn't be parsed",
+        )
+    if expiry <= (now or datetime.now(timezone.utc)):
+        return KeyCheck(KeyStatus.INACTIVE, f"it expired on {raw_expiry}")
+    return KeyCheck(KeyStatus.ACTIVE)
 
 
 def _find_key(
@@ -186,7 +234,10 @@ def _find_key(
     """Return the user-managed key *key_id* of the account, or None.
 
     Raises:
-        HttpError: If the keys can't be listed.
+        HttpError: If the IAM API refuses the request.
+        GoogleAuthError: If the credentials can't be used.
+        OSError: On a network failure (also ``httplib2.HttpLib2Error`` and
+            ``http.client.HTTPException``).
     """
     service = _build_iam_service(credentials)
     response = (
@@ -202,53 +253,32 @@ def _find_key(
     return None
 
 
-def is_key_active(
-    credentials: Any,
-    service_account_email: str,
-    key_id: str,
-    *,
-    now: datetime | None = None,
-) -> bool:
-    """Return True if *key_id* is a usable user-managed key of the account.
-
-    A key is usable when it is still listed (not deleted), isn't disabled,
-    hasn't expired (``validBeforeTime``) and is already valid
-    (``validAfterTime``).
-
-    Args:
-        credentials: Google OAuth2 credentials.
-        service_account_email: Full email of the service account.
-        key_id: The key's ``private_key_id``.
-        now: The current time (for tests); defaults to now, in UTC.
-
-    Returns:
-        True when the key can be used to authenticate.
-
-    Raises:
-        HttpError: If the account's keys can't be listed.
-    """
-    key = _find_key(credentials, service_account_email, key_id)
-    return key_inactive_reason(key, now) is None
-
-
-def _describe_list_error(error: Exception) -> str:
+def _describe_list_error(error: BaseException, service_account_email: str) -> str:
     """Explain why listing the account's keys failed."""
     if isinstance(error, HttpError):
         status = error.resp.status
         detail = getattr(error, "reason", "") or ""
-        hint = (
-            " Check that the IAM API is enabled and that your account may list"
-            " the service account's keys (iam.serviceAccountKeys.list)."
-            if status in (400, 401, 403, 404)
-            else ""
-        )
+        if status == 404:
+            hint = (
+                f" The service account {service_account_email} doesn't exist;"
+                " check the email chosen in the service account step."
+            )
+        elif status in (400, 401, 403):
+            hint = (
+                " Check that the IAM API is enabled and that your account may"
+                " list the service account's keys (iam.serviceAccountKeys.list)."
+            )
+        else:
+            hint = ""
         return (
             f"listing the keys failed with HTTP {status}"
             + (f" ({detail})" if detail else "")
             + "."
             + hint
         )
-    if isinstance(error, GoogleAuthError):
+    if isinstance(error, GoogleAuthError) and not isinstance(
+        error, RETRYABLE_NETWORK_ERRORS
+    ):
         return (
             f"your Google credentials couldn't be used ({type(error).__name__}:"
             f" {error}). Run 'gcloud auth application-default login' and try"
@@ -267,9 +297,11 @@ def check_existing_key(
     """Check whether *key_path* holds a usable key of the service account.
 
     Used to reuse a key file instead of minting a new key on every run (a
-    service account can have at most 10 keys).  A failure to list the keys
-    is reported as ``UNKNOWN``, never as an inactive key, so a working key
-    file isn't overwritten because of a permission or network problem.
+    service account can have at most 10 keys).  A file that can't be read
+    is ``UNREADABLE``, and a key that can't be checked (the keys can't be
+    listed, or its expiry can't be parsed) is ``UNKNOWN``; neither is ever
+    reported as an inactive key, so a working key file isn't overwritten
+    because of a permission or network problem.
 
     Args:
         credentials: Google OAuth2 credentials.
@@ -281,9 +313,15 @@ def check_existing_key(
         The :class:`KeyCheck` result.
     """
     try:
-        data = json.loads(key_path.read_text())
-    except (OSError, ValueError) as e:
-        return KeyCheck(KeyStatus.NOT_A_KEY, f"it can't be read as JSON ({e})")
+        text = key_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return KeyCheck(KeyStatus.NOT_A_KEY, "it isn't a text file")
+    except OSError as e:
+        return KeyCheck(KeyStatus.UNREADABLE, f"it can't be read ({e.strerror or e})")
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        return KeyCheck(KeyStatus.NOT_A_KEY, f"it isn't valid JSON ({e})")
     if not isinstance(data, dict) or not data.get("private_key_id"):
         return KeyCheck(KeyStatus.NOT_A_KEY, "it isn't a service account key file")
     owner = data.get("client_email")
@@ -291,12 +329,26 @@ def check_existing_key(
         return KeyCheck(KeyStatus.NOT_A_KEY, f"it is a key of {owner or 'unknown'}")
     try:
         key = _find_key(credentials, service_account_email, str(data["private_key_id"]))
-    except (HttpError, GoogleAuthError, HttpLib2Error, OSError) as e:
-        return KeyCheck(KeyStatus.UNKNOWN, _describe_list_error(e))
-    reason = key_inactive_reason(key, now)
-    if reason is not None:
-        return KeyCheck(KeyStatus.INACTIVE, reason)
-    return KeyCheck(KeyStatus.ACTIVE)
+    except _LIST_ERRORS as e:
+        return KeyCheck(
+            KeyStatus.UNKNOWN, _describe_list_error(e, service_account_email)
+        )
+    return _assess_key(key, now)
+
+
+class KeyNotSavedError(Exception):
+    """A new key was created in IAM but couldn't be written to its file.
+
+    Attributes:
+        key_name: The IAM resource name of the new key.
+        deleted: True if the key was deleted again, so nothing is left
+            behind; False if it is still active and must be deleted by hand.
+    """
+
+    def __init__(self, message: str, key_name: str, deleted: bool) -> None:
+        super().__init__(message)
+        self.key_name = key_name
+        self.deleted = deleted
 
 
 def download_key(
@@ -308,8 +360,10 @@ def download_key(
 ) -> Path:
     """Create and download a JSON key for the service account.
 
-    The key file is written with mode ``0600`` (also when an existing file is
-    overwritten).
+    The output file is opened (or created) first, so a path that can't be
+    written fails before any key exists in IAM.  If the key can't be saved
+    after it was created, it is deleted again.  The key file is written
+    with mode ``0600`` (also when an existing file is overwritten).
 
     Args:
         credentials: Google OAuth2 credentials.
@@ -322,27 +376,105 @@ def download_key(
 
     Raises:
         FileExistsError: If *output_path* exists and *overwrite* is False.
+        OSError: If *output_path* can't be opened for writing (no key is
+            created then).
+        KeyNotSavedError: If the new key couldn't be written; it says
+            whether the key was deleted again or must be deleted by hand.
     """
-    import os
-
-    if output_path.exists() and not overwrite:
+    existed = output_path.exists()
+    if existed and not overwrite:
         raise FileExistsError(f"Key file already exists: {output_path}")
 
-    service = _build_iam_service(credentials)
-    key = (
-        service.projects()
-        .serviceAccounts()
-        .keys()
-        .create(
-            name=_key_name(service_account_email),
-            body={"keyAlgorithm": "KEY_ALG_RSA_2048"},
+    # Reserve the file before minting a key: O_EXCL also closes the race
+    # with another process creating it.  An existing file is truncated only
+    # once the key exists.
+    flags = os.O_WRONLY | os.O_CREAT | (0 if overwrite else os.O_EXCL)
+    fd = os.open(str(output_path), flags, 0o600)
+    try:
+        out = os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        # O_CREAT's mode only applies to new files; tighten an existing one.
+        os.chmod(output_path, 0o600)
+        service = _build_iam_service(credentials)
+        key = (
+            service.projects()
+            .serviceAccounts()
+            .keys()
+            .create(
+                name=_key_name(service_account_email),
+                body={"keyAlgorithm": "KEY_ALG_RSA_2048"},
+            )
+            .execute()
         )
-        .execute()
-    )
-    key_data = json.loads(base64.b64decode(key["privateKeyData"]))
-    fd = os.open(str(output_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    # O_CREAT's mode only applies to new files; tighten an overwritten one too.
-    os.chmod(output_path, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(key_data, f, indent=2)
+    except BaseException:
+        out.close()
+        if not existed:
+            _remove_quietly(output_path)
+        raise
+
+    try:
+        key_data = json.loads(base64.b64decode(key["privateKeyData"]))
+        out.truncate(0)
+        json.dump(key_data, out, indent=2)
+        out.close()
+    except BaseException as e:
+        out.close()
+        if not existed:
+            _remove_quietly(output_path)
+        unsaved = _delete_unsaved_key(service, key, output_path, e)
+        # Ctrl-C stays Ctrl-C once the key is gone; otherwise say what's left.
+        if isinstance(e, Exception) or not unsaved.deleted:
+            raise unsaved from e
+        raise
     return output_path
+
+
+def _remove_quietly(path: Path) -> None:
+    """Delete *path*, ignoring errors (best-effort cleanup)."""
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _delete_unsaved_key(
+    service: Any, key: Mapping[str, Any], output_path: Path, error: BaseException
+) -> KeyNotSavedError:
+    """Delete a new key that couldn't be saved.
+
+    Args:
+        service: The IAM client that created the key.
+        key: The ``keys.create`` response.
+        output_path: Where the key should have been written.
+        error: Why writing it failed.
+
+    Returns:
+        The error to report: ``deleted`` says whether the key is gone, and
+        the message names the key when it has to be deleted by hand.
+    """
+    key_name = str(key.get("name", ""))
+    try:
+        if not key_name:
+            raise ValueError("IAM didn't return the new key's name")
+        service.projects().serviceAccounts().keys().delete(name=key_name).execute()
+    except Exception as delete_error:
+        return KeyNotSavedError(
+            f"A new key was created but couldn't be saved to {output_path}"
+            f" ({type(error).__name__}: {error}), and deleting it failed"
+            f" ({type(delete_error).__name__}: {delete_error}). The key is"
+            f" still active: delete {key_name or 'the newest key'} in the Cloud"
+            " Console (IAM > Service accounts > Keys) or with 'gcloud iam"
+            " service-accounts keys delete'.",
+            key_name,
+            deleted=False,
+        )
+    return KeyNotSavedError(
+        f"The new key couldn't be saved to {output_path}"
+        f" ({type(error).__name__}: {error}); it was deleted again, so no key"
+        " was left behind.",
+        key_name,
+        deleted=True,
+    )

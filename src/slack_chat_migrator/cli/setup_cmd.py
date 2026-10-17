@@ -405,6 +405,7 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
     import os
 
     from slack_chat_migrator.services.setup.service_account import (
+        KeyNotSavedError,
         KeyStatus,
         check_existing_key,
         download_key,
@@ -441,32 +442,22 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
             )
             state.mark_step("key", StepStatus.COMPLETE)
             return state
-        if check.status is KeyStatus.UNKNOWN:
-            # The key may well work: never offer to replace it on a failed
-            # check, which would leave the old key active and untracked.
-            console.print(
-                f"[yellow]Couldn't check whether {key_path} is still an active"
-                f" key for {state.service_account_email}: {check.reason}[/yellow]"
-            )
-            console.print(
-                "[dim]Kept the existing file unchanged; the next steps use it"
-                " as is. Re-run setup once the problem is fixed to check it"
-                " again, or choose another path to create a new key.[/dim]"
-            )
-            state.key_path = str(key_path)
-            state.mark_step("key", StepStatus.SKIPPED)
-            return state
         if check.status is KeyStatus.INACTIVE:
             question = (
                 f"{key_path} holds a key for {state.service_account_email} that"
                 f" can't be used ({check.reason}). Overwrite it with a new key?"
             )
-        else:
+        elif check.status is KeyStatus.NOT_A_KEY:
             question = (
                 f"{key_path} exists but isn't a key for"
                 f" {state.service_account_email} ({check.reason})."
                 " Overwrite it with a new key?"
             )
+        else:
+            # UNKNOWN, UNREADABLE (and any status added later): the file may
+            # hold a working key.  Never offer to replace it, which would
+            # leave the old key active and untracked.
+            return _keep_unchecked_key_file(state, key_path, check)
         if not click.confirm(question, default=False):
             console.print(
                 "[dim]Kept the existing file. Re-run setup and choose another"
@@ -489,10 +480,43 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
             )
         )
         state.mark_step("key", StepStatus.COMPLETE)
+    except KeyNotSavedError as e:
+        console.print(f"[red]Failed to save the new key: {e}[/red]")
+        state.mark_step("key", StepStatus.SKIPPED)
     except Exception as e:
         console.print(f"[red]Failed to download key: {e}[/red]")
-        console.print("[dim]You can create a key manually in the GCP Console.[/dim]")
+        console.print(
+            "[dim]No key was created. Choose another path, or create a key"
+            " manually in the GCP Console.[/dim]"
+        )
         state.mark_step("key", StepStatus.SKIPPED)
+    return state
+
+
+def _keep_unchecked_key_file(state, key_path: Path, check):  # type: ignore[no-untyped-def]
+    """Keep a key file that couldn't be checked, and say why."""
+    from slack_chat_migrator.services.setup.service_account import KeyStatus
+    from slack_chat_migrator.services.setup.setup_service import StepStatus
+
+    console = get_console()
+    if check.status is KeyStatus.UNREADABLE:
+        console.print(f"[yellow]Can't read {key_path}: {check.reason}[/yellow]")
+        console.print(
+            "[dim]Left it unchanged. Fix the file (or its permissions) and"
+            " re-run setup, or choose another path to create a new key.[/dim]"
+        )
+    else:
+        console.print(
+            f"[yellow]Couldn't check whether {key_path} is still an active"
+            f" key for {state.service_account_email}: {check.reason}[/yellow]"
+        )
+        console.print(
+            "[dim]Kept the existing file unchanged; the next steps use it"
+            " as is. Re-run setup once the problem is fixed to check it"
+            " again, or choose another path to create a new key.[/dim]"
+        )
+        state.key_path = str(key_path)
+    state.mark_step("key", StepStatus.SKIPPED)
     return state
 
 
