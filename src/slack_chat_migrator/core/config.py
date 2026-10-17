@@ -715,7 +715,7 @@ def _read_yaml(config_path: Path) -> Any:
     try:
         with open(config_path, encoding="utf-8") as f:
             # A SafeLoader subclass: it constructs only plain YAML types.
-            return yaml.load(f, Loader=_UniqueKeyLoader)  # noqa: S506
+            return yaml.load(f, Loader=_UniqueKeyLoader)  # noqa: S506  # nosec B506
     except yaml.YAMLError as e:
         raise ConfigError(f"Config file {config_path} is not valid YAML: {e}") from e
     except (OSError, UnicodeDecodeError) as e:
