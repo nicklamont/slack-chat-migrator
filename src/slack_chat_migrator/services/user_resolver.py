@@ -23,6 +23,7 @@ from google.auth.exceptions import RefreshError, TransportError
 from googleapiclient.errors import HttpError
 
 from slack_chat_migrator.utils.api import get_gcp_service
+from slack_chat_migrator.utils.domains import internal_domains, is_external_email
 from slack_chat_migrator.utils.logging import log_with_context
 
 
@@ -53,7 +54,9 @@ class UserResolver:
             unmapped_user_tracker: Tracker for unmapped users.
             export_root: Path to Slack export directory.
             workspace_admin: Admin email for fallback impersonation (None in dry-run).
-            workspace_domain: Google Workspace domain for external user detection.
+            workspace_domain: Google Workspace domain for external user detection
+                (the admin's domain).  With ``config.workspace_domains`` it
+                makes up the internal domains.
         """
         self.config = config
         self.state = state
@@ -64,6 +67,11 @@ class UserResolver:
         self.export_root = export_root
         self.workspace_admin: str | None = workspace_admin
         self.workspace_domain = workspace_domain
+        #: Users on these domains are internal: the admin's domain plus
+        #: ``config.workspace_domains``, normalised.
+        self.internal_domains: frozenset[str] = internal_domains(
+            workspace_domain, config.workspace_domains
+        )
         self._users_data: dict[str, dict[str, Any]] | None = None
 
     def _delegate_service(self, email: str) -> Any:
@@ -289,14 +297,15 @@ class UserResolver:
     def is_external_user(self, email: str | None) -> bool:
         """Check if a user is external based on their email domain.
 
+        A user is internal when their domain is the admin's domain or one
+        of ``config.workspace_domains``; case and surrounding spaces don't
+        matter.
+
         Args:
             email: The user's email address
 
         Returns:
-            True if the user is external, False otherwise
+            True if the user is external, False otherwise (also when no
+            internal domain is known)
         """
-        if not email or not isinstance(email, str) or not self.workspace_domain:
-            return False
-
-        domain = email.split("@")[-1]
-        return domain.lower() != self.workspace_domain.lower()
+        return is_external_email(email, self.internal_domains)

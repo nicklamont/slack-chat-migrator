@@ -528,6 +528,27 @@ class TestIsExternalUser:
         assert resolver.is_external_user("alice@EXAMPLE.COM") is False
         assert resolver.is_external_user("alice@Example.Com") is False
 
+    def test_workspace_domains_are_internal(self):
+        """config.workspace_domains adds internal domains (#89)."""
+        resolver = _make_resolver(
+            config=MigrationConfig(workspace_domains=[" Corp.Example.NET "])
+        )
+
+        assert resolver.is_external_user("carol@corp.example.net") is False
+        assert resolver.is_external_user(" Carol@CORP.example.net ") is False
+        assert resolver.is_external_user("alice@example.com") is False
+        assert resolver.is_external_user("x@other.org") is True
+        assert resolver.is_external_user("x@sub.corp.example.net") is True
+
+    def test_workspace_domains_without_an_admin_domain(self):
+        resolver = _make_resolver(
+            workspace_domain="",
+            config=MigrationConfig(workspace_domains=["corp.example.net"]),
+        )
+
+        assert resolver.is_external_user("carol@corp.example.net") is False
+        assert resolver.is_external_user("alice@example.com") is True
+
 
 class TestGetDelegateSafetyAssertion:
     """Tests for the safety assertion when creds_path is None."""
