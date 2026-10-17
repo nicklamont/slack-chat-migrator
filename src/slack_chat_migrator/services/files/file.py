@@ -85,13 +85,32 @@ _FILE_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
-#: ``UploadResult.skip_reason`` for files that don't exist any more or aren't
-#: in Slack (deleted, hidden, external, ...).  The detailed reason is in
-#: ``metadata["unavailable_reason"]``.  Such files are not failures; refused
-#: downloads (401/403, sign-in pages) are.
-SKIP_REASON_UNAVAILABLE = "unavailable"
+#: ``UploadResult.skip_reason`` for files that no retry or token can fetch
+#: (``DownloadStatus.UNAVAILABLE``: deleted, hidden by a plan limit,
+#: external, not readable by the exporting workspace, no URL, 404/410).  The
+#: detailed reason is in ``metadata["unavailable_reason"]``.  Such files are
+#: not failures; refused downloads (401/403, sign-in pages) are.
+SKIP_REASON_UNAVAILABLE = DownloadStatus.UNAVAILABLE.value
 SKIP_REASON_GOOGLE_DOCS_LINK = "google_docs_link"
 
+#: ``UploadResult.metadata`` key: True when only the conversion into a
+#: Google type failed, so a plain upload may still work.  Written by
+#: :meth:`FileHandler._execute_drive_upload`, read by
+#: :func:`_conversion_failed`.
+META_CONVERSION_FAILED = "conversion_failed"
+
+
+def _conversion_failed(result: UploadResult) -> bool:
+    """Whether *result* failed only because Drive refused the conversion."""
+    return bool(result.metadata.get(META_CONVERSION_FAILED))
+
+
+#: What a Slack canvas or list becomes; see :class:`SlackDocument`.
+DocumentKind = Literal["canvas", "list"]
+
+
+#: A Slack conversation's type (``config.CONVERSATION_TYPES``).
+ConversationType = Literal["public", "private", "mpim", "dm"]
 
 #: How attachments are stored; see :class:`DriveStatus`.
 DriveMode = Literal["not_initialized", "folder", "shared_drive", "my_drive", "none"]
@@ -144,7 +163,7 @@ class SlackDocument:
     """How a Slack canvas or list is fetched and stored on Drive.
 
     Attributes:
-        kind: ``"canvas"`` or ``"list"``.
+        kind: A canvas or a list.
         source_mime: Type of the downloaded content (HTML or CSV).
         extension: File extension for a plain (unconverted) upload.
         target_mime: Google Docs/Sheets type to convert into, or None to
@@ -153,7 +172,7 @@ class SlackDocument:
         title: File name without extension.
     """
 
-    kind: str
+    kind: DocumentKind
     source_mime: str
     extension: str
     target_mime: str | None
@@ -245,7 +264,7 @@ class FileHandler:
 
         # Conversation privacy, for limited-access folders
         self.channels_meta: Mapping[str, Any] = channels_meta or {}
-        self._conversation_types: dict[str, str] = {}
+        self._conversation_types: dict[str, ConversationType] = {}
 
         # Initialize file upload statistics
         self.file_stats: dict[str, Any] = {
@@ -745,7 +764,7 @@ class FileHandler:
                 mime_type=document.source_mime,
                 target_mime_type=target_mime,
             )
-            if not (target_mime and result.metadata.get("conversion_failed")):
+            if not (target_mime and _conversion_failed(result)):
                 break
             log_with_context(
                 logging.WARNING,
@@ -1207,7 +1226,7 @@ class FileHandler:
 
         Returns:
             The Drive upload, or an error result that says why it failed
-            (``metadata["conversion_failed"]`` when only the conversion did).
+            (:func:`_conversion_failed` when only the conversion did).
         """
         file_id = file_obj.get("id") or "unknown"
         name = name or file_obj.get("name") or f"file_{file_id}"
@@ -1308,7 +1327,9 @@ class FileHandler:
             name=name,
         )
 
-    def set_conversation_type(self, channel: str, conversation_type: str) -> None:
+    def set_conversation_type(
+        self, channel: str, conversation_type: ConversationType
+    ) -> None:
         """Record a conversation's type: public, private, mpim or dm.
 
         Overrides the guess from ``channels_meta``.
@@ -1393,7 +1414,7 @@ class FileHandler:
             return UploadResult(
                 error=f"Drive upload failed: {upload.reason}",
                 name=name,
-                metadata={"conversion_failed": upload.conversion_failed},
+                metadata={META_CONVERSION_FAILED: upload.conversion_failed},
             )
 
         # Never raises: a failed grant doesn't make the upload fail.

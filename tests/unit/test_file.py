@@ -1931,3 +1931,20 @@ class TestRefusedDownloads:
         handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
         assert "slack_token" not in caplog.text
         assert handler.get_file_statistics()["download_auth_failures"] == 0
+
+
+class TestClosedSets:
+    """Literal types stay in step with the values they stand for (#118)."""
+
+    def test_conversation_type_matches_the_config_values(self):
+        from typing import get_args
+
+        from slack_chat_migrator.core.config import CONVERSATION_TYPES
+        from slack_chat_migrator.services.files.file import ConversationType
+
+        assert set(get_args(ConversationType)) == set(CONVERSATION_TYPES)
+
+    def test_unavailable_is_defined_once(self):
+        from slack_chat_migrator.services.files.file import SKIP_REASON_UNAVAILABLE
+
+        assert DownloadStatus(SKIP_REASON_UNAVAILABLE) is DownloadStatus.UNAVAILABLE
