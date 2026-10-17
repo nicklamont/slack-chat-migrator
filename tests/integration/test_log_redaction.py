@@ -22,7 +22,9 @@ from tests.integration.conftest import (
 
 pytestmark = pytest.mark.integration
 
-SLACK_FILE_CREDENTIAL_SAMPLE = "xoxe-1234567890-abcdefSECRET"
+SLACK_FILE_CREDENTIAL_SAMPLE = (
+    "xoxe-1234567890-abcdefSECRET"  # pragma: allowlist secret
+)
 
 
 def _export_with_tokenised_files(tmp_path: Path) -> Path:

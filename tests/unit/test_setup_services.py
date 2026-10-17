@@ -403,7 +403,7 @@ def _iam_with_key(key_id: str = "kid1", **fields: object) -> MagicMock:
                 {
                     "client_email": "sa@p.iam.gserviceaccount.com",
                     "private_key_id": "new",
-                    "private_key": "PK",
+                    "private_key": "PK",  # pragma: allowlist secret
                 }
             ).encode()
         ).decode()
