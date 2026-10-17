@@ -1,5 +1,8 @@
 """Unit tests for the file handling module."""
 
+import hashlib
+import os
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,13 +12,16 @@ from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
-from slack_chat_migrator.services.files.file import FileHandler, _safe_temp_suffix
+from slack_chat_migrator.services.files.file import FileHandler
 from slack_chat_migrator.services.files.file_download import (
-    DownloadOutcome,
-    _is_internal_host,
-    download_file,
+    DownloadResult,
+    DownloadStatus,
 )
+from slack_chat_migrator.services.files.temp_files import safe_temp_suffix
 from slack_chat_migrator.types import UploadResult
+
+#: Path handed to mocked uploaders, which never open it.
+FAKE_PATH = "/tmp/fake_upload.bin"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -53,6 +59,23 @@ def _make_deps(**overrides):
         "user_resolver": user_resolver,
         "state": state,
     }
+
+
+def _ok_download(content=b"data"):
+    """Write *content* to a real temp file and wrap it as a successful download."""
+    fd, path = tempfile.mkstemp(prefix="test_dl_")
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(content)
+    return DownloadResult(
+        DownloadStatus.OK,
+        path=path,
+        md5=hashlib.md5(content).hexdigest(),  # noqa: S324 — fingerprint only
+        size=len(content),
+    )
+
+
+def _failed_download(reason="network_error:ConnectionError"):
+    return DownloadResult(DownloadStatus.FAILED, reason=reason)
 
 
 def _make_handler(
@@ -263,14 +286,15 @@ class TestUploadStrategy:
         handler.processed_files["F123"] = cached
 
         result = handler.upload_attachment({"id": "F123", "name": "a.txt"})
-        assert result is cached
         assert result.cached is True
+        assert result.url == cached.url
+        assert cached.cached is False  # the stored result isn't mutated
         # total_files should still be incremented
         assert handler.file_stats["total_files"] == 1
 
     def test_download_failure_returns_error_result(self):
         handler = self._make_ready_handler()
-        handler._download_file = MagicMock(return_value=None)
+        handler._download_file = MagicMock(return_value=_failed_download())
 
         result = handler.upload_attachment(
             {"id": "F1", "name": "bad.txt"},
@@ -279,13 +303,16 @@ class TestUploadStrategy:
         assert isinstance(result, UploadResult)
         assert not result.success
         assert not result.skipped
-        assert result.error == "Download failed"
+        assert result.error.startswith("Download failed")
         assert handler.file_stats["failed_uploads"] == 1
 
     def test_google_docs_skip(self):
         handler = self._make_ready_handler()
         handler._download_file = MagicMock(
-            return_value=DownloadOutcome.GOOGLE_DOCS_LINK
+            return_value=DownloadResult(
+                DownloadStatus.GOOGLE_DOCS_LINK,
+                url="https://docs.google.com/document/d/abc",
+            )
         )
 
         file_obj = {
@@ -301,7 +328,7 @@ class TestUploadStrategy:
     def test_google_drive_file_reference(self):
         handler = self._make_ready_handler()
         handler._download_file = MagicMock(
-            return_value=DownloadOutcome.GOOGLE_DRIVE_FILE
+            return_value=DownloadResult(DownloadStatus.GOOGLE_DRIVE_FILE)
         )
         handler._create_drive_reference = MagicMock(
             return_value=UploadResult(
@@ -327,7 +354,7 @@ class TestUploadStrategy:
     def test_small_image_tries_direct_upload(self):
         handler = self._make_ready_handler()
         content = b"\x89PNG" + b"\x00" * 1000
-        handler._download_file = MagicMock(return_value=content)
+        handler._download_file = MagicMock(return_value=_ok_download(content))
         handler.chat_uploader.is_suitable_for_direct_upload = MagicMock(
             return_value=True
         )
@@ -356,7 +383,7 @@ class TestUploadStrategy:
     def test_direct_upload_fallback_to_drive(self):
         handler = self._make_ready_handler()
         content = b"\x89PNG" + b"\x00" * 1000
-        handler._download_file = MagicMock(return_value=content)
+        handler._download_file = MagicMock(return_value=_ok_download(content))
         handler.chat_uploader.is_suitable_for_direct_upload = MagicMock(
             return_value=True
         )
@@ -384,7 +411,7 @@ class TestUploadStrategy:
     def test_non_image_goes_to_drive(self):
         handler = self._make_ready_handler()
         content = b"file data"
-        handler._download_file = MagicMock(return_value=content)
+        handler._download_file = MagicMock(return_value=_ok_download(content))
         handler._upload_to_drive = MagicMock(
             return_value=UploadResult(
                 upload_type="drive",
@@ -408,8 +435,9 @@ class TestUploadStrategy:
     def test_large_image_goes_to_drive(self):
         """Images larger than 25MB should bypass direct upload."""
         handler = self._make_ready_handler()
-        content = b"\x89PNG" + b"\x00" * (26 * 1024 * 1024)
-        handler._download_file = MagicMock(return_value=content)
+        download = _ok_download(b"\x89PNG")
+        download.size = 26 * 1024 * 1024  # as measured while streaming
+        handler._download_file = MagicMock(return_value=download)
         handler._upload_to_drive = MagicMock(
             return_value=UploadResult(
                 upload_type="drive",
@@ -434,7 +462,7 @@ class TestUploadStrategy:
     def test_drive_upload_failure_returns_error_result(self):
         handler = self._make_ready_handler()
         content = b"some data"
-        handler._download_file = MagicMock(return_value=content)
+        handler._download_file = MagicMock(return_value=_ok_download(content))
         handler._upload_to_drive = MagicMock(return_value=None)
 
         file_obj = {
@@ -471,7 +499,7 @@ class TestUploadStrategy:
             user_map={"UEXT": "ext@other.com"},
         )
         handler._drive_initialized = True
-        handler._download_file = MagicMock(return_value=None)
+        handler._download_file = MagicMock(return_value=_failed_download())
 
         file_obj = {"id": "F1", "name": "ext.txt", "user": "UEXT"}
         handler.upload_attachment(file_obj, channel="general")
@@ -480,7 +508,7 @@ class TestUploadStrategy:
     def test_null_mimetype_gets_guessed(self):
         handler = self._make_ready_handler()
         content = b"data"
-        handler._download_file = MagicMock(return_value=content)
+        handler._download_file = MagicMock(return_value=_ok_download(content))
         handler._upload_to_drive = MagicMock(
             return_value=UploadResult(
                 upload_type="drive",
@@ -504,7 +532,7 @@ class TestUploadStrategy:
 
     def test_channel_file_count_tracking(self):
         handler = self._make_ready_handler()
-        handler._download_file = MagicMock(return_value=None)
+        handler._download_file = MagicMock(return_value=_failed_download())
 
         handler.upload_attachment({"id": "F1", "name": "a.txt"}, channel="general")
         handler.upload_attachment({"id": "F2", "name": "b.txt"}, channel="general")
@@ -512,130 +540,6 @@ class TestUploadStrategy:
 
         assert handler.file_stats["files_by_channel"]["general"] == 2
         assert handler.file_stats["files_by_channel"]["random"] == 1
-
-
-# ===========================================================================
-# _download_file tests
-# ===========================================================================
-
-
-class TestDownloadFile:
-    """Tests for _download_file."""
-
-    def test_no_url_returns_none(self):
-        handler = _make_handler()
-        result = handler._download_file({"id": "F1", "name": "no_url.txt"})
-        assert result is None
-
-    def test_google_docs_link_returns_skip_marker(self):
-        handler = _make_handler()
-        urls = [
-            "https://docs.google.com/document/d/abc/edit",
-            "https://docs.google.com/spreadsheets/d/abc/edit",
-            "https://docs.google.com/presentation/d/abc/edit",
-            "https://sheets.google.com/abc/edit",
-            "https://slides.google.com/abc/edit",
-        ]
-        for url in urls:
-            result = handler._download_file(
-                {"id": "F1", "name": "doc", "url_private": url}
-            )
-            assert result is DownloadOutcome.GOOGLE_DOCS_LINK, f"Failed for URL: {url}"
-
-    def test_google_drive_file_returns_drive_marker(self):
-        handler = _make_handler()
-        urls = [
-            "https://drive.google.com/file/d/abc123/view",
-            "https://drive.google.com/open?id=abc123",
-        ]
-        for url in urls:
-            result = handler._download_file(
-                {"id": "F1", "name": "file.pdf", "url_private": url}
-            )
-            assert result is DownloadOutcome.GOOGLE_DRIVE_FILE, f"Failed for URL: {url}"
-
-    @patch("slack_chat_migrator.services.files.file.requests.get")
-    def test_successful_download(self, mock_get):
-        handler = _make_handler()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.content = b"file bytes"
-        mock_response.headers = {"Content-Length": "10"}
-        mock_get.return_value = mock_response
-
-        result = handler._download_file(
-            {"id": "F1", "name": "test.txt", "url_private": "https://files.slack.com/a"}
-        )
-        assert result == b"file bytes"
-        mock_get.assert_called_once_with(
-            "https://files.slack.com/a",
-            headers={},
-            stream=True,
-            timeout=60,
-        )
-
-    @patch("slack_chat_migrator.services.files.file.requests.get")
-    def test_http_error_raises_for_retry(self, mock_get):
-        handler = _make_handler()
-        mock_response = MagicMock()
-        mock_response.status_code = 500
-        mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError(
-            response=mock_response
-        )
-        mock_get.return_value = mock_response
-
-        with pytest.raises(requests.exceptions.HTTPError):
-            handler._download_file(
-                {
-                    "id": "F1",
-                    "name": "test.txt",
-                    "url_private": "https://files.slack.com/a",
-                }
-            )
-
-    @patch("slack_chat_migrator.services.files.file.requests.get")
-    def test_auth_error_returns_none_no_raise(self, mock_get):
-        handler = _make_handler()
-        mock_response = MagicMock()
-        mock_response.status_code = 403
-        err = requests.exceptions.HTTPError(response=mock_response)
-        mock_get.side_effect = err
-
-        result = handler._download_file(
-            {"id": "F1", "name": "test.txt", "url_private": "https://files.slack.com/a"}
-        )
-        assert result is None
-
-    @patch("slack_chat_migrator.services.files.file.requests.get")
-    def test_connection_error_re_raises(self, mock_get):
-        handler = _make_handler()
-        mock_get.side_effect = requests.exceptions.ConnectionError("conn refused")
-
-        with pytest.raises(requests.exceptions.ConnectionError):
-            handler._download_file(
-                {
-                    "id": "F1",
-                    "name": "test.txt",
-                    "url_private": "https://files.slack.com/a",
-                }
-            )
-
-    def test_non_request_exception_returns_none(self):
-        handler = _make_handler()
-        # Trigger a generic exception in processing by providing a file_obj
-        # that will cause issues after URL check
-        with patch(
-            "slack_chat_migrator.services.files.file.requests.get",
-            side_effect=ValueError("unexpected"),
-        ):
-            result = handler._download_file(
-                {
-                    "id": "F1",
-                    "name": "test.txt",
-                    "url_private": "https://files.slack.com/a",
-                }
-            )
-            assert result is None
 
 
 # ===========================================================================
@@ -660,7 +564,6 @@ class TestCreateDriveReference:
         assert result.drive_id == "ABC123"
         assert result.metadata.get("is_reference") is True
         assert result.name == "report.pdf"
-        assert "F1" in handler.processed_files
 
     def test_open_id_url(self):
         handler = _make_handler()
@@ -685,15 +588,17 @@ class TestCreateDriveReference:
         result = handler._create_drive_reference(file_obj, channel="general")
         assert result is None
 
-    def test_increments_drive_uploads_stat(self):
-        handler = _make_handler()
+    def test_upload_attachment_counts_and_caches_reference(self):
+        handler = _make_handler(folder_id="root")
         file_obj = {
             "id": "F1",
             "name": "a.txt",
             "url_private": "https://drive.google.com/file/d/id1/view",
         }
-        handler._create_drive_reference(file_obj)
+        result = handler.upload_attachment(file_obj, channel="general")
+        assert result.drive_id == "id1"
         assert handler.file_stats["drive_uploads"] == 1
+        assert "F1" in handler.processed_files
 
     def test_empty_drive_id_returns_none(self):
         handler = _make_handler()
@@ -1034,7 +939,7 @@ class TestUploadDirectToChat:
 
         file_obj = {"id": "F1", "name": "pic.png", "mimetype": "image/png"}
         result = handler._upload_direct_to_chat(
-            file_obj, b"png data", channel="general", space="spaces/ABC"
+            file_obj, FAKE_PATH, "image/png", channel="general", space="spaces/ABC"
         )
 
         assert result is not None
@@ -1064,7 +969,8 @@ class TestUploadDirectToChat:
             file_obj = {"id": "F1", "name": "pic.png", "mimetype": "image/png"}
             result = handler._upload_direct_to_chat(
                 file_obj,
-                b"png data",
+                FAKE_PATH,
+                "image/png",
                 channel="general",
                 space="spaces/ABC",
                 user_service=mock_user_service,
@@ -1082,7 +988,7 @@ class TestUploadDirectToChat:
 
         file_obj = {"id": "F1", "name": "pic.png", "mimetype": "image/png"}
         result = handler._upload_direct_to_chat(
-            file_obj, b"png data", channel="general", space="spaces/ABC"
+            file_obj, FAKE_PATH, "image/png", channel="general", space="spaces/ABC"
         )
 
         assert result is None
@@ -1096,7 +1002,7 @@ class TestUploadDirectToChat:
 
         file_obj = {"id": "F1", "name": "pic.png", "mimetype": "image/png"}
         result = handler._upload_direct_to_chat(
-            file_obj, b"png data", channel="general"
+            file_obj, FAKE_PATH, "image/png", channel="general"
         )
 
         assert result is None
@@ -1108,7 +1014,7 @@ class TestUploadDirectToChat:
 
         file_obj = {"id": "F1", "name": "pic.png", "mimetype": "image/png"}
         result = handler._upload_direct_to_chat(
-            file_obj, b"png data", channel="general"
+            file_obj, FAKE_PATH, "image/png", channel="general"
         )
 
         assert result is None
@@ -1125,7 +1031,9 @@ class TestUploadDirectToChat:
         }
 
         # file_obj with no id, name, or mimetype
-        result = handler._upload_direct_to_chat({}, b"data", channel="general")
+        result = handler._upload_direct_to_chat(
+            {}, FAKE_PATH, "application/octet-stream", channel="general"
+        )
 
         assert result is not None
         assert isinstance(result, UploadResult)
@@ -1168,7 +1076,7 @@ class TestUploadToDrive:
         }
         result = handler._upload_to_drive(
             file_obj,
-            b"pdf content",
+            FAKE_PATH,
             channel="general",
             sender_email="alice@example.com",
         )
@@ -1190,7 +1098,7 @@ class TestUploadToDrive:
         handler.drive_uploader.upload_file_to_drive.return_value = (None, None)
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
-        result = handler._upload_to_drive(file_obj, b"data", channel="general")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
 
         assert result is None
 
@@ -1204,7 +1112,7 @@ class TestUploadToDrive:
         )
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is not None
         assert isinstance(result, UploadResult)
@@ -1220,7 +1128,7 @@ class TestUploadToDrive:
         handler._shared_drive_id = None
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is None
 
@@ -1247,7 +1155,7 @@ class TestUploadToDrive:
             "mimetype": "text/plain",
             "user": "U123",
         }
-        result = handler._upload_to_drive(file_obj, b"data", channel="general")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1280,7 +1188,7 @@ class TestUploadToDrive:
             "mimetype": "text/plain",
             "user": "U123",
         }
-        result = handler._upload_to_drive(file_obj, b"data", channel="general")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
 
         assert result is not None  # upload succeeded, just ownership transfer failed
         assert result.upload_type == "drive"
@@ -1309,7 +1217,7 @@ class TestUploadToDrive:
             "mimetype": "text/plain",
             "user": "UEXT",
         }
-        result = handler._upload_to_drive(file_obj, b"data", channel="general")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1338,7 +1246,7 @@ class TestUploadToDrive:
             "mimetype": "text/plain",
             "user": "U123",
         }
-        result = handler._upload_to_drive(file_obj, b"data", channel="general")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1360,7 +1268,7 @@ class TestUploadToDrive:
             "mimetype": "application/octet-stream",
             "url_private": "https://docs.google.com/document/d/abc/edit",
         }
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1382,7 +1290,7 @@ class TestUploadToDrive:
             "mimetype": "application/octet-stream",
             "url_private": "https://docs.google.com/spreadsheets/d/abc/edit",
         }
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1404,7 +1312,7 @@ class TestUploadToDrive:
             "mimetype": "application/octet-stream",
             "url_private": "https://docs.google.com/presentation/d/abc/edit",
         }
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1426,7 +1334,7 @@ class TestUploadToDrive:
             "mimetype": "application/octet-stream",
             "url_private": "https://sheets.google.com/d/abc/edit",
         }
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1448,7 +1356,7 @@ class TestUploadToDrive:
             "mimetype": "application/octet-stream",
             "url_private": "https://drive.google.com/file/d/abc/view",
         }
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1470,7 +1378,7 @@ class TestUploadToDrive:
             "mimetype": "application/octet-stream",
             "url_private": "https://drive.google.com/file/d/abc/view",
         }
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1491,7 +1399,7 @@ class TestUploadToDrive:
             "name": "data.json",
             "mimetype": "null",
         }
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1512,7 +1420,7 @@ class TestUploadToDrive:
             "name": "file.txt",
             "mimetype": "",
         }
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1528,7 +1436,7 @@ class TestUploadToDrive:
         )
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
-        result = handler._upload_to_drive(file_obj, b"data", channel="general")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
 
         assert result is None
 
@@ -1548,8 +1456,8 @@ class TestUploadToDrive:
         file_obj1 = {"id": "F1", "name": "a.txt", "mimetype": "text/plain"}
         file_obj2 = {"id": "F2", "name": "b.txt", "mimetype": "text/plain"}
 
-        handler._upload_to_drive(file_obj1, b"data", channel="general")
-        handler._upload_to_drive(file_obj2, b"data", channel="general")
+        handler._upload_to_drive(file_obj1, FAKE_PATH, channel="general")
+        handler._upload_to_drive(file_obj2, FAKE_PATH, channel="general")
 
         assert handler.drive_uploader.upload_file_to_drive.call_count == 2
 
@@ -1560,7 +1468,7 @@ class TestUploadToDrive:
         handler.drive_uploader.upload_file_to_drive.return_value = ("file_id", None)
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is not None
         assert result.upload_type == "drive"
@@ -1589,7 +1497,7 @@ class TestUploadToDrive:
             "user": "U123",
         }
         handler._upload_to_drive(
-            file_obj, b"data", channel="general", sender_email="bob@example.com"
+            file_obj, FAKE_PATH, channel="general", sender_email="bob@example.com"
         )
 
         # Verify upload_file_to_drive was called with sender_email
@@ -1616,45 +1524,12 @@ class TestUploadToDrive:
             "mimetype": "text/plain",
             "user": "U999",  # not in user_map
         }
-        result = handler._upload_to_drive(file_obj, b"data")
+        result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert result is not None
         assert result.upload_type == "drive"
         assert result.drive_id == "file_id"
         assert handler.file_stats["ownership_transferred"] == 0
-
-
-# ===========================================================================
-# _create_drive_reference exception handling
-# ===========================================================================
-
-
-class TestCreateDriveReferenceExceptionHandling:
-    """Tests for _create_drive_reference exception handling."""
-
-    def test_general_exception_returns_none(self):
-        """Any unexpected exception in the try block returns None."""
-        handler = _make_handler()
-
-        # Replace file_stats with a dict subclass that raises TypeError
-        # on __getitem__ for "drive_uploads", which triggers after the URL
-        # is parsed successfully
-        class FailingStats(dict):
-            def __getitem__(self, key):
-                if key == "drive_uploads":
-                    raise TypeError("simulated stats error")
-                return super().__getitem__(key)
-
-        handler.file_stats = FailingStats(handler.file_stats)
-
-        file_obj = {
-            "id": "F1",
-            "name": "test.pdf",
-            "url_private": "https://drive.google.com/file/d/ABC/view",
-        }
-        result = handler._create_drive_reference(file_obj, channel="general")
-
-        assert result is None
 
 
 # ===========================================================================
@@ -1701,117 +1576,207 @@ class TestEnsureDriveInitializedDetailed:
 
 
 class TestSafeTempSuffix:
-    """Tests for _safe_temp_suffix()."""
+    """Tests for safe_temp_suffix()."""
 
     def test_normal_filename(self):
-        result = _safe_temp_suffix("report.pdf")
+        result = safe_temp_suffix("report.pdf")
         assert result == "_report.pdf"
 
     def test_path_separators_replaced(self):
-        result = _safe_temp_suffix("../../etc/passwd")
+        result = safe_temp_suffix("../../etc/passwd")
         assert "/" not in result
         assert "\\" not in result
         assert result.startswith("_")
 
     def test_null_bytes_replaced(self):
-        result = _safe_temp_suffix("file\x00.txt")
+        result = safe_temp_suffix("file\x00.txt")
         assert "\x00" not in result
         assert result.startswith("_")
 
     def test_long_name_truncated(self):
         long_name = "a" * 200
-        result = _safe_temp_suffix(long_name)
+        result = safe_temp_suffix(long_name)
         # underscore prefix + at most 64 chars from the name
         assert len(result) <= 65
 
     def test_preserves_safe_characters(self):
-        result = _safe_temp_suffix("my-file_v2.tar.gz")
+        result = safe_temp_suffix("my-file_v2.tar.gz")
         assert result == "_my-file_v2.tar.gz"
 
     def test_spaces_replaced(self):
-        result = _safe_temp_suffix("my file name.txt")
+        result = safe_temp_suffix("my file name.txt")
         assert " " not in result
         assert result.startswith("_")
 
     def test_empty_string(self):
-        result = _safe_temp_suffix("")
+        result = safe_temp_suffix("")
         assert result == "_"
 
 
-# ---------------------------------------------------------------------------
-# SSRF protection — _is_internal_host and download_file URL validation
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Streaming pipeline: unavailable files, temp files, fallback reuse
+# ===========================================================================
 
 
-class TestIsInternalHost:
-    """Tests for _is_internal_host()."""
+class TestUnavailableFiles:
+    """Deleted, hidden and URL-less files are reported, not failed (I37)."""
 
-    def test_private_ipv4(self):
-        assert _is_internal_host("192.168.1.1") is True
+    @pytest.mark.parametrize(
+        ("file_obj", "reason"),
+        [
+            ({"id": "F3", "mode": "tombstone"}, "deleted"),
+            ({"id": "F4", "mode": "hidden_by_limit"}, "hidden_by_limit"),
+            ({"id": "F5", "name": "x.pdf", "url_private": None}, "no_url"),
+        ],
+    )
+    def test_unavailable_is_skipped_not_failed(self, file_obj, reason):
+        handler = _make_handler(folder_id="root")
+        handler.temp_dir = MagicMock()
 
-    def test_loopback(self):
-        assert _is_internal_host("127.0.0.1") is True
+        result = handler.upload_attachment(dict(file_obj), "general", "spaces/S")
 
-    def test_link_local(self):
-        assert _is_internal_host("169.254.1.1") is True
+        assert result.skipped
+        assert result.skip_reason == "unavailable"
+        assert result.metadata["unavailable_reason"] == reason
+        assert result.error is None
+        assert handler.file_stats["unavailable_files"] == 1
+        assert handler.file_stats["failed_uploads"] == 0
+        handler.temp_dir.path.assert_not_called()  # nothing to download
 
-    def test_public_ip(self):
-        assert _is_internal_host("8.8.8.8") is False
-
-    def test_dns_name_returns_false(self):
-        assert _is_internal_host("files.slack.com") is False
-
-    def test_10_range(self):
-        assert _is_internal_host("10.0.0.1") is True
-
-
-class TestDownloadFileSSRF:
-    """Tests for SSRF protection in download_file()."""
-
-    def test_blocks_http_scheme(self):
-        """HTTP URLs should be blocked."""
+    def test_external_file_keeps_its_link(self):
+        handler = _make_handler(folder_id="root")
         file_obj = {
-            "id": "F001",
-            "name": "test.txt",
-            "url_private": "http://files.slack.com/file.txt",
+            "id": "F6",
+            "name": "deck.pdf",
+            "mode": "external",
+            "url_private": "https://www.dropbox.com/s/abc/deck.pdf",
         }
-        result = download_file(file_obj, "general")
-        assert result is None
+        result = handler.upload_attachment(file_obj, "general")
+        assert result.skip_reason == "unavailable"
+        assert result.url == "https://www.dropbox.com/s/abc/deck.pdf"
 
-    def test_blocks_internal_ip(self):
-        """URLs pointing to internal IPs should be blocked."""
-        file_obj = {
-            "id": "F002",
-            "name": "test.txt",
-            "url_private": "https://192.168.1.1/secret",
-        }
-        result = download_file(file_obj, "general")
-        assert result is None
+    def test_unavailable_result_is_cached(self):
+        handler = _make_handler(folder_id="root")
+        handler._download_file = MagicMock(
+            return_value=DownloadResult(DownloadStatus.UNAVAILABLE, reason="html_page")
+        )
+        handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
+        second = handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
 
-    def test_blocks_loopback(self):
-        """URLs pointing to loopback should be blocked."""
-        file_obj = {
-            "id": "F003",
-            "name": "test.txt",
-            "url_private": "https://127.0.0.1/internal",
-        }
-        result = download_file(file_obj, "general")
-        assert result is None
+        assert second.cached is True
+        handler._download_file.assert_called_once()
+        assert handler.file_stats["unavailable_files"] == 1
 
-    @patch("slack_chat_migrator.services.files.file_download.requests.get")
-    def test_allows_https_public_url(self, mock_get):
-        """Valid HTTPS URLs to public hosts should proceed to download."""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.content = b"file content"
-        mock_response.headers = {}
-        mock_get.return_value = mock_response
+    def test_failed_download_is_retried_next_time(self):
+        handler = _make_handler(folder_id="root")
+        handler._download_file = MagicMock(return_value=_failed_download())
 
-        file_obj = {
-            "id": "F004",
-            "name": "test.txt",
-            "url_private": "https://files.slack.com/file.txt",
-        }
-        result = download_file(file_obj, "general")
-        assert result == b"file content"
-        mock_get.assert_called_once()
+        handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
+        handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
+
+        assert handler._download_file.call_count == 2
+        assert handler.file_stats["failed_uploads"] == 2
+
+    def test_success_rate_ignores_unavailable(self):
+        handler = _make_handler()
+        handler.file_stats["total_files"] = 4
+        handler.file_stats["drive_uploads"] = 1
+        handler.file_stats["unavailable_files"] = 3
+        stats = handler.get_file_statistics()
+        assert stats["success_rate"] == 100.0
+        assert stats["unavailable_files"] == 3
+
+
+class TestTempFileLifecycle:
+    """Downloads are written once, reused for the fallback, then deleted."""
+
+    def _handler(self):
+        handler = _make_handler(folder_id="root")
+        handler._drive_initialized = True
+        return handler
+
+    def test_temp_file_removed_after_drive_upload(self):
+        handler = self._handler()
+        download = _ok_download(b"pdf bytes")
+        handler._download_file = MagicMock(return_value=download)
+        seen = {}
+
+        def fake_upload(file_obj, path, channel, sender_email):
+            seen["exists"] = os.path.exists(path)
+            return UploadResult(upload_type="drive", drive_id="d1", name="a.pdf")
+
+        handler._upload_to_drive = MagicMock(side_effect=fake_upload)
+        result = handler.upload_attachment(
+            {"id": "F1", "name": "a.pdf", "mimetype": "application/pdf"}, "general"
+        )
+
+        assert result.success
+        assert seen["exists"] is True
+        assert not os.path.exists(download.path)
+
+    def test_temp_file_removed_when_upload_raises(self):
+        handler = self._handler()
+        download = _ok_download(b"pdf bytes")
+        handler._download_file = MagicMock(return_value=download)
+        handler._upload_to_drive = MagicMock(side_effect=OSError("disk gone"))
+
+        result = handler.upload_attachment({"id": "F1", "name": "a.pdf"}, "general")
+
+        assert result.error == "disk gone"
+        assert handler.file_stats["failed_uploads"] == 1
+        assert not os.path.exists(download.path)
+
+    def test_direct_failure_falls_back_to_drive_with_same_file(self):
+        handler = self._handler()
+        download = _ok_download(b"\x89PNG small")
+        handler._download_file = MagicMock(return_value=download)
+        handler.chat_uploader.is_suitable_for_direct_upload = MagicMock(
+            return_value=True
+        )
+        handler._upload_direct_to_chat = MagicMock(return_value=None)
+        handler._upload_to_drive = MagicMock(
+            return_value=UploadResult(upload_type="drive", drive_id="d1")
+        )
+
+        handler.upload_attachment(
+            {"id": "F1", "name": "a.png", "mimetype": "image/png"},
+            "general",
+            "spaces/S",
+        )
+
+        handler._download_file.assert_called_once()
+        direct_path = handler._upload_direct_to_chat.call_args[0][1]
+        drive_path = handler._upload_to_drive.call_args[0][1]
+        assert direct_path == drive_path == download.path
+        assert not os.path.exists(download.path)
+
+    def test_download_uses_token_and_run_temp_dir(self, tmp_path):
+        token = "tok"  # noqa: S105 — test value
+        config = MigrationConfig(
+            shared_drive=SharedDriveConfig(name="Test Drive"), slack_token=token
+        )
+        handler = _make_handler(folder_id="root", config=config)
+        handler.state.context.output_dir = str(tmp_path)
+
+        with patch(
+            "slack_chat_migrator.services.files.file.download_file",
+            return_value=_failed_download(),
+        ) as mock_download:
+            handler._download_file(
+                {"id": "F1", "url_private": "https://files.slack.com/x"}
+            )
+
+        args, kwargs = mock_download.call_args
+        assert kwargs["slack_token"] == token
+        assert args[1].startswith(str(tmp_path / ".attachment_tmp"))
+        handler.cleanup_temp_files()
+        assert not (tmp_path / ".attachment_tmp").exists()
+
+    def test_init_sweeps_stale_temp_dirs(self, tmp_path):
+        with patch(
+            "slack_chat_migrator.services.files.file.sweep_stale_temp_dirs"
+        ) as sweep:
+            deps = _make_deps()
+            deps["state"].context.output_dir = str(tmp_path)
+            FileHandler(MagicMock(), MagicMock(), None, **deps)
+        sweep.assert_called_once_with(str(tmp_path))
