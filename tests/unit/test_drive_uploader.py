@@ -1,6 +1,7 @@
 """Unit tests for the DriveFileUploader class."""
 
 import hashlib
+from types import MappingProxyType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -498,54 +499,48 @@ class TestSetMessagePosterPermission:
 # -------------------------------------------------------------------
 
 
-class TestPendingFlags:
-    """Failed grants are flagged on the file, once (SF7)."""
+#: appProperties of a file with a pending grant (Bob) and transfer (Alice).
+PENDING_FLAGS = MappingProxyType(
+    {
+        "slackFileId": "F1",
+        "slackGrantPending": "true",
+        "slackGrant.0123abcd": "bob@example.com",
+        "slackOwnerPending": "true",
+        "slackOwner": "alice@example.com",
+    }
+)
 
-    def test_flag_is_stored_once_and_cleared(self):
-        uploader = _make_uploader()
 
-        uploader.set_grant_pending("f1", True, "SD")
-        uploader.set_grant_pending("f1", True, "SD")
-        uploader.set_grant_pending("f1", False, "SD")
-        uploader.set_grant_pending("f1", False, "SD")
+class TestPendingFlagsAreRead:
+    """Pending grants are learned wherever a file's appProperties are read."""
 
-        calls = uploader.drive_service.update_file.call_args_list
-        assert [c.args for c in calls] == [
-            ("f1", {"appProperties": {"slackGrantPending": "1"}}),
-            ("f1", {"appProperties": {"slackGrantPending": None}}),
-        ]
-        assert all(c.kwargs["supports_all_drives"] is True for c in calls)
-        assert uploader.grant_pending == set()
-
-    def test_failure_to_store_the_flag_is_not_raised(self):
-        uploader = _make_uploader()
-        uploader.drive_service.update_file.side_effect = _http_error(403)
-
-        uploader.set_owner_pending("f1", True)
-
-        assert uploader.owner_pending == {"f1"}
+    FLAGS = PENDING_FLAGS
 
     def test_pre_cache_reads_the_flags(self):
         uploader = _make_uploader()
         uploader.drive_service.list_files.return_value = {
             "files": [
-                {
-                    "id": "a",
-                    "md5Checksum": "m",
-                    "appProperties": {
-                        "slackFileId": "F1",
-                        "slackGrantPending": "1",
-                        "slackOwnerPending": "1",
-                    },
-                },
+                {"id": "a", "md5Checksum": "m", "appProperties": dict(self.FLAGS)},
                 {"id": "b", "md5Checksum": "n"},
             ]
         }
 
         uploader.pre_cache_folder_file_hashes("folder1")
 
-        assert uploader.grant_pending == {"a"}
-        assert uploader.owner_pending == {"a"}
+        assert uploader.pending.grants == {
+            "a": {"slackGrant.0123abcd": "bob@example.com"}
+        }
+        assert uploader.pending.owners == {"a": "alice@example.com"}
+
+    def test_hash_search_reads_the_flags(self):
+        uploader = _make_uploader()
+        uploader.drive_service.list_files.return_value = {
+            "files": [{"id": "a", "appProperties": dict(self.FLAGS)}]
+        }
+
+        uploader._find_file_by_hash("m", "a.txt", "folder1")
+
+        assert uploader.pending.owner("a") == "alice@example.com"
 
 
 class TestInit:
@@ -774,7 +769,8 @@ class TestSlackFileIndex:
                         "webViewLink": "https://doc",
                         "appProperties": {
                             "slackFileId": "F'1",
-                            "slackGrantPending": "1",
+                            "slackGrantPending": "true",
+                            "slackGrant.0123abcd": "bob@example.com",
                         },
                     }
                 ]
@@ -795,7 +791,9 @@ class TestSlackFileIndex:
             " and 'folder1' in parents and trashed=false"
         )
         assert search["drive_id"] == "SD"
-        assert uploader.grant_pending == {"doc1"}
+        assert uploader.pending.grants == {
+            "doc1": {"slackGrant.0123abcd": "bob@example.com"}
+        }
         # Remembered: no second search.
         assert uploader.find_uploaded_slack_file("folder1", "F'1") == found
         assert uploader.drive_service.list_files.call_count == 2

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from slack_chat_migrator.services.drive.pending import PendingPermissions
 from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_ERRORS,
     PermissionChange,
@@ -77,9 +78,10 @@ class DriveUpload:
     def reused(self) -> bool:
         """True when an existing Drive file is linked instead of a new upload.
 
-        Ownership is never transferred for reused files.
+        A reused file keeps its owner, unless an earlier run's transfer of
+        it failed (see ``FileHandler._apply_file_permissions``).
         """
-        return self.source is not DriveUploadSource.NEW
+        return self.source != DriveUploadSource.NEW
 
 
 @dataclass(frozen=True)
@@ -109,12 +111,6 @@ _CONVERSION_FAILURE_STATUSES = frozenset({400, 413, 415, 500})
 _UPLOAD_ERRORS: tuple[type[BaseException], ...] = (OSError, *DRIVE_CALL_ERRORS)
 
 
-#: appProperties flags on a file whose poster grant or ownership transfer
-#: failed, so a re-run that links the file again retries it.
-APP_PROPERTY_GRANT_PENDING = "slackGrantPending"
-APP_PROPERTY_OWNER_PENDING = "slackOwnerPending"
-
-
 #: Cached Drive file: (file_id, webViewLink).
 _CachedFile = tuple[str, str | None]
 
@@ -136,17 +132,21 @@ class DriveFileUploader:
         drive_service: DriveAdapter,
         *,
         on_listing_failure: Callable[[str, BaseException], None] | None = None,
+        on_flag_write_failure: Callable[[str, BaseException], None] | None = None,
     ) -> None:
         """Initialize the DriveFileUploader.
 
-        It grants no access itself, so it doesn't need to know who is
-        internal; FileHandler decides that.
+        It makes grants only when FileHandler asks
+        (:meth:`set_message_poster_permission`) and never decides who is
+        internal; FileHandler does.
 
         Args:
             drive_service: DriveAdapter instance wrapping the Google Drive API
             on_listing_failure: Called with the folder ID and the error each
                 time a folder's files can't be listed, so the caller can
                 count it.
+            on_flag_write_failure: Called with the file ID and the error when
+                a pending grant or transfer can't be recorded on the file.
         """
         self.drive_service = drive_service
         self._on_listing_failure = on_listing_failure or (lambda _folder, _e: None)
@@ -165,10 +165,11 @@ class DriveFileUploader:
         self._slack_id_misses: set[tuple[str, str]] = set()
         # Drive files created by this run.
         self.created_this_run: set[str] = set()
-        # Drive files whose poster grant or ownership transfer failed (this
-        # run or, from the appProperties flags, an earlier one).
-        self.grant_pending: set[str] = set()
-        self.owner_pending: set[str] = set()
+        #: Poster grants and transfers that failed, in this run or (read
+        #: from the files' appProperties) an earlier one.
+        self.pending = PendingPermissions(
+            drive_service, on_write_failure=on_flag_write_failure
+        )
         # Set by FileHandler before each channel is processed
         self.current_channel: str | None = None
 
@@ -284,10 +285,7 @@ class DriveFileUploader:
                     if not file_id:
                         continue
                     app_properties = file.get("appProperties") or {}
-                    if app_properties.get(APP_PROPERTY_GRANT_PENDING):
-                        self.grant_pending.add(file_id)
-                    if app_properties.get(APP_PROPERTY_OWNER_PENDING):
-                        self.owner_pending.add(file_id)
+                    self.pending.read(file_id, app_properties)
                     slack_file_id = app_properties.get(DRIVE_APP_PROPERTY_SLACK_FILE_ID)
                     md5 = file.get("md5Checksum")
                     if md5 or slack_file_id:
@@ -406,11 +404,7 @@ class DriveFileUploader:
         if found is None:
             self._slack_id_misses.add((folder_id, slack_file_id))
             return None
-        app_properties = found.get("appProperties") or {}
-        if app_properties.get(APP_PROPERTY_GRANT_PENDING):
-            self.grant_pending.add(found["id"])
-        if app_properties.get(APP_PROPERTY_OWNER_PENDING):
-            self.owner_pending.add(found["id"])
+        self.pending.read(found["id"], found.get("appProperties") or {})
         url = found.get("webViewLink")
         self.remember_file(folder_id, found["id"], url, slack_file_id=slack_file_id)
         return found["id"], url
@@ -482,6 +476,7 @@ class DriveFileUploader:
         if files and files[0].get("id"):
             file_id = files[0]["id"]
             web_view_link = files[0].get("webViewLink")
+            self.pending.read(file_id, files[0].get("appProperties") or {})
             self.remember_file(folder_id, file_id, web_view_link, md5=file_hash)
             log_with_context(
                 logging.DEBUG,
@@ -718,63 +713,3 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
             return False
-
-    def set_grant_pending(
-        self, file_id: str, pending: bool, shared_drive_id: str | None = None
-    ) -> None:
-        """Record whether a file's poster grant failed and must be made again.
-
-        See :meth:`set_owner_pending`.
-        """
-        self._set_pending(
-            self.grant_pending,
-            APP_PROPERTY_GRANT_PENDING,
-            file_id,
-            pending,
-            shared_drive_id,
-        )
-
-    def set_owner_pending(self, file_id: str, pending: bool) -> None:
-        """Record whether a file still needs its ownership transfer.
-
-        The flag is also stored in the file's ``appProperties``, so a later
-        run that links the file again retries it.  Storing it is best
-        effort: if that fails, only this run remembers it.  Nothing is sent
-        when the flag doesn't change.
-
-        Args:
-            file_id: The Drive file (regular Drive: transfers don't apply to
-                shared drives).
-            pending: True after a failure, False after a successful retry.
-        """
-        self._set_pending(
-            self.owner_pending, APP_PROPERTY_OWNER_PENDING, file_id, pending, None
-        )
-
-    def _set_pending(
-        self,
-        flagged: set[str],
-        key: str,
-        file_id: str,
-        pending: bool,
-        shared_drive_id: str | None,
-    ) -> None:
-        """Set or clear one pending flag, in memory and on the file."""
-        if pending == (file_id in flagged):
-            return
-        if pending:
-            flagged.add(file_id)
-        else:
-            flagged.discard(file_id)
-        try:
-            self.drive_service.update_file(
-                file_id,
-                {"appProperties": {key: "1" if pending else None}},
-                supports_all_drives=bool(shared_drive_id),
-            )
-        except DRIVE_CALL_ERRORS as e:
-            log_with_context(
-                logging.DEBUG,
-                f"Could not store {key}={pending} on {file_id}: {e}",
-                channel=self._get_current_channel(),
-            )

@@ -473,7 +473,7 @@ class TestUploadErrorsAreCounted:
 
 
 class TestGrantFailures:
-    """A failed grant never fails the upload, and is retried on reuse (SF7)."""
+    """A failed grant never fails the upload, and is retried (#98)."""
 
     @staticmethod
     def _writer_grants(fake, email="alice@example.com"):
@@ -572,6 +572,86 @@ class TestGrantFailures:
         assert run2.get_file_statistics()["ownership_transferred"] == 1
         assert "slackOwnerPending" not in fake.files_db[first.drive_id]["appProperties"]
 
+    def test_failed_batched_writer_grant_is_counted_and_flagged(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive(reject_grants_to={"bob@example.com"})
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        result = upload(
+            handler, downloads, "c", "F1", "UA", b"shared", sender="bob@example.com"
+        )
+
+        assert fake.batch_sizes == [2]
+        assert handler.get_file_statistics()["poster_grant_failures"] == 1
+        assert handler.drive_uploader.pending.has_grant(
+            result.drive_id, "bob@example.com"
+        )
+        assert fake.files_db[result.drive_id]["appProperties"]["slackGrantPending"]
+
+    def test_second_poster_in_the_same_run_gets_a_grant(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        upload(
+            handler,
+            downloads,
+            "c",
+            "F1",
+            "UA",
+            b"body",
+            space="spaces/T",
+            sender="bob@example.com",
+        )
+
+        assert self._writer_grants(fake, "bob@example.com")
+
+    def test_network_error_storing_the_flag_keeps_the_upload(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        fake.failing["files.update"] = ConnectionResetError("reset")
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        assert result.success
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 0
+        assert stats["poster_grant_failures"] == 1
+        assert stats["pending_flag_failures"] == 1
+        assert any(
+            r.levelname == "WARNING" and result.drive_id in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_new_owner_gets_no_writer_grant_on_relink(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine", space="spaces/T")
+
+        assert self._writer_grants(fake, "alice@example.com") == []
+
+    def test_transfer_is_not_retried_on_relink_in_the_same_run(
+        self, tmp_path, downloads
+    ):
+        """In-run retries of transfers are left to the end-of-run sweep."""
+        fake = FakeDrive(fail_transfer=True)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(handler, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine", space="spaces/T")
+
+        transfers = [
+            kw for kw in fake.permission_calls() if kw.get("transferOwnership")
+        ]
+        assert len(transfers) == 1
+
     def test_rerun_after_a_transfer_sends_nothing(self, tmp_path, downloads):
         fake = FakeDrive()
         run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
@@ -583,6 +663,158 @@ class TestGrantFailures:
 
         assert fake.permission_calls() == []
         assert fake.count("files.update") == 0
+
+
+class TestPendingSweep:
+    """The end-of-run sweep retries every flagged grant and transfer (#98)."""
+
+    @staticmethod
+    def _writer_grants(fake, email="alice@example.com"):
+        return TestGrantFailures._writer_grants(fake, email)
+
+    def test_sweep_retries_a_grant_from_this_run(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+        # The same file in a later message: answered from the in-run cache.
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+
+        handler.retry_pending_permissions()
+
+        assert len(self._writer_grants(fake)) == 2  # the failure and the retry
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 1
+        assert stats["pending_retry_failed"] == 0
+        assert (
+            "slackGrantPending" not in fake.files_db[result.drive_id]["appProperties"]
+        )
+
+    @pytest.mark.parametrize("shared", [True, False], ids=["shared", "my_drive"])
+    def test_resume_retries_files_it_never_links(self, tmp_path, downloads, shared):
+        """--resume skips sent messages, so the sweep finds the flagged file."""
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path, shared=shared)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(run1, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+
+        run2 = make_handler(fake, tmp_path, shared=shared)  # links nothing
+        run2.retry_pending_permissions()
+
+        assert len(self._writer_grants(fake)) == 2
+        assert run2.get_file_statistics()["pending_retried"] == 1
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert not any(key.startswith("slackGrant") for key in props)
+
+    def test_one_posters_success_keeps_anothers_flag(self, tmp_path, downloads):
+        fake = FakeDrive(reject_grants_to={"alice@example.com"})
+        run1 = make_handler(fake, tmp_path)
+        first = upload(run1, downloads, "c", "F1", "UA", b"body")
+        upload(
+            run1,
+            downloads,
+            "c",
+            "F1",
+            "UA",
+            b"body",
+            space="spaces/T",
+            sender="bob@example.com",
+        )  # Bob's grant works
+
+        fake.reject_grants_to = set()
+        run2 = make_handler(fake, tmp_path)
+        run2.retry_pending_permissions()
+
+        assert len(self._writer_grants(fake, "alice@example.com")) == 2
+        assert run2.get_file_statistics()["pending_retried"] == 1
+        props = fake.files_db[first.drive_id]["appProperties"]
+        assert "slackGrantPending" not in props
+
+    def test_sweep_retries_a_failed_transfer(self, tmp_path, downloads):
+        fake = FakeDrive(fail_transfer=True)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        result = upload(handler, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+
+        handler.retry_pending_permissions()
+
+        transfers = [
+            kw for kw in fake.permission_calls() if kw.get("transferOwnership")
+        ]
+        assert len(transfers) == 2
+        assert handler.get_file_statistics()["pending_retried"] == 1
+        assert (
+            "slackOwnerPending" not in fake.files_db[result.drive_id]["appProperties"]
+        )
+
+    def test_transfer_is_not_retried_once_the_option_is_off(self, tmp_path, downloads):
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(run1, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+
+        run2 = make_handler(fake, tmp_path, shared=False)  # transfers now off
+        run2.retry_pending_permissions()
+
+        transfers = [
+            kw for kw in fake.permission_calls() if kw.get("transferOwnership")
+        ]
+        assert len(transfers) == 1
+        assert run2.get_file_statistics()["pending_retried"] == 0
+
+    def test_still_failing_retry_is_counted_and_kept(self, tmp_path, downloads):
+        fake = FakeDrive(reject_grants_to={"alice@example.com"})
+        handler = make_handler(fake, tmp_path)
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        handler.retry_pending_permissions()
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 0
+        assert stats["pending_retry_failed"] == 1
+        assert handler.drive_uploader.pending.has_grant(
+            result.drive_id, "alice@example.com"
+        )
+
+    def test_unknown_recipient_is_skipped_with_a_warning(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        result = upload(run1, downloads, "c", "F1", "UA", b"body")
+        record = fake.files_db[result.drive_id]
+        record["appProperties"].update(
+            {"slackGrantPending": "true", "slackGrant.0123abcd": "-"}
+        )
+
+        run2 = make_handler(fake, tmp_path)
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        assert fake.permission_calls() == []
+        assert any("too long" in r.getMessage() for r in caplog.records)
+
+    def test_failed_search_still_retries_this_runs_flags(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+        fake.fail_query = lambda q: http_error(500) if "Pending" in q else None
+
+        handler.retry_pending_permissions()
+
+        assert handler.get_file_statistics()["pending_retried"] == 1
+
+    def test_nothing_to_do_without_drive(self, tmp_path):
+        handler = make_handler(FakeDrive(), tmp_path)
+        handler.folder_id = None
+
+        handler.retry_pending_permissions()  # no error, nothing counted
+
+        assert handler.get_file_statistics()["pending_retried"] == 0
 
 
 # ---------------------------------------------------------------------------

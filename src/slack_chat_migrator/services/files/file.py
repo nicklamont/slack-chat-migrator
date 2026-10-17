@@ -36,6 +36,7 @@ from slack_chat_migrator.services.drive.folder_manager import (
     FolderLookup,
     FolderSyncResult,
 )
+from slack_chat_migrator.services.drive.pending import UNKNOWN_TARGET
 from slack_chat_migrator.services.drive_adapter import DRIVE_CALL_ERRORS
 from slack_chat_migrator.services.files.file_download import (
     AUTH_FAILURE_REASONS,
@@ -258,6 +259,9 @@ class FileHandler:
             "ownership_transferred": 0,
             "ownership_transfer_failed": 0,
             "poster_grant_failures": 0,
+            "pending_retried": 0,
+            "pending_retry_failed": 0,
+            "pending_flag_failures": 0,
             "folder_listing_failures": 0,
             "external_folder_grant_failures": 0,
             "folder_sync_failures": 0,
@@ -285,7 +289,9 @@ class FileHandler:
             on_sync_result=self._count_folder_sync,
         )
         self.drive_uploader = DriveFileUploader(
-            drive_service, on_listing_failure=self._count_listing_failure
+            drive_service,
+            on_listing_failure=self._count_listing_failure,
+            on_flag_write_failure=self._count_flag_write_failure,
         )
         self.chat_uploader = ChatFileUploader(chat_service)
 
@@ -1497,15 +1503,20 @@ class FileHandler:
         Ownership is transferred only when ``config.transfer_file_ownership``
         is set, only in regular-Drive mode and only to internal users: for a
         new upload, or for a file an earlier run uploaded (found by its
-        Slack ID) whose transfer failed then.  A file found by its content
-        (``HASH``) keeps its owner.
+        Slack ID) whose transfer to this owner is still pending.  Any other
+        reused file keeps its owner.
 
-        A reused file gets the poster's grant unless it was made earlier in
-        this run, or, for a file from an earlier run, unless that run made it
-        (no failure flagged on the file).  Failures are logged, counted per
-        attempt (``poster_grant_failures``, ``ownership_transfer_failed``)
-        and flagged on the file, never raised: the upload stays a success.
+        A reused file gets the poster's grant unless this run already made
+        it.  A file an earlier run uploaded (found by its Slack ID) gets it
+        only if that run's grant to this poster failed: that run made its
+        grants.  Failures are logged, counted per attempt
+        (``poster_grant_failures``, ``ownership_transfer_failed``) and
+        flagged per poster on the file (see
+        :class:`~slack_chat_migrator.services.drive.pending.PendingPermissions`),
+        never raised: the upload stays a success.  :meth:`retry_pending_permissions`
+        retries the flagged ones at the end of the run.
         """
+        pending = self.drive_uploader.pending
         poster = sender_email if self._is_internal_email(sender_email) else None
         can_transfer = bool(
             self.config.transfer_file_ownership
@@ -1516,22 +1527,23 @@ class FileHandler:
             source is DriveUploadSource.SLACK_ID
             and drive_file_id not in self.drive_uploader.created_this_run
         )
-        owner_pending = drive_file_id in self.drive_uploader.owner_pending
+        pending_owner = pending.owner(drive_file_id)
         owner = (
             owner_email
             if can_transfer
+            and owner_email
             and (
-                source is DriveUploadSource.NEW or (from_earlier_run and owner_pending)
+                source is DriveUploadSource.NEW
+                or (
+                    from_earlier_run
+                    and pending_owner is not None
+                    and pending_owner.lower() == owner_email.lower()
+                )
             )
             else None
         )
-        if from_earlier_run:
-            # An earlier run uploaded it and made its grants.  Grant again
-            # only if that failed (flagged on the file), and not to a poster
-            # whom that run's transfer made the owner.
-            became_owner = can_transfer and not owner_pending and poster == owner_email
-            if became_owner or drive_file_id not in self.drive_uploader.grant_pending:
-                poster = None
+        if from_earlier_run and poster and not pending.has_grant(drive_file_id, poster):
+            poster = None  # the earlier run made this grant
 
         if sender_email and not self._is_internal_email(sender_email):
             log_with_context(
@@ -1600,15 +1612,16 @@ class FileHandler:
     ) -> None:
         """Remember a poster grant, or count and flag it as failed.
 
-        A flagged file gets the grant again when it is linked again, in this
-        run or a later one.
+        The flag is per poster, so another poster's success never clears it.
+        The end-of-run sweep retries flagged grants, as does linking the
+        file again.
         """
         if granted:
             self._mark_granted(drive_file_id, poster)
         else:
             self._increment_stat("poster_grant_failures")
-        self.drive_uploader.set_grant_pending(
-            drive_file_id, not granted, self._shared_drive_id
+        self.drive_uploader.pending.set_grant(
+            drive_file_id, poster, not granted, self._shared_drive_id
         )
 
     def _already_granted(self, drive_file_id: str, email: str) -> bool:
@@ -1626,7 +1639,10 @@ class FileHandler:
         channel: str | None,
         file_id: str,
     ) -> bool:
-        """Transfer ownership of a new regular-Drive file to its Slack uploader.
+        """Transfer ownership of a regular-Drive file to its Slack uploader.
+
+        The file is new, or an earlier run's transfer of it is pending;
+        only called when ``config.transfer_file_ownership`` is set.
 
         Returns:
             True if the transfer succeeded.  Both outcomes are counted.
@@ -1648,9 +1664,9 @@ class FileHandler:
     ) -> None:
         """Count and log one ownership transfer attempt.
 
-        A failed transfer is flagged on the file (see
-        :meth:`DriveFileUploader.set_owner_pending`), so linking the file
-        again, in this run or a later one, retries it.
+        A failed transfer is flagged on the file, so the end-of-run sweep
+        (:meth:`retry_pending_permissions`) retries it, in this run and in
+        later ones, as does a later run that links the file again.
 
         Args:
             transferred: Whether the transfer succeeded.
@@ -1660,7 +1676,9 @@ class FileHandler:
             file_id: Slack file ID for logging context.
             error: Why the transfer failed, when known.
         """
-        self.drive_uploader.set_owner_pending(drive_file_id, not transferred)
+        self.drive_uploader.pending.set_owner(
+            drive_file_id, new_owner_email, not transferred
+        )
         if transferred:
             # The owner needs no writer grant when the file is linked again.
             self._mark_granted(drive_file_id, new_owner_email)
@@ -1684,6 +1702,99 @@ class FileHandler:
             file_id=file_id,
             drive_file_id=drive_file_id,
         )
+
+    def retry_pending_permissions(self) -> None:
+        """Retry the poster grants and ownership transfers that failed.
+
+        Run at the end of every migration run (also with ``--resume``, which
+        doesn't link files of already-sent messages again).  The flagged
+        files are those this run flagged plus those whose appProperties
+        flags an earlier run left: the whole shared drive is searched, or in
+        regular Drive the attachment root and its channel folders.  Each
+        poster grant is retried for internal posters; a transfer only while
+        ``transfer_file_ownership`` is still set.  A success clears the
+        flag; results are counted in ``pending_retried`` and
+        ``pending_retry_failed``.  A flag holding ``"-"`` (an email too long
+        to store) can't be retried and is logged.
+        """
+        root = self._root_folder_id
+        if not root:
+            return
+        pending = self.drive_uploader.pending
+        try:
+            folder_ids = set() if self._shared_drive_id else self._migration_folders()
+            pending.find_flagged(self._shared_drive_id, folder_ids)
+        except DRIVE_CALL_ERRORS as e:
+            log_with_context(
+                logging.WARNING,
+                f"Could not look for Drive files with pending grants ({e});"
+                " retrying only the ones this run flagged",
+            )
+        retried = failed = 0
+        for drive_file_id, targets in list(pending.grants.items()):
+            for email in list(targets.values()):
+                if not self._can_retry(drive_file_id, email, "grant"):
+                    continue
+                granted = self.drive_uploader.set_message_poster_permission(
+                    drive_file_id, email, self._shared_drive_id
+                )
+                if granted:
+                    self._mark_granted(drive_file_id, email)
+                    pending.set_grant(
+                        drive_file_id, email, False, self._shared_drive_id
+                    )
+                    retried += 1
+                else:
+                    failed += 1
+        transfers = self.config.transfer_file_ownership and not self._shared_drive_id
+        for drive_file_id, email in list(pending.owners.items()):
+            if not transfers or not self._can_retry(drive_file_id, email, "transfer"):
+                continue
+            if self._transfer_file_ownership(drive_file_id, email):
+                self._mark_granted(drive_file_id, email)
+                pending.set_owner(drive_file_id, email, False)
+                retried += 1
+            else:
+                failed += 1
+        self._increment_stat("pending_retried", retried)
+        self._increment_stat("pending_retry_failed", failed)
+        if retried or failed:
+            log_with_context(
+                logging.WARNING if failed else logging.INFO,
+                f"Retried {retried + failed} pending Drive grant(s) and"
+                f" transfer(s): {retried} succeeded, {failed} still failing"
+                " (retried again by the next run)",
+            )
+
+    def _can_retry(self, drive_file_id: str, email: str, what: str) -> bool:
+        """Whether a flagged grant or transfer to *email* can be retried."""
+        if email == UNKNOWN_TARGET:
+            log_with_context(
+                logging.WARNING,
+                f"Can't retry a pending {what} on Drive file {drive_file_id}: the"
+                " recipient's email was too long to store with the flag",
+                drive_file_id=drive_file_id,
+            )
+            return False
+        return self._is_internal_email(email)
+
+    def _migration_folders(self) -> set[str]:
+        """The attachment root and every channel folder in it (regular Drive).
+
+        Raises:
+            Any of ``DRIVE_CALL_ERRORS`` if the folders can't be listed.
+        """
+        root = self._root_folder_id
+        if not root:
+            return set()
+        children = self.folder_manager.list_child_folders(root, self._shared_drive_id)
+        return {root} | {folder["id"] for folder in children}
+
+    def _count_flag_write_failure(
+        self, drive_file_id: str, error: BaseException
+    ) -> None:
+        """Count a pending grant or transfer that couldn't be stored on its file."""
+        self._increment_stat("pending_flag_failures")
 
     def get_file_statistics(self) -> dict[str, Any]:
         """Get detailed file upload statistics.
@@ -1711,6 +1822,9 @@ class FileHandler:
             "ownership_transferred": self.file_stats["ownership_transferred"],
             "ownership_transfer_failed": self.file_stats["ownership_transfer_failed"],
             "poster_grant_failures": self.file_stats["poster_grant_failures"],
+            "pending_retried": self.file_stats["pending_retried"],
+            "pending_retry_failed": self.file_stats["pending_retry_failed"],
+            "pending_flag_failures": self.file_stats["pending_flag_failures"],
             "folder_listing_failures": self.file_stats["folder_listing_failures"],
             "external_folder_grant_failures": self.file_stats[
                 "external_folder_grant_failures"
