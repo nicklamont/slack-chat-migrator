@@ -841,7 +841,7 @@ class TestInitializeSharedDriveAndFolder:
         handler.folder_manager.find_or_create_root_folder.assert_not_called()
 
     def test_no_shared_drive_and_no_folder_is_not_ready(self):
-        """SF12: the status says Drive isn't usable, and why."""
+        """The status says Drive isn't usable, and why (#118)."""
         handler = _make_handler()
         handler.shared_drive_manager.get_or_create_shared_drive.return_value = None
         handler.shared_drive_manager.last_error = "quota exceeded"
@@ -1303,9 +1303,9 @@ class TestUploadToDrive:
         assert handler.file_stats["ownership_transferred"] == 0
 
     def test_external_user_skips_ownership_transfer(self):
-        """External users should not have ownership transferred."""
+        """External users never get ownership, even with transfers on."""
         handler = self._make_ready_handler(
-            user_map={"UEXT": "ext@other.com"},
+            user_map={"UEXT": "ext@other.com"}, config=TRANSFER_CONFIG
         )
         handler.user_resolver.is_external_user.return_value = True
         handler.folder_manager.find_or_create_channel_folder.return_value = (
@@ -1328,11 +1328,12 @@ class TestUploadToDrive:
         assert result.upload_type == "drive"
         assert result.drive_id == "file_id"
         assert handler.file_stats["ownership_transferred"] == 0
+        handler.drive_service.create_permission.assert_not_called()
 
     def test_shared_drive_skips_ownership_transfer(self):
-        """Files on shared drives skip ownership transfer."""
+        """Files on shared drives are never transferred, even with transfers on."""
         handler = self._make_ready_handler(
-            user_map={"U123": "alice@example.com"},
+            user_map={"U123": "alice@example.com"}, config=TRANSFER_CONFIG
         )
         _use_drive(handler, shared_drive="drive123")
         handler.user_resolver.is_external_user.return_value = False
@@ -1356,6 +1357,7 @@ class TestUploadToDrive:
         assert result.upload_type == "drive"
         assert result.drive_id == "file_id"
         assert handler.file_stats["ownership_transferred"] == 0
+        handler.drive_service.create_permission.assert_not_called()
 
     def test_google_docs_url_sets_mime_type(self):
         """Google Docs URLs should set appropriate MIME types."""
@@ -1569,7 +1571,7 @@ class TestUploadToDrive:
     def test_writer_grant_goes_to_sender_not_file_owner(self):
         """Only the message sender gets writer; the file owner is not granted."""
         handler = self._make_ready_handler(
-            user_map={"U123": "alice@example.com"},
+            user_map={"U123": "alice@example.com"}, config=TRANSFER_CONFIG
         )
         _use_drive(handler, shared_drive="drive123")
         handler.folder_manager.find_or_create_channel_folder.return_value = (
@@ -1595,7 +1597,7 @@ class TestUploadToDrive:
 
     def test_no_user_email_logs_warning(self):
         """When no user email is available, no ownership transfer happens."""
-        handler = self._make_ready_handler(user_map={})
+        handler = self._make_ready_handler(user_map={}, config=TRANSFER_CONFIG)
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1612,6 +1614,7 @@ class TestUploadToDrive:
         assert result.upload_type == "drive"
         assert result.drive_id == "file_id"
         assert handler.file_stats["ownership_transferred"] == 0
+        handler.drive_service.create_permission.assert_not_called()
 
 
 # ===========================================================================

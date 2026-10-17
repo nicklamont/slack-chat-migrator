@@ -232,7 +232,7 @@ class TestGrants:
 
     def test_shared_drive_grants_writer_to_poster_only(self, tmp_path, downloads):
         fake = FakeDrive()
-        handler = make_handler(fake, tmp_path)
+        handler = make_handler(fake, tmp_path, transfer=True)  # still no transfer
 
         upload(handler, downloads, "c", "F1", "UA", b"doc")
 
@@ -241,6 +241,40 @@ class TestGrants:
             ("alice@example.com", "writer")
         ]
         assert not any(kw.get("transferOwnership") for kw in calls)
+
+
+class TestTransferGuards:
+    """With transfers on, only internal uploaders in regular Drive get ownership."""
+
+    @staticmethod
+    def _transfers(fake):
+        return [kw for kw in fake.permission_calls() if kw.get("transferOwnership")]
+
+    def test_no_transfer_to_an_external_uploader(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        upload(handler, downloads, "c", "F1", "UX", b"ext")
+
+        assert self._transfers(fake) == []
+
+    def test_no_transfer_on_a_shared_drive(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=True, transfer=True)
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        assert self._transfers(fake) == []
+
+    def test_internal_uploader_in_regular_drive_gets_ownership(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        assert len(self._transfers(fake)) == 1
 
 
 class TestDriveSetup:
@@ -375,7 +409,7 @@ class TestWorkspaceDomains:
 
 
 class TestOwnershipTransfer:
-    """Transfers are opt-in and never disable Drive's notification (CR1)."""
+    """Transfers are opt-in and never disable Drive's notification (#98)."""
 
     def test_off_by_default_poster_gets_writer(self, tmp_path, downloads):
         fake = FakeDrive()
@@ -411,7 +445,7 @@ class TestOwnershipTransfer:
     def test_failed_batched_transfer_is_counted_and_logged(
         self, tmp_path, downloads, caplog
     ):
-        """Poster != owner: writer grant and transfer share a batch (TA3.3)."""
+        """Poster != owner: writer grant and transfer share a batch (#98)."""
         fake = FakeDrive(fail_transfer=True)
         handler = make_handler(fake, tmp_path, shared=False, transfer=True)
 
@@ -1529,7 +1563,7 @@ class TestCanvasConversion:
     def test_other_upload_failures_are_not_blamed_on_conversion(
         self, tmp_path, doc_downloads, caplog
     ):
-        """SF14: one attempt, the real cause, no "could not convert" warning."""
+        """One attempt, the real cause, no "could not convert" warning (#118)."""
         fake = FakeDrive()
         handler = make_handler(fake, tmp_path)
         fake.add_folder("CHF", "general", "SD1")  # only the upload fails
@@ -1601,7 +1635,7 @@ class TestCanvasConversion:
     def test_rerun_finds_the_canvas_when_its_folder_cannot_be_listed(
         self, tmp_path, doc_downloads
     ):
-        """SF9: a failed listing is counted and retried; dedup still works."""
+        """A failed listing is counted and retried; dedup still works (#125)."""
         fake = FakeDrive()
         first = post_document(make_handler(fake, tmp_path), CANVAS)
         folder = fake.files_db[first.drive_id]["parents"][0]
@@ -1696,7 +1730,7 @@ class TestTransferConfig:
 
 
 # ---------------------------------------------------------------------------
-# Private folders fail closed (SF2)
+# Private folders fail closed (#137)
 # ---------------------------------------------------------------------------
 
 

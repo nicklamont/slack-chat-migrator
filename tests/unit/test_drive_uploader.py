@@ -466,7 +466,7 @@ class TestSetMessagePosterPermission:
         ids=["reset", "timeout"],
     )
     def test_network_error_returns_false(self, error):
-        """A network error after the upload doesn't escape (SF7)."""
+        """A network error after the upload doesn't escape (#98)."""
         uploader = _make_uploader()
         uploader.drive_service.create_permission.side_effect = error
 
@@ -755,7 +755,7 @@ class TestSlackFileIndex:
         assert uploader.find_uploaded_slack_file("other_folder", "F1") is None
 
     def test_folder_that_failed_to_list_is_searched_by_slack_id(self):
-        """SF9: a failed listing doesn't turn off deduplication by Slack ID."""
+        """A failed listing doesn't turn off deduplication by Slack ID (#125)."""
         failures = []
         uploader = DriveFileUploader(
             MagicMock(), on_listing_failure=lambda f, e: failures.append(f)

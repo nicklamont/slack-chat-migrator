@@ -567,7 +567,7 @@ class TestDefaultExternalCheck:
 
 
 class TestSyncChannelFolder:
-    """Lookup and sync in one call, with failures reported (SF5)."""
+    """Lookup and sync in one call, with failures reported (#118)."""
 
     def _fm(self, fake):
         reported: list[tuple[str, FolderSyncResult]] = []

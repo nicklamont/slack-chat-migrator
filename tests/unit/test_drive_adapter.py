@@ -426,7 +426,7 @@ class TestApplyPermissionChanges:
 
 
 class TestOwnershipTransferRequests:
-    """Drive rejects transfers with sendNotificationEmail=false (CR1)."""
+    """Drive rejects transfers with sendNotificationEmail=false (#98)."""
 
     def test_create_permission_omits_notification_flag_for_transfers(
         self, adapter, mock_service
@@ -472,7 +472,7 @@ class TestOwnershipTransferRequests:
 
 
 class TestPermissionChangeInvariants:
-    """A change is exactly one of a grant or a removal (TD5)."""
+    """A change is exactly one of a grant or a removal (#98)."""
 
     def test_needs_a_body_or_a_permission_id(self):
         from slack_chat_migrator.services.drive_adapter import PermissionChange
