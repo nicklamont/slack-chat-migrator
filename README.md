@@ -7,9 +7,8 @@ Migrates Slack workspace JSON exports into Google Chat spaces via the [Google Ch
 - Imports all messages (including threaded replies)
 - Uploads attachments into per-channel Google Drive folders with MD5 deduplication, and converts Slack canvases and lists to Google Docs and Sheets
 - Migrates emoji reactions using per-user impersonation
-- Posts channel metadata (purpose/topic) from `channels.json`
+- Sets the space description from the channel's purpose and topic in `channels.json`
 - Retries API calls on transient errors with exponential backoff
-- Logs in structured JSON for easy Cloud Logging ingestion
 - Filters channels via `config.yaml`
 - Automatically generates user mapping from users.json
 - Maps external emails to internal workspace emails
@@ -187,7 +186,7 @@ retry_delay: 2
 
 The config file is validated before anything is migrated, so a typo can't silently change what gets imported:
 
-- If you pass `--config` and the file doesn't exist, the command fails. Without `--config`, a missing `config.yaml` means "use the defaults" (all channels, no user overrides), and a warning says so.
+- If you pass `--config` and the file doesn't exist, the command fails. Without `--config`, a missing `config.yaml` means "use the defaults" (all channels, no user overrides), and a warning says so. `validate` is stricter: it stops when the config file is missing and, in a terminal, offers to create one with `init` (without a terminal it exits with status 1).
 - A file that isn't valid YAML, or whose top level isn't a mapping, is an error.
 - Values are type-checked. Booleans must be YAML `true`/`false` (not the string `"false"`), counts must be whole numbers, and `retry_delay` must be a number. List options such as `include_channels` also accept a single name (`include_channels: general` means `[general]`, with a warning) or an empty value. Channel names may be numeric and may start with `#`.
 - An unknown option that looks like a misspelling of a real one (for example `include_channel` or `max_retry`) is an error with a "did you mean" hint. Other unknown options are ignored with a warning.
@@ -340,7 +339,7 @@ Complete import mode on this tool's spaces (named `Slack #…`) that are stuck i
 
 The migration tool provides two levels of debug logging:
 
-- **`--verbose` / `-v`**: Enables verbose console output showing DEBUG level messages. Useful for understanding the migration flow and troubleshooting issues. It doesn't change what is written to the log files.
+- **`--verbose` / `-v`**: Enables verbose console output showing DEBUG level messages. Useful for understanding the migration flow and troubleshooting issues. It doesn't change which records are written to the log files (channel logs do use a more detailed line format, with the logger name and source line).
 - **`--debug_api`**: Writes DEBUG detail to the log files: HTTP API request/response data and full message payloads (message text). This creates very large log files but is invaluable for diagnosing API-related issues or developing the tool. Only enable this when specifically needed. Without it, log files record INFO and above, and failure logs list message and file IDs instead of message content.
 
 Both options are independent and can be used together for maximum debugging information.
@@ -522,7 +521,7 @@ The tool provides several configurable options for handling errors during migrat
    - `max_retries: 3` (default): Maximum number of retry attempts for failed API calls
    - `retry_delay: 2` (default): Initial delay in seconds between retry attempts
 
-   Google API calls are retried on 408, 429 and 5xx responses, on 403 responses whose reason is a rate limit or quota (`rateLimitExceeded`, `userRateLimitExceeded`, `sharingRateLimitExceeded`, `quotaExceeded`, which is how Drive reports throttling), and on network errors (connection resets, timeouts, DNS failures, TLS errors, truncated responses). Other 4xx errors, and local errors such as a missing or unreadable file, are not retried. Each wait uses exponential backoff with full jitter (a random delay up to `retry_delay × 2ⁿ`, capped at 64 seconds), or the server's `Retry-After` header when it sends one. Rate-limit errors are retried for up to 5 minutes in total, whatever `max_retries` says, because Chat and Drive quotas are per-minute windows.
+   Google API calls are retried on 408, 429 and 5xx responses, on 403 responses whose reason is a rate limit or quota (`rateLimitExceeded`, `userRateLimitExceeded`, `sharingRateLimitExceeded`, `quotaExceeded`, which is how Drive reports throttling), and on network errors (connection resets, timeouts, DNS failures, TLS errors, truncated responses). Other 4xx errors, and local errors such as a missing or unreadable file, are not retried. Each wait is the server's `Retry-After` header when it sends one, and otherwise exponential backoff with full jitter (a random delay up to `retry_delay × 2ⁿ`, capped at 64 seconds). Rate-limit errors (429, and the rate-limit 403s above) are retried, whatever `max_retries` says, until the next wait would take the total past 5 minutes, because Chat and Drive quotas are per-minute windows; their `Retry-After` is followed as sent within that budget. For other errors, `max_retries` applies and a `Retry-After` longer than 64 seconds is cut to 64.
 
 These options can be configured in your `config.yaml` file:
 
@@ -844,7 +843,8 @@ src/slack_chat_migrator/
 │   ├── files/                     # Slack file handling
 │   │   ├── file.py                # FileHandler class (delegates to download/permissions)
 │   │   ├── file_download.py       # Slack file download logic
-│   │   └── file_permissions.py    # Drive file ownership/sharing
+│   │   ├── file_permissions.py    # Drive file ownership/sharing
+│   │   └── temp_files.py          # Locked temp dirs for downloads, swept after crashes
 │   ├── messages/                  # Message migration pipeline
 │   │   ├── message_attachments.py # Attachment processing
 │   │   ├── message_builder.py     # Message payload construction (Slack → Chat format)
@@ -872,9 +872,11 @@ src/slack_chat_migrator/
     ├── permissions.py             # Permission validation
     ├── slack_emoji_data.py        # Generated by scripts/generate_slack_emoji_data.py
     └── user_validation.py         # User data validation
+scripts/
+└── generate_slack_emoji_data.py   # Regenerates utils/slack_emoji_data.py
 tests/
 ├── unit/                          # Fast, isolated tests
-└── integration/                   # Tests requiring external services
+└── integration/                   # Dry-run pipeline and CLI tests (no credentials needed)
 ```
 
 ### Setting Up Permissions

@@ -12,6 +12,23 @@ shared_drive:
   # If neither id nor name is specified, the tool will create a new shared drive
   # with the name "Imported Slack Attachments"
 
+# Attachments
+
+# Optional Slack token with the files:read scope, sent as a Bearer header to
+# Slack's file hosts only. Needed when the export's file links have expired or
+# your workspace requires authentication. Leave empty to use the SLACK_TOKEN
+# environment variable instead (keep tokens out of version control).
+slack_token: ""
+
+# Upload Slack canvases as Google Docs and Slack Lists as Google Sheets.
+# When false (or when a conversion fails), the HTML or CSV file is uploaded.
+convert_canvases: true
+
+# Make the Drive folders of private channels, group DMs and DMs
+# limited-access folders that only the conversation's members can open
+# (shared drives only).
+restrict_private_channel_folders: true
+
 # Optional: Channels to exclude from migration (by name)
 exclude_channels:
   - "random"        # Example: Skip the random channel
@@ -47,6 +64,14 @@ email_domain_override: ""  # e.g. "company.com"
 user_mapping_overrides:
   # U12345678: "user@example.com"
   # U87654321: "another_user@example.com"
+
+# Optional: Map Slack workspace custom emoji (which have no Unicode
+# equivalent) to a Unicode emoji, a standard emoji name, or the name of a
+# Google Chat custom emoji. Keys work with or without colons; quote values
+# that start with ":".
+custom_emoji_map:
+  # partyparrot: "🦜"
+  # approved: ":white_check_mark:"
 
 # User handling options
 
