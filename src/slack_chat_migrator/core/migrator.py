@@ -34,6 +34,7 @@ from slack_chat_migrator.core.migration_logging import (
 )
 from slack_chat_migrator.core.progress import ProgressTracker
 from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.exceptions import MigrationAbortedError
 from slack_chat_migrator.services.chat.dry_run_service import DryRunChatService
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
 from slack_chat_migrator.services.drive.dry_run_service import DryRunDriveService
@@ -423,7 +424,13 @@ class SlackToChatMigrator:
                 to renderers (Rich, plain text).
 
         Returns:
-            True on successful completion.
+            True when every channel migrated without errors; False when the
+            run finished but some channels had errors or imports were left
+            incomplete (see ``state.errors``).
+
+        Raises:
+            MigrationAbortedError: If a channel failed and ``abort_on_error``
+                is enabled.
         """
         self._progress_tracker = progress_tracker
         migration_start_time = time.time()
@@ -525,8 +532,18 @@ class SlackToChatMigrator:
                     continue
 
                 result = self.channel_processor.process_channel(ch)
+                if (
+                    result.had_errors
+                    and channel_name not in self.state.errors.channels_with_errors
+                ):
+                    self.state.errors.channels_with_errors.append(channel_name)
                 if result.should_abort:
-                    break
+                    # abort_on_error: the run fails here; the failure path
+                    # below logs it and the checkpoint is kept.
+                    raise MigrationAbortedError(
+                        f"Migration aborted after errors in channel '{channel_name}'"
+                        " (abort_on_error is enabled)"
+                    )
 
                 # Only checkpoint channels that completed without errors
                 if not result.had_errors:
@@ -580,7 +597,9 @@ class SlackToChatMigrator:
             # Clean up channel handlers in success case (finally block will also run)
             cleanup_channel_handlers(self.state)
 
-            return True
+            return not (
+                self.state.has_errors or self.state.errors.incomplete_import_spaces
+            )
 
         except BaseException as e:
             # Calculate migration duration

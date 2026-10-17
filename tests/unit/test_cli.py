@@ -20,6 +20,14 @@ from slack_chat_migrator.services.chat_adapter import ChatAdapter
 from slack_chat_migrator.services.spaces.space_creator import ImportCompletionResult
 
 
+def _mock_orchestrator() -> MagicMock:
+    """A MagicMock orchestrator whose run succeeds (exit code 0)."""
+    orch = MagicMock()
+    orch.run_migration.return_value = 0
+    orch.cleanup_result = None
+    return orch
+
+
 class TestCLIGroup:
     """Tests for the CLI group structure."""
 
@@ -169,7 +177,7 @@ class TestValidateCommand:
     ):
         """Validate always passes dry_run=True to the orchestrator."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
         config_file = tmp_path / "config.yaml"
         config_file.write_text("{}")
@@ -202,7 +210,7 @@ class TestValidateCommand:
     ):
         """Validate command delegates permission checks to orchestrator."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
         config_file = tmp_path / "config.yaml"
         config_file.write_text("{}")
@@ -396,7 +404,7 @@ class TestMigrateExceptionPaths:
         self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
     ):
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch.validate_prerequisites.side_effect = ConfigError("creds not found")
         mock_orch_cls.return_value = mock_orch
 
@@ -423,7 +431,7 @@ class TestMigrateExceptionPaths:
         self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
     ):
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch.validate_prerequisites.return_value = None
         mock_orch.run_migration.side_effect = MigrationAbortedError("unmapped users")
         mock_orch_cls.return_value = mock_orch
@@ -456,7 +464,7 @@ class TestCredentialFreeDryRun:
     ):
         """Dry-run mode accepts missing --creds_path and --workspace_admin."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
 
         runner = CliRunner()
@@ -482,7 +490,7 @@ class TestCredentialFreeDryRun:
     ):
         """Live migration (no --dry_run) rejects missing --creds_path."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch.validate_prerequisites.side_effect = click.UsageError(
             "--creds_path is required for live migration"
         )
@@ -507,7 +515,7 @@ class TestCredentialFreeDryRun:
     ):
         """Validate command works without --creds_path or --workspace_admin."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
         config_file = tmp_path / "config.yaml"
         config_file.write_text("{}")
@@ -584,7 +592,7 @@ class TestMigrateResumeFlag:
     ):
         """--resume sets update_mode=True in the args namespace."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
 
         runner = CliRunner()
@@ -614,7 +622,7 @@ class TestMigrateResumeFlag:
     ):
         """--update_mode still works but emits a deprecation warning."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
 
         runner = CliRunner()

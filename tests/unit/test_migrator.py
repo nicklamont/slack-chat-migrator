@@ -21,6 +21,7 @@ from slack_chat_migrator.core.migration_logging import (
 )
 from slack_chat_migrator.core.migrator import SlackToChatMigrator
 from slack_chat_migrator.core.state import MigrationState, _default_migration_summary
+from slack_chat_migrator.exceptions import MigrationAbortedError
 from slack_chat_migrator.services.spaces.space_creator import (
     _list_all_spaces,
     cleanup_import_mode_spaces,
@@ -1688,9 +1689,55 @@ class TestMigrate:
         )
         mock_cp_cls.return_value = mock_cp
 
-        m.migrate()
-        # Only called once because abort breaks the loop
+        with pytest.raises(MigrationAbortedError, match="general"):
+            m.migrate()
+        # Only called once because abort ends the run
         assert mock_cp.process_channel.call_count == 1
+        # The run is a failure: no success log, and the checkpoint is kept
+        mock_log_success.assert_not_called()
+        mock_clear_cp.assert_not_called()
+        assert m.state.errors.channels_with_errors == ["general"]
+
+    @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+    @patch("slack_chat_migrator.core.migrator.log_migration_success")
+    @patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.save_checkpoint")
+    @patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+    @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+    @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
+    def test_errored_channels_recorded_and_reported(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        users = [
+            {"id": "U001", "name": "alice", "profile": {"email": "alice@example.com"}}
+        ]
+        channels = [
+            {"id": "C001", "name": "general", "members": ["U001"]},
+            {"id": "C002", "name": "random", "members": ["U001"]},
+        ]
+        m = _make_migrator_for_migrate(tmp_path)
+        _setup_export(tmp_path, users=users, channels=channels)
+
+        mock_cp = MagicMock()
+        mock_cp.process_channel.side_effect = lambda ch: MagicMock(
+            should_abort=False, had_errors=ch.name == "general"
+        )
+        mock_cp_cls.return_value = mock_cp
+
+        assert m.migrate() is False
+        assert m.state.errors.channels_with_errors == ["general"]
+        assert m.state.has_errors
+        # Only the clean channel is checkpointed
+        saved = mock_save_cp.call_args.args[1].completed_channels
+        assert list(saved) == ["random"]
 
     @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
     @patch("slack_chat_migrator.core.migrator.log_migration_success")

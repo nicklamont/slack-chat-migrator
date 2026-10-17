@@ -317,21 +317,22 @@ class TestLiveExitsNeverCompleteImports:
         )
 
     @pytest.mark.parametrize(
-        "behaviour",
+        ("behaviour", "exit_code"),
         [
-            {"run": KeyboardInterrupt()},
-            {"run": RuntimeError("boom")},
-            {"validate": PermissionCheckError("missing scope")},
-            {"code": 1},  # cancelled at a prompt
+            ({"run": KeyboardInterrupt()}, 130),
+            ({"run": RuntimeError("boom")}, 1),
+            ({"validate": PermissionCheckError("missing scope")}, 1),
+            ({"code": 1}, 1),  # cancelled at a prompt
         ],
         ids=["ctrl-c", "exception", "permission-check", "cancel"],
     )
     def test_no_completion(
-        self, mock_run, mock_logger, mock_warn, tmp_path, behaviour
+        self, mock_run, mock_logger, mock_warn, tmp_path, behaviour, exit_code
     ) -> None:
         p1, p2 = self._patch(**behaviour)
         with p1, p2:
-            _live_cli(tmp_path)
+            result = _live_cli(tmp_path)
+        assert result.exit_code == exit_code
         mock_run.assert_not_called()
 
 

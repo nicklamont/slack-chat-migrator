@@ -27,6 +27,21 @@ from slack_chat_migrator.utils.logging import log_with_context
 # Create logger instance
 logger = logging.getLogger("slack_chat_migrator")
 
+# ---------------------------------------------------------------------------
+# Exit codes
+# ---------------------------------------------------------------------------
+
+#: The run succeeded with no errors.
+EXIT_OK = 0
+#: The run failed, was aborted or cancelled, or completed with errors
+#: (channels with errors, incomplete imports, failed completions,
+#: unmapped users in validation).
+EXIT_FAILURE = 1
+#: Click usage errors (missing or invalid options) exit with 2.
+EXIT_USAGE = 2
+#: Interrupted with Ctrl-C (128 + SIGINT).
+EXIT_INTERRUPTED = 130
+
 
 # ---------------------------------------------------------------------------
 # Custom click.Group that defaults to ``migrate`` for backwards compatibility.
@@ -253,8 +268,11 @@ class InterruptHandler:
                     "To resume from where you left off:",
                     f"  [bold]{resume_cmd}[/bold]",
                     "",
+                    "Spaces this run created are still in import mode;"
+                    " nothing was finalized.",
                     "[red]Spaces in import mode must be completed within 90 days.[/red]",
-                    "Run [bold]migrate --complete[/bold] to finalize all spaces.",
+                    "When you're done, run [bold]migrate --complete[/bold] to"
+                    " finalize them.",
                 ]
                 console.print(
                     Panel(
@@ -276,7 +294,8 @@ class InterruptHandler:
         )
         log_with_context(
             logging.WARNING,
-            "Spaces in import mode must be completed within 90 days.",
+            "Spaces this run created are still in import mode and must be"
+            " completed within 90 days (migrate --resume, then migrate --complete).",
         )
 
 

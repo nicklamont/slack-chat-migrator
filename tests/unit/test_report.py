@@ -957,3 +957,68 @@ class TestGenerateReport:
         assert "timestamp" in report["migration_summary"]
         # Should be a valid ISO format timestamp
         assert "T" in report["migration_summary"]["timestamp"]
+
+
+class TestSummariesReportErrors:
+    """Console summaries say when a run had errors (issue #110)."""
+
+    def _state_with_errors(self):
+        state = _make_state()
+        state.errors.channels_with_errors = ["general"]
+        state.errors.incomplete_import_spaces = [("spaces/a", "general")]
+        return state
+
+    def test_dry_run_plain_lists_errors(self, capsys):
+        resolver = MagicMock()
+        resolver.is_external_user.return_value = False
+        print_dry_run_summary(_make_ctx(), self._state_with_errors(), resolver)
+        out = capsys.readouterr().out
+        assert "Channels with errors: 1 (general)" in out
+        assert "Spaces left in import mode: 1 (general)" in out
+
+    def test_migration_plain_says_completed_with_errors(self, capsys):
+        from slack_chat_migrator.cli.report import print_rich_summary
+
+        resolver = MagicMock()
+        resolver.is_external_user.return_value = False
+        print_rich_summary(
+            _make_ctx(dry_run=False), self._state_with_errors(), resolver
+        )
+        out = capsys.readouterr().out
+        assert "Channels with errors: 1 (general)" in out
+        assert "RESULT: completed with errors" in out
+
+    def test_migration_plain_clean_run_has_no_error_lines(self, capsys):
+        from slack_chat_migrator.cli.report import print_rich_summary
+
+        resolver = MagicMock()
+        resolver.is_external_user.return_value = False
+        print_rich_summary(_make_ctx(dry_run=False), _make_state(), resolver)
+        out = capsys.readouterr().out
+        assert "Channels with errors" not in out
+        assert "completed with errors" not in out
+
+    def test_rich_titles(self, monkeypatch):
+        import io
+
+        from rich.console import Console
+
+        import slack_chat_migrator.cli.report as report
+
+        buffer = io.StringIO()
+        monkeypatch.setattr(report.sys.stdout, "isatty", lambda: True, raising=False)
+        monkeypatch.setattr(
+            report,
+            "Console",
+            lambda: Console(file=buffer, width=120, color_system=None),
+        )
+        resolver = MagicMock()
+        resolver.is_external_user.return_value = False
+        report.print_rich_summary(
+            _make_ctx(dry_run=False), self._state_with_errors(), resolver
+        )
+        report.print_dry_run_summary(_make_ctx(), self._state_with_errors(), resolver)
+        text = buffer.getvalue()
+        assert "Migration Completed With Errors" in text
+        assert "Validation Found Errors" in text
+        assert "Migration Complete ✓" not in text

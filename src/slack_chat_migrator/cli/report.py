@@ -32,6 +32,21 @@ if TYPE_CHECKING:
     from slack_chat_migrator.services.user_resolver import UserResolver
 
 
+def _error_summary_lines(state: MigrationState) -> list[str]:
+    """Plain lines describing channels with errors and incomplete imports."""
+    lines: list[str] = []
+    errored = state.errors.channels_with_errors
+    if errored:
+        lines.append(f"Channels with errors: {len(errored)} ({', '.join(errored)})")
+    incomplete = state.errors.incomplete_import_spaces
+    if incomplete:
+        lines.append(
+            f"Spaces left in import mode: {len(incomplete)}"
+            f" ({', '.join(channel for _space, channel in incomplete)})"
+        )
+    return lines
+
+
 def print_dry_run_summary(
     ctx: MigrationContext,
     state: MigrationState,
@@ -96,10 +111,20 @@ def print_dry_run_summary(
             user_label += f" ({unmapped_count} unmapped)"
         table.add_row("Users mapped", user_label)
 
+    error_lines = _error_summary_lines(state)
+    for line in error_lines:
+        label, _, value = line.partition(": ")
+        table.add_row(f"[red]{label}[/red]", f"[red]{value}[/red]")
+
     console.print()
-    console.print(
-        Panel(table, title="Validation Complete \u2713", border_style="green")
-    )
+    if error_lines:
+        console.print(
+            Panel(table, title="Validation Found Errors \u2717", border_style="red")
+        )
+    else:
+        console.print(
+            Panel(table, title="Validation Complete \u2713", border_style="green")
+        )
 
     # --- Unmapped users warning ---
     non_bot_unmapped = [
@@ -154,6 +179,8 @@ def _print_dry_run_plain(
         print(
             f"Users mapped:     {total_mapped}/{total_users} ({unmapped_count} unmapped)"
         )
+    for line in _error_summary_lines(state):
+        print(line)
 
     if file_handler is not None and hasattr(file_handler, "get_file_statistics"):
         try:
@@ -211,8 +238,17 @@ def print_rich_summary(
     console = Console()
     summary = state.progress.migration_summary
     is_dry_run = ctx.dry_run
-    title = "Dry Run Complete \u2713" if is_dry_run else "Migration Complete \u2713"
-    border = "blue" if is_dry_run else "green"
+    error_lines = _error_summary_lines(state)
+    if error_lines:
+        title = (
+            "Dry Run Completed With Errors \u2717"
+            if is_dry_run
+            else "Migration Completed With Errors \u2717"
+        )
+        border = "red"
+    else:
+        title = "Dry Run Complete \u2713" if is_dry_run else "Migration Complete \u2713"
+        border = "blue" if is_dry_run else "green"
 
     # --- Compact completion banner (stats already visible in progress display) ---
     output_dir = state.context.output_dir or "."
@@ -227,6 +263,9 @@ def print_rich_summary(
     failed_count = len(state.messages.failed_messages)
     if failed_count > 0:
         summary_line += f" \u2022 [red]{failed_count} failed[/red]"
+
+    if error_lines:
+        summary_line += "\n" + "\n".join(f"[red]{line}[/red]" for line in error_lines)
 
     if is_dry_run:
         body = (
@@ -287,6 +326,11 @@ def _print_migration_summary_plain(
     failed_count = len(state.messages.failed_messages)
     if failed_count > 0:
         print(f"Failed messages:    {failed_count}")
+    error_lines = _error_summary_lines(state)
+    for line in error_lines:
+        print(line)
+    if error_lines:
+        print("RESULT: completed with errors")
 
     non_bot_unmapped = [
         u

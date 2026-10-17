@@ -13,6 +13,10 @@ from typing import TYPE_CHECKING, Any
 import click
 
 from slack_chat_migrator.cli.common import (
+    EXIT_FAILURE,
+    EXIT_INTERRUPTED,
+    EXIT_OK,
+    YES_ENVVAR,
     InterruptHandler,
     cli,
     common_options,
@@ -21,6 +25,7 @@ from slack_chat_migrator.cli.common import (
     deprecated_option,
     handle_exception,
     show_security_warning,
+    stdin_is_interactive,
     yes_option,
 )
 from slack_chat_migrator.cli.report import (
@@ -34,6 +39,7 @@ from slack_chat_migrator.core.migrator import SlackToChatMigrator
 from slack_chat_migrator.core.progress import ProgressTracker
 from slack_chat_migrator.exceptions import (
     ConfigError,
+    ConfirmationRequiredError,
     PermissionCheckError,
 )
 from slack_chat_migrator.utils.logging import (
@@ -160,16 +166,52 @@ def migrate(
     orchestrator = MigrationOrchestrator(args)
     orchestrator.output_dir = output_dir
 
-    with InterruptHandler(export_path=export_path):
-        try:
-            orchestrator.validate_prerequisites()
-            orchestrator.run_migration()
-        except Exception as e:
-            handle_exception(e)
-            sys.exit(1)
-        finally:
-            orchestrator.cleanup()
-            show_security_warning()
+    exit_code = run_orchestrator(orchestrator, export_path)
+    if exit_code:
+        sys.exit(exit_code)
+
+
+def run_orchestrator(orchestrator: MigrationOrchestrator, export_path: str) -> int:
+    """Run prerequisites, the migration and cleanup, and return the exit code.
+
+    Exit codes: 0 success with no errors; 1 failed, aborted, cancelled or
+    completed with errors; 130 interrupted (Ctrl-C).  Click usage errors
+    propagate (exit 2).
+
+    Args:
+        orchestrator: The configured orchestrator.
+        export_path: The export path (for the resume hint after Ctrl-C).
+
+    Returns:
+        The process exit code.
+    """
+    exit_code = EXIT_OK
+    try:
+        with InterruptHandler(export_path=export_path):
+            try:
+                orchestrator.validate_prerequisites()
+                exit_code = orchestrator.run_migration()
+            except click.ClickException:
+                raise
+            except Exception as e:
+                handle_exception(e)
+                exit_code = EXIT_FAILURE
+            finally:
+                orchestrator.cleanup()
+                show_security_warning()
+    except KeyboardInterrupt:
+        return EXIT_INTERRUPTED
+
+    cleanup_result = orchestrator.cleanup_result
+    if cleanup_result is not None and cleanup_result.failed:
+        log_with_context(
+            logging.ERROR,
+            "Post-migration import completion failed for"
+            f" {len(cleanup_result.failed)} space(s): "
+            + ", ".join(sorted(cleanup_result.failed)),
+        )
+        exit_code = EXIT_FAILURE
+    return exit_code
 
 
 def _run_complete_mode(
@@ -438,9 +480,28 @@ class MigrationOrchestrator:
                 detail=str(config_path),
             )
 
+    def _check_can_confirm(self) -> None:
+        """Fail fast when a live run would need a prompt nobody can answer.
+
+        Raises:
+            ConfirmationRequiredError: For a live migration without
+                ``--yes`` when stdin isn't an interactive terminal.
+        """
+        if (
+            not self.args.dry_run
+            and not getattr(self.args, "assume_yes", False)
+            and not stdin_is_interactive()
+        ):
+            raise ConfirmationRequiredError(
+                "A live migration asks for confirmation before it starts, but"
+                " stdin is not an interactive terminal. Re-run with --yes (or"
+                f" set {YES_ENVVAR}=1) to run unattended."
+            )
+
     def validate_prerequisites(self) -> None:
         """Validate all prerequisites before migration."""
         self._check_credential_args()
+        self._check_can_confirm()
 
         is_tty = sys.stdout.isatty()
         if is_tty:
@@ -601,25 +662,20 @@ class MigrationOrchestrator:
             return False  # In explicit dry run, just report and exit
 
         # Ask user if they want to proceed anyway
-        try:
-            if click.confirm(
-                "Proceed anyway despite unmapped users? (NOT RECOMMENDED)",
-                default=False,
-            ):
-                log_with_context(
-                    logging.WARNING,
-                    "Proceeding with unmapped users - messages will be attributed to workspace admin",
-                )
-                return True
-            else:
-                log_with_context(
-                    logging.INFO,
-                    "Migration cancelled. Please fix the user mappings and try again.",
-                )
-                return False
-        except click.Abort:
-            log_with_context(logging.INFO, "\nMigration cancelled by user.")
-            return False
+        if confirm_action(
+            "Proceed anyway despite unmapped users? (NOT RECOMMENDED)",
+            assume_yes=bool(getattr(self.args, "assume_yes", False)),
+        ):
+            log_with_context(
+                logging.WARNING,
+                "Proceeding with unmapped users - messages will be attributed to workspace admin",
+            )
+            return True
+        log_with_context(
+            logging.WARNING,
+            "Migration cancelled. Please fix the user mappings and try again.",
+        )
+        return False
 
     def report_validation_success(self, is_explicit_dry_run: bool = False) -> None:
         """Report successful validation.
@@ -670,7 +726,7 @@ class MigrationOrchestrator:
         self.dry_run_migrator = self.create_migrator(force_dry_run=True)
 
         try:
-            self.dry_run_migrator.migrate()
+            validation_clean = self.dry_run_migrator.migrate()
         except BaseException as e:
             # Generate report even on failure to show progress made
             try:
@@ -723,6 +779,9 @@ class MigrationOrchestrator:
                 report_file,
             )
 
+        if not validation_clean:
+            self._report_run_errors(m, "Validation")
+
         # Check validation results
         if self.check_unmapped_users(self.dry_run_migrator):
             return self.report_validation_issues(self.dry_run_migrator)
@@ -738,17 +797,41 @@ class MigrationOrchestrator:
         log_with_context(logging.INFO, "STEP 2: Ready to proceed with actual migration")
         log_with_context(logging.INFO, "")
 
-        try:
-            return click.confirm("Proceed with the actual migration?", default=False)
-        except click.Abort:
-            log_with_context(logging.INFO, "\nMigration cancelled by user.")
-            return False
+        return confirm_action(
+            "Proceed with the actual migration?",
+            assume_yes=bool(getattr(self.args, "assume_yes", False)),
+        )
 
-    def _run_with_progress(self, m: SlackToChatMigrator) -> None:
+    @staticmethod
+    def _report_run_errors(m: SlackToChatMigrator, label: str) -> None:
+        """Log which channels had errors or were left in import mode."""
+        errors = m.state.errors
+        if errors.channels_with_errors:
+            log_with_context(
+                logging.ERROR,
+                f"{label} completed with errors in"
+                f" {len(errors.channels_with_errors)} channel(s): "
+                + ", ".join(errors.channels_with_errors),
+            )
+        if errors.incomplete_import_spaces:
+            log_with_context(
+                logging.ERROR,
+                f"{len(errors.incomplete_import_spaces)} space(s) were left in"
+                " import mode: "
+                + ", ".join(
+                    f"#{channel} ({space})"
+                    for space, channel in errors.incomplete_import_spaces
+                ),
+            )
+
+    def _run_with_progress(self, m: SlackToChatMigrator) -> bool:
         """Run ``m.migrate()`` with a ProgressTracker and renderer.
 
         On failure the report is still generated so partial results are
         available for inspection.
+
+        Returns:
+            ``m.migrate()``'s result: True if no channel had errors.
         """
         from slack_chat_migrator.cli.renderers import create_renderer
 
@@ -759,12 +842,13 @@ class MigrationOrchestrator:
         )
         renderer.start()
         try:
-            m.migrate(progress_tracker=tracker)
+            succeeded = m.migrate(progress_tracker=tracker)
         except BaseException as e:
             renderer.stop()
             self._generate_partial_report(m, e)
             raise
         renderer.stop()
+        return bool(succeeded)
 
     @staticmethod
     def _generate_partial_report(m: SlackToChatMigrator, exc: BaseException) -> None:
@@ -811,7 +895,11 @@ class MigrationOrchestrator:
             _warn_import_mode_deadline()
 
     def _confirm_start(self) -> bool:
-        """Show a confirmation prompt before starting migration/validation."""
+        """Show a confirmation prompt before starting a dry-run validation.
+
+        A dry run changes nothing, so there's no prompt when nobody can
+        answer it (no terminal) or ``--yes`` was given.
+        """
         if self.migrator is None:
             return True
 
@@ -821,51 +909,70 @@ class MigrationOrchestrator:
         )
         msg = f"Ready to begin {mode} of {channel_count} channels."
 
-        if sys.stdout.isatty():
-            from slack_chat_migrator.cli.renderers import get_console
-
-            console = get_console()
-            console.print(f"\n{msg}")
-            if not click.confirm("Continue?", default=True):
-                click.echo("Aborted.")
-                return False
-        else:
+        interactive = sys.stdout.isatty() and stdin_is_interactive()
+        if not interactive or getattr(self.args, "assume_yes", False):
             log_with_context(logging.INFO, msg)
+            return True
+
+        from slack_chat_migrator.cli.renderers import get_console
+
+        get_console().print(f"\n{msg}")
+        if not confirm_action("Continue?", assume_yes=False, default=True):
+            click.echo("Aborted.")
+            return False
         return True
 
-    def run_migration(self) -> None:
-        """Execute the main migration logic."""
+    def run_migration(self) -> int:
+        """Execute the main migration logic.
+
+        Returns:
+            The exit code: 0 when the run succeeded with no errors; 1 when it
+            was cancelled, completed with errors, or (validation) found
+            unmapped users.
+        """
         if self.args.dry_run:
             # Explicit dry run mode
             if self.migrator is None:
                 raise RuntimeError("Migrator not initialized")
 
             if not self._confirm_start():
-                return
+                log_with_context(logging.WARNING, "Validation cancelled.")
+                return EXIT_FAILURE
 
             m = self.migrator
-            self._run_with_progress(m)
+            succeeded = self._run_with_progress(m)
             self._print_summary(m)
 
+            exit_code = EXIT_OK
+            if not succeeded:
+                self._report_run_errors(m, "Validation")
+                exit_code = EXIT_FAILURE
             if self.check_unmapped_users(self.migrator):
                 self.report_validation_issues(self.migrator, is_explicit_dry_run=True)
-            else:
+                exit_code = EXIT_FAILURE
+            elif succeeded:
                 self.report_validation_success(is_explicit_dry_run=True)
-        else:
-            # Full migration with automatic validation
-            if self.run_validation():
-                self.report_validation_success()
+            return exit_code
 
-                if self.get_user_confirmation():
-                    if self.migrator is None:
-                        raise RuntimeError("Migrator not initialized")
-                    m = self.migrator
-                    self._run_with_progress(m)
-                    self.live_migration_finished = True
-                    self._print_summary(m)
-                else:
-                    log_with_context(logging.INFO, "Migration cancelled by user.")
-                    return
+        # Full migration with automatic validation
+        if not self.run_validation():
+            return EXIT_FAILURE
+        self.report_validation_success()
+
+        if not self.get_user_confirmation():
+            log_with_context(logging.WARNING, "Migration cancelled by user.")
+            return EXIT_FAILURE
+
+        if self.migrator is None:
+            raise RuntimeError("Migrator not initialized")
+        m = self.migrator
+        succeeded = self._run_with_progress(m)
+        self.live_migration_finished = True
+        self._print_summary(m)
+        if not succeeded:
+            self._report_run_errors(m, "Migration")
+            return EXIT_FAILURE
+        return EXIT_OK
 
     def cleanup(self) -> None:
         """Perform cleanup operations.

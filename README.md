@@ -226,6 +226,17 @@ slack-chat-migrator cleanup           # Complete import mode (deprecated — use
 
 > **Backwards compatibility:** Running `slack-chat-migrator --creds_path ...` (flags without a subcommand) automatically routes to `migrate`, but this implicit routing is deprecated. Use `slack-chat-migrator migrate ...` instead.
 
+#### Exit Codes and Unattended Runs
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | Success with no errors |
+| `1` | Failed, aborted (`abort_on_error`), cancelled at a prompt, or completed with errors: a channel had errors, a space was left in import mode, an import completion failed, or `validate`/`--dry_run` found unmapped users |
+| `2` | Usage error (missing or invalid options) |
+| `130` | Interrupted with Ctrl-C |
+
+A live `migrate` asks for confirmation before it starts. To run it unattended (cron, CI, `nohup`), pass `--yes` (or set `SLACK_CHAT_MIGRATOR_YES=1`), which answers yes to every prompt, including "proceed despite unmapped users". Without a terminal and without `--yes`, a live run exits with status 1 before doing anything, instead of silently doing nothing. Dry runs and `validate` never need `--yes`.
+
 #### Subcommands
 
 ##### `setup`
@@ -249,7 +260,7 @@ Generate a `config.yaml` file interactively by analysing your Slack export. Walk
 
 ##### `validate`
 
-Dry-run validation of export data, user mappings, and channels. Equivalent to `migrate --dry_run` but expressed as an explicit command. Credentials are optional — you can run a full validation with only `--export_path`. When `--creds_path` is provided, permission checks are also performed.
+Dry-run validation of export data, user mappings, and channels. Equivalent to `migrate --dry_run` but expressed as an explicit command. Credentials are optional — you can run a full validation with only `--export_path`. When `--creds_path` is provided, permission checks are also performed. It exits with status 1 when it finds unmapped users or channels with errors.
 
 | Option | Required | Description |
 |--------|----------|-------------|
@@ -481,7 +492,7 @@ flowchart TD
 
 The tool provides several configurable options for handling errors during migration:
 
-1. **Abort on Error**: When enabled (`abort_on_error: true`), the migration will stop after encountering errors in a channel. When disabled (default), the migration will continue processing other channels even if errors occur.
+1. **Abort on Error**: When enabled (`abort_on_error: true`), the migration stops after the first channel with errors; the run counts as failed (exit status 1) and no post-migration import completion runs. When disabled (default), the migration will continue processing other channels even if errors occur, and the run still exits with status 1 if any channel had errors.
 
 2. **Maximum Failure Percentage**: Controls how many message failures are tolerated within a channel before skipping the rest of that channel (`max_failure_percentage: 10` by default). If the failure rate exceeds this percentage, the channel processing will stop.
 

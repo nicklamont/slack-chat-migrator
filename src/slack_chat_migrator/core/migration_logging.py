@@ -77,9 +77,18 @@ def log_migration_success(
 
     no_work_done = stats["spaces_created"] == 0 and stats["messages_created"] == 0
     interrupted_early = stats["channels_processed"] == 0
+    had_errors = stats["channels_with_errors"] > 0 or stats["incomplete_imports"] > 0
 
     # --- Outcome header ---------------------------------------------------
-    if is_dry_run:
+    if had_errors:
+        log_with_context(
+            logging.WARNING,
+            "DRY RUN VALIDATION COMPLETED WITH ERRORS"
+            if is_dry_run
+            else "SLACK-TO-GOOGLE-CHAT MIGRATION COMPLETED WITH ERRORS",
+            outcome="completed_with_errors",
+        )
+    elif is_dry_run:
         log_with_context(
             logging.INFO,
             "DRY RUN VALIDATION COMPLETED SUCCESSFULLY",
