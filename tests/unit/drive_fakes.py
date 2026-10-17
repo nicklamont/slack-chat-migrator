@@ -71,6 +71,7 @@ class FakeDrive:
         reject_inherited_flag_on_create: bool = False,
         honor_drive_query: bool = True,
         reject_grants_to: set[str] | None = None,
+        fail_restriction: bool = False,
     ):
         self.files_db: dict[str, dict[str, Any]] = {}
         self.permissions_db: dict[str, list[dict[str, Any]]] = {}
@@ -86,6 +87,8 @@ class FakeDrive:
         self.honor_drive_query = honor_drive_query
         # Emails whose grants fail, as Drive does for a blocked domain.
         self.reject_grants_to = set(reject_grants_to or ())
+        # Restricting a folder (files.update) fails with 403 while set.
+        self.fail_restriction = fail_restriction
 
     # -- helpers ------------------------------------------------------------
 
@@ -237,7 +240,10 @@ class _Files:
             record = self.d.files_db.get(kw["fileId"])
             if not record:
                 raise http_error(404, "not found")
-            record.update(kw.get("body", {}))
+            body = kw.get("body", {})
+            if self.d.fail_restriction and "inheritedPermissionsDisabled" in body:
+                raise http_error(403, "insufficient role to limit access")
+            record.update(body)
             return dict(record)
 
         return Req(run, "files.update", kw)

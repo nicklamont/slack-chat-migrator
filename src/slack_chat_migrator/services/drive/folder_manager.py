@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
@@ -25,6 +26,24 @@ from slack_chat_migrator.utils.logging import (
 
 if TYPE_CHECKING:
     from slack_chat_migrator.services.drive_adapter import DriveAdapter
+
+
+@dataclass(frozen=True)
+class FolderLookup:
+    """Outcome of finding (or creating) a channel folder.
+
+    Attributes:
+        folder_id: The folder, or None when there is none or it can't be used.
+        error: Why the folder couldn't be found, created or used; None when
+            the lookup worked (a read-only lookup may then still find no
+            folder).
+        restriction_failed: The folder exists but couldn't be made
+            limited-access, so a private conversation's files must not go in.
+    """
+
+    folder_id: str | None
+    error: str | None = None
+    restriction_failed: bool = False
 
 
 class FolderManager:
@@ -63,10 +82,10 @@ class FolderManager:
         # (parent_folder_id, folder name) -> folder ID, shared by every lookup.
         # Folders are created or found once per run; the cache is trusted.
         self.folder_cache: dict[tuple[str, str], str] = {}
-        # Folders known to have inherited permissions disabled, and folders
-        # Drive refused to restrict (so it isn't retried for every file).
+        # Folders known to have inherited permissions disabled, and how often
+        # restricting each other folder has failed (it is retried each time).
         self.restricted_folders: set[str] = set()
-        self._restriction_failed: set[str] = set()
+        self.restriction_failures: dict[str, int] = {}
 
     def _is_outside_workspace_domain(self, email: str) -> bool:
         """Default external check: the email's domain isn't the workspace's."""
@@ -105,7 +124,8 @@ class FolderManager:
 
         A limited-access folder (``inheritedPermissionsDisabled``) is open
         only to people with direct access, plus shared drive managers, not
-        to every member of the shared drive.
+        to every member of the shared drive.  A failure isn't remembered:
+        the next call (the next file, or the next run) tries again.
 
         Args:
             folder_id: Folder to restrict.
@@ -117,8 +137,6 @@ class FolderManager:
         """
         if folder_id in self.restricted_folders:
             return True
-        if folder_id in self._restriction_failed:
-            return False
         try:
             response = self.drive_service.update_file(
                 folder_id,
@@ -127,26 +145,15 @@ class FolderManager:
                 supports_all_drives=bool(shared_drive_id),
             )
         except HttpError as e:
-            self._restriction_failed.add(folder_id)
-            log_with_context(
-                logging.WARNING,
-                f"Could not limit access to the {channel} folder ({e}); its files"
-                " are visible to every member of the shared drive",
-                channel=channel,
-                folder_id=folder_id,
-            )
+            self._log_restriction_failure(folder_id, channel, str(e))
             return False
         if response.get("inheritedPermissionsDisabled") is False:
-            self._restriction_failed.add(folder_id)
-            log_with_context(
-                logging.WARNING,
-                f"Drive did not limit access to the {channel} folder; its files"
-                " are visible to every member of the shared drive",
-                channel=channel,
-                folder_id=folder_id,
+            self._log_restriction_failure(
+                folder_id, channel, "Drive kept inherited permissions on"
             )
             return False
         self.restricted_folders.add(folder_id)
+        self.restriction_failures.pop(folder_id, None)
         log_with_context(
             logging.INFO,
             f"Limited access to the {channel} folder to its members",
@@ -154,6 +161,23 @@ class FolderManager:
             folder_id=folder_id,
         )
         return True
+
+    def _log_restriction_failure(
+        self, folder_id: str, channel: str, cause: str
+    ) -> None:
+        """Count a failed restriction; log it at ERROR the first time."""
+        count = self.restriction_failures.get(folder_id, 0) + 1
+        self.restriction_failures[folder_id] = count
+        log_with_context(
+            logging.ERROR if count == 1 else logging.DEBUG,
+            f"Not uploading files of private conversation {channel}: its Drive"
+            f" folder could not be made limited-access ({cause}). Make the"
+            " workspace admin a Manager of the shared drive, or set"
+            " restrict_private_channel_folders: false to accept drive-wide"
+            " visibility. Retrying with the next file.",
+            channel=channel,
+            folder_id=folder_id,
+        )
 
     def list_child_folders(
         self, parent_folder_id: str, shared_drive_id: str | None = None
@@ -316,16 +340,38 @@ class FolderManager:
     ) -> str | None:
         """Get or create a channel-specific folder.
 
+        Same as :meth:`find_or_create_channel_folder`, returning only the
+        folder ID.
+
+        Returns:
+            The folder ID if successful, None otherwise
+        """
+        return self.find_or_create_channel_folder(
+            channel, parent_folder_id, shared_drive_id, restricted=restricted
+        ).folder_id
+
+    def find_or_create_channel_folder(
+        self,
+        channel: str,
+        parent_folder_id: str,
+        shared_drive_id: str | None = None,
+        *,
+        restricted: bool = False,
+    ) -> FolderLookup:
+        """Get or create a channel-specific folder.
+
         Args:
             channel: The channel name
             parent_folder_id: ID of the parent folder
             shared_drive_id: ID of the shared drive (if applicable)
             restricted: Make it a limited-access folder
                 (``inheritedPermissionsDisabled``), for private channels and
-                DMs.  An existing folder is restricted too.
+                DMs.  An existing folder is restricted too.  If that fails,
+                no folder is returned (fail closed), so the conversation's
+                files are never stored in an open folder.
 
         Returns:
-            The folder ID if successful, None otherwise
+            The folder, or the reason there is none.
         """
         name = self._sanitize_folder_name(channel)
         folder_id = self.folder_cache.get((parent_folder_id, name))
@@ -349,7 +395,7 @@ class FolderManager:
                     channel, name, parent_folder_id, shared_drive_id, restricted
                 )
                 if not folder_id:
-                    return None
+                    return FolderLookup(None, "Drive returned no folder ID")
         except HttpError as e:
             log_with_context(
                 logging.WARNING,
@@ -357,11 +403,17 @@ class FolderManager:
                 channel=channel,
                 error=str(e),
             )
-            return None
+            return FolderLookup(None, f"could not find or create the folder: {e}")
 
-        if restricted:
-            self.ensure_restricted(folder_id, channel, shared_drive_id)
-        return folder_id
+        if restricted and not self.ensure_restricted(
+            folder_id, channel, shared_drive_id
+        ):
+            return FolderLookup(
+                None,
+                "the private conversation's folder could not be made limited-access",
+                restriction_failed=True,
+            )
+        return FolderLookup(folder_id)
 
     def _create_channel_folder(
         self,

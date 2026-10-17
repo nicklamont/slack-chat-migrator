@@ -13,6 +13,7 @@ from httplib2 import Response
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.services.drive import DriveUpload
+from slack_chat_migrator.services.drive.folder_manager import FolderLookup
 from slack_chat_migrator.services.files.file import FileHandler
 from slack_chat_migrator.services.files.file_download import (
     DownloadResult,
@@ -110,6 +111,11 @@ def _make_handler(
         )
     # No Drive file from an earlier run unless a test says otherwise.
     handler.drive_uploader.find_uploaded_slack_file.return_value = None
+    # Tests configure get_or_create_channel_folder; the lookup wraps it.
+    folder_manager = handler.folder_manager
+    folder_manager.find_or_create_channel_folder.side_effect = lambda *args, **kwargs: (
+        FolderLookup(folder_manager.get_or_create_channel_folder(*args, **kwargs))
+    )
 
     return handler
 
@@ -1107,8 +1113,8 @@ class TestUploadToDrive:
         assert result.url == "https://drive.google.com/file/d/file_id/view"
         handler.folder_manager.get_or_create_channel_folder.assert_not_called()
 
-    def test_no_folder_id_returns_none(self):
-        """Returns None when no folder ID is available."""
+    def test_no_folder_id_is_an_error(self):
+        """No folder means a failed result that says so."""
         handler = self._make_ready_handler()
         handler._root_folder_id = None
         handler._shared_drive_id = None
@@ -1116,7 +1122,8 @@ class TestUploadToDrive:
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
         result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
-        assert result is None
+        assert not result.success
+        assert result.error.startswith("No Drive folder")
 
     def test_ownership_transfer_for_internal_user_no_shared_drive(self):
         """Transfers ownership for internal users on regular Drive folders."""

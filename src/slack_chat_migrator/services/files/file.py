@@ -28,6 +28,7 @@ from slack_chat_migrator.services.drive import (
     SharedDriveManager,
 )
 from slack_chat_migrator.services.drive.drive_uploader import SOURCE_SLACK_ID
+from slack_chat_migrator.services.drive.folder_manager import FolderLookup
 from slack_chat_migrator.services.files.file_download import (
     REASON_EXTERNAL,
     DownloadResult,
@@ -183,6 +184,7 @@ class FileHandler:
             "ownership_transferred": 0,
             "ownership_transfer_failed": 0,
             "external_folder_grant_failures": 0,
+            "restricted_folder_failures": 0,
             "files_by_channel": {},
         }
 
@@ -445,7 +447,11 @@ class FileHandler:
         # channel's folder is linked again without downloading it.
         folder_id: str | None = None
         if self._is_drive_bound(file_obj, space):
-            folder_id = self._resolve_upload_folder(channel, file_id)
+            lookup = self._choose_upload_folder(channel, file_id)
+            if lookup.folder_id is None:
+                # Fail before downloading a file there's nowhere to put.
+                return self._folder_failure(lookup, name)
+            folder_id = lookup.folder_id
             existing = self._find_existing_upload(file_obj, folder_id, name)
             if existing is not None:
                 return existing
@@ -857,7 +863,7 @@ class FileHandler:
             file_hash=file_hash,
             folder_id=folder_id,
         )
-        if drive_result:
+        if drive_result is not None and drive_result.success:
             log_with_context(
                 logging.DEBUG,
                 f"Successfully uploaded file {name} to Drive: {drive_result.url}",
@@ -869,11 +875,12 @@ class FileHandler:
 
         log_with_context(
             logging.ERROR,
-            f"Failed to upload file {name}",
+            f"Failed to upload file {name}"
+            + (f": {drive_result.error}" if drive_result is not None else ""),
             channel=channel,
             file_id=file_id,
         )
-        return None
+        return drive_result
 
     def _upload_direct_to_chat(
         self,
@@ -997,9 +1004,11 @@ class FileHandler:
 
             user_email = self.user_map.get(user_id) if user_id else None
 
-            folder_id = folder_id or self._resolve_upload_folder(channel, file_id)
             if not folder_id:
-                return None
+                lookup = self._choose_upload_folder(channel, file_id)
+                if lookup.folder_id is None:
+                    return self._folder_failure(lookup, name)
+                folder_id = lookup.folder_id
 
             return self._execute_drive_upload(
                 file_path,
@@ -1029,36 +1038,51 @@ class FileHandler:
 
         Returns the folder ID, or None if no valid folder is available.
         """
-        folder_id = None
+        return self._choose_upload_folder(channel, file_id).folder_id
+
+    def _choose_upload_folder(self, channel: str | None, file_id: str) -> FolderLookup:
+        """Get or create the target Drive folder for an upload, or say why not.
+
+        A private conversation whose folder can't be made limited-access
+        gets no folder: its files are never stored in an open one, neither
+        its own folder nor the root.
+        """
+        lookup = FolderLookup(None)
 
         restricted = bool(channel) and self.should_restrict_folder(channel or "")
         if channel and self._root_folder_id:
-            folder_id = self.folder_manager.get_or_create_channel_folder(
+            lookup = self.folder_manager.find_or_create_channel_folder(
                 channel,
                 self._root_folder_id,
                 self._shared_drive_id,
                 restricted=restricted,
             )
-
-            if folder_id:
+            if lookup.folder_id:
                 self.drive_uploader.pre_cache_folder_file_hashes(
-                    folder_id, self._shared_drive_id
+                    lookup.folder_id, self._shared_drive_id
                 )
+                return lookup
+            if restricted:
+                return lookup
 
-        if not folder_id and not restricted:
-            # A private conversation's files never fall back to the open root.
-            folder_id = self._root_folder_id
+        if self._root_folder_id:
+            return FolderLookup(self._root_folder_id)
 
-        if not folder_id:
-            log_with_context(
-                logging.ERROR,
-                "No valid folder ID available for file upload",
-                channel=channel,
-                file_id=file_id,
-            )
-            return None
+        log_with_context(
+            logging.ERROR,
+            "No valid folder ID available for file upload",
+            channel=channel,
+            file_id=file_id,
+        )
+        return FolderLookup(None, lookup.error or "no Drive folder is available")
 
-        return folder_id
+    def _folder_failure(self, lookup: FolderLookup, name: str) -> UploadResult:
+        """The failed result for a file that has no usable Drive folder."""
+        if lookup.restriction_failed:
+            self._increment_stat("restricted_folder_failures")
+        return UploadResult(
+            error=f"No Drive folder: {lookup.error or 'unknown error'}", name=name
+        )
 
     def set_conversation_type(self, channel: str, conversation_type: str) -> None:
         """Record a conversation's type: public, private, mpim or dm.
@@ -1386,6 +1410,7 @@ class FileHandler:
             "external_folder_grant_failures": self.file_stats[
                 "external_folder_grant_failures"
             ],
+            "restricted_folder_failures": self.file_stats["restricted_folder_failures"],
             "files_by_channel": dict(self.file_stats["files_by_channel"]),
             "success_rate": successful / max(1, successful + failed) * 100,
         }

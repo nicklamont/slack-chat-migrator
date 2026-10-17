@@ -520,14 +520,34 @@ class TestSanitizeFolderName:
 class TestEnsureRestricted:
     """Limited-access folders (F10)."""
 
-    def test_failed_update_is_not_retried(self):
+    def test_failed_update_is_retried_next_time(self, caplog):
         svc = MagicMock()
         svc.update_file.side_effect = _make_http_error(403)
         fm = FolderManager(svc)
 
         assert fm.ensure_restricted("F", "hr", "SD") is False
         assert fm.ensure_restricted("F", "hr", "SD") is False
-        svc.update_file.assert_called_once()
+        assert svc.update_file.call_count == 2
+        assert fm.restriction_failures == {"F": 2}
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1  # said loudly once, then quietly
+
+    def test_restricted_lookup_fails_closed(self):
+        svc = MagicMock()
+        svc.list_files.return_value = {"files": [{"id": "OPEN", "name": "hr"}]}
+        svc.update_file.side_effect = _make_http_error(403)
+        fm = FolderManager(svc)
+
+        lookup = fm.find_or_create_channel_folder("hr", "ROOT", "SD", restricted=True)
+
+        assert lookup.folder_id is None
+        assert lookup.restriction_failed is True
+        assert "limited-access" in lookup.error
+        assert (
+            fm.get_or_create_channel_folder("hr", "ROOT", "SD", restricted=True) is None
+        )
+        # Unrestricted callers still get the folder.
+        assert fm.get_or_create_channel_folder("hr", "ROOT", "SD") == "OPEN"
 
     def test_update_sets_flag_and_supports_all_drives(self):
         svc = MagicMock()

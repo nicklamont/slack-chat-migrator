@@ -12,6 +12,7 @@ import pytest
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.services.drive.folder_manager import FolderLookup
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
 from slack_chat_migrator.services.files import file as file_mod
 from slack_chat_migrator.services.files.file_download import (
@@ -785,8 +786,8 @@ class TestLimitedAccessFolders:
     def test_private_files_never_fall_back_to_the_root(self, tmp_path, downloads):
         fake = FakeDrive()
         handler = make_meta_handler(fake, tmp_path)
-        handler.folder_manager.get_or_create_channel_folder = MagicMock(
-            return_value=None
+        handler.folder_manager.find_or_create_channel_folder = MagicMock(
+            return_value=FolderLookup(None, "boom")
         )
 
         result = upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
@@ -969,3 +970,56 @@ class TestTransferConfig:
 
         with pytest.raises(ConfigError, match="transfer_file_ownership"):
             MigrationConfig.from_dict({"transfer_file_ownership": "yes"})
+
+
+# ---------------------------------------------------------------------------
+# Private folders fail closed (SF2)
+# ---------------------------------------------------------------------------
+
+
+class TestPrivateFoldersFailClosed:
+    def _handler(self, fake, tmp_path):
+        return make_meta_handler(fake, tmp_path)
+
+    def test_no_file_goes_into_an_open_private_folder(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive(reject_inherited_flag_on_create=True, fail_restriction=True)
+        handler = self._handler(fake, tmp_path)
+
+        result = upload(handler, downloads, "hr", "F1", "UA", b"secret", space=None)
+
+        assert not result.success
+        assert "limited-access" in result.error
+        uploads = [
+            kw
+            for name, kw in fake.calls
+            if name == "files.create" and kw.get("media_body")
+        ]
+        assert uploads == []  # nothing was uploaded
+        assert downloads.calls == []  # nor downloaded
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 1
+        assert stats["restricted_folder_failures"] == 1
+        assert any(
+            r.levelname == "ERROR" and "hr" in r.getMessage() for r in caplog.records
+        )
+
+    def test_restriction_is_retried_with_the_next_file(self, tmp_path, downloads):
+        fake = FakeDrive(reject_inherited_flag_on_create=True, fail_restriction=True)
+        handler = self._handler(fake, tmp_path)
+
+        first = upload(handler, downloads, "hr", "F1", "UA", b"one", space=None)
+        fake.fail_restriction = False
+        second = upload(handler, downloads, "hr", "F2", "UA", b"two", space=None)
+
+        assert not first.success
+        assert second.success
+        folder_id = fake.files_db[second.drive_id]["parents"][0]
+        assert fake.files_db[folder_id]["inheritedPermissionsDisabled"] is True
+
+    def test_public_channel_is_unaffected(self, tmp_path, downloads):
+        fake = FakeDrive(reject_inherited_flag_on_create=True, fail_restriction=True)
+        handler = self._handler(fake, tmp_path)
+        result = upload(handler, downloads, "general", "F1", "UA", b"x", space=None)
+        assert result.success
