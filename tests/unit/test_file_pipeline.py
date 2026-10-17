@@ -392,6 +392,119 @@ class TestOwnershipTransfer:
         assert handler.get_file_statistics()["ownership_transferred"] == 1
 
 
+class TestGrantFailures:
+    """A failed grant never fails the upload, and is retried on reuse (SF7)."""
+
+    @staticmethod
+    def _writer_grants(fake, email="alice@example.com"):
+        return [
+            kw
+            for kw in fake.permission_calls()
+            if kw["body"]["emailAddress"] == email and kw["body"]["role"] == "writer"
+        ]
+
+    def test_network_error_on_grant_keeps_the_upload(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        assert result.success
+        stats = handler.get_file_statistics()
+        assert stats["poster_grant_failures"] == 1
+        assert stats["failed_uploads"] == 0
+        assert fake.files_db[result.drive_id]["appProperties"]["slackGrantPending"]
+        assert not handler._already_granted(result.drive_id, "alice@example.com")
+
+    def test_failed_grant_on_a_canvas_makes_no_second_copy(
+        self, tmp_path, doc_downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = TimeoutError("timed out")
+
+        result = post_document(handler, CANVAS)
+
+        assert result.success
+        uploads = [
+            kw
+            for name, kw in fake.calls
+            if name == "files.create" and kw.get("media_body") is not None
+        ]
+        assert len(uploads) == 1
+
+    def test_grant_is_retried_when_the_file_is_linked_again(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        first = upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+
+        # The same Slack file again, for another space: linked by Slack ID.
+        again = upload(handler, downloads, "c", "F1", "UA", b"body", space="spaces/T")
+
+        assert again.drive_id == first.drive_id
+        assert again.metadata["source"] == "slack_id"
+        assert len(self._writer_grants(fake)) == 2  # the failed one and the retry
+        assert handler._already_granted(first.drive_id, "alice@example.com")
+        assert "slackGrantPending" not in fake.files_db[first.drive_id]["appProperties"]
+
+    def test_rerun_retries_a_flagged_grant_only(self, tmp_path, downloads):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        failed = upload(run1, downloads, "c", "F1", "UA", b"one")
+        del fake.failing["permissions.create"]
+        granted = upload(run1, downloads, "c", "F2", "UA", b"two")
+
+        run2 = make_handler(fake, tmp_path)
+        fake.calls.clear()
+        downloads.calls.clear()
+        upload(run2, downloads, "c", "F1", "UA", b"one")
+        upload(run2, downloads, "c", "F2", "UA", b"two")
+
+        assert downloads.calls == []
+        grants = [kw["fileId"] for kw in fake.permission_calls()]
+        assert grants == [failed.drive_id]
+        assert granted.drive_id not in grants
+        assert run2.get_file_statistics()["poster_grant_failures"] == 0
+        assert (
+            "slackGrantPending" not in fake.files_db[failed.drive_id]["appProperties"]
+        )
+
+    def test_rerun_retries_a_failed_transfer(self, tmp_path, downloads):
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        first = upload(run1, downloads, "c", "F1", "UA", b"mine")
+        assert run1.get_file_statistics()["ownership_transfer_failed"] == 1
+        assert fake.files_db[first.drive_id]["appProperties"]["slackOwnerPending"]
+
+        fake.fail_transfer = False
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.calls.clear()
+        upload(run2, downloads, "c", "F1", "UA", b"mine")
+
+        transfers = [
+            kw for kw in fake.permission_calls() if kw.get("transferOwnership")
+        ]
+        assert [kw["fileId"] for kw in transfers] == [first.drive_id]
+        assert run2.get_file_statistics()["ownership_transferred"] == 1
+        assert "slackOwnerPending" not in fake.files_db[first.drive_id]["appProperties"]
+
+    def test_rerun_after_a_transfer_sends_nothing(self, tmp_path, downloads):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(run1, downloads, "c", "F1", "UA", b"mine")
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.calls.clear()
+        upload(run2, downloads, "c", "F1", "UA", b"mine")
+
+        assert fake.permission_calls() == []
+        assert fake.count("files.update") == 0
+
+
 # ---------------------------------------------------------------------------
 # Content type and resumable uploads (I28, I37)
 # ---------------------------------------------------------------------------

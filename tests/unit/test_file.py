@@ -654,6 +654,14 @@ class TestTransferFileOwnership:
         result = handler._transfer_file_ownership("file1", "alice@example.com")
         assert result is False
 
+    def test_network_error_is_a_failed_transfer(self):
+        handler = _make_handler()
+        handler.drive_service.create_permission.side_effect = ConnectionResetError(
+            "reset"
+        )
+
+        assert handler._transfer_file_ownership("file1", "alice@example.com") is False
+
 
 # ===========================================================================
 # ensure_drive_initialized tests

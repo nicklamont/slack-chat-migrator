@@ -249,6 +249,16 @@ class _Files:
             body = kw.get("body", {})
             if self.d.fail_restriction and "inheritedPermissionsDisabled" in body:
                 raise http_error(403, "insufficient role to limit access")
+            body = dict(body)
+            if "appProperties" in body:
+                # Drive merges appProperties; a null value deletes the key.
+                props = {**(record.get("appProperties") or {})}
+                for key, value in body.pop("appProperties").items():
+                    if value is None:
+                        props.pop(key, None)
+                    else:
+                        props[key] = value
+                record["appProperties"] = props
             record.update(body)
             return dict(record)
 

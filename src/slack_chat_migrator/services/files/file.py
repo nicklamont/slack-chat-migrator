@@ -32,8 +32,8 @@ from slack_chat_migrator.services.drive.domains import (
     is_external_email,
 )
 from slack_chat_migrator.services.drive.drive_uploader import (
-    SOURCE_SLACK_ID,
     DriveUploadFailure,
+    DriveUploadSource,
 )
 from slack_chat_migrator.services.drive.folder_manager import (
     FolderLookup,
@@ -201,6 +201,7 @@ class FileHandler:
             "external_user_files": 0,
             "ownership_transferred": 0,
             "ownership_transfer_failed": 0,
+            "poster_grant_failures": 0,
             "external_folder_grant_failures": 0,
             "folder_sync_failures": 0,
             "folder_grant_failures": 0,
@@ -475,7 +476,9 @@ class FileHandler:
                 # Fail before downloading a file there's nowhere to put.
                 return self._folder_failure(lookup, name)
             folder_id = lookup.folder_id
-            existing = self._find_existing_upload(file_obj, folder_id, name)
+            existing = self._find_existing_upload(
+                file_obj, folder_id, name, channel, sender_email
+            )
             if existing is not None:
                 return existing
 
@@ -673,9 +676,19 @@ class FileHandler:
         return not direct_candidate
 
     def _find_existing_upload(
-        self, file_obj: dict[str, Any], folder_id: str | None, name: str
+        self,
+        file_obj: dict[str, Any],
+        folder_id: str | None,
+        name: str,
+        channel: str | None = None,
+        sender_email: str | None = None,
     ) -> UploadResult | None:
-        """Return the Drive upload of this Slack file made by an earlier run."""
+        """Return this Slack file's Drive upload into *folder_id*, if any.
+
+        The upload was made earlier in this run (for another message) or by
+        an earlier run.  Missing grants are made again, as for any reused
+        file.
+        """
         file_id = file_obj.get("id")
         if not folder_id or not file_id:
             return None
@@ -684,10 +697,18 @@ class FileHandler:
             return None
         log_with_context(
             logging.DEBUG,
-            f"File {name} was uploaded by an earlier run; linking it without"
-            " downloading",
+            f"File {name} was uploaded earlier; linking it without downloading",
             file_id=file_id,
             drive_file_id=existing.file_id,
+        )
+        user_id = file_obj.get("user")
+        self._apply_file_permissions(
+            existing.file_id,
+            existing.source,
+            sender_email,
+            self.user_map.get(user_id) if user_id else None,
+            channel,
+            file_id,
         )
         return UploadResult(
             upload_type="drive",
@@ -1219,16 +1240,10 @@ class FileHandler:
                 metadata={"conversion_failed": upload.conversion_failed},
             )
 
-        if upload.source != SOURCE_SLACK_ID:
-            # An earlier run uploaded this very file and set its permissions.
-            self._apply_file_permissions(
-                upload.file_id,
-                upload.reused,
-                sender_email,
-                user_email,
-                channel,
-                file_id,
-            )
+        # Never raises: a failed grant doesn't make the upload fail.
+        self._apply_file_permissions(
+            upload.file_id, upload.source, sender_email, user_email, channel, file_id
+        )
 
         log_with_context(
             logging.DEBUG,
@@ -1314,7 +1329,7 @@ class FileHandler:
     def _apply_file_permissions(
         self,
         drive_file_id: str,
-        reused: bool,
+        source: DriveUploadSource,
         sender_email: str | None,
         owner_email: str | None,
         channel: str | None,
@@ -1324,21 +1339,47 @@ class FileHandler:
 
         Everyone else, external members included, gets reader access through
         the channel folder.  External users never get a per-file grant.
+
         Ownership is transferred only when ``config.transfer_file_ownership``
-        is set, only for new uploads in regular-Drive mode (a reused file
-        keeps its owner), and only to internal users.
+        is set, only in regular-Drive mode and only to internal users: for a
+        new upload, or for a file an earlier run uploaded (found by its
+        Slack ID) whose transfer failed then.  A file found by its content
+        (``HASH``) keeps its owner.
+
+        A reused file gets the poster's grant unless it was made earlier in
+        this run, or, for a file from an earlier run, unless that run made it
+        (no failure flagged on the file).  Failures are logged, counted per
+        attempt (``poster_grant_failures``, ``ownership_transfer_failed``)
+        and flagged on the file, never raised: the upload stays a success.
         """
         poster = sender_email if self._is_internal_email(sender_email) else None
-        owner = (
-            owner_email
-            if self.config.transfer_file_ownership
-            and not reused
+        can_transfer = bool(
+            self.config.transfer_file_ownership
             and not self._shared_drive_id
             and self._is_internal_email(owner_email)
+        )
+        from_earlier_run = (
+            source is DriveUploadSource.SLACK_ID
+            and drive_file_id not in self.drive_uploader.created_this_run
+        )
+        owner_pending = drive_file_id in self.drive_uploader.owner_pending
+        owner = (
+            owner_email
+            if can_transfer
+            and (
+                source is DriveUploadSource.NEW or (from_earlier_run and owner_pending)
+            )
             else None
         )
+        if from_earlier_run:
+            # An earlier run uploaded it and made its grants.  Grant again
+            # only if that failed (flagged on the file), and not to a poster
+            # whom that run's transfer made the owner.
+            became_owner = can_transfer and not owner_pending and poster == owner_email
+            if became_owner or drive_file_id not in self.drive_uploader.grant_pending:
+                poster = None
 
-        if sender_email and poster is None:
+        if sender_email and not self._is_internal_email(sender_email):
             log_with_context(
                 logging.DEBUG,
                 f"Not granting file access to external poster {sender_email}",
@@ -1363,9 +1404,7 @@ class FileHandler:
                     ownership_transfer_change(drive_file_id, owner),
                 ]
             )
-            if writer_error is None:
-                self._mark_granted(drive_file_id, poster)
-            else:
+            if writer_error is not None:
                 log_with_context(
                     logging.WARNING,
                     f"Failed to set writer permission for message poster on file"
@@ -1373,6 +1412,7 @@ class FileHandler:
                     channel=channel,
                     file_id=file_id,
                 )
+            self._record_poster_grant(drive_file_id, poster, writer_error is None)
             self._count_ownership_transfer(
                 transfer_error is None,
                 drive_file_id,
@@ -1384,10 +1424,7 @@ class FileHandler:
             return
 
         if grant_poster and poster:
-            if self.drive_uploader.set_message_poster_permission(
-                drive_file_id, poster, self._shared_drive_id
-            ):
-                self._mark_granted(drive_file_id, poster)
+            self._grant_poster(drive_file_id, poster)
 
         if owner:
             transferred = self._handle_ownership_transfer(
@@ -1395,13 +1432,33 @@ class FileHandler:
             )
             if not transferred and poster == owner:
                 # Keep the poster able to edit their file.
-                if self.drive_uploader.set_message_poster_permission(
-                    drive_file_id, poster, self._shared_drive_id
-                ):
-                    self._mark_granted(drive_file_id, poster)
+                self._grant_poster(drive_file_id, poster)
+
+    def _grant_poster(self, drive_file_id: str, poster: str) -> None:
+        """Give the poster ``writer`` access (a failure is logged there)."""
+        granted = self.drive_uploader.set_message_poster_permission(
+            drive_file_id, poster, self._shared_drive_id
+        )
+        self._record_poster_grant(drive_file_id, poster, granted)
+
+    def _record_poster_grant(
+        self, drive_file_id: str, poster: str, granted: bool
+    ) -> None:
+        """Remember a poster grant, or count and flag it as failed.
+
+        A flagged file gets the grant again when it is linked again, in this
+        run or a later one.
+        """
+        if granted:
+            self._mark_granted(drive_file_id, poster)
+        else:
+            self._increment_stat("poster_grant_failures")
+        self.drive_uploader.set_grant_pending(
+            drive_file_id, not granted, self._shared_drive_id
+        )
 
     def _already_granted(self, drive_file_id: str, email: str) -> bool:
-        """Whether *email* already got writer access to the file this run."""
+        """Whether *email* got writer access (or ownership) this run."""
         return (drive_file_id, email) in self._granted_posters
 
     def _mark_granted(self, drive_file_id: str, email: str) -> None:
@@ -1437,6 +1494,10 @@ class FileHandler:
     ) -> None:
         """Count and log one ownership transfer attempt.
 
+        A failed transfer is flagged on the file (see
+        :meth:`DriveFileUploader.set_owner_pending`), so linking the file
+        again, in this run or a later one, retries it.
+
         Args:
             transferred: Whether the transfer succeeded.
             drive_file_id: The Drive file.
@@ -1445,7 +1506,10 @@ class FileHandler:
             file_id: Slack file ID for logging context.
             error: Why the transfer failed, when known.
         """
+        self.drive_uploader.set_owner_pending(drive_file_id, not transferred)
         if transferred:
+            # The owner needs no writer grant when the file is linked again.
+            self._mark_granted(drive_file_id, new_owner_email)
             self._increment_stat("ownership_transferred")
             log_with_context(
                 logging.DEBUG,
@@ -1492,6 +1556,7 @@ class FileHandler:
             "external_user_files": self.file_stats["external_user_files"],
             "ownership_transferred": self.file_stats["ownership_transferred"],
             "ownership_transfer_failed": self.file_stats["ownership_transfer_failed"],
+            "poster_grant_failures": self.file_stats["poster_grant_failures"],
             "external_folder_grant_failures": self.file_stats[
                 "external_folder_grant_failures"
             ],

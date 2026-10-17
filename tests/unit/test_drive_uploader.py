@@ -460,6 +460,20 @@ class TestSetMessagePosterPermission:
 
         assert result is False
 
+    @pytest.mark.parametrize(
+        "error",
+        [ConnectionResetError("reset"), TimeoutError("slow")],
+        ids=["reset", "timeout"],
+    )
+    def test_network_error_returns_false(self, error):
+        """A network error after the upload doesn't escape (SF7)."""
+        uploader = _make_uploader()
+        uploader.drive_service.create_permission.side_effect = error
+
+        assert (
+            uploader.set_message_poster_permission("file1", "user@example.com") is False
+        )
+
     @pytest.mark.parametrize("shared_drive_id", [None, "drive1"])
     def test_role_is_writer_in_both_modes(self, shared_drive_id):
         """Drive v3 has no "editor" role; posters always get "writer" (I12)."""
@@ -483,6 +497,56 @@ class TestSetMessagePosterPermission:
 # -------------------------------------------------------------------
 # TestInit
 # -------------------------------------------------------------------
+
+
+class TestPendingFlags:
+    """Failed grants are flagged on the file, once (SF7)."""
+
+    def test_flag_is_stored_once_and_cleared(self):
+        uploader = _make_uploader()
+
+        uploader.set_grant_pending("f1", True, "SD")
+        uploader.set_grant_pending("f1", True, "SD")
+        uploader.set_grant_pending("f1", False, "SD")
+        uploader.set_grant_pending("f1", False, "SD")
+
+        calls = uploader.drive_service.update_file.call_args_list
+        assert [c.args for c in calls] == [
+            ("f1", {"appProperties": {"slackGrantPending": "1"}}),
+            ("f1", {"appProperties": {"slackGrantPending": None}}),
+        ]
+        assert all(c.kwargs["supports_all_drives"] is True for c in calls)
+        assert uploader.grant_pending == set()
+
+    def test_failure_to_store_the_flag_is_not_raised(self):
+        uploader = _make_uploader()
+        uploader.drive_service.update_file.side_effect = _http_error(403)
+
+        uploader.set_owner_pending("f1", True)
+
+        assert uploader.owner_pending == {"f1"}
+
+    def test_pre_cache_reads_the_flags(self):
+        uploader = _make_uploader()
+        uploader.drive_service.list_files.return_value = {
+            "files": [
+                {
+                    "id": "a",
+                    "md5Checksum": "m",
+                    "appProperties": {
+                        "slackFileId": "F1",
+                        "slackGrantPending": "1",
+                        "slackOwnerPending": "1",
+                    },
+                },
+                {"id": "b", "md5Checksum": "n"},
+            ]
+        }
+
+        uploader.pre_cache_folder_file_hashes("folder1")
+
+        assert uploader.grant_pending == {"a"}
+        assert uploader.owner_pending == {"a"}
 
 
 class TestInit:
