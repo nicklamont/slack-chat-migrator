@@ -72,6 +72,13 @@ class UserResolver:
         self.internal_domains: frozenset[str] = internal_domains(
             workspace_domain, config.workspace_domains
         )
+        if not self.internal_domains and config.workspace_domains:
+            log_with_context(
+                logging.WARNING,
+                "The workspace admin's domain is unknown (no --workspace_admin),"
+                " so nobody counts as external and workspace_domains is not"
+                " used: this run's external-user counts are 0.",
+            )
         self._users_data: dict[str, dict[str, Any]] | None = None
 
     def _delegate_service(self, email: str) -> Any:
