@@ -916,6 +916,10 @@ SLACK_FILE_URL = (
 )
 
 
+XOXE_TAIL = "tail9f8e7d"
+XOXE_URL = f"https://files.slack.com/files-pri/T1-F1/a.pdf?t=xoxe-1-{XOXE_TAIL}"
+
+
 class TestSlackTokenRedaction:
     """sanitize_for_log() and the RedactingFilter remove Slack tokens."""
 
@@ -953,10 +957,8 @@ class TestSlackTokenRedaction:
         assert "1234567890-abcdef" not in result
 
     def test_redacts_rotating_token(self):
-        result = sanitize_for_log(
-            "refresh xoxe.xoxp-1-Mi0yLTE2 done"
-        )  # pragma: allowlist secret
-        assert "Mi0yLTE2" not in result
+        text = "refresh xoxe.xoxp-1-Mi0yLTE2 done"  # pragma: allowlist secret
+        assert "Mi0yLTE2" not in sanitize_for_log(text)
 
     def test_does_not_touch_ordinary_words(self):
         text = "Processing channel xoxo-party and taxonomy=fine"
@@ -976,6 +978,57 @@ class TestSlackTokenRedaction:
         assert RedactingFilter().filter(record) is True
         assert "xoxe-1234567890" not in record.getMessage()
         assert "xoxe-1234567890" not in record.error_details
+
+    @staticmethod
+    def _record(msg, args):
+        return logging.LogRecord(
+            "slack_chat_migrator", logging.WARNING, __file__, 1, msg, args, None
+        )
+
+    def test_filter_fails_closed_when_args_do_not_match_format(self):
+        record = self._record("download failed for %s", (XOXE_URL, "extra"))
+        assert RedactingFilter().filter(record) is True
+        message = record.getMessage()
+        assert record.args is None
+        assert XOXE_TAIL not in message
+        assert "download failed for %s" in message
+        assert "didn't match the format" in message
+        assert "extra" in message
+
+    def test_filter_fails_closed_for_mapping_args(self):
+        record = self._record("%(url)s %(missing)s", ({"url": XOXE_URL},))
+        RedactingFilter().filter(record)
+        assert XOXE_TAIL not in record.getMessage()
+        assert "url=" in record.getMessage()
+
+    def test_filter_survives_unprintable_args(self):
+        class Unprintable:
+            def __str__(self):
+                raise RuntimeError("no")
+
+        record = self._record("%d %s", (Unprintable(), XOXE_URL))
+        RedactingFilter().filter(record)
+        message = record.getMessage()
+        assert "<unprintable Unprintable>" in message
+        assert XOXE_TAIL not in message
+
+    def test_mismatched_args_never_reach_stderr(self, tmp_path, capsys):
+        """logging.Handler.handleError would print the raw args to stderr."""
+        import io
+
+        setup_logger(output_dir=str(tmp_path))
+        stream = io.StringIO()
+        logging.getLogger("slack_chat_migrator").handlers[0].setStream(stream)
+        logging.getLogger("slack_chat_migrator").warning(
+            "download failed for %s", XOXE_URL, "extra"
+        )
+        logging.getLogger("slack_chat_migrator").handlers[1].flush()
+        err = capsys.readouterr().err
+        assert XOXE_TAIL not in err
+        assert "--- Logging error ---" not in err
+        for text in (stream.getvalue(), (tmp_path / "migration.log").read_text()):
+            assert XOXE_TAIL not in text
+            assert "download failed for" in text
 
     def test_no_token_in_any_log_file(self, tmp_path):
         """End to end: main log, channel log and console are all redacted."""

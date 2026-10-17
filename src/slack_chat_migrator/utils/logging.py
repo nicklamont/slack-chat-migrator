@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from typing import IO, Any
 
 from slack_chat_migrator.constants import (
@@ -68,13 +69,45 @@ _STANDARD_RECORD_ATTRS = frozenset(
 ) | {"message", "asctime"}
 
 
+def _safe_str(value: Any) -> str:
+    """``str(value)``, or a placeholder when ``__str__`` itself fails."""
+    try:
+        return str(value)
+    except Exception:
+        return f"<unprintable {type(value).__name__}>"
+
+
+def _unformattable_message(record: logging.LogRecord) -> str:
+    """Build a redacted message for a record whose args don't fit its format.
+
+    Logging would otherwise print the raw ``msg`` and ``args`` (secrets
+    included) to stderr when the formatter fails on the same mismatch.
+    """
+    args = record.args
+    if isinstance(args, Mapping):
+        parts = [f"{_safe_str(k)}={_safe_str(v)}" for k, v in args.items()]
+    elif isinstance(args, tuple):
+        parts = [_safe_str(arg) for arg in args]
+    else:
+        parts = [_safe_str(args)]
+    text = (
+        f"{_safe_str(record.msg)} [log arguments didn't match the format:"
+        f" {', '.join(sanitize_for_log(part) for part in parts)}]"
+    )
+    return sanitize_for_log(text)
+
+
 class RedactingFilter(logging.Filter):
     """Filter that redacts secrets from every record a handler emits.
 
     It rewrites the formatted message and any string ``extra`` fields (such
     as ``api_data``, ``response`` or ``error_details``) with
-    :func:`sanitize_for_log`, so no handler writes Slack file tokens or
-    bearer tokens, whatever the formatter.
+    :func:`sanitize_for_log`.  Together with :class:`EnhancedFormatter`,
+    which also redacts tracebacks and the final formatted line, no handler
+    writes Slack file tokens or bearer tokens.  A record whose arguments
+    don't match its format string fails closed: its message is replaced by
+    a redacted rendering of the format string and arguments, so logging's
+    error handler never prints the raw arguments.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -89,11 +122,13 @@ class RedactingFilter(logging.Filter):
         try:
             message = record.getMessage()
         except Exception:
-            return True
-        sanitized = sanitize_for_log(message)
-        if sanitized != message:
-            record.msg = sanitized
+            record.msg = _unformattable_message(record)
             record.args = None
+        else:
+            sanitized = sanitize_for_log(message)
+            if sanitized != message:
+                record.msg = sanitized
+                record.args = None
         for name, value in list(record.__dict__.items()):
             if name not in _STANDARD_RECORD_ATTRS and isinstance(value, str) and value:
                 record.__dict__[name] = sanitize_for_log(value)
