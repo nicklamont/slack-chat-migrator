@@ -3,11 +3,13 @@
 import hashlib
 from unittest.mock import MagicMock, patch
 
+import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 from slack_chat_migrator.services.drive.drive_uploader import (
     DriveFileUploader,
+    DriveUpload,
 )
 
 # -------------------------------------------------------------------
@@ -324,16 +326,14 @@ class TestUploadFileToDrive:
             "webViewLink": "https://new_link",
         }
 
-        file_id, url = uploader.upload_file_to_drive(
-            str(test_file), "upload.txt", "folder1"
-        )
+        upload = uploader.upload_file_to_drive(str(test_file), "upload.txt", "folder1")
 
-        assert file_id == "new_file_id"
-        assert url == "https://new_link"
+        assert upload == DriveUpload("new_file_id", "https://new_link", reused=False)
+        uploader.drive_service.create_permission.assert_not_called()
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_http_error_during_upload(self, mock_media_cls, tmp_path):
-        """HttpError during upload returns (None, None)."""
+        """HttpError during upload returns None."""
         uploader = _make_uploader()
         uploader.folders_pre_cached.add("folder1")
 
@@ -346,12 +346,9 @@ class TestUploadFileToDrive:
         # create raises HttpError
         uploader.drive_service.create_file.side_effect = _http_error(500)
 
-        file_id, url = uploader.upload_file_to_drive(
-            str(test_file), "fail.txt", "folder1"
+        assert (
+            uploader.upload_file_to_drive(str(test_file), "fail.txt", "folder1") is None
         )
-
-        assert file_id is None
-        assert url is None
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_reuses_existing_file_by_hash(self, mock_media_cls, tmp_path):
@@ -376,52 +373,13 @@ class TestUploadFileToDrive:
             "webViewLink": "https://existing_link",
         }
 
-        file_id, url = uploader.upload_file_to_drive(
-            str(test_file), "dup.txt", "folder1"
-        )
+        upload = uploader.upload_file_to_drive(str(test_file), "dup.txt", "folder1")
 
-        assert file_id == "existing_id"
-        assert url == "https://existing_link"
+        assert upload == DriveUpload(
+            "existing_id", "https://existing_link", reused=True
+        )
         # create should NOT have been called
         uploader.drive_service.create_file.assert_not_called()
-
-    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
-    def test_reused_file_sets_poster_permission(self, mock_media_cls, tmp_path):
-        """Sets poster permission on reused file when message_poster_email provided."""
-        uploader = _make_uploader()
-        uploader.folders_pre_cached.add("folder1")
-
-        test_file = tmp_path / "dup.txt"
-        content = b"duplicate content"
-        test_file.write_bytes(content)
-        file_hash = hashlib.md5(content).hexdigest()  # noqa: S324
-
-        uploader.file_hash_cache[file_hash] = (
-            "existing_id",
-            "https://existing_link",
-        )
-
-        uploader.drive_service.get_file.return_value = {
-            "id": "existing_id",
-            "webViewLink": "https://existing_link",
-        }
-
-        uploader.drive_service.create_permission.return_value = {"id": "perm1"}
-
-        file_id, _url = uploader.upload_file_to_drive(
-            str(test_file),
-            "dup.txt",
-            "folder1",
-            message_poster_email="poster@example.com",
-        )
-
-        assert file_id == "existing_id"
-        uploader.drive_service.create_file.assert_not_called()
-        uploader.drive_service.create_permission.assert_called_once()
-        call_kwargs = uploader.drive_service.create_permission.call_args
-        body = call_kwargs.kwargs.get("body", call_kwargs[1].get("body"))
-        assert body["emailAddress"] == "poster@example.com"
-        assert body["role"] == "editor"
 
 
 # -------------------------------------------------------------------
@@ -430,15 +388,15 @@ class TestUploadFileToDrive:
 
 
 class TestSetMessagePosterPermission:
-    """Tests for _set_message_poster_permission."""
+    """Tests for set_message_poster_permission."""
 
     def test_success_creates_permission(self):
-        """Successfully creates editor permission."""
+        """Successfully creates a writer permission."""
         uploader = _make_uploader()
 
         uploader.drive_service.create_permission.return_value = {"id": "perm1"}
 
-        result = uploader._set_message_poster_permission("file1", "user@example.com")
+        result = uploader.set_message_poster_permission("file1", "user@example.com")
 
         assert result is True
 
@@ -448,27 +406,28 @@ class TestSetMessagePosterPermission:
 
         uploader.drive_service.create_permission.side_effect = _http_error(403)
 
-        result = uploader._set_message_poster_permission("file1", "user@example.com")
+        result = uploader.set_message_poster_permission("file1", "user@example.com")
 
         assert result is False
 
-    def test_shared_drive_uses_writer_role(self):
-        """Shared drive uses 'writer' role instead of 'editor'."""
+    @pytest.mark.parametrize("shared_drive_id", [None, "drive1"])
+    def test_role_is_writer_in_both_modes(self, shared_drive_id):
+        """Drive v3 has no "editor" role; posters always get "writer" (I12)."""
         uploader = _make_uploader()
 
         uploader.drive_service.create_permission.return_value = {"id": "perm2"}
 
-        result = uploader._set_message_poster_permission(
+        result = uploader.set_message_poster_permission(
             "file1",
             "user@example.com",
-            shared_drive_id="drive1",
+            shared_drive_id=shared_drive_id,
         )
 
         assert result is True
-        # Verify body had 'writer' role
         call_kwargs = uploader.drive_service.create_permission.call_args
-        body = call_kwargs.kwargs.get("body", call_kwargs[1].get("body"))
+        body = call_kwargs.kwargs["body"]
         assert body["role"] == "writer"
+        assert call_kwargs.kwargs["supports_all_drives"] is bool(shared_drive_id)
 
 
 # -------------------------------------------------------------------
@@ -596,11 +555,9 @@ class TestUploadFileToDriveAdditional:
             "webViewLink": "https://link",
         }
 
-        file_id, _url = uploader.upload_file_to_drive(
-            str(test_file), "data.xyz123", "folder1"
-        )
+        upload = uploader.upload_file_to_drive(str(test_file), "data.xyz123", "folder1")
 
-        assert file_id == "file_id"
+        assert upload.file_id == "file_id"
         # Verify MediaFileUpload was called with octet-stream
         mock_media_cls.assert_called_once_with(
             str(test_file), mimetype="application/octet-stream"
@@ -622,42 +579,10 @@ class TestUploadFileToDriveAdditional:
             "webViewLink": "https://new_link",
         }
 
-        file_id, _url = uploader.upload_file_to_drive(
+        upload = uploader.upload_file_to_drive(
             str(test_file), "upload.txt", "folder1", shared_drive_id="sd1"
         )
 
-        assert file_id == "new_id"
+        assert upload.file_id == "new_id"
         call_kwargs = uploader.drive_service.create_file.call_args
         assert call_kwargs.kwargs.get("supports_all_drives") is True
-
-    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
-    def test_upload_sets_poster_permission_on_new_file(self, mock_media_cls, tmp_path):
-        """Message poster email triggers permission call on new upload."""
-        uploader = _make_uploader()
-        uploader.folders_pre_cached.add("folder1")
-
-        test_file = tmp_path / "upload.txt"
-        test_file.write_bytes(b"content")
-
-        uploader.drive_service.list_files.return_value = {"files": []}
-
-        uploader.drive_service.create_file.return_value = {
-            "id": "new_id",
-            "webViewLink": "https://link",
-        }
-
-        uploader.drive_service.create_permission.return_value = {"id": "perm1"}
-
-        file_id, _url = uploader.upload_file_to_drive(
-            str(test_file),
-            "upload.txt",
-            "folder1",
-            message_poster_email="poster@example.com",
-        )
-
-        assert file_id == "new_id"
-        uploader.drive_service.create_permission.assert_called_once()
-        call_kwargs = uploader.drive_service.create_permission.call_args
-        body = call_kwargs.kwargs.get("body", call_kwargs[1].get("body"))
-        assert body["emailAddress"] == "poster@example.com"
-        assert body["role"] == "editor"

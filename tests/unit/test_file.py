@@ -12,6 +12,7 @@ from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.services.drive import DriveUpload
 from slack_chat_migrator.services.files.file import FileHandler
 from slack_chat_migrator.services.files.file_download import (
     DownloadResult,
@@ -40,10 +41,9 @@ def _make_deps(**overrides):
         ),
     )
     user_map = overrides.pop("user_map", {"U123": "alice@example.com"})
-    user_resolver = overrides.pop("user_resolver", MagicMock())
-    if not hasattr(user_resolver, "is_external_user") or not callable(
-        user_resolver.is_external_user
-    ):
+    user_resolver = overrides.pop("user_resolver", None)
+    if user_resolver is None:
+        user_resolver = MagicMock()
         user_resolver.is_external_user = MagicMock(return_value=False)
     workspace_domain = overrides.pop("workspace_domain", "example.com")
 
@@ -1063,9 +1063,8 @@ class TestUploadToDrive:
             "channel_folder"
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "drive_file_id",
-            "https://drive.google.com/file/d/drive_file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "drive_file_id", "https://drive.google.com/file/d/drive_file_id/view"
         )
 
         file_obj = {
@@ -1095,7 +1094,7 @@ class TestUploadToDrive:
             "channel_folder"
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
-        handler.drive_uploader.upload_file_to_drive.return_value = (None, None)
+        handler.drive_uploader.upload_file_to_drive.return_value = None
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
         result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
@@ -1106,9 +1105,8 @@ class TestUploadToDrive:
         """When no channel is provided, uses root folder."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
@@ -1143,9 +1141,8 @@ class TestUploadToDrive:
             "channel_folder"
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
         handler.drive_service.create_permission.return_value = {}
 
@@ -1173,13 +1170,12 @@ class TestUploadToDrive:
             "channel_folder"
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
-        # Mock _transfer_file_ownership to raise HttpError directly
-        handler._transfer_file_ownership = MagicMock(
-            side_effect=HttpError(Response({"status": "403"}), b"forbidden")
+        # transfer_file_ownership() reports a 403 by returning False
+        handler.drive_service.create_permission.side_effect = HttpError(
+            Response({"status": "403"}), b"forbidden"
         )
 
         file_obj = {
@@ -1194,6 +1190,7 @@ class TestUploadToDrive:
         assert result.upload_type == "drive"
         assert result.drive_id == "file_id"
         assert handler.file_stats["ownership_transfer_failed"] == 1
+        assert handler.file_stats["ownership_transferred"] == 0
 
     def test_external_user_skips_ownership_transfer(self):
         """External users should not have ownership transferred."""
@@ -1206,9 +1203,8 @@ class TestUploadToDrive:
             "channel_folder"
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {
@@ -1235,9 +1231,8 @@ class TestUploadToDrive:
             "channel_folder"
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {
@@ -1257,9 +1252,8 @@ class TestUploadToDrive:
         """Google Docs URLs should set appropriate MIME types."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {
@@ -1279,9 +1273,8 @@ class TestUploadToDrive:
         """Google Sheets URLs should set spreadsheet MIME type."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {
@@ -1301,9 +1294,8 @@ class TestUploadToDrive:
         """Google Slides URLs should set presentation MIME type."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {
@@ -1323,9 +1315,8 @@ class TestUploadToDrive:
         """sheets.google.com URL should set spreadsheet MIME type."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {
@@ -1345,9 +1336,8 @@ class TestUploadToDrive:
         """drive.google.com URL with octet-stream guesses from filename."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {
@@ -1367,9 +1357,8 @@ class TestUploadToDrive:
         """drive.google.com URL with no guessable MIME defaults to document."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {
@@ -1389,9 +1378,8 @@ class TestUploadToDrive:
         """Regular files with null MIME type should be guessed from name."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {
@@ -1410,9 +1398,8 @@ class TestUploadToDrive:
         """Regular files with empty MIME type should be guessed from name."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {
@@ -1448,9 +1435,8 @@ class TestUploadToDrive:
             "channel_folder"
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj1 = {"id": "F1", "name": "a.txt", "mimetype": "text/plain"}
@@ -1465,7 +1451,9 @@ class TestUploadToDrive:
         """When drive_uploader returns None for public_url, generates a default link."""
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
-        handler.drive_uploader.upload_file_to_drive.return_value = ("file_id", None)
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id"
+        )
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
         result = handler._upload_to_drive(file_obj, FAKE_PATH)
@@ -1475,8 +1463,8 @@ class TestUploadToDrive:
         assert result.drive_id == "file_id"
         assert result.url == "https://drive.google.com/file/d/file_id/view"
 
-    def test_sender_email_takes_priority_over_user_email(self):
-        """sender_email should be used over user_map email for message_poster_email."""
+    def test_writer_grant_goes_to_sender_not_file_owner(self):
+        """Only the message sender gets writer; the file owner is not granted."""
         handler = self._make_ready_handler(
             user_map={"U123": "alice@example.com"},
         )
@@ -1484,10 +1472,8 @@ class TestUploadToDrive:
         handler.folder_manager.get_or_create_channel_folder.return_value = (
             "channel_folder"
         )
-        handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {
@@ -1500,22 +1486,16 @@ class TestUploadToDrive:
             file_obj, FAKE_PATH, channel="general", sender_email="bob@example.com"
         )
 
-        # Verify upload_file_to_drive was called with sender_email
-        call_args = handler.drive_uploader.upload_file_to_drive.call_args
-        assert (
-            call_args.kwargs.get("message_poster_email") == "bob@example.com"
-            or call_args[4] == "bob@example.com"
-            if len(call_args[0]) > 4
-            else True
+        handler.drive_uploader.set_message_poster_permission.assert_called_once_with(
+            "file_id", "bob@example.com", "drive123"
         )
 
     def test_no_user_email_logs_warning(self):
         """When no user email is available, no ownership transfer happens."""
         handler = self._make_ready_handler(user_map={})
         handler._shared_drive_id = None
-        handler.drive_uploader.upload_file_to_drive.return_value = (
-            "file_id",
-            "https://drive.google.com/file/d/file_id/view",
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
+            "file_id", "https://drive.google.com/file/d/file_id/view"
         )
 
         file_obj = {

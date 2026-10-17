@@ -105,6 +105,9 @@ class FileHandler:
         # Initialize the dictionary to track processed files
         self.processed_files: dict[str, Any] = {}
 
+        # (drive_file_id, email) pairs that already received writer access
+        self._granted_posters: set[tuple[str, str]] = set()
+
         # Initialize file upload statistics
         self.file_stats: dict[str, Any] = {
             "total_files": 0,
@@ -835,19 +838,26 @@ class FileHandler:
     ) -> UploadResult | None:
         """Upload a temp file to Drive and handle permissions.
 
-        Returns the UploadResult or None on failure.
-        """
-        message_poster_email = sender_email or user_email
+        Args:
+            file_path: Temp file holding the content.
+            name: File name on Drive.
+            mime_type: MIME type reported in the result.
+            folder_id: Target Drive folder.
+            channel: Channel name for logging context.
+            file_id: Slack file ID for logging context.
+            user_email: Mapped email of the Slack user who uploaded the file
+                (the ownership-transfer target in regular-Drive mode).
+            sender_email: Email of the message sender, who gets ``writer``
+                access.  Callers pass None for external senders.
 
-        drive_file_id, public_url = self.drive_uploader.upload_file_to_drive(
-            file_path,
-            name,
-            folder_id,
-            self._shared_drive_id,
-            message_poster_email=message_poster_email,
+        Returns:
+            The UploadResult or None on failure.
+        """
+        upload = self.drive_uploader.upload_file_to_drive(
+            file_path, name, folder_id, self._shared_drive_id
         )
 
-        if not drive_file_id:
+        if upload is None:
             log_with_context(
                 logging.ERROR,
                 f"Failed to upload file {name} to Drive",
@@ -856,90 +866,125 @@ class FileHandler:
             )
             return None
 
-        if message_poster_email:
-            log_with_context(
-                logging.DEBUG,
-                f"Gave editor permission to message poster {message_poster_email} for file {drive_file_id}",
-                channel=channel,
-                file_id=file_id,
-            )
-        else:
-            log_with_context(
-                logging.WARNING,
-                "No user email available for message poster, could not assign editor permissions",
-                channel=channel,
-                file_id=file_id,
-            )
-
-        self._handle_ownership_transfer(drive_file_id, user_email, channel, file_id)
+        self._apply_file_permissions(
+            upload.file_id, upload.reused, sender_email, user_email, channel, file_id
+        )
 
         log_with_context(
             logging.DEBUG,
             f"Successfully uploaded file to Drive: {name}",
             channel=channel,
             file_id=file_id,
-            drive_file_id=drive_file_id,
+            drive_file_id=upload.file_id,
         )
 
         return UploadResult(
             upload_type="drive",
-            url=public_url or f"https://drive.google.com/file/d/{drive_file_id}/view",
-            drive_id=drive_file_id,
+            url=upload.url or f"https://drive.google.com/file/d/{upload.file_id}/view",
+            drive_id=upload.file_id,
             name=name,
             mime_type=mime_type,
+            metadata={"reused": upload.reused},
         )
+
+    def _is_internal_email(self, email: str | None) -> bool:
+        """True for a mapped email that belongs to the workspace."""
+        return bool(email) and not self.user_resolver.is_external_user(email)
+
+    def _apply_file_permissions(
+        self,
+        drive_file_id: str,
+        reused: bool,
+        sender_email: str | None,
+        owner_email: str | None,
+        channel: str | None,
+        file_id: str,
+    ) -> None:
+        """Grant the poster ``writer`` access and transfer ownership if allowed.
+
+        Everyone else gets access through the channel folder.  External users
+        never get a grant.  Ownership is transferred only for new uploads in
+        regular-Drive mode, so a reused file keeps its owner.
+        """
+        poster = sender_email if self._is_internal_email(sender_email) else None
+        owner = (
+            owner_email
+            if not reused
+            and not self._shared_drive_id
+            and self._is_internal_email(owner_email)
+            else None
+        )
+
+        if sender_email and poster is None:
+            log_with_context(
+                logging.DEBUG,
+                f"Not granting file access to external poster {sender_email}",
+                channel=channel,
+                file_id=file_id,
+            )
+
+        # The new owner needs no separate writer grant.
+        if (
+            poster
+            and poster != owner
+            and not self._already_granted(drive_file_id, poster)
+        ):
+            if self.drive_uploader.set_message_poster_permission(
+                drive_file_id, poster, self._shared_drive_id
+            ):
+                self._mark_granted(drive_file_id, poster)
+
+        if owner:
+            transferred = self._handle_ownership_transfer(
+                drive_file_id, owner, channel, file_id
+            )
+            if not transferred and poster == owner:
+                # Keep the poster able to edit their file.
+                if self.drive_uploader.set_message_poster_permission(
+                    drive_file_id, poster, self._shared_drive_id
+                ):
+                    self._mark_granted(drive_file_id, poster)
+
+    def _already_granted(self, drive_file_id: str, email: str) -> bool:
+        """Whether *email* already got writer access to the file this run."""
+        return (drive_file_id, email) in self._granted_posters
+
+    def _mark_granted(self, drive_file_id: str, email: str) -> None:
+        """Remember a successful poster grant."""
+        self._granted_posters.add((drive_file_id, email))
 
     def _handle_ownership_transfer(
         self,
         drive_file_id: str,
-        user_email: str | None,
+        new_owner_email: str,
         channel: str | None,
         file_id: str,
-    ) -> None:
-        """Transfer file ownership if conditions allow it.
+    ) -> bool:
+        """Transfer ownership of a new regular-Drive file to its Slack uploader.
 
-        Ownership transfer only works for regular Drive folders (not shared drives)
-        and only for internal users.
+        Returns:
+            True if the transfer succeeded.  Both outcomes are counted.
         """
-        if (
-            user_email
-            and not self.user_resolver.is_external_user(user_email)
-            and not self._shared_drive_id
-        ):
-            try:
-                self._transfer_file_ownership(drive_file_id, user_email)
-                self.file_stats["ownership_transferred"] += 1
-                log_with_context(
-                    logging.DEBUG,
-                    f"Transferred file ownership to original poster: {user_email}",
-                    channel=channel,
-                    file_id=file_id,
-                    drive_file_id=drive_file_id,
-                )
-            except HttpError as e:
-                self.file_stats["ownership_transfer_failed"] += 1
-                log_with_context(
-                    logging.WARNING,
-                    f"Could not transfer file ownership to {user_email}: {e}",
-                    channel=channel,
-                    file_id=file_id,
-                )
-        elif user_email and self.user_resolver.is_external_user(user_email):
+        if self._transfer_file_ownership(drive_file_id, new_owner_email):
+            self._increment_stat("ownership_transferred")
             log_with_context(
                 logging.DEBUG,
-                f"External user {user_email} cannot be made file owner, using service account ownership",
+                f"Transferred file ownership to original poster: {new_owner_email}",
                 channel=channel,
                 file_id=file_id,
                 drive_file_id=drive_file_id,
             )
-        elif self._shared_drive_id:
-            log_with_context(
-                logging.DEBUG,
-                "Files in shared drives use inherited permissions, not individual ownership",
-                channel=channel,
-                file_id=file_id,
-                drive_file_id=drive_file_id,
-            )
+            return True
+
+        self._increment_stat("ownership_transfer_failed")
+        log_with_context(
+            logging.WARNING,
+            f"Could not transfer file ownership to {new_owner_email}",
+            channel=channel,
+            file_id=file_id,
+            drive_file_id=drive_file_id,
+        )
+        return False
 
     def get_file_statistics(self) -> dict[str, Any]:
         """Get detailed file upload statistics.

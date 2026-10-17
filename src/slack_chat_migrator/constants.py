@@ -58,7 +58,9 @@ MEMBER_TYPE_HUMAN = "HUMAN"
 MARKUP_SYNTAX = "MARKUP_SYNTAX_CHAT"
 
 # --- Google Drive Roles ---
-DRIVE_ROLE_EDITOR = "editor"
+# Drive v3 roles are owner, organizer, fileOrganizer, writer, commenter and
+# reader; there is no "editor".
+DRIVE_ROLE_WRITER = "writer"
 DRIVE_ROLE_READER = "reader"
 
 # --- Membership Time Offsets ---

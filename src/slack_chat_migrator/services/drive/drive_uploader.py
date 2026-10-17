@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import mimetypes
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -17,12 +18,30 @@ if TYPE_CHECKING:
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
+from slack_chat_migrator.constants import DRIVE_ROLE_WRITER
 from slack_chat_migrator.utils.api import escape_drive_query_value
 from slack_chat_migrator.utils.logging import (
     log_with_context,
 )
 
 logger = logging.getLogger("slack_chat_migrator")
+
+
+@dataclass
+class DriveUpload:
+    """A Drive file holding an attachment.
+
+    Attributes:
+        file_id: Drive file ID.
+        url: ``webViewLink`` of the file, if known.
+        reused: True when an existing Drive file was linked instead of
+            uploading a new one.  Ownership is never transferred for
+            reused files.
+    """
+
+    file_id: str
+    url: str | None = None
+    reused: bool = False
 
 
 class DriveFileUploader:
@@ -272,26 +291,22 @@ class DriveFileUploader:
         filename: str,
         folder_id: str,
         shared_drive_id: str | None = None,
-        message_poster_email: str | None = None,
-    ) -> tuple[str | None, str | None]:
-        """Upload a file to Google Drive.
+    ) -> DriveUpload | None:
+        """Upload a file to Google Drive, or reuse an identical one.
+
+        If a file with the same MD5 hash already exists in the folder, that
+        file is returned (``reused=True``) instead of uploading a duplicate.
+        No permissions are set here; access comes from the folder, and the
+        caller grants the poster's access.
 
         Args:
             file_path: Path to the local file
             filename: Name for the uploaded file
             folder_id: ID of the Drive folder to upload to
             shared_drive_id: ID of the shared drive (if applicable)
-            message_poster_email: Email of the user who will post the message with this attachment
-                                 This user will get editor permissions on the file
-
-        We rely on folder permissions for access control instead of setting individual
-        file permissions. Only the message poster gets explicit editor access to the file.
-
-        If a file with the same MD5 hash already exists in the folder, we'll reuse that file
-        instead of uploading a duplicate.
 
         Returns:
-            Tuple of (file_id, public_url) if successful, (None, None) otherwise
+            The DriveUpload, or None if the upload failed
         """
         try:
             # Get MIME type
@@ -324,14 +339,7 @@ class DriveFileUploader:
                     f"Reusing existing file with same hash: {filename} (ID: {existing_file_id})",
                     channel=self._get_current_channel(),
                 )
-
-                # Set permissions for the message poster on the existing file
-                if message_poster_email:
-                    self._set_message_poster_permission(
-                        existing_file_id, message_poster_email, shared_drive_id
-                    )
-
-                return existing_file_id, existing_url
+                return DriveUpload(existing_file_id, existing_url, reused=True)
 
             # File doesn't exist yet, proceed with upload
             log_with_context(
@@ -353,14 +361,8 @@ class DriveFileUploader:
             )
 
             file_id = file.get("id")
-            public_url = file.get("webViewLink")
-
-            # We only set editor permissions for the message poster
-            # All other permissions are inherited from the folder
-            if file_id and message_poster_email:
-                self._set_message_poster_permission(
-                    file_id, message_poster_email, shared_drive_id
-                )
+            if not file_id:
+                return None
 
             log_with_context(
                 logging.DEBUG,
@@ -368,7 +370,7 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            return (file_id, public_url)
+            return DriveUpload(file_id, file.get("webViewLink"))
 
         except HttpError as e:
             log_with_context(
@@ -376,15 +378,15 @@ class DriveFileUploader:
                 f"Failed to upload file {filename} to Drive: {e}",
                 channel=self._get_current_channel(),
             )
-            return (None, None)
+            return None
 
-    def _set_message_poster_permission(
+    def set_message_poster_permission(
         self,
         file_id: str,
         message_poster_email: str,
         shared_drive_id: str | None = None,
     ) -> bool:
-        """Set editor permission for the message poster on a file.
+        """Give the message poster ``writer`` access to a file.
 
         Args:
             file_id: ID of the file
@@ -396,14 +398,13 @@ class DriveFileUploader:
         """
         log_with_context(
             logging.DEBUG,
-            f"Setting editor permission for message poster {message_poster_email} on file {file_id}",
+            f"Setting writer permission for message poster {message_poster_email} on file {file_id}",
             channel=self._get_current_channel(),
         )
         try:
             permission = {
                 "type": "user",
-                "role": (shared_drive_id and "writer")
-                or "editor",  # 'writer' is used for shared drives
+                "role": DRIVE_ROLE_WRITER,
                 "emailAddress": message_poster_email,
             }
             self.drive_service.create_permission(
@@ -416,14 +417,14 @@ class DriveFileUploader:
 
             log_with_context(
                 logging.DEBUG,
-                f"Successfully set editor permission for message poster {message_poster_email} on file {file_id}",
+                f"Successfully set writer permission for message poster {message_poster_email} on file {file_id}",
                 channel=self._get_current_channel(),
             )
             return True
         except HttpError as e:
             log_with_context(
                 logging.WARNING,
-                f"Failed to set editor permission for message poster on file {file_id}: {e}",
+                f"Failed to set writer permission for message poster on file {file_id}: {e}",
                 channel=self._get_current_channel(),
             )
             return False
