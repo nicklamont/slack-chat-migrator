@@ -82,27 +82,41 @@ def _safe_str(value: Any) -> str:
         return f"<unprintable {type(value).__name__}>"
 
 
-#: One ``%`` placeholder: optional ``(key)``, flags, width, precision, length
-#: modifier and conversion (``%%`` included).  Groups: key, width, precision.
+#: One ``%`` placeholder: optional ``(key)``, flags, width, precision (``.``
+#: alone means 0, as in ``%.s``), length modifier and conversion (``%%``
+#: included).  Groups: key, width, precision.
 _PLACEHOLDER_RE = re.compile(
-    r"%(?:\(([^)]*)\))?[#0 +\-]*(\*|\d+)?(?:\.(\*|\d+))?[hlL]?"
+    r"%(?:\(([^)]*)\))?[#0 +\-]*(\*|\d+)?(?:\.(\*|\d*))?[hlL]?"
     r"[diouxXeEfFgGcrsa%]"
 )
+
+
+def _arguments_needed(match: re.Match[str]) -> int:
+    """How many positional arguments one placeholder consumes."""
+    if match.group(0) == "%%":
+        return 0
+    return 1 + (match.group(2) == "*") + (match.group(3) == "*")
 
 
 def _unformattable_message(record: logging.LogRecord, error: Exception) -> str:
     """Build a redacted message for a record whose args don't fit its format.
 
     Logging would otherwise print the raw ``msg`` and ``args`` (secrets
-    included) to stderr when the formatter fails on the same mismatch.  The
-    args are put into the format one placeholder at a time, whatever their
-    types, *before* sanitising, so a secret that is only recognisable next
-    to its prefix (``Bearer %s``, ``token=%s``, ``?t=%s``) is still redacted.
-    The trailing marker names the exception and the call site, and lists
-    arguments without a placeholder by type only (``<str>``, or
-    ``key=<str>`` for mapping arguments): a value with no placeholder has
-    lost its prefix, so a forgotten ``%s`` after ``Bearer`` must not print
-    the token.
+    included) to stderr when the formatter fails on the same mismatch.
+
+    - When the positional arguments match the placeholders in number (a
+      type error such as ``%d`` given a string), each is put into its own
+      placeholder, whatever its type, *before* sanitising, so a secret that
+      is only recognisable next to its prefix (``Bearer %s``, ``token=%s``,
+      ``?t=%s``) is still redacted.
+    - When the numbers differ, which placeholder a value belongs to is
+      unknown, so nothing is filled in: the format string is shown as it
+      is and every argument by type only (``<str>``), since a value moved
+      away from its prefix would no longer be recognised as a secret.
+    - Mapping arguments fill their named placeholders; unused ones are
+      shown as ``key=<str>``.
+
+    The trailing marker also names the exception and the call site.
 
     Args:
         record: The record whose ``getMessage()`` failed.
@@ -113,6 +127,7 @@ def _unformattable_message(record: logging.LogRecord, error: Exception) -> str:
     """
     args = record.args
     used: set[Any] = set()
+    unused_label = "unused arguments"
 
     if isinstance(args, Mapping):
         mapping = args
@@ -134,17 +149,23 @@ def _unformattable_message(record: logging.LogRecord, error: Exception) -> str:
         ]
     else:
         pending = list(args) if isinstance(args, tuple) else [args]
+        msg = _safe_str(record.msg)
+        needed = sum(_arguments_needed(m) for m in _PLACEHOLDER_RE.finditer(msg))
+        if needed != len(pending):
+            text = msg
+            unused_label = "arguments"
+        else:
+            unused_label = "unused arguments"
 
-        def substitute(match: re.Match[str]) -> str:
-            if match.group(0) == "%%":
-                return "%"
-            # A "*" width or precision takes its own argument first.
-            for _ in range((match.group(2) == "*") + (match.group(3) == "*")):
-                if pending:
+            def substitute(match: re.Match[str]) -> str:
+                if match.group(0) == "%%":
+                    return "%"
+                # A "*" width or precision takes its own argument first.
+                for _ in range(_arguments_needed(match) - 1):
                     pending.pop(0)
-            return _safe_str(pending.pop(0)) if pending else match.group(0)
+                return _safe_str(pending.pop(0))
 
-        text = _PLACEHOLDER_RE.sub(substitute, _safe_str(record.msg))
+            text = _PLACEHOLDER_RE.sub(substitute, msg)
         leftover = [f"<{type(arg).__name__}>" for arg in pending]
 
     marker = f"{type(error).__name__} at {record.pathname}:{record.lineno}"
@@ -152,7 +173,7 @@ def _unformattable_message(record: logging.LogRecord, error: Exception) -> str:
     if detail:
         marker += f": {detail}"
     if leftover:
-        marker += "; unused arguments: " + ", ".join(leftover)
+        marker += f"; {unused_label}: " + ", ".join(leftover)
     return sanitize_for_log(f"{text} [{marker}]")
 
 

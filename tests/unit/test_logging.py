@@ -1026,7 +1026,7 @@ class TestSlackTokenRedaction:
             channel="general",
         )
         logging.getLogger("slack_chat_migrator").warning(
-            "fetch %s?key=%s", "https://files.slack.com/f/y.png", "K9", "extra"
+            "fetch %s?key=%s (%d)", "https://files.slack.com/f/y.png", "K9", "x"
         )
         channel_handler.close()
         expected = (
@@ -1052,9 +1052,12 @@ class TestSlackTokenRedaction:
             [line] = [ln for ln in outputs[name].splitlines() if "fetch https://" in ln]
             message = line.split(" - WARNING - ", 1)[1]
             assert message.startswith(
-                "fetch https://files.slack.com/f/y.png?key=[REDACTED] [TypeError at "
+                "fetch https://files.slack.com/f/y.png?key=[REDACTED] (x) [TypeError at "
             ), (name, message)
-            assert message.endswith("; unused arguments: <str>]"), (name, message)
+            assert message.endswith("a real number is required, not str]"), (
+                name,
+                message,
+            )
 
     def test_filter_redacts_message_args_and_extras(self):
         record = logging.LogRecord(
@@ -1086,39 +1089,41 @@ class TestSlackTokenRedaction:
     def test_filter_fails_closed_when_args_do_not_match_format(self):
         message = self._filtered("download failed for %s", (XOXE_URL, "extra"), 42)
         assert XOXE_TAIL not in message
-        assert "download failed for https://files.slack.com/" in message
-        # The redacted value ends at the space before the marker.
-        assert "?t=[REDACTED] [" in message
-        assert f"[TypeError at {__file__}:42: not all arguments converted" in message
-        assert message.endswith("; unused arguments: <str>]")
-        assert "extra" not in message
+        # With a count mismatch nothing is filled in: format plus types.
+        assert message == (
+            f"download failed for %s [TypeError at {__file__}:42: not all"
+            " arguments converted during string formatting; arguments:"
+            " <str>, <str>]"
+        )
 
     @pytest.mark.parametrize(
         ("msg", "args", "secret", "kept"),
         [
+            # Same number of arguments as placeholders, wrong type: each
+            # value is put next to its prefix before redacting.
             (
-                "Authorization: Bearer %s",
-                ("ya29.SECRETBEARER", "extra"),
+                "Authorization: Bearer %d",
+                ("ya29.SECRETBEARER",),
                 "SECRETBEARER",
                 "Authorization: Bearer [REDACTED]",
             ),
             (
-                "refreshing token=%s for %s",
-                ("SECRETTOKEN",),
+                "refreshing token=%s for %d",
+                ("SECRETTOKEN", "alice"),
                 "SECRETTOKEN",
-                "refreshing token=[REDACTED] for %s",
+                "refreshing token=[REDACTED] for alice",
             ),
             (
-                "fetch %s?key=%s",
-                ("https://x.example/api", "SECRETKEY", 3),
+                "fetch %s?key=%s (%d)",
+                ("https://x.example/api", "SECRETKEY", "three"),
                 "SECRETKEY",
-                "fetch https://x.example/api?key=[REDACTED]",
+                "fetch https://x.example/api?key=[REDACTED] (three)",
             ),
             (
-                "file %s?t=%s",
+                "file %s?t=%s %d",
                 ("https://files.slack.com/f", "abc.def", "x"),
                 "abc.def",
-                "?t=[REDACTED]",
+                "?t=[REDACTED] x",
             ),
             (
                 "Bearer %(token)s for %(user)s",
@@ -1154,34 +1159,44 @@ class TestSlackTokenRedaction:
             ("Authorization: Bearer", ("ya29.a0SECRETBEARER",)),
             ("refreshing token=", ("SECRETTOKEN1",)),
             ("Using API key", ("AIzaSyD-SECRETAPIKEY",)),
+            # Too few arguments: filling by position would move the token.
+            ("GET %s Authorization: Bearer %s", ("ya29.SECRET-A",)),
+            ("Fetching %s with token=%s", ("SECRET-B",)),
             ("token=%(tok)s", ({"access": "SECRETMAPVAL"},)),
         ],
     )
-    def test_unused_arguments_are_shown_by_type_only(self, msg, args):
+    def test_arguments_without_a_known_placeholder_are_types_only(self, msg, args):
         message = self._filtered(msg, args)
         assert "SECRET" not in message
-        assert "unused arguments: " in message
+        assert "arguments: " in message
         assert "<str>" in message
+        assert message.startswith(msg)  # the format is shown as it is
 
     def test_star_width_takes_its_own_argument(self):
-        message = self._filtered("%*d items for token=%s", (5, 3, "SECRETSTAR", "x"))
-        assert message.startswith("3 items for token=[REDACTED] [TypeError at ")
+        message = self._filtered("%*d items for token=%s", (5, "x", "SECRETSTAR"))
+        assert message.startswith("x items for token=[REDACTED] [TypeError at ")
         assert "SECRETSTAR" not in message
-        assert message.endswith("; unused arguments: <str>]")
+        assert "arguments" not in message
 
     def test_percent_escapes_with_mapping_args(self):
         message = self._filtered("100%% of %(n)s %(missing)s", ({"n": "files"},))
         assert message.startswith("100% of files %(missing)s [KeyError at ")
 
     def test_star_precision_takes_its_own_argument(self):
-        message = self._filtered("%.*s and token=%s", (3, "abcdef", "SECRETP", "x"))
+        message = self._filtered("%.*s and token=%d", (3, "abcdef", "SECRETP"))
         assert message.startswith("abcdef and token=[REDACTED] [TypeError at ")
         assert "SECRETP" not in message
 
-    def test_percent_escapes_and_missing_args(self):
-        message = self._filtered("100%% of %s and %d", ("files",))
-        assert message.startswith("100% of files and %d [TypeError at ")
-        assert "unused arguments" not in message
+    def test_dot_precision_without_digits_is_a_placeholder(self):
+        """``%.s`` takes an argument, so the token stays after Bearer."""
+        message = self._filtered("%.s Bearer %s n=%d", ("x", "ya29.SECRET-E", "y"))
+        assert message.startswith("x Bearer [REDACTED] n=y [TypeError at ")
+        assert "SECRET-E" not in message
+
+    def test_percent_escapes_and_type_errors(self):
+        message = self._filtered("100%% of %s and %d", ("files", "many"))
+        assert message.startswith("100% of files and many [TypeError at ")
+        assert "arguments" not in message
 
     def test_filter_survives_unprintable_args(self):
         class Unprintable:
