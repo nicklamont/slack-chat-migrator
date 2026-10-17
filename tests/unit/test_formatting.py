@@ -2334,3 +2334,27 @@ class TestMalformedInput:
             ],
         }
         assert parse_slack_blocks(message) == "t"
+
+
+class TestCustomEmojiMapScope:
+    """custom_emoji_map only rewrites the names it maps."""
+
+    def test_unmapped_custom_emoji_keeps_skin_tone(self):
+        from slack_chat_migrator.utils.formatting import convert_formatting
+
+        text = "hi :wave_custom::skin-tone-3:"
+        mapped = {"partyparrot": ":parrot:"}
+        assert convert_formatting(text, {}, custom_emoji_map=mapped) == text
+        assert convert_formatting(text, {}) == text
+
+    def test_mapped_custom_emoji_is_rewritten(self):
+        from slack_chat_migrator.utils.formatting import convert_formatting
+
+        mapped = {"partyparrot": ":party-parrot-chat:"}
+        out = convert_formatting("go :partyparrot:", {}, custom_emoji_map=mapped)
+        assert out == "go :party-parrot-chat:"
+        # A mapping to a standard emoji name resolves to Unicode.
+        out = convert_formatting(
+            "go :partyparrot:", {}, custom_emoji_map={"partyparrot": ":tada:"}
+        )
+        assert out == "go 🎉"
