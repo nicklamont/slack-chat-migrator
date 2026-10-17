@@ -382,7 +382,7 @@ def config_was_given() -> bool:
     may be missing (the defaults are then used, with a warning).
 
     Returns:
-        True if ``--config`` came from the command line or environment.
+        True if ``--config`` was given on the command line.
     """
     ctx = click.get_current_context(silent=True)
     if ctx is None:

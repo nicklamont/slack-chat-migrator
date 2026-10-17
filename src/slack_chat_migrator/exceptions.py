@@ -30,7 +30,11 @@ class UserMappingError(MigratorError):
 
 
 class MigrationAbortedError(MigratorError):
-    """Raised when the migration is aborted due to errors exceeding thresholds."""
+    """Raised to stop the migration after a channel with errors.
+
+    Only raised with ``abort_on_error: true``; the remaining channels are
+    not processed and the run fails.
+    """
 
 
 class ConfirmationRequiredError(MigratorError):
