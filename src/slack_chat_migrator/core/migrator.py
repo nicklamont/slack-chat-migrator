@@ -324,6 +324,9 @@ class SlackToChatMigrator:
             user_resolver=self.user_resolver,
             state=self.state,
             dry_run=self.dry_run,
+            # Lets the handler tell public channels (open folders) from
+            # private conversations (limited-access folders).
+            channels_meta=self.ctx.channels_meta,
         )
         # FileHandler now handles its own drive folder initialization automatically
 
