@@ -21,9 +21,15 @@ SYSTEM_SUBTYPES = frozenset({CHANNEL_JOIN_SUBTYPE, CHANNEL_LEAVE_SUBTYPE})
 # --- File Size Limits ---
 # Largest image sent as a direct Chat attachment; bigger files go to Drive.
 DIRECT_UPLOAD_MAX_BYTES = 25 * 1024 * 1024  # 25 MB
+# Chat ``media.upload`` limit.  Drive accepts files up to 5 TB, so Drive
+# uploads are never refused for their size.
+CHAT_MEDIA_MAX_BYTES = 200 * 1024 * 1024  # 200 MB
+# Chat media uploads above this size use a resumable session.
 RESUMABLE_UPLOAD_THRESHOLD_BYTES = 5 * 1024 * 1024  # 5 MB
 # Chunk size for streaming Slack downloads to disk and for hashing files.
 FILE_READ_CHUNK_BYTES = 1024 * 1024  # 1 MiB
+# Chunk size of resumable Drive uploads (a multiple of 256 KiB).
+DRIVE_UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024  # 16 MiB
 
 # --- Slack File Downloads ---
 # Hosts Slack serves export files from.  A host matches when it equals an

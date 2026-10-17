@@ -7,6 +7,7 @@ import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
+from slack_chat_migrator.constants import DRIVE_UPLOAD_CHUNK_BYTES
 from slack_chat_migrator.services.drive.drive_uploader import (
     DriveFileUploader,
     DriveUpload,
@@ -560,7 +561,10 @@ class TestUploadFileToDriveAdditional:
         assert upload.file_id == "file_id"
         # Verify MediaFileUpload was called with octet-stream
         mock_media_cls.assert_called_once_with(
-            str(test_file), mimetype="application/octet-stream"
+            str(test_file),
+            mimetype="application/octet-stream",
+            resumable=True,
+            chunksize=DRIVE_UPLOAD_CHUNK_BYTES,
         )
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
@@ -586,3 +590,84 @@ class TestUploadFileToDriveAdditional:
         assert upload.file_id == "new_id"
         call_kwargs = uploader.drive_service.create_file.call_args
         assert call_kwargs.kwargs.get("supports_all_drives") is True
+
+
+class TestResumableUpload:
+    """Drive uploads stream in resumable chunks with Slack's type (I28)."""
+
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_uses_given_mime_type_and_hash(self, mock_media_cls, tmp_path):
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        test_file = tmp_path / "Screenshot"
+        test_file.write_bytes(b"\x89PNG")
+        uploader.drive_service.list_files.return_value = {"files": []}
+        uploader.drive_service.create_file.return_value = {
+            "id": "f",
+            "webViewLink": "l",
+        }
+        uploader._calculate_file_hash = MagicMock()
+
+        uploader.upload_file_to_drive(
+            str(test_file),
+            "Screenshot",
+            "folder1",
+            mime_type="image/png",
+            file_hash="abc",
+        )
+
+        uploader._calculate_file_hash.assert_not_called()  # hashed once, upstream
+        mock_media_cls.assert_called_once_with(
+            str(test_file),
+            mimetype="image/png",
+            resumable=True,
+            chunksize=DRIVE_UPLOAD_CHUNK_BYTES,
+        )
+
+    def test_large_upload_memory_is_bounded(self, tmp_path):
+        """A 512 MiB upload through the real client stays well under 64 MiB."""
+        import json
+        import tracemalloc
+
+        from googleapiclient.discovery import build
+        from googleapiclient.http import HttpMockSequence
+
+        from slack_chat_migrator.services.drive_adapter import DriveAdapter
+
+        size = 512 * 1024 * 1024
+        big = tmp_path / "big.mov"
+        with open(big, "wb") as fh:
+            fh.truncate(size)  # sparse: no disk or memory cost
+
+        chunk = DRIVE_UPLOAD_CHUNK_BYTES
+        responses = [
+            ({"status": "200"}, b'{"files": []}'),  # md5 duplicate search
+            ({"status": "200", "location": "https://upload.example/s"}, b""),
+        ]
+        for end in range(chunk, size, chunk):
+            responses.append(({"status": "308", "range": f"bytes=0-{end - 1}"}, b""))
+        responses.append(
+            ({"status": "200"}, json.dumps({"id": "BIG", "webViewLink": "l"}).encode())
+        )
+        http = HttpMockSequence(responses)
+        service = build("drive", "v3", http=http, static_discovery=True)
+        uploader = DriveFileUploader(DriveAdapter(service))
+        uploader.folders_pre_cached.add("folder1")
+
+        tracemalloc.start()
+        try:
+            upload = uploader.upload_file_to_drive(
+                str(big),
+                "big.mov",
+                "folder1",
+                mime_type="video/quicktime",
+                file_hash="0" * 32,
+            )
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert upload is not None
+        assert upload.file_id == "BIG"
+        assert http._iterable == []  # every chunk was sent
+        assert peak < 64 * 1024 * 1024

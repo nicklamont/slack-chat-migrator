@@ -18,7 +18,11 @@ if TYPE_CHECKING:
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
-from slack_chat_migrator.constants import DRIVE_ROLE_WRITER
+from slack_chat_migrator.constants import (
+    DRIVE_ROLE_WRITER,
+    DRIVE_UPLOAD_CHUNK_BYTES,
+    FILE_READ_CHUNK_BYTES,
+)
 from slack_chat_migrator.utils.api import escape_drive_query_value
 from slack_chat_migrator.utils.logging import (
     log_with_context,
@@ -80,7 +84,7 @@ class DriveFileUploader:
         """
         hash_md5 = hashlib.md5()  # noqa: S324 — not used for security
         with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
+            for chunk in iter(lambda: f.read(FILE_READ_CHUNK_BYTES), b""):
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
 
@@ -291,35 +295,44 @@ class DriveFileUploader:
         filename: str,
         folder_id: str,
         shared_drive_id: str | None = None,
+        *,
+        mime_type: str | None = None,
+        file_hash: str | None = None,
     ) -> DriveUpload | None:
         """Upload a file to Google Drive, or reuse an identical one.
 
         If a file with the same MD5 hash already exists in the folder, that
         file is returned (``reused=True``) instead of uploading a duplicate.
-        No permissions are set here; access comes from the folder, and the
-        caller grants the poster's access.
+        New files are sent in a resumable session, in
+        :data:`DRIVE_UPLOAD_CHUNK_BYTES` chunks, so memory use doesn't grow
+        with the file size.  No permissions are set here; access comes from
+        the folder, and the caller grants the poster's access.
 
         Args:
             file_path: Path to the local file
             filename: Name for the uploaded file
             folder_id: ID of the Drive folder to upload to
             shared_drive_id: ID of the shared drive (if applicable)
+            mime_type: Content type (Slack's ``mimetype``); guessed from the
+                file name when omitted
+            file_hash: MD5 of the content, if already known; computed from
+                the file otherwise
 
         Returns:
             The DriveUpload, or None if the upload failed
         """
         try:
-            # Get MIME type
-            mime_type, _ = mimetypes.guess_type(filename)
+            if not mime_type:
+                mime_type, _ = mimetypes.guess_type(filename)
             if not mime_type:
                 mime_type = "application/octet-stream"
 
-            # Calculate the file's MD5 hash
-            file_hash = self._calculate_file_hash(file_path)
+            if not file_hash:
+                file_hash = self._calculate_file_hash(file_path)
 
             log_with_context(
                 logging.DEBUG,
-                f"Calculated MD5 hash for {filename}: {file_hash}",
+                f"MD5 hash for {filename}: {file_hash}",
                 channel=self._get_current_channel(),
             )
 
@@ -350,7 +363,12 @@ class DriveFileUploader:
 
             file_metadata = {"name": filename, "parents": [folder_id]}
 
-            media = MediaFileUpload(file_path, mimetype=mime_type)
+            media = MediaFileUpload(
+                file_path,
+                mimetype=mime_type,
+                resumable=True,
+                chunksize=DRIVE_UPLOAD_CHUNK_BYTES,
+            )
 
             # Upload with appropriate parameters
             file = self.drive_service.create_file(

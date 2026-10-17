@@ -1681,7 +1681,7 @@ class TestTempFileLifecycle:
         handler._download_file = MagicMock(return_value=download)
         seen = {}
 
-        def fake_upload(file_obj, path, channel, sender_email):
+        def fake_upload(file_obj, path, channel, sender_email, file_hash=None):
             seen["exists"] = os.path.exists(path)
             return UploadResult(upload_type="drive", drive_id="d1", name="a.pdf")
 

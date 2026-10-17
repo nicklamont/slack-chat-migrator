@@ -429,7 +429,13 @@ class FileHandler:
 
             # Fall back to Drive upload, reusing the same temp file
             drive_result = self._try_drive_upload(
-                file_obj, download.path, channel, sender_email, file_id, name
+                file_obj,
+                download.path,
+                channel,
+                sender_email,
+                file_id,
+                name,
+                file_hash=download.md5,
             )
             if drive_result:
                 return drive_result
@@ -598,7 +604,9 @@ class FileHandler:
             space is not None
             and mime_type in self.DIRECT_UPLOAD_MIME_TYPES
             and file_size <= DIRECT_UPLOAD_MAX_BYTES
-            and self.chat_uploader.is_suitable_for_direct_upload(name, file_size)
+            and self.chat_uploader.is_suitable_for_direct_upload(
+                name, file_size, mime_type
+            )
         )
         if not use_direct:
             return None
@@ -632,6 +640,7 @@ class FileHandler:
         sender_email: str | None,
         file_id: str,
         name: str,
+        file_hash: str | None = None,
     ) -> UploadResult | None:
         """Upload file to Google Drive."""
         log_with_context(
@@ -641,7 +650,9 @@ class FileHandler:
             file_id=file_id,
         )
 
-        drive_result = self._upload_to_drive(file_obj, file_path, channel, sender_email)
+        drive_result = self._upload_to_drive(
+            file_obj, file_path, channel, sender_email, file_hash=file_hash
+        )
         if drive_result:
             log_with_context(
                 logging.DEBUG,
@@ -693,7 +704,7 @@ class FileHandler:
                 uploader = self.chat_uploader
 
             upload_response, attachment_metadata = uploader.upload_file_to_chat(
-                file_path, name, space
+                file_path, name, space, mime_type=mime_type
             )
             if not (upload_response and attachment_metadata):
                 log_with_context(
@@ -741,6 +752,7 @@ class FileHandler:
         file_path: str,
         channel: str | None = None,
         sender_email: str | None = None,
+        file_hash: str | None = None,
     ) -> UploadResult | None:
         """Upload a downloaded file to Google Drive.
 
@@ -749,6 +761,8 @@ class FileHandler:
             file_path: Temp file holding the content
             channel: Optional channel name for context
             sender_email: Email address of the message sender (for permissions handling)
+            file_hash: MD5 computed while downloading, so the file isn't
+                read again just to hash it
 
         Returns:
             UploadResult with drive upload details if successful, None otherwise
@@ -782,6 +796,7 @@ class FileHandler:
                 file_id,
                 user_email,
                 sender_email,
+                file_hash=file_hash,
             )
 
         except (HttpError, OSError) as e:
@@ -835,6 +850,7 @@ class FileHandler:
         file_id: str,
         user_email: str | None,
         sender_email: str | None,
+        file_hash: str | None = None,
     ) -> UploadResult | None:
         """Upload a temp file to Drive and handle permissions.
 
@@ -849,12 +865,18 @@ class FileHandler:
                 (the ownership-transfer target in regular-Drive mode).
             sender_email: Email of the message sender, who gets ``writer``
                 access.  Callers pass None for external senders.
+            file_hash: MD5 of the content, if known.
 
         Returns:
             The UploadResult or None on failure.
         """
         upload = self.drive_uploader.upload_file_to_drive(
-            file_path, name, folder_id, self._shared_drive_id
+            file_path,
+            name,
+            folder_id,
+            self._shared_drive_id,
+            mime_type=mime_type,
+            file_hash=file_hash,
         )
 
         if upload is None:

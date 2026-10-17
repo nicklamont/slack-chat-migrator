@@ -230,3 +230,55 @@ class TestGrants:
             ("alice@example.com", "writer")
         ]
         assert not any(kw.get("transferOwnership") for kw in calls)
+
+
+# ---------------------------------------------------------------------------
+# Content type and resumable uploads (I28, I37)
+# ---------------------------------------------------------------------------
+
+
+class TestContentType:
+    def test_slack_mime_type_reaches_drive_resumably(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+
+        result = upload(
+            handler,
+            downloads,
+            "c",
+            "F1",
+            "UA",
+            b"\x89PNG",
+            name="Screenshot",
+            mime="image/png",
+            space=None,
+        )
+
+        record = fake.files_db[result.drive_id]
+        assert record["mimeType"] == "image/png"
+        assert record["resumable"] is True
+        assert record["chunksize"] == 16 * 1024 * 1024
+        assert result.mime_type == "image/png"
+
+    def test_slack_mime_type_enables_direct_upload(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        handler.chat_service.upload_media.return_value = {
+            "attachmentDataRef": {"resourceName": "ref"}
+        }
+
+        result = upload(
+            handler,
+            downloads,
+            "c",
+            "F1",
+            "UA",
+            b"\x89PNG",
+            name="Screenshot",
+            mime="image/png",
+        )
+
+        assert result.upload_type == "direct"
+        media = handler.chat_service.upload_media.call_args.kwargs["media_body"]
+        assert media.mimetype() == "image/png"
+        assert fake.count("files.create") == 0
