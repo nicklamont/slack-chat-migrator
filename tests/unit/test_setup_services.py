@@ -435,6 +435,38 @@ def _http_error(status: int, reason: str = "denied") -> Exception:
     return HttpError(Response({"status": str(status)}), body)
 
 
+def _iam_error(
+    status: int, message: str, status_name: str, details: list | None = None
+) -> Exception:
+    """An HttpError with the body shape IAM sends (code, message, status, details)."""
+    from googleapiclient.errors import HttpError
+    from httplib2 import Response
+
+    error: dict[str, Any] = {"code": status, "message": message, "status": status_name}
+    if details is not None:
+        error["details"] = details
+    return HttpError(
+        Response({"status": str(status)}), json.dumps({"error": error}).encode()
+    )
+
+
+#: The documented response when iam.disableServiceAccountKeyCreation blocks
+#: keys.create (cloud.google.com/iam/docs/troubleshoot-org-policies, REST).
+ORG_POLICY_DETAILS = [
+    {
+        "@type": "type.googleapis.com/google.rpc.PreconditionFailure",
+        "violations": [
+            {
+                "type": "constraints/iam.disableServiceAccountKeyCreation",
+                "subject": "projects/p/serviceAccounts/sa@p.iam.gserviceaccount.com"
+                "?configvalue=sa%40p.iam.gserviceaccount.com",
+                "description": "Key creation is not allowed on this service account.",
+            }
+        ],
+    }
+]
+
+
 def _refresh_error() -> Exception:
     from google.auth.exceptions import RefreshError
 
@@ -584,34 +616,109 @@ class TestDownloadKey:
             self._download(service, old, overwrite=True)
         assert old.read_text() == '{"old": true}'
 
-    @pytest.mark.parametrize(
-        ("status", "advice"),
-        [
-            (400, "at most 10 keys"),
-            (401, "application-default login"),
-            (403, "iam.serviceAccountKeys.create"),
-            (404, "doesn't exist"),
-            (429, "wait a minute"),
-            (409, "Check the error above"),
-        ],
-    )
-    def test_refused_create_says_no_key_and_why(
-        self, tmp_path: Path, status: int, advice: str
-    ) -> None:
+    def _refusal(self, tmp_path: Path, error: Exception) -> str:
         from slack_chat_migrator.services.setup.service_account import (
             KeyCreateError,
         )
 
         service = _iam_with_key()
-        error = _http_error(status, "refused")
         self._keys(service).create.return_value.execute.side_effect = error
         with pytest.raises(KeyCreateError) as raised:
             self._download(service, tmp_path / "key.json")
         assert raised.value.maybe_created is False
-        assert raised.value.status == status
-        assert "no key was created" in str(raised.value)
-        assert advice in str(raised.value)
-        assert "Choose another path" not in str(raised.value)
+        assert raised.value.status == error.resp.status  # type: ignore[attr-defined]
+        message = str(raised.value)
+        assert "no key was created" in message
+        assert "Choose another path" not in message
+        return message
+
+    @pytest.mark.parametrize(
+        ("error", "advice"),
+        [
+            (
+                _iam_error(400, "Precondition check failed.", "FAILED_PRECONDITION"),
+                "already has 10 keys",
+            ),
+            (
+                _iam_error(401, "Unauthenticated", "UNAUTHENTICATED"),
+                "application-default",
+            ),
+            (
+                _iam_error(
+                    403,
+                    "Permission 'iam.serviceAccountKeys.create' denied on resource"
+                    " (or it may not exist).",
+                    "PERMISSION_DENIED",
+                ),
+                "iam.serviceAccountKeys.create",
+            ),
+            (_iam_error(404, "Not found", "NOT_FOUND"), "doesn't exist"),
+            (_iam_error(429, "Quota exceeded", "RESOURCE_EXHAUSTED"), "wait a minute"),
+            (
+                _iam_error(409, "Conflict", "ABORTED"),
+                "See the HTTP error for the cause",
+            ),
+        ],
+    )
+    def test_refused_create_says_no_key_and_why(
+        self, tmp_path: Path, error: Exception, advice: str
+    ) -> None:
+        message = self._refusal(tmp_path, error)
+        assert advice in message
+        assert "organization policy" not in message.lower()
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            # The documented response, with the violation in the details.
+            _iam_error(
+                400,
+                "Key creation is not allowed on this service account.",
+                "FAILED_PRECONDITION",
+                ORG_POLICY_DETAILS,
+            ),
+            # The same refusal without details: recognised by its message.
+            _iam_error(
+                400,
+                "Key creation is not allowed on this service account.",
+                "FAILED_PRECONDITION",
+            ),
+        ],
+    )
+    def test_org_policy_refusal_gets_policy_advice(
+        self, tmp_path: Path, error: Exception
+    ) -> None:
+        message = self._refusal(tmp_path, error)
+        assert "organization policy (iam.disableServiceAccountKeyCreation)" in message
+        assert "Organization Policy Administrator" in message
+        assert "keys-create-delete#allow-creation" in message
+        # Deleting keys can't help here and could break whoever uses them.
+        assert "keys delete" not in message
+        assert "delete one" not in message
+        assert "10 keys" not in message
+
+    def test_managed_constraint_is_named(self, tmp_path: Path) -> None:
+        details = json.loads(json.dumps(ORG_POLICY_DETAILS))
+        details[0]["violations"][0]["type"] = (
+            "constraints/iam.managed.disableServiceAccountKeyCreation"
+        )
+        error = _iam_error(400, "Not allowed.", "FAILED_PRECONDITION", details)
+        message = self._refusal(tmp_path, error)
+        assert "(iam.managed.disableServiceAccountKeyCreation)" in message
+
+    def test_403_covers_a_missing_account_and_how_to_choose_again(
+        self, tmp_path: Path
+    ) -> None:
+        error = _iam_error(403, "denied (or it may not exist).", "PERMISSION_DENIED")
+        message = self._refusal(tmp_path, error)
+        assert f"or {SA} doesn't exist" in message
+        assert "answer No to 'Resume from previous session?'" in message
+        assert "organization policy" not in message.lower()
+
+    def test_429_doesnt_suggest_deleting_keys(self, tmp_path: Path) -> None:
+        error = _iam_error(429, "Quota exceeded", "RESOURCE_EXHAUSTED")
+        message = self._refusal(tmp_path, error)
+        assert "delete" not in message.lower()
 
     @pytest.mark.parametrize(
         "error",
@@ -1086,6 +1193,9 @@ class TestCheckExistingKey:
         check = self._check(self._key_file(tmp_path), _iam_failing(error))
         assert "IAM API is enabled" in check.reason
         assert "iam.serviceAccountKeys.list" in check.reason
+        # With projects/-/..., a missing account is a 403 too.
+        assert f"that {SA} exists" in check.reason
+        assert "answer No to 'Resume from previous session?'" in check.reason
 
     def test_404_says_the_service_account_does_not_exist(self, tmp_path: Path) -> None:
         error = _http_error(404, "Service account does not exist.")

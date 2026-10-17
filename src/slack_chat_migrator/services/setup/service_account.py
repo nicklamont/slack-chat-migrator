@@ -278,17 +278,19 @@ def _describe_list_error(error: BaseException, service_account_email: str) -> st
     if isinstance(error, HttpError):
         status = error.resp.status
         detail = getattr(error, "reason", "") or ""
+        # keys.list addresses the account as projects/-/serviceAccounts/...,
+        # so a missing account is a 403; 404 is only a fallback.
         if status == 404:
             hint = (
                 f" The service account {service_account_email} doesn't exist;"
-                " check the email chosen in the service account step (to"
-                " choose it again, re-run setup and answer No to 'Resume from"
-                " previous session?')."
+                f" check the email chosen in the service account step{_RESUME_HINT}."
             )
         elif status in (400, 401, 403):
             hint = (
-                " Check that the IAM API is enabled and that your account may"
-                " list the service account's keys (iam.serviceAccountKeys.list)."
+                " Check that the IAM API is enabled, that your account may list"
+                " the service account's keys (iam.serviceAccountKeys.list), and"
+                f" that {service_account_email} exists (IAM answers 403, not 404,"
+                f" for a missing account here){_RESUME_HINT}."
             )
         else:
             hint = ""
@@ -462,22 +464,74 @@ def _maybe_created_advice(service_account_email: str) -> str:
     )
 
 
-#: What to do when IAM refuses to create a key, by HTTP status.
+#: How to choose another service account on a resumed setup run.
+_RESUME_HINT = (
+    " (to choose another account, re-run setup and answer No to 'Resume from"
+    " previous session?')"
+)
+
+#: Where Google explains how to exempt a project from the key-creation policy.
+_ALLOW_KEY_CREATION_URL = (
+    "https://cloud.google.com/iam/docs/keys-create-delete#allow-creation"
+)
+
+#: What to do when IAM refuses to create a key, by HTTP status.  A 400 that
+#: comes from the key-creation org policy gets :func:`_policy_advice`
+#: instead.  ``keys.create`` addresses the account as
+#: ``projects/-/serviceAccounts/<email>``, and with ``-`` IAM answers 403,
+#: not 404, for an account that doesn't exist; 404 is only a fallback.
 _CREATE_REFUSED_ADVICE = {
-    400: "A service account can have at most 10 keys: delete unused ones"
-    " ('{list}', then 'gcloud iam service-accounts keys delete <KEY_ID>"
-    " --iam-account={email}') and try again.",
+    400: "If {email} already has 10 keys (the most IAM allows), delete one you"
+    " know is no longer used: list them with '{list}', then run 'gcloud iam"
+    " service-accounts keys delete <KEY_ID> --iam-account={email}'. Otherwise"
+    " see the HTTP error for the cause.",
     401: "Your Google credentials were rejected: run 'gcloud auth"
     " application-default login' and try again.",
     403: "Your account may not create keys for {email} (it needs"
     " iam.serviceAccountKeys.create, for example through the Service Account"
-    " Key Admin role), or an organization policy"
-    " (iam.disableServiceAccountKeyCreation) forbids new keys.",
+    " Key Admin role), or {email} doesn't exist (IAM answers 403, not 404, for"
+    " a missing account here){resume}.",
     404: "The service account {email} doesn't exist; check the email chosen in"
-    " the service account step.",
-    429: "IAM's quota or rate limit was hit: wait a minute and try again. If"
-    " the account already has 10 keys, delete unused ones ('{list}').",
+    " the service account step{resume}.",
+    429: "IAM's quota or rate limit was hit: wait a minute and try again.",
 }
+
+
+def _key_creation_policy(error: HttpError) -> str | None:
+    """Return the org-policy constraint that refused ``keys.create``, if any.
+
+    IAM reports ``iam.disableServiceAccountKeyCreation`` (or its managed
+    successor) as a 400 FAILED_PRECONDITION, like the 10-key limit, so the
+    two are told apart by the violation in the error details or, failing
+    that, by the message.
+    """
+    details = getattr(error, "error_details", None)
+    for detail in details if isinstance(details, list) else []:
+        violations = detail.get("violations") if isinstance(detail, Mapping) else None
+        for violation in violations if isinstance(violations, list) else []:
+            kind = (
+                str(violation.get("type", "")) if isinstance(violation, Mapping) else ""
+            )
+            if "disableServiceAccountKeyCreation" in kind:
+                return kind.removeprefix("constraints/")
+    content = error.content.decode("utf-8", "replace") if error.content else ""
+    text = f"{getattr(error, 'reason', '')} {content}"
+    if "Key creation is not allowed" in text or (
+        "disableServiceAccountKeyCreation" in text
+    ):
+        return "iam.disableServiceAccountKeyCreation"
+    return None
+
+
+def _policy_advice(constraint: str, service_account_email: str) -> str:
+    return (
+        f"An organization policy ({constraint}) forbids creating service"
+        " account keys in this project; organizations created since May 2024"
+        " enforce it by default. Ask an Organization Policy Administrator"
+        " (roles/orgpolicy.policyAdmin) to exempt this project (see"
+        f" {_ALLOW_KEY_CREATION_URL}), or reuse an existing key file of"
+        f" {service_account_email} if you have one."
+    )
 
 
 def _create_failure(
@@ -506,9 +560,13 @@ def _create_failure(
                 maybe_created=True,
                 status=status,
             )
-        advice = _CREATE_REFUSED_ADVICE.get(
-            status, "Check the error above and try again."
-        ).format(email=email, list=_list_keys_command(email))
+        constraint = _key_creation_policy(error) if status == 400 else None
+        if constraint is not None:
+            advice = _policy_advice(constraint, email)
+        else:
+            advice = _CREATE_REFUSED_ADVICE.get(
+                status, "See the HTTP error for the cause, then try again."
+            ).format(email=email, list=_list_keys_command(email), resume=_RESUME_HINT)
         return KeyCreateError(
             f"IAM refused to create a key ({detail}); no key was created. {advice}",
             maybe_created=False,
