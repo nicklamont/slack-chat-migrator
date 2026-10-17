@@ -462,7 +462,7 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
             )
         elif check.status is KeyStatus.NOT_A_KEY:
             question = (
-                f"{key_path} exists but isn't a key for"
+                f"{key_path} can't be used as a key of"
                 f" {state.service_account_email} ({check.reason})."
                 " Overwrite it with a new key?"
             )

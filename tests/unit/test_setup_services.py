@@ -1387,6 +1387,24 @@ class TestKeyCheck:
         with pytest.raises(ValueError, match="reason"):
             KeyCheck(KeyStatus[status], reason)
 
+    def test_active_has_no_reason_at_all(self) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeyCheck,
+            KeyStatus,
+        )
+
+        with pytest.raises(ValueError, match="reason"):
+            KeyCheck(KeyStatus.ACTIVE, "   ")
+
+    def test_naive_now_is_the_callers_bug(self) -> None:
+        from datetime import datetime
+
+        from slack_chat_migrator.services.setup.service_account import _assess_key
+
+        key = {"validBeforeTime": "2030-01-01T00:00:00Z"}
+        with pytest.raises(TypeError, match="timezone-aware"):
+            _assess_key(key, datetime(2026, 1, 1))
+
     @pytest.mark.parametrize("reason", ["   ", 123])
     def test_reason_must_be_real_text(self, reason: Any) -> None:
         from slack_chat_migrator.services.setup.service_account import (
@@ -1501,7 +1519,7 @@ class TestKeyStep:
             confirm_answer=True,
         )
         question = confirm.call_args.args[0]
-        assert "isn't a key for" in question
+        assert "can't be used as a key of" in question
         assert "x@else.com" in question
         assert download.call_args.kwargs["overwrite"] is True
         assert state.step_status("key") == StepStatus.COMPLETE

@@ -173,7 +173,11 @@ class KeyCheck:
             raise ValueError(f"KeyCheck.status must be a KeyStatus: {self.status!r}")
         if not isinstance(self.reason, str):
             raise ValueError(f"KeyCheck.reason must be a string: {self.reason!r}")
-        if (self.status is KeyStatus.ACTIVE) == bool(self.reason.strip()):
+        if self.status is KeyStatus.ACTIVE:
+            invalid = self.reason != ""
+        else:
+            invalid = not self.reason.strip()
+        if invalid:
             raise ValueError(
                 "KeyCheck.reason must be empty for an ACTIVE key and given"
                 f" otherwise (status={self.status.value}, reason={self.reason!r})"
@@ -232,6 +236,9 @@ def _assess_key(key: Mapping[str, Any] | None, now: datetime | None = None) -> K
     Returns:
         ``ACTIVE``; ``INACTIVE`` when the key is deleted, disabled or
         expired; ``UNKNOWN`` when its expiry time can't be parsed.
+
+    Raises:
+        TypeError: If *now* is a naive datetime (a programming error).
     """
     if key is None:
         return KeyCheck(KeyStatus.INACTIVE, "it was deleted")
@@ -240,15 +247,17 @@ def _assess_key(key: Mapping[str, Any] | None, now: datetime | None = None) -> K
     raw_expiry = key.get("validBeforeTime")
     if raw_expiry in (None, ""):
         return KeyCheck(KeyStatus.ACTIVE)
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:  # a caller's bug, not something IAM sent
+        raise TypeError("now must be a timezone-aware datetime")
     try:
         expiry = _parse_key_time(str(raw_expiry))
-        expired = expiry <= (now or datetime.now(timezone.utc))
-    except (ValueError, TypeError):  # TypeError: naive against aware time
+    except ValueError:
         return KeyCheck(
             KeyStatus.UNKNOWN,
             f"its expiry time {raw_expiry!r} from IAM couldn't be parsed",
         )
-    if expired:
+    if expiry <= now:
         return KeyCheck(KeyStatus.INACTIVE, f"it expired on {raw_expiry}")
     return KeyCheck(KeyStatus.ACTIVE)
 
