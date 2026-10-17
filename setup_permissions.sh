@@ -218,9 +218,18 @@ json_field() {
 # key is still usable: not deleted, not disabled and not expired.
 verify_existing_key() {
   local key_email key_id keys line id disabled valid_before found now
+  if [ ! -r "${KEY_FILE}" ]; then
+    fail "Can't read key file '${KEY_FILE}'. The file was left unchanged; fix its permissions, or use --key-file to choose another path."
+  fi
+  if [ ! -s "${KEY_FILE}" ]; then
+    fail "Key file '${KEY_FILE}' is empty (perhaps left by a failed key creation). Remove it and run this script again."
+  fi
   key_email=$(json_field client_email "${KEY_FILE}")
+  if [ -z "${key_email}" ]; then
+    fail "Key file '${KEY_FILE}' is not a service account key file (no client_email). Use --key-file to choose another path, or move the file away."
+  fi
   if [ "${key_email}" != "${SERVICE_ACCOUNT_EMAIL}" ]; then
-    fail "Key file '${KEY_FILE}' belongs to '${key_email:-unknown}', not ${SERVICE_ACCOUNT_EMAIL}. Use --key-file to choose another path, or move the old file away."
+    fail "Key file '${KEY_FILE}' belongs to '${key_email}', not ${SERVICE_ACCOUNT_EMAIL}. Use --key-file to choose another path, or move the old file away."
   fi
 
   key_id=$(json_field private_key_id "${KEY_FILE}")
@@ -252,7 +261,7 @@ verify_existing_key() {
   esac
   # An expiry that can't be read says nothing about the key: keep the file.
   if [ -n "${valid_before}" ] && ! [[ "${valid_before}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2} ]]; then
-    fail "Couldn't read the expiry time '${valid_before}' of key ${key_id} of ${SERVICE_ACCOUNT_EMAIL}, so '${KEY_FILE}' couldn't be checked. The file was left unchanged."
+    fail "Couldn't read the expiry time '${valid_before}' of key ${key_id} of ${SERVICE_ACCOUNT_EMAIL}, so '${KEY_FILE}' couldn't be checked. The file was left unchanged. Check the key in the Cloud Console, or remove the file and run this script again to create a new key."
   fi
   # ISO 8601 UTC timestamps compare correctly as strings.
   now=$(date -u +%Y-%m-%dT%H:%M:%S)
@@ -268,10 +277,16 @@ create_service_account_key() {
   # Check if key file exists
   if [ ! -f "${KEY_FILE}" ]; then
     echo "   - Creating and downloading service account key to '${KEY_FILE}'..."
+    # gcloud creates the output file before it calls IAM, so a failed
+    # create leaves an empty file behind: remove it, or the next run would
+    # take it for someone else's key.
     (umask 077 && gcloud iam service-accounts keys create "${KEY_FILE}" \
       --iam-account="${SERVICE_ACCOUNT_EMAIL}" \
       --project "${PROJECT_ID}") \
-      || fail "Failed to create service account key"
+      || {
+        [ -s "${KEY_FILE}" ] || rm -f "${KEY_FILE}"
+        fail "Failed to create service account key (see the gcloud error above). If it was a network error, IAM may have created the key anyway: check with 'gcloud iam service-accounts keys list --iam-account=${SERVICE_ACCOUNT_EMAIL} --managed-by=user' and delete any key you have no file for."
+      }
     echo "   ✅ Key file created and downloaded successfully"
   else
     verify_existing_key

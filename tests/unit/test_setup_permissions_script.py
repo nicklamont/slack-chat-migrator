@@ -31,6 +31,10 @@ pytestmark = pytest.mark.skipif(
 # writes a key file for "iam service-accounts keys create <path>".
 STUB = r"""#!/bin/bash
 echo "$*" >> "$GCLOUD_LOG"
+# Like real gcloud, "keys create" creates its output file before calling IAM.
+if [ "$1 $2 $3 $4" = "iam service-accounts keys create" ]; then
+  : > "$5"
+fi
 for pattern in ${FAIL_ON:-}; do
   case "$*" in *"${pattern//_/ }"*) echo "ERROR: (gcloud) PERMISSION_DENIED" >&2; exit 1 ;; esac
 done
@@ -61,7 +65,17 @@ def _bin_dir(tmp_path: Path, with_gcloud: bool = True) -> Path:
     """A PATH directory with only the tools the script needs (+ the stub)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    for tool in ("bash", "grep", "sed", "head", "basename", "chmod", "cat", "date"):
+    for tool in (
+        "bash",
+        "grep",
+        "sed",
+        "head",
+        "basename",
+        "chmod",
+        "cat",
+        "date",
+        "rm",
+    ):
         target = shutil.which(tool)
         assert target, tool
         link = bin_dir / tool
@@ -149,6 +163,35 @@ class TestSetupPermissionsScript:
         assert result.returncode != 0
         assert "Setup completed successfully" not in result.stdout
 
+    def test_failed_create_leaves_no_empty_file(self, tmp_path: Path) -> None:
+        key = tmp_path / "slack-chat-migrator-sa-key.json"
+        result = _run(tmp_path, fail_on="keys_create")
+        assert result.returncode != 0
+        assert "Failed to create service account key" in result.stderr
+        assert "--managed-by=user" in result.stderr
+        assert not key.exists()
+        # So the next run creates the key instead of blaming "unknown".
+        result = _run(tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(key.read_text()) == KEY
+
+    @pytest.mark.parametrize(
+        ("content", "message"),
+        [
+            ("", "is empty (perhaps left by a failed key creation)"),
+            ("not json", "not a service account key file (no client_email)"),
+        ],
+    )
+    def test_empty_or_foreign_file_gets_its_own_message(
+        self, tmp_path: Path, content: str, message: str
+    ) -> None:
+        (tmp_path / "slack-chat-migrator-sa-key.json").write_text(content)
+        result = _run(tmp_path)
+        assert result.returncode != 0
+        assert message in result.stderr
+        assert "belongs to" not in result.stderr
+        assert "keys create" not in _calls(tmp_path)
+
     def test_reused_key_of_another_account_is_rejected(self, tmp_path: Path) -> None:
         other = {**KEY, "client_email": "someone@else.iam.gserviceaccount.com"}
         (tmp_path / "slack-chat-migrator-sa-key.json").write_text(json.dumps(other))
@@ -193,6 +236,7 @@ class TestSetupPermissionsScript:
         assert result.returncode != 0
         assert "Couldn't read the expiry time 'soon'" in result.stderr
         assert "left unchanged" in result.stderr
+        assert "Check the key in the Cloud Console" in result.stderr
         assert "keys create" not in _calls(tmp_path)
         assert json.loads(key.read_text()) == KEY
 
