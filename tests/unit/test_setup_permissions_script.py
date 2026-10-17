@@ -42,7 +42,15 @@ if [ "$1 $2 $3 $4" = "iam service-accounts keys create" ]; then
   printf '%s' "$KEY_JSON" > "$5"
 fi
 if [ "$1 $2 $3 $4" = "iam service-accounts keys list" ]; then
-  # csv[no-heading](name.basename(),disabled,validBeforeTime)
+  # The script parses this exact output shape; anything else is a bug.
+  case " $* " in
+    *" --managed-by=user "*) ;;
+    *) echo "stub: keys list without --managed-by=user" >&2; exit 64 ;;
+  esac
+  case " $* " in
+    *" --format=csv[no-heading](name.basename(),disabled,validBeforeTime) "*) ;;
+    *) echo "stub: unexpected keys list --format" >&2; exit 64 ;;
+  esac
   printf '%s\n' "$KEY_LIST"
 fi
 exit 0
@@ -177,6 +185,19 @@ class TestSetupPermissionsScript:
         assert "left unchanged" in result.stderr
         assert "keys create" not in _calls(tmp_path)
         assert json.loads(key.read_text()) == KEY
+
+    def test_keys_are_listed_in_the_parsed_format(self, tmp_path: Path) -> None:
+        (tmp_path / "slack-chat-migrator-sa-key.json").write_text(json.dumps(KEY))
+        result = _run(tmp_path)
+        assert result.returncode == 0, result.stderr
+        listed = [c for c in _calls(tmp_path).splitlines() if "keys list" in c]
+        assert len(listed) == 1
+        assert f"--iam-account={SA_EMAIL}" in listed[0]
+        assert "--managed-by=user" in listed[0]
+        assert (
+            "--format=csv[no-heading](name.basename(),disabled,validBeforeTime)"
+            in listed[0]
+        )
 
     def test_disabled_false_and_future_expiry_is_active(self, tmp_path: Path) -> None:
         (tmp_path / "slack-chat-migrator-sa-key.json").write_text(json.dumps(KEY))
