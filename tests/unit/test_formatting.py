@@ -64,7 +64,7 @@ class TestParseRichTextElements:
 
     def test_emoji_element(self):
         elements = [{"type": "emoji", "name": "thumbsup"}]
-        assert _parse_rich_text_elements(elements) == ":thumbsup:"
+        assert _parse_rich_text_elements(elements) == "\U0001f44d"
 
     def test_user_mention(self):
         elements = [{"type": "user", "user_id": "U12345"}]
@@ -1003,10 +1003,10 @@ class TestParseRichTextElementsEdgeCases:
         assert result == "~_*all styles*_~"
 
     def test_emoji_with_missing_name(self):
-        """Emoji element with no name field."""
+        """Emoji element with no name field renders nothing."""
         elements = [{"type": "emoji"}]
         result = _parse_rich_text_elements(elements)
-        assert result == "::"
+        assert result == ""
 
     def test_text_element_with_empty_style_dict(self):
         """Empty style dict should not apply any formatting."""
@@ -1287,3 +1287,163 @@ class TestEscapedTextStaysLiteral:
         assert "users/" not in result
         assert "<https://evil|" not in result
         assert result.replace(ZWSP, "") == "<@U123> <https://evil|https://bank> & co"
+
+
+# --- emoji shortcodes ---
+
+TADA = "\U0001f389"
+
+
+class TestEmojiOnlyInProse:
+    """Shortcodes are replaced only in prose, and only for real emoji."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "redis key session:id:42",
+            "key:ok:value",
+            "fe80::a:b:1",
+            "2001:db8::ab:cd:1",
+            "at 12:30:00 UTC",
+            "x:b:y",
+            "`arr[1:x:2]`",
+            "```\nkey:ok:value\n```",
+            "```key:ok:value```",
+            "https://example.com/a?q=b:ok:c",
+            "see https://host/x/:ok:/y",
+            "std::vector::size",
+        ],
+    )
+    def test_technical_text_unchanged(self, text):
+        assert convert_formatting(text, {}) == text
+
+    def test_shortcode_inside_link_token_unchanged(self):
+        text = "<https://grafana.example/d?from=now:ok:x|dash>"
+        assert convert_formatting(text, {}) == text
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (":tada:", TADA),
+            ("we shipped :tada:", f"we shipped {TADA}"),
+            ("(:tada:)", f"({TADA})"),
+            (":tada:!", f"{TADA}!"),
+            (":smile::tada:", f"\U0001f604{TADA}"),
+            (":partyparrot::tada:", f":partyparrot:{TADA}"),
+            (":thumbsup::skin-tone-2:", "\U0001f44d\U0001f3fb"),
+            (":man-shrugging:", "\U0001f937\N{ZWJ}\N{MALE SIGN}\N{VS16}"),
+            ("`code` then :tada:", f"`code` then {TADA}"),
+            ("it`s :tada:", f"it`s {TADA}"),
+        ],
+    )
+    def test_prose_shortcodes_replaced(self, text, expected):
+        assert convert_formatting(text, {}) == expected
+
+    def test_custom_emoji_stays_literal(self):
+        assert convert_formatting("so :partyparrot: today", {}) == (
+            "so :partyparrot: today"
+        )
+
+    def test_custom_emoji_map_applies_in_text(self):
+        mapping = {"partyparrot": "\U0001f99c", "shipit": ":ship-it:"}
+        result = convert_formatting(
+            ":partyparrot: :shipit: :tada:", {}, custom_emoji_map=mapping
+        )
+        assert result == f"\U0001f99c :ship-it: {TADA}"
+
+    def test_emoji_in_link_label_replaced(self):
+        assert convert_formatting("<https://x.example|:tada: party>", {}) == (
+            f"<https://x.example|{TADA} party>"
+        )
+
+    def test_preformatted_block_unchanged(self):
+        message = {
+            "blocks": [
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_preformatted",
+                            "elements": [
+                                {"type": "text", "text": "key:ok:value fe80::a:b:1"}
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "text": "",
+        }
+        result = convert_formatting(parse_slack_blocks(message), {})
+        assert result == "```\nkey:ok:value fe80::a:b:1\n```"
+
+
+class TestCodeSpans:
+    """Inside code, entities are decoded and tokens become plain text."""
+
+    def test_entities_decoded_without_defusing(self):
+        assert convert_formatting("`if a &lt;b &amp;&amp; c&gt;d`", {}) == (
+            "`if a <b && c>d`"
+        )
+
+    def test_link_tokens_become_plain_text(self):
+        text = "```curl <https://api.example.com/v1?a=1&amp;b=2>```"
+        assert convert_formatting(text, {}) == (
+            "```curl https://api.example.com/v1?a=1&b=2```"
+        )
+
+    def test_labelled_link_shows_label(self):
+        assert convert_formatting("`<http://x.com|x.com>`", {}) == "`x.com`"
+
+    def test_mention_in_code_is_plain(self):
+        result = convert_formatting("`<@U123>` and <@U123>", TOKEN_USER_MAP)
+        assert result == "`@alice@example.com` and <users/alice@example.com>"
+
+    def test_broadcast_in_code_is_plain(self):
+        assert convert_formatting("`<!here>`", {}) == "`@here`"
+
+    def test_backtick_in_link_label_does_not_open_code(self):
+        result = convert_formatting("<https://x.example|a`b> :tada: `c`", {})
+        assert result == f"<https://x.example|a`b> {TADA} `c`"
+
+    def test_unterminated_fence_is_text(self):
+        assert convert_formatting("``` :tada:", {}) == f"``` {TADA}"
+
+
+class TestRichTextEmojiElements:
+    """Rich-text emoji elements are converted to Unicode directly."""
+
+    def test_unicode_field_preferred(self):
+        elements = [{"type": "emoji", "name": "thumbsup", "unicode": "1f44d-1f3fd"}]
+        assert _parse_rich_text_elements(elements) == "\U0001f44d\U0001f3fd"
+
+    def test_skin_tone_name_without_unicode(self):
+        elements = [{"type": "emoji", "name": "wave::skin-tone-3"}]
+        assert _parse_rich_text_elements(elements) == "\U0001f44b\U0001f3fc"
+
+    def test_skin_tone_name_with_untoned_unicode(self):
+        elements = [{"type": "emoji", "name": "wave::skin-tone-3", "unicode": "1f44b"}]
+        assert _parse_rich_text_elements(elements) == "\U0001f44b\U0001f3fc"
+
+    def test_custom_emoji_kept_as_shortcode(self):
+        elements = [{"type": "emoji", "name": "partyparrot"}]
+        assert _parse_rich_text_elements(elements) == ":partyparrot:"
+
+    def test_emoji_glued_to_word_still_converted(self):
+        message = {
+            "blocks": [
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [
+                                {"type": "text", "text": "nice"},
+                                {"type": "emoji", "name": "tada", "unicode": "1f389"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "text": "nice:tada:",
+        }
+        assert convert_formatting(parse_slack_blocks(message), {}) == f"nice{TADA}"

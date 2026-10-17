@@ -8,8 +8,9 @@ Conversion happens in two steps:
    rich-text elements is entity-escaped (``&amp; &lt; &gt;``), exactly like
    Slack's own ``text`` field, so the result is well-formed mrkdwn.
 2. :func:`convert_formatting` converts that mrkdwn into Google Chat markup
-   (``MARKUP_SYNTAX_CHAT``): it parses ``<…>`` tokens on the escaped text and
-   decodes entities only in the literal text between them.
+   (``MARKUP_SYNTAX_CHAT``): it parses ``<...>`` tokens on the escaped text,
+   decodes entities only in the literal text between them, and replaces
+   emoji shortcodes only in prose, never in code, URLs or tokens.
 """
 
 from __future__ import annotations
@@ -25,12 +26,42 @@ if TYPE_CHECKING:
     from slack_chat_migrator.core.state import MigrationState
     from slack_chat_migrator.utils.user_validation import UnmappedUserTracker
 
-import emoji
+from slack_chat_migrator.utils.emoji import (
+    apply_skin_tone,
+    chat_custom_emoji_name,
+    emoji_from_codepoints,
+    slack_emoji_to_unicode,
+    split_skin_tone,
+)
 
 # This assumes a standard logging setup. If you don't have one,
 # you can replace `from slack_chat_migrator.utils.logging import logger`
 # with `import logging; logger = logging.getLogger(__name__)`
 from slack_chat_migrator.utils.logging import log_with_context
+
+
+def _render_emoji_element(element: dict) -> str:
+    """Render a rich-text ``emoji`` element as Unicode.
+
+    Uses the element's ``unicode`` field (``"1f44d"``, ``"1f44d-1f3fd"``)
+    when present, else resolves the name.  Custom or unknown emoji are kept
+    as ``:name:``.
+
+    Args:
+        element: A rich-text element of type ``emoji``.
+
+    Returns:
+        The emoji, ``:name:`` for custom emoji, or ``""`` without a name.
+    """
+    name = str(element.get("name") or "")
+    unicode_emoji = emoji_from_codepoints(element.get("unicode"))
+    if unicode_emoji:
+        _, tone = split_skin_tone(name)
+        return apply_skin_tone(unicode_emoji, tone) if tone else unicode_emoji
+    resolved = slack_emoji_to_unicode(name)
+    if resolved:
+        return resolved
+    return f":{name}:" if name else ""
 
 
 def _parse_rich_text_elements(elements: list[dict]) -> str:
@@ -126,7 +157,7 @@ def _parse_rich_text_elements(elements: list[dict]) -> str:
             output_parts.append(_apply_styles(link_markdown, style))
 
         elif el_type == "emoji":
-            output_parts.append(f":{el.get('name', '')}:")
+            output_parts.append(_render_emoji_element(el))
 
         elif el_type == "user":
             user_mention = f"<@{el.get('user_id', '')}>"
@@ -403,7 +434,7 @@ def parse_slack_blocks(message: dict) -> str:
     return result
 
 
-# --- mrkdwn → Google Chat conversion -------------------------------------
+# --- mrkdwn to Google Chat conversion -------------------------------------
 
 # Slack's broadcast commands (``<!here>`` etc.), all mapped to Chat's @all.
 _BROADCAST_COMMANDS = frozenset({"here", "channel", "everyone", "group"})
@@ -414,10 +445,20 @@ _URL_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*:")
 # Slack user / channel / user group IDs (``U0123``, ``W0123``, ``C0123``...).
 _SLACK_ID_RE = re.compile(r"[A-Z][A-Z0-9]+")
 
-# A literal "<" followed by a letter could open Chat markup (``<users/…>``,
-# ``<https://…|…>``, ``<customEmojis/…>``).  A zero-width space keeps it text.
+# A literal "<" followed by a letter could open Chat markup (``<users/...>``,
+# ``<https://...|...>``, ``<customEmojis/...>``).  A zero-width space keeps
+# it text.
 _CHAT_MARKUP_START_RE = re.compile(r"<(?=[A-Za-z])")
 _ZERO_WIDTH_SPACE = "\N{ZERO WIDTH SPACE}"
+
+# Characters that start a code span or a token in mrkdwn.
+_MRKDWN_SPECIAL_RE = re.compile(r"[`<]")
+
+# ``:name:`` or ``:name::skin-tone-2:`` (Slack emoji names are lowercase).
+_SHORTCODE_RE = re.compile(r":([a-z0-9_+\-]+(?:::skin-tone-[2-6](?:-[2-6])?)?):")
+
+# Bare URLs in prose; shortcodes inside them are part of the URL.
+_BARE_URL_RE = re.compile(r"(?:\b[a-z][a-z0-9+.\-]*://|\bwww\.)[^\s<>]+", re.I)
 
 
 @dataclass
@@ -426,6 +467,7 @@ class _ConversionContext:
 
     user_map: Mapping[str, str]
     channel_id_to_name: Mapping[str, str]
+    custom_emoji_map: Mapping[str, object] | None
     state: MigrationState | None
     unmapped_user_tracker: UnmappedUserTracker | None
     original_text: str
@@ -447,7 +489,7 @@ def _decode_entities(text: str) -> str:
     """Decode the three HTML entities Slack uses in mrkdwn.
 
     Args:
-        text: Escaped mrkdwn text without ``<…>`` tokens.
+        text: Escaped mrkdwn text without ``<...>`` tokens.
 
     Returns:
         The literal text.
@@ -455,22 +497,87 @@ def _decode_entities(text: str) -> str:
     return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
-def _render_literal(text: str) -> str:
-    """Render escaped literal mrkdwn text as Chat text.
+def _replace_shortcodes(text: str, custom_map: Mapping[str, object] | None) -> str:
+    """Replace ``:name:`` shortcodes that resolve to real emoji.
 
-    Entities are decoded, and a decoded ``<`` that could open Chat markup is
-    defused, so text a user typed as ``&lt;https://a|b&gt;`` or
-    ``&lt;users/x&gt;`` stays text instead of becoming a link or a mention.
+    A shortcode must stand on its own: not glued to a letter, digit, ``_`` or
+    ``:`` on the left (unless it directly follows another shortcode, as in
+    ``:smile::tada:``), nor to a letter, digit or ``_`` on the right.  So
+    ``session:id:42``, ``key:ok:value``, ``fe80::a:b:1`` and ``12:30:00``
+    are left alone.  Unresolved names (custom emoji) stay ``:name:``, renamed
+    to their Chat custom emoji name when ``custom_emoji_map`` maps one.
 
     Args:
-        text: Escaped literal text (no ``<…>`` tokens).
+        text: Decoded prose (no code, URLs or tokens).
+        custom_map: ``config.custom_emoji_map``.
+
+    Returns:
+        The text with emoji shortcodes replaced.
+    """
+    out: list[str] = []
+    copied = 0
+    previous_end = -1
+    search_from = 0
+    while True:
+        match = _SHORTCODE_RE.search(text, search_from)
+        if not match:
+            break
+        start, end = match.span()
+        before = text[start - 1] if start else ""
+        after = text[end] if end < len(text) else ""
+        glued_left = before.isalnum() or before in ("_", ":")
+        if (glued_left and start != previous_end) or after.isalnum() or after == "_":
+            search_from = start + 1
+            continue
+        name = match.group(1)
+        replacement = slack_emoji_to_unicode(name, custom_map)
+        if replacement is None and custom_map:
+            replacement = f":{chat_custom_emoji_name(name, custom_map)}:"
+        if replacement is not None:
+            out.append(text[copied:start])
+            out.append(replacement)
+            copied = end
+        previous_end = search_from = end
+    out.append(text[copied:])
+    return "".join(out)
+
+
+def _emojize_prose(text: str, custom_map: Mapping[str, object] | None) -> str:
+    """Replace emoji shortcodes in prose, leaving bare URLs untouched."""
+    if ":" not in text:
+        return text
+    out: list[str] = []
+    last = 0
+    for url in _BARE_URL_RE.finditer(text):
+        out.append(_replace_shortcodes(text[last : url.start()], custom_map))
+        out.append(url.group(0))
+        last = url.end()
+    out.append(_replace_shortcodes(text[last:], custom_map))
+    return "".join(out)
+
+
+def _render_prose(text: str, ctx: _ConversionContext) -> str:
+    """Render escaped literal mrkdwn prose as Chat text.
+
+    Entities are decoded and emoji shortcodes replaced.  A decoded ``<`` that
+    could open Chat markup is defused, so text a user typed as
+    ``&lt;https://a|b&gt;`` or ``&lt;users/x&gt;`` stays text instead of
+    becoming a link or a mention.
+
+    Args:
+        text: Escaped literal text (no ``<...>`` tokens or code).
+        ctx: Conversion context (for the custom emoji map).
 
     Returns:
         Text that is safe to embed in a Chat message.
     """
-    decoded = _decode_entities(text)
-    decoded = _CHAT_MARKUP_START_RE.sub("<" + _ZERO_WIDTH_SPACE, decoded)
-    return str(emoji.emojize(decoded, language="alias"))
+    decoded = _emojize_prose(_decode_entities(text), ctx.custom_emoji_map)
+    return _CHAT_MARKUP_START_RE.sub("<" + _ZERO_WIDTH_SPACE, decoded)
+
+
+def _render_text(text: str, ctx: _ConversionContext, in_code: bool) -> str:
+    """Render literal text: decoded only inside code, full prose otherwise."""
+    return _decode_entities(text) if in_code else _render_prose(text, ctx)
 
 
 def _find_token_end(text: str, start: int) -> int:
@@ -487,6 +594,28 @@ def _find_token_end(text: str, start: int) -> int:
     if not inner or inner[0].isspace() or "<" in inner or "\n" in inner:
         return -1
     return end
+
+
+def _find_code_end(text: str, start: int) -> tuple[int, str]:
+    """Find the end of the code span or block opened at *start*.
+
+    Args:
+        text: The mrkdwn text.
+        start: Index of a backtick.
+
+    Returns:
+        ``(end, fence)``: *fence* is three backticks for a block or one for
+        inline code; *end* is the index of the closing fence, or -1 when the
+        backticks don't open code.  Inline code must close on the same line
+        and not be empty.
+    """
+    if text.startswith("```", start):
+        return text.find("```", start + 3), "```"
+    end = text.find("`", start + 1)
+    newline = text.find("\n", start + 1)
+    if end == -1 or end == start + 1 or (newline != -1 and newline < end):
+        return -1, "`"
+    return end, "`"
 
 
 def _track_unmapped_mention(slack_user_id: str, ctx: _ConversionContext) -> None:
@@ -511,26 +640,31 @@ def _track_unmapped_mention(slack_user_id: str, ctx: _ConversionContext) -> None
         )
 
 
-def _render_user_token(user_id: str, label: str, ctx: _ConversionContext) -> str:
+def _render_user_token(
+    user_id: str, label: str, ctx: _ConversionContext, in_code: bool
+) -> str:
     """Render ``<@U123>`` / ``<@U123|alice>`` as a Chat mention.
 
     Unmapped users become ``@alice`` (or ``@U123`` without a label) and are
-    tracked as unmapped mentions.
+    tracked as unmapped mentions.  Inside code the mention is plain text.
     """
     if not _SLACK_ID_RE.fullmatch(user_id):
-        return _render_literal(label or f"@{user_id}")
+        return _render_text(label or f"@{user_id}", ctx, in_code)
     gchat_user_id = ctx.user_map.get(user_id)
+    if in_code:
+        return "@" + _decode_entities(label.lstrip("@") or gchat_user_id or user_id)
     if gchat_user_id:
         return f"<users/{gchat_user_id}>"
     _track_unmapped_mention(user_id, ctx)
-    display = label.lstrip("@") or user_id
-    return "@" + _render_literal(display)
+    return "@" + _render_prose(label.lstrip("@") or user_id, ctx)
 
 
-def _render_channel_token(channel_id: str, label: str, ctx: _ConversionContext) -> str:
+def _render_channel_token(
+    channel_id: str, label: str, ctx: _ConversionContext, in_code: bool
+) -> str:
     """Render ``<#C123|name>``, ``<#C123|>`` and ``<#C123>`` as ``#name``."""
     name = label or ctx.channel_id_to_name.get(channel_id) or channel_id
-    return "#" + _render_literal(name.lstrip("#"))
+    return "#" + _render_text(name.lstrip("#"), ctx, in_code)
 
 
 def format_epoch_utc(epoch: object, fmt: str = "%Y-%m-%d %H:%M UTC") -> str | None:
@@ -551,66 +685,76 @@ def format_epoch_utc(epoch: object, fmt: str = "%Y-%m-%d %H:%M UTC") -> str | No
     return moment.strftime(fmt)
 
 
-def _render_special_token(command: str, label: str, inner: str) -> str:
-    """Render ``<!here>``, ``<!subteam^S1|@eng>``, ``<!date^…|fallback>``…"""
+def _render_special_token(
+    command: str, label: str, inner: str, ctx: _ConversionContext, in_code: bool
+) -> str:
+    """Render ``<!here>``, ``<!subteam^S1|@eng>``, ``<!date^...|fallback>``..."""
     name, _, args = command.partition("^")
     if name in _BROADCAST_COMMANDS:
-        return "<users/all>"
+        return f"@{name}" if in_code else "<users/all>"
     if name == "subteam":
         handle = label or args.split("^", 1)[0]
         if not handle:
             return "@subteam"
-        return _render_literal(handle if handle.startswith("@") else f"@{handle}")
+        return _render_text(
+            handle if handle.startswith("@") else f"@{handle}", ctx, in_code
+        )
     if name == "date":
         if label:
-            return _render_literal(label)
+            return _render_text(label, ctx, in_code)
         return format_epoch_utc(args.split("^", 1)[0]) or ""
-    return _render_literal(label or inner)
+    return _render_text(label or inner, ctx, in_code)
 
 
-def _render_link_token(url: str, label: str) -> str:
-    """Render ``<https://…|label>``, ``<mailto:…|…>``, ``<tel:…>`` for Chat.
+def _render_link_token(
+    url: str, label: str, ctx: _ConversionContext, in_code: bool
+) -> str:
+    """Render ``<https://...|label>``, ``<mailto:...|...>``, ``<tel:...>``.
 
     Returns the bare URL when there is no label or it equals the URL, else
-    Chat's ``<url|label>``.
+    Chat's ``<url|label>``.  Inside code, the label (or URL) as plain text.
     """
     url = _decode_entities(url)
+    if in_code:
+        return _decode_entities(label) or url
     if not label or _decode_entities(label) == url:
         return url
     # A ">" would end Chat's link early, and "<" could nest markup.
     safe_label = (
-        _render_literal(label)
+        _render_prose(label, ctx)
         .replace(">", "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK}")
         .replace("<", "\N{SINGLE LEFT-POINTING ANGLE QUOTATION MARK}")
     )
     return f"<{url}|{safe_label}>"
 
 
-def _render_token(inner: str, ctx: _ConversionContext) -> str:
-    """Render the inside of one Slack ``<…>`` token as Chat text.
+def _render_token(inner: str, ctx: _ConversionContext, in_code: bool = False) -> str:
+    """Render the inside of one Slack ``<...>`` token as Chat text.
 
     Args:
         inner: The token without its angle brackets, still escaped.
         ctx: Lookups and tracking for this conversion.
+        in_code: True inside a code span or block, where Chat shows markup
+            literally, so tokens become plain text.
 
     Returns:
         The Chat markup or text for the token.
     """
     target, _, label = inner.partition("|")
     if target.startswith("@"):
-        return _render_user_token(target[1:], label, ctx)
+        return _render_user_token(target[1:], label, ctx, in_code)
     if target.startswith("#"):
-        return _render_channel_token(target[1:], label, ctx)
+        return _render_channel_token(target[1:], label, ctx, in_code)
     if target.startswith("!"):
-        return _render_special_token(target[1:], label, inner)
+        return _render_special_token(target[1:], label, inner, ctx, in_code)
     if _URL_SCHEME_RE.match(target):
-        return _render_link_token(target, label)
+        return _render_link_token(target, label, ctx, in_code)
     # Unknown token: keep what a reader would have seen.
-    return _render_literal(label or inner)
+    return _render_text(label or inner, ctx, in_code)
 
 
-def _convert_mrkdwn(text: str, ctx: _ConversionContext) -> str:
-    """Convert escaped Slack mrkdwn into Chat markup, token by token."""
+def _convert_segment(text: str, ctx: _ConversionContext, in_code: bool) -> str:
+    """Convert mrkdwn without code spans: tokens plus literal text."""
     out: list[str] = []
     literal_start = 0
     pos = 0
@@ -622,10 +766,42 @@ def _convert_mrkdwn(text: str, ctx: _ConversionContext) -> str:
         if end == -1:
             pos += 1
             continue
-        out.append(_render_literal(text[literal_start:pos]))
-        out.append(_render_token(text[pos + 1 : end], ctx))
+        out.append(_render_text(text[literal_start:pos], ctx, in_code))
+        out.append(_render_token(text[pos + 1 : end], ctx, in_code))
         pos = literal_start = end + 1
-    out.append(_render_literal(text[literal_start:]))
+    out.append(_render_text(text[literal_start:], ctx, in_code))
+    return "".join(out)
+
+
+def _convert_mrkdwn(text: str, ctx: _ConversionContext) -> str:
+    """Convert escaped Slack mrkdwn into Chat markup.
+
+    Code spans and blocks are found first; inside them only entities are
+    decoded (and tokens become plain text), so emoji shortcodes and markup
+    there stay exactly as typed.
+    """
+    out: list[str] = []
+    prose_start = 0
+    pos = 0
+    while True:
+        match = _MRKDWN_SPECIAL_RE.search(text, pos)
+        if not match:
+            break
+        pos = match.start()
+        if text[pos] == "<":
+            # Skip whole tokens so a backtick inside a link label can't open code.
+            end = _find_token_end(text, pos)
+            pos = end + 1 if end != -1 else pos + 1
+            continue
+        end, fence = _find_code_end(text, pos)
+        if end == -1:
+            pos += len(fence)
+            continue
+        out.append(_convert_segment(text[prose_start:pos], ctx, in_code=False))
+        code = text[pos + len(fence) : end]
+        out.append(fence + _convert_segment(code, ctx, in_code=True) + fence)
+        pos = prose_start = end + len(fence)
+    out.append(_convert_segment(text[prose_start:], ctx, in_code=False))
     return "".join(out)
 
 
@@ -635,32 +811,41 @@ def convert_formatting(
     state: MigrationState | None = None,
     unmapped_user_tracker: UnmappedUserTracker | None = None,
     channel_id_to_name: Mapping[str, str] | None = None,
+    custom_emoji_map: Mapping[str, object] | None = None,
 ) -> str:
     """Convert Slack mrkdwn to Google Chat markup (``MARKUP_SYNTAX_CHAT``).
 
-    Slack ``<…>`` tokens are parsed on the still-escaped text, and HTML
+    Slack ``<...>`` tokens are parsed on the still-escaped text, and HTML
     entities (``&lt; &gt; &amp;``) are decoded only in the literal text in
-    between, so text a user typed as ``<…>`` never becomes a live link or
+    between, so text a user typed as ``<...>`` never becomes a live link or
     mention.  Tokens are converted as follows:
 
-    - ``<@U123>``, ``<@U123|name>``, ``<@W123>`` → ``<users/{email}>``, or
+    - ``<@U123>``, ``<@U123|name>``, ``<@W123>`` -> ``<users/{email}>``, or
       ``@name`` / ``@U123`` when the user is unmapped (tracked)
-    - ``<#C123|name>``, ``<#C123|>``, ``<#C123>`` → ``#name`` (via
+    - ``<#C123|name>``, ``<#C123|>``, ``<#C123>`` -> ``#name`` (via
       *channel_id_to_name*), or ``#C123`` when unknown
-    - ``<!here>``, ``<!channel>``, ``<!everyone>`` → ``<users/all>``
-    - ``<!subteam^S123|@eng>`` → ``@eng``; ``<!date^…|fallback>`` → fallback
-    - ``<https://…|label>``, ``<mailto:…|…>``, ``<tel:…|…>`` → ``<url|label>``,
-      or the bare URL when there is no label or it equals the URL
-    - anything else → its label, or its inner text
+    - ``<!here>``, ``<!channel>``, ``<!everyone>`` -> ``<users/all>``
+    - ``<!subteam^S123|@eng>`` -> ``@eng``; ``<!date^...|fallback>`` ->
+      the fallback
+    - ``<https://...|label>``, ``<mailto:...|...>``, ``<tel:...|...>`` ->
+      ``<url|label>``, or the bare URL when there is no label or it equals
+      the URL
+    - anything else -> its label, or its inner text
+
+    Emoji shortcodes (``:tada:``) are replaced only in prose: never inside
+    code spans, code blocks, URLs or tokens, and only when the name is a
+    real emoji.  Inside code, tokens become plain text.
 
     Args:
         text: The Slack mrkdwn text to convert (escaped, as in ``text``).
-        user_map: Slack user ID → Google Chat user ID or email.
+        user_map: Slack user ID -> Google Chat user ID or email.
         state: Optional MigrationState for context
             (``context.current_channel``, ``context.current_message_ts``).
         unmapped_user_tracker: Optional tracker for unmapped user mentions.
-        channel_id_to_name: Slack channel ID → channel name, used for channel
+        channel_id_to_name: Slack channel ID -> channel name, used for channel
             references without a label.
+        custom_emoji_map: ``config.custom_emoji_map`` (Slack emoji name ->
+            Unicode or ``:name:``).
 
     Returns:
         The text formatted for Google Chat.
@@ -671,6 +856,7 @@ def convert_formatting(
     ctx = _ConversionContext(
         user_map=user_map,
         channel_id_to_name=channel_id_to_name or {},
+        custom_emoji_map=custom_emoji_map,
         state=state,
         unmapped_user_tracker=unmapped_user_tracker,
         original_text=text,

@@ -76,3 +76,19 @@ class TestChannelReferences:
             }
         )
         assert text == "see #general and #general or #C9999"
+
+
+class TestEmojiInPayloadText:
+    """Emoji shortcodes use config.custom_emoji_map and skip code."""
+
+    def test_custom_emoji_map_is_used(self) -> None:
+        ctx = _ctx(custom_emoji_map={"partyparrot": "\U0001f99c"})
+        text = _payload_text(
+            {
+                "ts": "1700000000.000100",
+                "user": "U001",
+                "text": ":partyparrot: `key:ok:value` :tada:",
+            },
+            ctx,
+        )
+        assert text == "\U0001f99c `key:ok:value` \U0001f389"

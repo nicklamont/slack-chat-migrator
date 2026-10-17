@@ -82,6 +82,7 @@ def build_message_payload(
         unmapped_user_tracker=getattr(user_resolver, "unmapped_user_tracker", None),
         # Resolves channel references without a label (<#C123>, <#C123|>)
         channel_id_to_name=ctx.channel_id_to_name,
+        custom_emoji_map=ctx.config.custom_emoji_map,
     )
 
     # For edited messages, add an edit indicator

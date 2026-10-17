@@ -197,6 +197,21 @@ When duplicate spaces are found, the tool will:
 3. Log detailed information about each space to help you choose
 4. Provide exact configuration entries to copy into your config file
 
+#### Emoji Mapping
+
+Emoji in message text (`:tada:`) and reactions are converted to Unicode using Slack's emoji names, including skin tones (`:thumbsup::skin-tone-2:`) and Slack-only names such as `:man-shrugging:` and `:flag-us:`. Shortcodes inside code, code blocks and links are left alone.
+
+Slack workspace custom emoji (for example `:partyparrot:`) have no Unicode equivalent. In message text they stay as `:partyparrot:`, and reactions that use them are skipped instead of being sent as invalid emoji. Use `custom_emoji_map` to map them (quote the values: YAML doesn't allow a bare leading `:`):
+
+```yaml
+custom_emoji_map:
+  partyparrot: "🦜"                 # a Unicode emoji
+  approved: ":white_check_mark:"    # the name of a standard emoji
+  shipit: ":ship-it:"               # the name of a Google Chat custom emoji
+```
+
+The map is checked before the standard names, so it can also override them. A Slack skin tone (`approved::skin-tone-3`) is applied to the mapped emoji when that emoji supports one. A `:name:` value that isn't a standard emoji is taken as the name of a Google Chat custom emoji, and message text shows it as `:ship-it:`. The Slack export contains no emoji images, so create any custom emoji you want in Google Chat yourself before migrating.
+
 > **Note:** Debug and logging options are controlled via command-line flags (`--verbose` and `--debug_api`) rather than configuration file settings. This ensures consistent logging behavior across all migration runs.
 
 ### Command-Line Reference
