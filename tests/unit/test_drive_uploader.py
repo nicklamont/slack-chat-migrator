@@ -10,6 +10,7 @@ from slack_chat_migrator.constants import DRIVE_UPLOAD_CHUNK_BYTES
 from slack_chat_migrator.services.drive.drive_uploader import (
     DriveFileUploader,
     DriveUpload,
+    DriveUploadFailure,
     DriveUploadSource,
 )
 
@@ -364,9 +365,46 @@ class TestUploadFileToDrive:
         # create raises HttpError
         uploader.drive_service.create_file.side_effect = _http_error(500)
 
-        assert (
-            uploader.upload_file_to_drive(str(test_file), "fail.txt", "folder1") is None
+        failure = uploader.upload_file_to_drive(str(test_file), "fail.txt", "folder1")
+
+        assert isinstance(failure, DriveUploadFailure)
+        assert "HttpError 500" in failure.reason
+        assert not failure.conversion_failed  # no target type: not a conversion
+
+    @pytest.mark.parametrize(
+        ("status", "conversion"), [(400, True), (413, True), (500, True), (403, False)]
+    )
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_conversion_failure_is_flagged(
+        self, mock_media_cls, tmp_path, status, conversion
+    ):
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        test_file = tmp_path / "doc.html"
+        test_file.write_bytes(b"<p>x</p>")
+        uploader.drive_service.create_file.side_effect = _http_error(status)
+
+        failure = uploader.upload_file_to_drive(
+            str(test_file),
+            "Doc",
+            "folder1",
+            target_mime_type="application/vnd.google-apps.document",
         )
+
+        assert isinstance(failure, DriveUploadFailure)
+        assert failure.conversion_failed is conversion
+
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_network_error_is_a_failure_with_its_cause(self, mock_media_cls, tmp_path):
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        test_file = tmp_path / "a.txt"
+        test_file.write_bytes(b"data")
+        uploader.drive_service.create_file.side_effect = ConnectionResetError("reset")
+
+        failure = uploader.upload_file_to_drive(str(test_file), "a.txt", "folder1")
+
+        assert failure == DriveUploadFailure("ConnectionResetError: reset")
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_reuses_existing_file_by_hash(self, mock_media_cls, tmp_path):

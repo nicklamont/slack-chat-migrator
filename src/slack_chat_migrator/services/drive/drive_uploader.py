@@ -29,7 +29,10 @@ from slack_chat_migrator.constants import (
     DRIVE_UPLOAD_CHUNK_BYTES,
     FILE_READ_CHUNK_BYTES,
 )
-from slack_chat_migrator.utils.api import escape_drive_query_value
+from slack_chat_migrator.utils.api import (
+    RETRYABLE_NETWORK_ERRORS,
+    escape_drive_query_value,
+)
 from slack_chat_migrator.utils.logging import (
     log_with_context,
 )
@@ -74,6 +77,35 @@ class DriveUpload:
         Ownership is never transferred for reused files.
         """
         return self.source is not DriveUploadSource.NEW
+
+
+@dataclass(frozen=True)
+class DriveUploadFailure:
+    """Why :meth:`DriveFileUploader.upload_file_to_drive` has no file.
+
+    Attributes:
+        reason: The cause, for the log and the migration report.
+        conversion_failed: Drive refused to convert the upload into the
+            requested Google type (HTTP 400, 413, 415 or 500 with a target
+            type).  A plain upload of the same file may still work.
+    """
+
+    reason: str
+    conversion_failed: bool = False
+
+
+#: Statuses that, for an upload with a target Google type, mean the
+#: conversion failed rather than the upload: content Drive can't convert
+#: (400, 415), too large to convert (413), or the converter failing (500,
+#: still failing after the retries).
+_CONVERSION_FAILURE_STATUSES = frozenset({400, 413, 415, 500})
+
+#: Errors besides HttpError that leave an upload without a file: reading the
+#: temp file, or a network error that outlasted the retries.
+_UPLOAD_IO_ERRORS: tuple[type[BaseException], ...] = (
+    OSError,
+    *RETRYABLE_NETWORK_ERRORS,
+)
 
 
 #: Cached Drive file: (file_id, webViewLink).
@@ -370,7 +402,7 @@ class DriveFileUploader:
         slack_file_id: str | None = None,
         channel: str | None = None,
         target_mime_type: str | None = None,
-    ) -> DriveUpload | None:
+    ) -> DriveUpload | DriveUploadFailure:
         """Upload a file to Google Drive, or reuse an identical one.
 
         If a file with the same MD5 hash already exists in the folder, that
@@ -397,7 +429,9 @@ class DriveFileUploader:
                 since their content differs from the uploaded bytes.
 
         Returns:
-            The DriveUpload, or None if the upload failed
+            The DriveUpload, or why there is none: an HttpError from Drive, a
+            network error that outlasted the retries, or an OSError reading
+            the file.  The caller logs it.
         """
         try:
             if not mime_type:
@@ -474,7 +508,7 @@ class DriveFileUploader:
 
             file_id = file.get("id")
             if not file_id:
-                return None
+                return DriveUploadFailure("Drive returned no file ID")
             url = file.get("webViewLink")
             self.remember_file(
                 folder_id,
@@ -493,12 +527,14 @@ class DriveFileUploader:
             return DriveUpload(file_id, url)
 
         except HttpError as e:
-            log_with_context(
-                logging.ERROR,
-                f"Failed to upload file {filename} to Drive: {e}",
-                channel=self._get_current_channel(),
+            status = int(getattr(e.resp, "status", 0) or 0)
+            return DriveUploadFailure(
+                f"Drive refused the upload: {e}",
+                conversion_failed=bool(target_mime_type)
+                and status in _CONVERSION_FAILURE_STATUSES,
             )
-            return None
+        except _UPLOAD_IO_ERRORS as e:
+            return DriveUploadFailure(f"{type(e).__name__}: {e}")
 
     @staticmethod
     def poster_permission_change(

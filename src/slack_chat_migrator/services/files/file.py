@@ -31,7 +31,10 @@ from slack_chat_migrator.services.drive.domains import (
     internal_domains,
     is_external_email,
 )
-from slack_chat_migrator.services.drive.drive_uploader import SOURCE_SLACK_ID
+from slack_chat_migrator.services.drive.drive_uploader import (
+    SOURCE_SLACK_ID,
+    DriveUploadFailure,
+)
 from slack_chat_migrator.services.drive.folder_manager import (
     FolderLookup,
     FolderSyncResult,
@@ -519,7 +522,7 @@ class FileHandler:
                 return direct_result
 
             # Fall back to Drive upload, reusing the same temp file
-            drive_result = self._try_drive_upload(
+            return self._try_drive_upload(
                 file_obj,
                 file_path,
                 channel,
@@ -529,10 +532,6 @@ class FileHandler:
                 file_hash=download.md5,
                 folder_id=folder_id,
             )
-            if drive_result:
-                return drive_result
-
-            return UploadResult(error="Upload failed", name=name)
         finally:
             remove_temp_file(download.path)
 
@@ -582,7 +581,9 @@ class FileHandler:
     ) -> UploadResult:
         """Upload a downloaded canvas or list, converting it when planned.
 
-        A failed conversion falls back to a plain ``.html``/``.csv`` upload.
+        Only a failed conversion falls back to a plain ``.html``/``.csv``
+        upload; any other failure (no folder, a network error) is returned
+        with its cause.
         """
         file_id = file_obj.get("id") or "unknown"
         file_path = download.file_path  # only called for OK results
@@ -603,18 +604,24 @@ class FileHandler:
                 mime_type=document.source_mime,
                 target_mime_type=target_mime,
             )
-            if result is not None:
-                return result
-            if target_mime:
-                log_with_context(
-                    logging.WARNING,
-                    f"Could not convert {document.kind} {document.title!r} to a"
-                    " Google file; uploading it as"
-                    f" {document.extension.lstrip('.').upper()} instead",
-                    channel=channel,
-                    file_id=file_id,
-                )
-        return UploadResult(error="Upload failed", name=document.plain_name)
+            if not (target_mime and result.metadata.get("conversion_failed")):
+                break
+            log_with_context(
+                logging.WARNING,
+                f"Could not convert {document.kind} {document.title!r} to a"
+                f" Google file ({result.error}); uploading it as"
+                f" {document.extension.lstrip('.').upper()} instead",
+                channel=channel,
+                file_id=file_id,
+            )
+        if not result.success:
+            log_with_context(
+                logging.ERROR,
+                f"Failed to upload {document.kind} {document.title!r}: {result.error}",
+                channel=channel,
+                file_id=file_id,
+            )
+        return result
 
     def _sync_channel_context(self) -> None:
         """Propagate current channel to sub-uploaders for logging context."""
@@ -892,8 +899,8 @@ class FileHandler:
         name: str,
         file_hash: str | None = None,
         folder_id: str | None = None,
-    ) -> UploadResult | None:
-        """Upload file to Google Drive."""
+    ) -> UploadResult:
+        """Upload a file to Google Drive; a failure is logged with its cause."""
         log_with_context(
             logging.DEBUG,
             f"Using Google Drive upload for file: {name}",
@@ -909,7 +916,7 @@ class FileHandler:
             file_hash=file_hash,
             folder_id=folder_id,
         )
-        if drive_result is not None and drive_result.success:
+        if drive_result.success:
             log_with_context(
                 logging.DEBUG,
                 f"Successfully uploaded file {name} to Drive: {drive_result.url}",
@@ -921,8 +928,7 @@ class FileHandler:
 
         log_with_context(
             logging.ERROR,
-            f"Failed to upload file {name}"
-            + (f": {drive_result.error}" if drive_result is not None else ""),
+            f"Failed to upload file {name}: {drive_result.error}",
             channel=channel,
             file_id=file_id,
         )
@@ -1014,7 +1020,7 @@ class FileHandler:
         name: str | None = None,
         mime_type: str | None = None,
         target_mime_type: str | None = None,
-    ) -> UploadResult | None:
+    ) -> UploadResult:
         """Upload a downloaded file to Google Drive.
 
         Args:
@@ -1030,7 +1036,8 @@ class FileHandler:
             target_mime_type: Google type to convert the upload into
 
         Returns:
-            UploadResult with drive upload details if successful, None otherwise
+            The Drive upload, or an error result that says why it failed
+            (``metadata["conversion_failed"]`` when only the conversion did).
         """
         file_id = file_obj.get("id") or "unknown"
         name = name or file_obj.get("name") or f"file_{file_id}"
@@ -1070,14 +1077,9 @@ class FileHandler:
             )
 
         except (HttpError, OSError) as e:
-            log_with_context(
-                logging.ERROR,
-                f"Error uploading file to Drive: {e}",
-                channel=channel,
-                file_id=file_id,
-                error=str(e),
+            return UploadResult(
+                error=f"Drive upload failed: {type(e).__name__}: {e}", name=name
             )
-            return None
 
     def _resolve_upload_folder(self, channel: str | None, file_id: str) -> str | None:
         """Get or create the target Drive folder for an upload.
@@ -1178,7 +1180,7 @@ class FileHandler:
         sender_email: str | None,
         file_hash: str | None = None,
         target_mime_type: str | None = None,
-    ) -> UploadResult | None:
+    ) -> UploadResult:
         """Upload a temp file to Drive and handle permissions.
 
         Args:
@@ -1196,7 +1198,7 @@ class FileHandler:
             target_mime_type: Google type to convert the upload into.
 
         Returns:
-            The UploadResult or None on failure.
+            The Drive upload, or an error result with the cause.
         """
         upload = self.drive_uploader.upload_file_to_drive(
             file_path,
@@ -1210,14 +1212,12 @@ class FileHandler:
             target_mime_type=target_mime_type,
         )
 
-        if upload is None:
-            log_with_context(
-                logging.ERROR,
-                f"Failed to upload file {name} to Drive",
-                channel=channel,
-                file_id=file_id,
+        if isinstance(upload, DriveUploadFailure):
+            return UploadResult(
+                error=f"Drive upload failed: {upload.reason}",
+                name=name,
+                metadata={"conversion_failed": upload.conversion_failed},
             )
-            return None
 
         if upload.source != SOURCE_SLACK_ID:
             # An earlier run uploaded this very file and set its permissions.

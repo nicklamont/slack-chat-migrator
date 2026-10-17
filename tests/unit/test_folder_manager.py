@@ -646,6 +646,14 @@ class TestEnsureRestricted:
         errors = [r for r in caplog.records if r.levelname == "ERROR"]
         assert len(errors) == 1  # said loudly once, then quietly
 
+    def test_network_error_fails_closed(self):
+        svc = MagicMock()
+        svc.update_file.side_effect = TimeoutError("timed out")
+        fm = FolderManager(svc)
+
+        assert fm.ensure_restricted("F", "hr", "SD") is False
+        assert fm.restriction_failures == {"F": 1}
+
     def test_restricted_lookup_fails_closed(self):
         svc = MagicMock()
         svc.list_files.return_value = {"files": [{"id": "OPEN", "name": "hr"}]}

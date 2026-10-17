@@ -1013,6 +1013,43 @@ class TestCanvasConversion:
         assert fake.files_db[sheet.drive_id]["mimeType"] == "text/csv"
         assert "converted_to" not in canvas.metadata
 
+    def test_other_upload_failures_are_not_blamed_on_conversion(
+        self, tmp_path, doc_downloads, caplog
+    ):
+        """SF14: one attempt, the real cause, no "could not convert" warning."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.add_folder("CHF", "general", "SD1")  # only the upload fails
+        fake.failing["files.create"] = ConnectionResetError("connection reset")
+
+        result = post_document(handler, CANVAS)
+
+        assert not result.success
+        assert result.error == (
+            "Drive upload failed: ConnectionResetError: connection reset"
+        )
+        uploads = [
+            kw
+            for name, kw in fake.calls
+            if name == "files.create" and kw.get("media_body") is not None
+        ]
+        assert len(uploads) == 1
+        assert not any("Could not convert" in r.getMessage() for r in caplog.records)
+        assert handler.get_file_statistics()["failed_uploads"] == 1
+
+    def test_network_error_creating_the_folder_fails_the_file(
+        self, tmp_path, doc_downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["files.create"] = ConnectionResetError("connection reset")
+
+        result = post_document(handler, CANVAS)
+
+        assert not result.success
+        assert result.error and result.error.startswith("No Drive folder:")
+        assert "connection reset" in result.error
+
     def test_conversion_can_be_turned_off(self, tmp_path, doc_downloads):
         fake = FakeDrive()
         config = MigrationConfig(

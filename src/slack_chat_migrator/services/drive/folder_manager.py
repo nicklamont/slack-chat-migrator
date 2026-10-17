@@ -215,7 +215,7 @@ class FolderManager:
                 fields="id, inheritedPermissionsDisabled",
                 supports_all_drives=bool(shared_drive_id),
             )
-        except HttpError as e:
+        except DRIVE_CALL_ERRORS as e:
             self._log_restriction_failure(folder_id, channel, str(e))
             return False
         if response.get("inheritedPermissionsDisabled") is False:
@@ -467,7 +467,7 @@ class FolderManager:
                 )
                 if not folder_id:
                     return FolderLookup(None, "Drive returned no folder ID")
-        except HttpError as e:
+        except DRIVE_CALL_ERRORS as e:
             log_with_context(
                 logging.WARNING,
                 f"Failed to get or create channel folder {channel}: {e}",

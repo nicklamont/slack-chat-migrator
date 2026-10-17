@@ -13,7 +13,7 @@ from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
-from slack_chat_migrator.services.drive import DriveUpload
+from slack_chat_migrator.services.drive import DriveUpload, DriveUploadFailure
 from slack_chat_migrator.services.drive.folder_manager import FolderLookup
 from slack_chat_migrator.services.files.file import FileHandler
 from slack_chat_migrator.services.files.file_download import (
@@ -481,7 +481,9 @@ class TestUploadStrategy:
         handler = self._make_ready_handler()
         content = b"some data"
         handler._download_file = MagicMock(return_value=_ok_download(content))
-        handler._upload_to_drive = MagicMock(return_value=None)
+        handler._upload_to_drive = MagicMock(
+            return_value=UploadResult(error="Drive upload failed: quota", name="f")
+        )
 
         file_obj = {
             "id": "F1",
@@ -492,7 +494,7 @@ class TestUploadStrategy:
         result = handler.upload_attachment(file_obj, channel="general")
         assert isinstance(result, UploadResult)
         assert not result.success
-        assert result.error is not None
+        assert result.error == "Drive upload failed: quota"  # the real cause
         assert handler.file_stats["failed_uploads"] == 1
 
     def test_exception_in_upload_attachment_increments_failed(self):
@@ -1082,20 +1084,25 @@ class TestUploadToDrive:
         assert result.drive_id == "drive_file_id"
         assert result.name == "report.pdf"
 
-    def test_upload_returns_none_when_drive_upload_fails(self):
-        """Returns None when drive_uploader returns (None, None)."""
+    def test_failed_drive_upload_returns_its_cause(self):
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
         handler.folder_manager.get_or_create_channel_folder.return_value = (
             "channel_folder"
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
-        handler.drive_uploader.upload_file_to_drive.return_value = None
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUploadFailure(
+            "Drive refused the upload: 403 storageQuotaExceeded"
+        )
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
         result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
 
-        assert result is None
+        assert not result.success
+        assert result.error == (
+            "Drive upload failed: Drive refused the upload: 403 storageQuotaExceeded"
+        )
+        assert result.metadata == {"conversion_failed": False}
 
     def test_upload_without_channel_uses_root_folder(self):
         """When no channel is provided, uses root folder."""
@@ -1413,8 +1420,7 @@ class TestUploadToDrive:
         assert result.drive_id == "file_id"
         assert result.mime_type == "text/plain"
 
-    def test_http_error_returns_none(self):
-        """HttpError during upload returns None."""
+    def test_http_error_returns_an_error_result(self):
         handler = self._make_ready_handler()
         handler._shared_drive_id = None
         handler.folder_manager.get_or_create_channel_folder.side_effect = HttpError(
@@ -1424,7 +1430,10 @@ class TestUploadToDrive:
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
         result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
 
-        assert result is None
+        assert not result.success
+        assert result.error and result.error.startswith(
+            "Drive upload failed: HttpError"
+        )
 
     def test_channel_folder_already_processed(self):
         """Second upload to same channel folder uses cache."""
