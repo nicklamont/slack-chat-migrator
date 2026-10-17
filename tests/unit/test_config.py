@@ -243,3 +243,38 @@ class TestMigrationConfigValidation:
 
         with pytest.raises(ValueError, match="max_retries must be >= 0"):
             load_config(config_path)
+
+
+class TestNewConfigOptions:
+    """Options added for the October 2026 audit fixes."""
+
+    def test_defaults(self):
+        cfg = MigrationConfig.from_dict({})
+        assert cfg.workspace_domains == []
+        assert cfg.conversation_types == ["public", "private", "mpim", "dm"]
+        assert cfg.max_parallel_channels == 1
+        assert cfg.file_workers == 4
+        assert cfg.space_manager == "admin"
+        assert cfg.migrate_pins is True
+        assert cfg.convert_canvases is True
+        assert cfg.quote_shared_messages is False
+
+    def test_slack_token_falls_back_to_env(self, monkeypatch):
+        env_value, config_value = "xoxb-from-env", "xoxb-from-config"
+        monkeypatch.setenv("SLACK_TOKEN", env_value)
+        assert MigrationConfig.from_dict({}).slack_token == env_value
+        cfg = MigrationConfig.from_dict({"slack_token": config_value})
+        assert cfg.slack_token == config_value
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {"max_parallel_channels": 0},
+            {"file_workers": 0},
+            {"space_manager": "owner"},
+            {"conversation_types": ["public", "threads"]},
+        ],
+    )
+    def test_invalid_values_rejected(self, data):
+        with pytest.raises(ValueError):
+            MigrationConfig.from_dict(data)

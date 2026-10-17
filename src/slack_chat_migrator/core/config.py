@@ -9,6 +9,7 @@ which Slack channels should be processed based on the configuration.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -17,6 +18,12 @@ from typing import Any
 import yaml
 
 from slack_chat_migrator.utils.logging import log_with_context
+
+#: Slack conversation types, in the order they are listed in the export.
+CONVERSATION_TYPES = ("public", "private", "mpim", "dm")
+
+#: Who becomes the space manager after ``completeImport``.
+SPACE_MANAGER_CHOICES = ("admin", "creator")
 
 
 class ImportCompletionStrategy(str, Enum):
@@ -82,8 +89,59 @@ class MigrationConfig:
     # Shared drive
     shared_drive: SharedDriveConfig = field(default_factory=SharedDriveConfig)
 
+    # Identity: Google Workspace domains whose users are "internal" (can be
+    # impersonated).  Empty means "the workspace admin's domain only".
+    workspace_domains: list[str] = field(default_factory=list)
+
+    # Optional Slack token (``files:read``) used as a Bearer header when
+    # downloading export files.  Falls back to the ``SLACK_TOKEN`` env var.
+    slack_token: str = ""
+
+    # Durable migration state (created spaces, import deadlines, resume
+    # points, uploaded files).  Empty means
+    # ``<export_root>/.slack_chat_migrator_state.json``.
+    state_file: str = ""
+
+    # Slack conversation types to migrate: public channels, private
+    # channels, group DMs (mpim) and direct messages (dm).
+    conversation_types: list[str] = field(
+        default_factory=lambda: list(CONVERSATION_TYPES)
+    )
+
+    # Performance
+    max_parallel_channels: int = 1
+    file_workers: int = 4
+
+    # Optional features
+    custom_emoji_map: dict[str, str] = field(default_factory=dict)
+    use_chat_custom_emoji: bool = False
+    quote_shared_messages: bool = False
+    migrate_pins: bool = True
+    convert_canvases: bool = True
+    restrict_private_channel_folders: bool = True
+    space_manager: str = "admin"
+    public_channel_audience: str = ""
+    announcement_channels: list[str] = field(default_factory=list)
+
     def __post_init__(self) -> None:
         """Validate configuration values after initialization."""
+        if self.max_parallel_channels < 1:
+            raise ValueError(
+                f"max_parallel_channels must be >= 1, got {self.max_parallel_channels}"
+            )
+        if self.file_workers < 1:
+            raise ValueError(f"file_workers must be >= 1, got {self.file_workers}")
+        if self.space_manager not in SPACE_MANAGER_CHOICES:
+            raise ValueError(
+                f"space_manager must be one of {', '.join(SPACE_MANAGER_CHOICES)},"
+                f" got {self.space_manager!r}"
+            )
+        unknown_types = set(self.conversation_types) - set(CONVERSATION_TYPES)
+        if unknown_types:
+            raise ValueError(
+                f"Unknown conversation_types: {', '.join(sorted(unknown_types))}."
+                f" Valid values: {', '.join(CONVERSATION_TYPES)}"
+            )
         if self.max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {self.max_retries}")
         if not (0 <= self.max_failure_percentage <= 100):
@@ -120,6 +178,24 @@ class MigrationConfig:
             max_retries=data.get("max_retries", 3),
             retry_delay=data.get("retry_delay", 2),
             shared_drive=shared_drive,
+            workspace_domains=data.get("workspace_domains") or [],
+            slack_token=data.get("slack_token") or os.environ.get("SLACK_TOKEN", ""),
+            state_file=data.get("state_file") or "",
+            conversation_types=data.get("conversation_types")
+            or list(CONVERSATION_TYPES),
+            max_parallel_channels=data.get("max_parallel_channels", 1),
+            file_workers=data.get("file_workers", 4),
+            custom_emoji_map=data.get("custom_emoji_map") or {},
+            use_chat_custom_emoji=data.get("use_chat_custom_emoji", False),
+            quote_shared_messages=data.get("quote_shared_messages", False),
+            migrate_pins=data.get("migrate_pins", True),
+            convert_canvases=data.get("convert_canvases", True),
+            restrict_private_channel_folders=data.get(
+                "restrict_private_channel_folders", True
+            ),
+            space_manager=data.get("space_manager", "admin"),
+            public_channel_audience=data.get("public_channel_audience") or "",
+            announcement_channels=data.get("announcement_channels") or [],
         )
 
 
