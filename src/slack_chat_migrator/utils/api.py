@@ -13,7 +13,6 @@ import json
 import logging
 import math
 import random
-import socket
 import ssl
 import threading
 import time
@@ -156,8 +155,7 @@ RATE_LIMIT_REASONS = frozenset(
 RETRYABLE_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
     TransportError,
     ConnectionError,
-    TimeoutError,
-    socket.timeout,
+    TimeoutError,  # also socket.timeout
     ssl.SSLError,
     http.client.IncompleteRead,
     http.client.RemoteDisconnected,

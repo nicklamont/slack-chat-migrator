@@ -108,7 +108,7 @@ cz check --message "fix: description"
 
 ## Conventions
 
-- **Python 3.9+** — no walrus operator in hot paths, use `from __future__ import annotations` sparingly
+- **Python 3.10+** — no walrus operator in hot paths, use `from __future__ import annotations` sparingly
 - **Conventional Commits** — enforced by commitizen pre-commit hook and CI
   - `feat:`, `fix:`, `refactor:`, `docs:`, `ci:`, `test:`, `chore:`
 - **Trunk-based development** — work on feature branches, merge to `main`, release via tags

@@ -5,9 +5,9 @@ from __future__ import annotations
 import functools
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Callable, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import click
 

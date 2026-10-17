@@ -41,7 +41,7 @@ flowchart LR
 
 ### Prerequisites
 
-- Python 3.9+ (with `venv` module for virtual environment management)
+- Python 3.10+ (with `venv` module for virtual environment management)
 - Google Cloud SDK (`gcloud`) (optional, only needed for `setup_permissions.sh` script)
   - Not required if using `slack-chat-migrator setup` (recommended) or manual console setup
   - If installing:

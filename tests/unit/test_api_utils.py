@@ -5,7 +5,6 @@ import datetime
 import email.utils
 import http.client
 import json
-import socket
 import ssl
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1293,7 +1292,6 @@ class TestRetryClassification:
             http.client.IncompleteRead(b"partial"),
             http.client.RemoteDisconnected("closed"),
             TimeoutError("timed out"),
-            socket.timeout("timed out"),
             ssl.SSLError("bad record mac"),
             ConnectionResetError("reset"),
         ],
