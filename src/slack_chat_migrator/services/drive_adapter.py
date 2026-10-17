@@ -5,8 +5,8 @@ method calls that are easier to mock, test, and type-check.
 
 The adapter delegates to a pre-built (and retry-wrapped) Drive service
 object, so it does **not** add its own retry logic.  The one exception is
-:meth:`DriveAdapter.apply_permission_changes`: calls that fail inside a batch
-request are re-sent one by one through the retry-wrapped service.
+:meth:`DriveAdapter.apply_permission_changes`, which re-sends some calls that
+failed inside a batch request; its docstring states the rule.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
 from slack_chat_migrator.constants import (
@@ -22,12 +23,26 @@ from slack_chat_migrator.constants import (
     HTTP_RATE_LIMIT,
     HTTP_SERVER_ERROR_MIN,
 )
-from slack_chat_migrator.utils.api import RETRYABLE_NETWORK_ERRORS
+from slack_chat_migrator.utils.api import (
+    HTTP_REQUEST_TIMEOUT,
+    RETRYABLE_NETWORK_ERRORS,
+)
+
+#: Errors that apply_permission_changes returns instead of raising.
+_PERMISSION_ERRORS: tuple[type[BaseException], ...] = (
+    HttpError,
+    RefreshError,
+    *RETRYABLE_NETWORK_ERRORS,
+)
 
 
 @dataclass(frozen=True)
 class PermissionChange:
-    """One permission to create (``body`` set) or delete (``permission_id`` set)."""
+    """One permission to create (``body`` set) or delete (``permission_id`` set).
+
+    Exactly one of ``body`` and ``permission_id`` is set, and
+    ``transfer_ownership`` only goes with a ``body``.
+    """
 
     file_id: str
     body: dict[str, Any] | None = None
@@ -35,15 +50,30 @@ class PermissionChange:
     supports_all_drives: bool = False
     transfer_ownership: bool = False
 
+    def __post_init__(self) -> None:
+        """Reject changes that are neither, or both, a grant and a removal."""
+        if (self.body is None) == (self.permission_id is None):
+            raise ValueError(
+                "PermissionChange needs exactly one of body (a grant) or"
+                " permission_id (a removal)"
+            )
+        if self.transfer_ownership and self.body is None:
+            raise ValueError("transfer_ownership only applies to a grant (body)")
 
-def _retry_individually(error: Exception) -> bool:
-    """Whether a call that failed inside a batch is worth sending again alone."""
-    if not isinstance(error, HttpError):
-        return True  # transport-level failure of that part of the batch
-    status = int(getattr(error.resp, "status", 0) or 0)
-    return (
-        status in (HTTP_FORBIDDEN, HTTP_RATE_LIMIT) or status >= HTTP_SERVER_ERROR_MIN
-    )
+
+def _retry_individually(error: BaseException) -> bool:
+    """Whether a call that failed inside a batch is re-sent on its own.
+
+    See :meth:`DriveAdapter.apply_permission_changes` for the rule.
+    """
+    if isinstance(error, HttpError):
+        status = int(getattr(error.resp, "status", 0) or 0)
+        return (
+            status in (HTTP_FORBIDDEN, HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
+            or status >= HTTP_SERVER_ERROR_MIN
+        )
+    # Credentials that can't be refreshed won't work on a second try.
+    return not isinstance(error, RefreshError)
 
 
 class DriveAdapter:
@@ -307,24 +337,32 @@ class DriveAdapter:
 
     def apply_permission_changes(
         self, changes: list[PermissionChange]
-    ) -> list[Exception | None]:
+    ) -> list[BaseException | None]:
         """Create and delete permissions, batching several into one request.
 
-        A single change is sent on its own.  Several are sent as Drive batch
-        requests of up to :data:`DRIVE_BATCH_MAX_REQUESTS` calls; calls that
-        fail with a rate-limit or server error are then re-sent one by one
-        through the retry-wrapped service.
+        A single change is sent on its own, through the retry-wrapped
+        service.  Several are sent as Drive batch requests of up to
+        :data:`DRIVE_BATCH_MAX_REQUESTS` calls.
+
+        Re-send rule: a call that failed inside a batch is sent once more on
+        its own, through the retry-wrapped service, when its error is an
+        ``HttpError`` with status 403, 408, 429 or 5xx (403 because Drive
+        reports rate limits as 403), or any non-HTTP failure such as a
+        dropped connection, except a ``RefreshError``.  When the whole batch
+        request fails, every call in it gets that error and the same rule
+        applies.  Other ``HttpError`` statuses (400, 404, ...) and
+        ``RefreshError`` are not re-sent.
 
         Args:
             changes: The permissions to create or delete.
 
         Returns:
             One entry per change, in order: None on success, else the error.
-            Errors are returned, never raised, including network errors
-            that outlast the retries.
+            ``HttpError``, ``RefreshError`` and network errors that outlast
+            the retries are returned, never raised.
         """
         requests = [self._permission_request(change) for change in changes]
-        results: list[Exception | None] = [None] * len(requests)
+        results: list[BaseException | None] = [None] * len(requests)
         raw_service = getattr(self._svc, "_wrapped_obj", self._svc)
         new_batch = getattr(raw_service, "new_batch_http_request", None)
 
@@ -334,7 +372,7 @@ class DriveAdapter:
                 def callback(
                     request_id: str,
                     _response: Any,
-                    exception: Exception | None,
+                    exception: BaseException | None,
                     _offset: int = start,
                 ) -> None:
                     if exception is not None:
@@ -350,9 +388,9 @@ class DriveAdapter:
                     )
                 try:
                     batch.execute()
-                except (HttpError, *RETRYABLE_NETWORK_ERRORS) as e:
-                    # The whole batch request failed; every call in it is
-                    # re-sent on its own through the retry-wrapped service.
+                except _PERMISSION_ERRORS as e:
+                    # The whole batch request failed: each call in it gets the
+                    # error, then the re-send rule applies.
                     for offset in range(len(chunk)):
                         results[start + offset] = e
             pending = [
@@ -367,7 +405,7 @@ class DriveAdapter:
             try:
                 requests[index].execute()
                 results[index] = None
-            except (HttpError, *RETRYABLE_NETWORK_ERRORS) as e:
+            except _PERMISSION_ERRORS as e:
                 results[index] = e
         return results
 

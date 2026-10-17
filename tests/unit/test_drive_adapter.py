@@ -469,3 +469,75 @@ class TestOwnershipTransferRequests:
         ]
         assert grant["sendNotificationEmail"] is False
         assert "sendNotificationEmail" not in transfer
+
+
+class TestPermissionChangeInvariants:
+    """A change is exactly one of a grant or a removal (TD5)."""
+
+    def test_needs_a_body_or_a_permission_id(self):
+        from slack_chat_migrator.services.drive_adapter import PermissionChange
+
+        with pytest.raises(ValueError, match="exactly one"):
+            PermissionChange("F")
+        with pytest.raises(ValueError, match="exactly one"):
+            PermissionChange("F", body={"role": "reader"}, permission_id="p")
+
+    def test_transfer_needs_a_grant(self):
+        from slack_chat_migrator.services.drive_adapter import PermissionChange
+
+        with pytest.raises(ValueError, match="transfer_ownership"):
+            PermissionChange("F", permission_id="p", transfer_ownership=True)
+        PermissionChange("F", body={"role": "owner"}, transfer_ownership=True)
+
+
+class TestResendRule:
+    """Which calls that failed in a batch are sent again on their own."""
+
+    @pytest.mark.parametrize(
+        ("status", "resent"),
+        [
+            (400, False),
+            (403, True),
+            (404, False),
+            (408, True),
+            (429, True),
+            (503, True),
+        ],
+    )
+    def test_http_statuses(self, status, resent):
+        from googleapiclient.errors import HttpError
+        from httplib2 import Response
+
+        from slack_chat_migrator.services.drive_adapter import _retry_individually
+
+        error = HttpError(Response({"status": str(status)}), b"x")
+        assert _retry_individually(error) is resent
+
+    def test_transport_errors_are_resent_but_refresh_errors_are_not(self):
+        from google.auth.exceptions import RefreshError
+
+        from slack_chat_migrator.services.drive_adapter import _retry_individually
+
+        assert _retry_individually(ConnectionError("reset")) is True
+        assert _retry_individually(OSError("socket closed")) is True
+        assert _retry_individually(RefreshError("expired")) is False
+
+    def test_refresh_error_is_returned_not_raised(self):
+        from google.auth.exceptions import RefreshError
+
+        from slack_chat_migrator.services.drive_adapter import PermissionChange
+
+        class Failing:
+            def permissions(self):
+                return self
+
+            def create(self, **kw):
+                return self
+
+            def execute(self):
+                raise RefreshError("token expired")
+
+        errors = DriveAdapter(Failing()).apply_permission_changes(
+            [PermissionChange("F", body={"role": "reader"})]
+        )
+        assert isinstance(errors[0], RefreshError)
