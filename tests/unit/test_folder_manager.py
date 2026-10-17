@@ -580,7 +580,7 @@ class TestSyncChannelFolder:
 
         assert result.ok
         assert result.folder_id is None
-        assert reported == []
+        assert reported == [("general", result)]
 
     def test_failed_lookup_is_a_failed_sync(self, caplog):
         svc = MagicMock()

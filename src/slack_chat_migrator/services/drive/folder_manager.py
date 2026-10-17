@@ -636,8 +636,8 @@ class FolderManager:
 
         A channel without a folder (no files were uploaded) needs no sync and
         gives an ``ok`` result with no ``folder_id``.  A failed lookup gives
-        a result with ``lookup_error``.  Every result, including a failed
-        lookup, is passed to *on_sync_result*.
+        a result with ``lookup_error``.  Every result, including those two,
+        is passed to *on_sync_result*.
 
         Args:
             channel: Channel name.
@@ -654,7 +654,9 @@ class FolderManager:
             self._report_sync(channel, result)
             return result
         if not lookup.folder_id:
-            return FolderSyncResult()
+            result = FolderSyncResult()
+            self._report_sync(channel, result)
+            return result
         return self.set_channel_folder_permissions(
             lookup.folder_id, channel, user_emails, shared_drive_id
         )

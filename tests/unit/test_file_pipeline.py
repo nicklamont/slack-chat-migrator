@@ -1044,6 +1044,30 @@ class TestLimitedAccessFolders:
         assert result.lookup_error
         assert handler.get_file_statistics()["folder_sync_failures"] == 1
 
+    def test_failed_removals_are_counted(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"x")
+        assert handler.sync_channel_folder_permissions("c", ["alice@example.com"]).ok
+        fake.failing["permissions.delete"] = http_error(403)
+
+        result = handler.sync_channel_folder_permissions("c", [])
+
+        assert result.failed_removals == ("alice@example.com",)
+        stats = handler.get_file_statistics()
+        assert stats["folder_removal_failures"] == 1
+        assert stats["folder_sync_failures"] == 1
+
+    def test_sync_without_drive_is_a_counted_failure(self, tmp_path):
+        handler = make_handler(FakeDrive(), tmp_path)
+        handler.folder_id = None  # Drive could not be set up
+
+        result = handler.sync_channel_folder_permissions("c", ["alice@example.com"])
+
+        assert not result.ok
+        assert result.lookup_error
+        assert handler.get_file_statistics()["folder_sync_failures"] == 1
+
     def test_channel_without_folder_needs_no_sync(self, tmp_path):
         handler = make_meta_handler(FakeDrive(), tmp_path)
 
