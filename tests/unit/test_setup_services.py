@@ -487,25 +487,27 @@ SA = "sa@p.iam.gserviceaccount.com"
 
 
 class _CloseFails:
-    """A key file whose first close() fails, like a full disk at the flush."""
+    """A key file whose first close()s fail, like a full disk at the flush."""
 
-    def __init__(self, f: Any, error: BaseException) -> None:
+    def __init__(self, f: Any, errors: list[BaseException]) -> None:
         self._f = f
-        self._error: BaseException | None = error
+        self._errors = errors
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._f, name)
 
     def close(self) -> None:
         self._f.close()
-        if self._error is not None:
-            error, self._error = self._error, None
-            raise error
+        if self._errors:
+            raise self._errors.pop(0)
 
 
 @contextlib.contextmanager
-def _fail_on_close(error: BaseException) -> Iterator[None]:
+def _fail_on_close(*errors: BaseException) -> Iterator[None]:
     """Make the next key file download_key opens fail when it is closed.
+
+    The first close() raises the first error, the next one the second, and
+    so on; later closes succeed.
 
     Only service_account's view of ``os`` is replaced, so nothing else in
     the process is affected.
@@ -520,7 +522,7 @@ def _fail_on_close(error: BaseException) -> Iterator[None]:
 
         @staticmethod
         def fdopen(fd: int, *args: Any, **kwargs: Any) -> Any:
-            return _CloseFails(real_os.fdopen(fd, *args, **kwargs), error)
+            return _CloseFails(real_os.fdopen(fd, *args, **kwargs), list(errors))
 
     with patch.object(sa, "os", _Os()):
         yield
@@ -865,6 +867,79 @@ class TestDownloadKey:
             str(raised.value)
         )
 
+    def test_cleanup_failure_cant_skip_the_delete(self, tmp_path: Path) -> None:
+        """The flush fails in the save and again in the cleanup."""
+        from slack_chat_migrator.services.setup.service_account import (
+            KeyNotSavedError,
+        )
+
+        service = _iam_with_key()
+        key = tmp_path / "key.json"
+        full = OSError(28, "No space left on device")
+        with _fail_on_close(full, OSError(28, "No space left on device")):
+            with pytest.raises(KeyNotSavedError) as raised:
+                self._download(service, key)
+        assert raised.value.deleted is True
+        self._keys(service).delete.assert_called_once_with(name=NEW_KEY_NAME)
+        assert not key.exists()
+
+    def test_ctrl_c_during_the_cleanup_stays_ctrl_c(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeySetupInterrupted,
+        )
+
+        service = _iam_with_key()
+        key = tmp_path / "key.json"
+        with _fail_on_close(
+            OSError(28, "No space left on device"), KeyboardInterrupt()
+        ):
+            with pytest.raises(KeyboardInterrupt) as raised:
+                self._download(service, key)
+        assert isinstance(raised.value, KeySetupInterrupted)
+        assert raised.value.deleted is True
+        self._keys(service).delete.assert_called_once_with(name=NEW_KEY_NAME)
+        assert not key.exists()
+
+    @pytest.mark.parametrize(
+        ("error", "names_the_key_list"),
+        [(_http_error(503, "unavailable"), True), (_http_error(403, "denied"), False)],
+    )
+    def test_ctrl_c_while_discarding_after_a_failed_create(
+        self, tmp_path: Path, error: Exception, names_the_key_list: bool
+    ) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeySetupInterrupted,
+        )
+
+        service = _iam_with_key()
+        self._keys(service).create.return_value.execute.side_effect = error
+        with _fail_on_close(KeyboardInterrupt()):
+            with pytest.raises(KeyboardInterrupt) as raised:
+                self._download(service, tmp_path / "key.json")
+        # A key may exist only after a 5xx: then say how to find it.
+        assert isinstance(raised.value, KeySetupInterrupted) is names_the_key_list
+        assert ("keys list" in str(raised.value)) is names_the_key_list
+
+    def test_bad_key_data_on_overwrite_leaves_the_old_file(
+        self, tmp_path: Path
+    ) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeyNotSavedError,
+        )
+
+        service = _iam_with_key()
+        self._keys(service).create.return_value.execute.return_value = {
+            "name": NEW_KEY_NAME,
+            "privateKeyData": "not base64 json",  # pragma: allowlist secret
+        }
+        key = tmp_path / "key.json"
+        key.write_text('{"old": true}')
+        with pytest.raises(KeyNotSavedError) as raised:
+            self._download(service, key, overwrite=True)
+        # truncate(0) never ran, so nothing claims the file was emptied.
+        assert key.read_text() == '{"old": true}'
+        assert "earlier content" not in str(raised.value)
+
     def test_failed_overwrite_says_the_old_file_is_lost(self, tmp_path: Path) -> None:
         from slack_chat_migrator.services.setup.service_account import (
             KeyNotSavedError,
@@ -963,6 +1038,16 @@ class TestDownloadKey:
             assert type(copy) is type(error)
             assert str(copy) == "m"
             assert copy.__dict__ == error.__dict__
+
+    def test_interrupt_has_a_default_message(self) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeySetupInterrupted,
+        )
+
+        error = KeySetupInterrupted()
+        assert "Interrupted" in str(error)
+        assert error.key_name == ""
+        assert error.deleted is False
 
     def test_deleted_is_keyword_only(self) -> None:
         from slack_chat_migrator.services.setup.service_account import (

@@ -490,7 +490,7 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
             credentials, state.service_account_email, key_path, overwrite=overwrite
         )
     except KeySetupInterrupted as e:
-        # Name the key that may be left in IAM, then stop like any Ctrl-C.
+        # Say what Ctrl-C left behind, then stop like any Ctrl-C.
         console.print(f"\n[red]{e}[/red]")
         state.mark_step("key", StepStatus.SKIPPED)
         raise

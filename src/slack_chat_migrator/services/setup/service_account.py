@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 from google.auth.exceptions import GoogleAuthError
 from googleapiclient.errors import HttpError
@@ -440,7 +440,18 @@ def _rebuild_error(
     return error
 
 
-class KeyNotSavedError(Exception):
+class _PicklableError(BaseException):
+    """Pickles an exception through ``args`` plus its attributes.
+
+    The default pickling calls ``cls(*args)``, which fails for exceptions
+    with required keyword-only attributes.
+    """
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (_rebuild_error, (type(self), self.args, self.__dict__))
+
+
+class KeyNotSavedError(_PicklableError, Exception):
     """A new key was created in IAM but couldn't be written to its file.
 
     Attributes:
@@ -456,17 +467,15 @@ class KeyNotSavedError(Exception):
         self.key_name = key_name
         self.deleted = deleted
 
-    def __reduce__(self) -> tuple[Any, ...]:
-        return (_rebuild_error, (type(self), self.args, self.__dict__))
 
-
-class KeyCreateError(Exception):
+class KeyCreateError(_PicklableError, Exception):
     """``keys.create`` failed, so no key file was written.
 
     Attributes:
         maybe_created: True when the outcome is unknown (a network failure,
             a timeout, HTTP 408 or 5xx): IAM may have created the key.
-            False when IAM refused the request, so no key exists.
+            False when IAM refused the request or the credentials failed
+            before it was sent, so this request created no key.
         status: The HTTP status, or None when there was no response.
     """
 
@@ -477,28 +486,32 @@ class KeyCreateError(Exception):
         self.maybe_created = maybe_created
         self.status = status
 
-    def __reduce__(self) -> tuple[Any, ...]:
-        return (_rebuild_error, (type(self), self.args, self.__dict__))
 
-
-class KeySetupInterrupted(KeyboardInterrupt):
-    """Ctrl-C while a new key was being created or cleaned up.
+class KeySetupInterrupted(_PicklableError, KeyboardInterrupt):
+    """Ctrl-C while a new key was being created, saved or cleaned up.
 
     It is still a :class:`KeyboardInterrupt`, so the run stops as for any
-    Ctrl-C; its message says which key may be left active in IAM and how to
-    delete it.
+    Ctrl-C; its message says what the interruption left behind: a key that
+    may still be active in IAM (and how to find and delete it), or an
+    earlier key file that was emptied for the new key.
 
     Attributes:
         key_name: The new key's IAM resource name, or "" when it isn't
             known (Ctrl-C during ``keys.create``).
+        deleted: True if the new key was deleted again, so no key is left
+            in IAM.
     """
 
-    def __init__(self, message: str, key_name: str = "") -> None:
+    def __init__(
+        self,
+        message: str = "Interrupted while setting up a service account key.",
+        key_name: str = "",
+        *,
+        deleted: bool = False,
+    ) -> None:
         super().__init__(message)
         self.key_name = key_name
-
-    def __reduce__(self) -> tuple[Any, ...]:
-        return (_rebuild_error, (type(self), self.args, self.__dict__))
+        self.deleted = deleted
 
 
 def _list_keys_command(service_account_email: str) -> str:
@@ -724,10 +737,25 @@ def download_key(
         os.close(fd)
         raise
 
-    def discard_file() -> None:
-        out.close()
+    def discard_file() -> bool:
+        """Close the output file, and remove it if this call created it.
+
+        Never raises, so it can't pre-empt deleting or reporting a key.
+
+        Returns:
+            True if Ctrl-C arrived while closing the file.
+        """
+        interrupted = False
+        try:
+            out.close()
+        except BaseException as close_error:
+            interrupted = isinstance(close_error, KeyboardInterrupt)
+            log_with_context(
+                logging.DEBUG, f"Couldn't close {output_path}: {close_error!r}"
+            )
         if not existed:
             _remove_quietly(output_path)
+        return interrupted
 
     try:
         # O_CREAT's mode only applies to new files; tighten an existing one.
@@ -749,22 +777,36 @@ def download_key(
             .execute()
         )
     except BaseException as e:
-        discard_file()
+        interrupted = discard_file()
         failure = _create_failure(e, service_account_email, requested_at)
         if failure is None:
             raise
+        if interrupted and isinstance(failure, KeyCreateError):
+            if not failure.maybe_created:
+                raise KeyboardInterrupt from e  # nothing was created
+            failure = KeySetupInterrupted(str(failure))
         raise failure from e
 
+    truncated = False  # whether an existing file was emptied for the new key
     try:
         key_data = json.loads(base64.b64decode(key["privateKeyData"]))
         out.truncate(0)
+        truncated = existed
         json.dump(key_data, out, indent=2)
         out.close()
     except BaseException as e:
-        discard_file()
-        _handle_unsaved_key(
-            service, key, output_path, e, service_account_email, existed, requested_at
+        # Delete (or name) the key first; closing and removing the file
+        # comes after and can't stop that.
+        outcome = _unsaved_key_outcome(
+            service, key, output_path, e, service_account_email, truncated, requested_at
         )
+        if discard_file() and isinstance(outcome, KeyNotSavedError):
+            outcome = KeySetupInterrupted(
+                str(outcome), outcome.key_name, deleted=outcome.deleted
+            )
+        if outcome is e:
+            raise
+        raise outcome from e
     return output_path
 
 
@@ -776,16 +818,18 @@ def _remove_quietly(path: Path) -> None:
         log_with_context(logging.DEBUG, f"Couldn't remove {path}: {e}")
 
 
-def _handle_unsaved_key(
+def _unsaved_key_outcome(
     service: Any,
     key: Mapping[str, Any],
     output_path: Path,
     error: BaseException,
     service_account_email: str,
-    overwrote: bool,
+    truncated: bool,
     requested_at: datetime,
-) -> NoReturn:
-    """Delete a new key that couldn't be saved, then raise what happened.
+) -> BaseException:
+    """Delete a new key that couldn't be saved, and say what happened.
+
+    Never raises: a failed or interrupted delete is part of the outcome.
 
     Args:
         service: The IAM client that created the key.
@@ -793,18 +837,18 @@ def _handle_unsaved_key(
         output_path: Where the key should have been written.
         error: Why writing it failed.
         service_account_email: The key's service account.
-        overwrote: True if *output_path* held an earlier file, which is now
-            truncated.
+        truncated: True if an earlier file at *output_path* was already
+            emptied for the new key.
         requested_at: When ``keys.create`` was sent, to identify the key
             when IAM didn't return its name.
 
-    Raises:
-        KeyboardInterrupt: The original Ctrl-C, when the key was deleted
-            and no earlier file was lost.
-        KeySetupInterrupted: On Ctrl-C (while saving or while deleting)
-            with the key possibly still active, or an earlier file lost.
-        KeyNotSavedError: Otherwise; ``deleted`` says whether the key is
-            gone.
+    Returns:
+        The exception to raise: *error* itself (a plain Ctrl-C, when the
+        key was deleted and no earlier file was lost);
+        :class:`KeySetupInterrupted` on Ctrl-C (while saving or while
+        deleting) with the key possibly still active or an earlier file
+        lost; otherwise :class:`KeyNotSavedError`, whose ``deleted`` says
+        whether the key is gone.
     """
     key_name = str(key.get("name", ""))
     delete_error: BaseException | None = None
@@ -820,21 +864,21 @@ def _handle_unsaved_key(
     )
     cause = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
     lost_file = (
-        f" {output_path} no longer holds its earlier content (it was truncated"
+        f" {output_path} no longer holds its earlier content (it was emptied"
         " for the new key); restore it or remove it."
-        if overwrote
+        if truncated
         else ""
     )
     if delete_error is None:
-        if isinstance(error, KeyboardInterrupt) and not overwrote:
-            raise error  # nothing is left behind: a plain Ctrl-C
+        if isinstance(error, KeyboardInterrupt) and not truncated:
+            return error  # nothing is left behind: a plain Ctrl-C
         message = (
             f"The new key couldn't be saved to {output_path} ({cause}); it was"
             f" deleted again, so no key is left in IAM.{lost_file}"
         )
         if interrupted:
-            raise KeySetupInterrupted(message, key_name) from error
-        raise KeyNotSavedError(message, key_name, deleted=True) from error
+            return KeySetupInterrupted(message, key_name, deleted=True)
+        return KeyNotSavedError(message, key_name, deleted=True)
 
     if isinstance(delete_error, KeyboardInterrupt):
         how = "deleting it was interrupted"
@@ -857,5 +901,5 @@ def _handle_unsaved_key(
         + lost_file
     )
     if interrupted:
-        raise KeySetupInterrupted(message, key_name) from error
-    raise KeyNotSavedError(message, key_name, deleted=False) from error
+        return KeySetupInterrupted(message, key_name, deleted=False)
+    return KeyNotSavedError(message, key_name, deleted=False)
