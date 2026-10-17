@@ -933,12 +933,12 @@ class TestSlackTokenRedaction:
     @pytest.mark.parametrize(
         "token",
         [
-            "xoxp-1234-5678-abcd",
-            "xoxb-12345-67890-AbCdEf",
-            "xoxp-1-abc",
-            "xoxa-2-abc",
-            "xoxs-12-abc",
-            "xoxr-3-abc",
+            "xoxp-1234-5678-abcd",  # pragma: allowlist secret
+            "xoxb-12345-67890-AbCdEf",  # pragma: allowlist secret
+            "xoxp-1-abc",  # pragma: allowlist secret
+            "xoxa-2-abc",  # pragma: allowlist secret
+            "xoxs-12-abc",  # pragma: allowlist secret
+            "xoxr-3-abc",  # pragma: allowlist secret
             "xapp-1-A0-123-abc",
         ],
     )
@@ -953,7 +953,9 @@ class TestSlackTokenRedaction:
         assert "1234567890-abcdef" not in result
 
     def test_redacts_rotating_token(self):
-        result = sanitize_for_log("refresh xoxe.xoxp-1-Mi0yLTE2 done")
+        result = sanitize_for_log(
+            "refresh xoxe.xoxp-1-Mi0yLTE2 done"
+        )  # pragma: allowlist secret
         assert "Mi0yLTE2" not in result
 
     def test_does_not_touch_ordinary_words(self):

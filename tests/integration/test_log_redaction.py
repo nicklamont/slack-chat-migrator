@@ -34,7 +34,9 @@ def _export_with_tokenised_files(tmp_path: Path) -> Path:
             f"https://files.slack.com/files-pri/T1-{f['id']}/a.txt?t={SLACK_FILE_CREDENTIAL_SAMPLE}"
         )
         f["url_private_download"] = f["url_private"] + "&dl=1"
-    message["text"] = f"see {message['files'][0]['url_private']} and xoxp-9-SECRET"
+    message["text"] = (
+        f"see {message['files'][0]['url_private']} and xoxp-9-SECRET"  # pragma: allowlist secret
+    )
     return build_export(
         export,
         users=USERS,
@@ -74,7 +76,7 @@ def test_dry_run_logs_contain_no_tokens(tmp_path: Path) -> None:
         os.umask(old_umask)
 
     assert SLACK_FILE_CREDENTIAL_SAMPLE not in result.output
-    assert "xoxp-9-SECRET" not in result.output
+    assert "xoxp-9-SECRET" not in result.output  # pragma: allowlist secret
 
     run_dirs = list(Path("migration_logs").glob("run_*"))
     assert len(run_dirs) == 1
