@@ -102,6 +102,8 @@ def _make_handler(
             dry_run=dry_run,
             **deps,
         )
+    # No Drive file from an earlier run unless a test says otherwise.
+    handler.drive_uploader.find_uploaded_slack_file.return_value = None
 
     return handler
 
@@ -1738,3 +1740,19 @@ class TestTempFileLifecycle:
             deps["state"].context.output_dir = str(tmp_path)
             FileHandler(MagicMock(), MagicMock(), None, **deps)
         sweep.assert_called_once_with(str(tmp_path))
+
+
+def test_unavailable_slack_download_url_is_not_kept():
+    """A tokenised Slack URL must not end up in a message placeholder."""
+    handler = _make_handler(folder_id="root")
+    signed_url = "https://files.slack.com/files-pri/T-F/a.png?t=xoxe-secret"
+    handler._download_file = MagicMock(
+        return_value=DownloadResult(
+            DownloadStatus.UNAVAILABLE, reason="html_page", url=signed_url
+        )
+    )
+    result = handler.upload_attachment(
+        {"id": "F1", "name": "a.png", "url_private": signed_url}, "general"
+    )
+    assert result.skip_reason == "unavailable"
+    assert result.url is None

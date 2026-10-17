@@ -18,6 +18,7 @@ import enum
 import hashlib
 import logging
 import os
+import re
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -176,6 +177,14 @@ def redact_url(url: str | None) -> str:
         return ""
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
+_QUERY_IN_TEXT = re.compile(r"\?[^\s'\")]+")
+
+
+def _redact_error(error: BaseException) -> str:
+    """Error text with URL query strings removed (export URLs embed tokens)."""
+    return _QUERY_IN_TEXT.sub("?<redacted>", str(error))
 
 
 def is_allowed_file_url(url: str) -> bool:
@@ -483,7 +492,7 @@ def download_file(
             f"Failed to download file {name} after retries: {type(e).__name__}",
             channel=channel,
             file_id=file_id,
-            error=str(e),
+            error=_redact_error(e),
         )
         return DownloadResult(
             DownloadStatus.FAILED,
@@ -541,7 +550,7 @@ def download_file(
                 f"Download of {name} was interrupted: {type(e).__name__}",
                 channel=channel,
                 file_id=file_id,
-                error=str(e),
+                error=_redact_error(e),
             )
             return DownloadResult(
                 DownloadStatus.FAILED,

@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from slack_chat_migrator.services.files.file import SKIP_REASON_UNAVAILABLE
 from slack_chat_migrator.types import UploadResult
 from slack_chat_migrator.utils.logging import log_with_context
 
@@ -215,7 +216,7 @@ class MessageAttachmentProcessor:
                         channel=channel,
                         file_id=file_id,
                     )
-                    if upload_result.skip_reason == ISSUE_UNAVAILABLE:
+                    if upload_result.skip_reason == SKIP_REASON_UNAVAILABLE:
                         result.issues.append(
                             AttachmentIssue(
                                 file_id,

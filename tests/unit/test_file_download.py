@@ -724,3 +724,16 @@ class TestExportFlags:
 
     def test_list_csv_url_counts_as_a_url(self):
         assert unavailable_reason({"list_csv_download_url": SLACK_DL_URL}) is None
+
+
+def test_network_error_logs_do_not_leak_tokens(dest, caplog):
+    query = "t=xoxe-1-SECRET"
+    error = requests.ConnectionError(
+        f"Max retries exceeded with url: /files-pri/T-F/a.png?{query} (Caused by x)"
+    )
+    session = FakeSession({SLACK_URL: error})
+    with caplog.at_level("DEBUG", logger="slack_chat_migrator"):
+        download_file(png_file(), str(dest), session=session)
+    assert "SECRET" not in caplog.text
+    for record in caplog.records:
+        assert "SECRET" not in str(getattr(record, "error", ""))

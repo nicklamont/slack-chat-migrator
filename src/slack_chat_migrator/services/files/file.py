@@ -29,6 +29,7 @@ from slack_chat_migrator.services.drive import (
 )
 from slack_chat_migrator.services.drive.drive_uploader import SOURCE_SLACK_ID
 from slack_chat_migrator.services.files.file_download import (
+    REASON_EXTERNAL,
     DownloadResult,
     DownloadStatus,
     create_drive_reference,
@@ -415,11 +416,15 @@ class FileHandler:
         user_service: ChatAdapter | None = None,
         sender_email: str | None = None,
     ) -> UploadResult:
-        """Fetch one Slack file and upload it, without touching the stats.
+        """Fetch one Slack file and upload it: the per-file unit of work.
 
-        This is the per-file unit of work: download (streamed to a temp
-        file), then direct Chat upload or Drive upload.  The temp file is
-        deleted before returning.
+        Downloads (streamed to a temp file), then uploads directly to Chat
+        or to Drive; the temp file is deleted before returning.  Upload
+        counters and :attr:`processed_files` are left to the caller.  Shared
+        caches are only changed through small helpers (``_mark_granted``,
+        ``_increment_stat``, ``DriveFileUploader.remember_file``,
+        ``FolderManager.remember_folder``), so a prefetch pool can call this
+        once locks are added there.
 
         Args:
             file_obj: The file object from Slack.
@@ -614,11 +619,12 @@ class FileHandler:
         return (file_id, channel or "", space or "")
 
     def _is_drive_bound(self, file_obj: dict[str, Any], space: str | None) -> bool:
-        """Whether the file will go to Drive (judged from Slack's metadata).
+        """Whether the file will be downloaded and uploaded to Drive.
 
-        Small images may go straight to Chat; everything else, including
-        files whose download would be skipped, is Drive-bound only if it
-        needs downloading.
+        Judged from Slack's metadata before downloading: small images with a
+        target space may go straight to Chat instead, and files that won't
+        be downloaded at all (Google links, unavailable files) aren't
+        Drive-bound.
         """
         if google_link_status(file_obj) or unavailable_reason(file_obj):
             return False
@@ -733,11 +739,14 @@ class FileHandler:
             return UploadResult(error="Failed to create Drive reference", name=name)
 
         if download.status is DownloadStatus.UNAVAILABLE:
+            # Only an external file's own link is worth keeping; Slack's
+            # download URLs can carry an export token.
+            keep_link = download.reason == REASON_EXTERNAL
             return UploadResult(
                 upload_type="skip",
                 skip_reason=SKIP_REASON_UNAVAILABLE,
                 name=name,
-                url=download.url,
+                url=download.url if keep_link else None,
                 metadata={"unavailable_reason": download.reason},
             )
 

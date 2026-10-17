@@ -64,6 +64,15 @@ class DriveUpload:
 #: Cached Drive file: (file_id, webViewLink).
 _CachedFile = tuple[str, Optional[str]]
 
+#: Drive limits each appProperties entry to 124 bytes of key plus value.
+_APP_PROPERTY_MAX_BYTES = 124
+
+
+def _fit_app_property(key: str, value: str) -> str:
+    """Truncate *value* so ``key + value`` fits in an appProperties entry."""
+    budget = _APP_PROPERTY_MAX_BYTES - len(key.encode("utf-8"))
+    return value.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+
 
 class DriveFileUploader:
     """Handles file uploads to Google Drive."""
@@ -433,7 +442,9 @@ class DriveFileUploader:
             if slack_file_id:
                 app_properties = {DRIVE_APP_PROPERTY_SLACK_FILE_ID: slack_file_id}
                 if channel:
-                    app_properties[DRIVE_APP_PROPERTY_SLACK_CHANNEL] = channel
+                    app_properties[DRIVE_APP_PROPERTY_SLACK_CHANNEL] = (
+                        _fit_app_property(DRIVE_APP_PROPERTY_SLACK_CHANNEL, channel)
+                    )
                 file_metadata["appProperties"] = app_properties
 
             media = MediaFileUpload(

@@ -702,3 +702,28 @@ class TestSlackFileIndex:
         assert upload.file_id == "old"
         assert upload.source == "slack_id"
         uploader.drive_service.create_file.assert_not_called()
+
+
+@patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+def test_long_channel_names_fit_app_property_limit(mock_media_cls, tmp_path):
+    """Drive allows 124 bytes per appProperties entry (key + value)."""
+    uploader = _make_uploader()
+    uploader.folders_pre_cached.add("folder1")
+    test_file = tmp_path / "a.pdf"
+    test_file.write_bytes(b"pdf")
+    uploader.drive_service.create_file.return_value = {"id": "new"}
+    channel = "mpdm-" + "--".join(f"user{i}" for i in range(40)) + "-é"
+
+    uploader.upload_file_to_drive(
+        str(test_file),
+        "a.pdf",
+        "folder1",
+        file_hash="h",
+        slack_file_id="F1",
+        channel=channel,
+    )
+
+    props = uploader.drive_service.create_file.call_args.kwargs["body"]["appProperties"]
+    for key, value in props.items():
+        assert len(key.encode()) + len(value.encode()) <= 124
+    assert channel.startswith(props["slackChannel"])
