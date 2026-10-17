@@ -2175,3 +2175,34 @@ class TestTimestampsInUtc:
     def test_tz_fixture_really_changes_local_time(self, far_from_utc):
         assert os.environ["TZ"] == "Asia/Tokyo"
         assert time.localtime(1700000000).tm_hour == 7
+
+
+class TestMalformedInput:
+    """Malformed export data doesn't crash the renderer."""
+
+    def test_non_dict_message_blocks_entries(self):
+        message = {
+            "text": "",
+            "attachments": [
+                {
+                    "is_share": True,
+                    "message_blocks": ["oops", {"message": "not a dict"}],
+                    "text": "shared text",
+                }
+            ],
+        }
+        assert parse_slack_blocks(message).endswith("shared text")
+
+    def test_non_mapping_style(self):
+        elements = [{"type": "text", "text": "plain", "style": ["bold"]}]
+        assert _parse_rich_text_elements(elements) == "plain"
+
+    def test_non_dict_blocks_and_elements(self):
+        message = {
+            "text": "t",
+            "blocks": [
+                "junk",
+                {"type": "rich_text", "elements": ["junk", _section("junk")]},
+            ],
+        }
+        assert parse_slack_blocks(message) == "t"

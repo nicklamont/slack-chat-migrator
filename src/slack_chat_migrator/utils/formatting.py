@@ -297,7 +297,9 @@ def _render_element(element: dict, rctx: _RenderContext, in_code: bool) -> str:
         The mrkdwn for the element.
     """
     el_type = str(element.get("type"))
-    style: _Style = {} if in_code else (element.get("style") or {})
+    style = element.get("style")
+    if in_code or not isinstance(style, Mapping):
+        style = {}
     renderer = _ELEMENT_RENDERERS.get(el_type)
     rendered = renderer(element, style, rctx) if renderer else None
     if rendered is not None:
@@ -387,8 +389,9 @@ def _render_shared_message(
     # Prefer rich message_blocks over plain text
     forwarded_text = ""
     for msg_block in attachment.get("message_blocks") or []:
-        if "message" in msg_block and "blocks" in msg_block["message"]:
-            forwarded_text = parse_slack_blocks(msg_block["message"], custom_emoji_map)
+        nested = msg_block.get("message") if isinstance(msg_block, dict) else None
+        if isinstance(nested, dict) and "blocks" in nested:
+            forwarded_text = parse_slack_blocks(nested, custom_emoji_map)
             break
 
     if not forwarded_text:
@@ -530,20 +533,20 @@ def _convert_bullets_to_gchat(text: str) -> str:
     return "\n".join(lines)
 
 
-def _combine_with_attachments(main_text: str, forwarded_texts: list[str]) -> str:
+def _combine_with_attachments(main_text: str, attachment_texts: list[str]) -> str:
     """Combine main message text with rendered attachments.
 
     Args:
         main_text: The primary message text.
-        forwarded_texts: Rendered attachments (forwarded messages, alerts...).
+        attachment_texts: Rendered attachments (forwarded messages, alerts...).
 
     Returns:
         Combined text, using only the attachments when main text is empty.
     """
-    if not main_text.strip() and forwarded_texts:
-        return "\n\n".join(forwarded_texts)
-    if main_text.strip() and forwarded_texts:
-        return main_text + "\n\n" + "\n\n".join(forwarded_texts)
+    if not main_text.strip() and attachment_texts:
+        return "\n\n".join(attachment_texts)
+    if main_text.strip() and attachment_texts:
+        return main_text + "\n\n" + "\n\n".join(attachment_texts)
     return main_text
 
 
