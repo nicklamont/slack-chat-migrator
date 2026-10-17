@@ -279,7 +279,7 @@ Run the full Slack-to-Google-Chat migration.
 | Option | Required | Description |
 |--------|----------|-------------|
 | `--creds_path` | Live only | Path to the service account credentials JSON file (optional with `--dry_run`) |
-| `--export_path` | Yes | Path to the Slack export directory |
+| `--export_path` | Yes (not with `--complete`) | Path to the Slack export directory |
 | `--workspace_admin` | Live only | Email of workspace admin to impersonate (optional with `--dry_run`) |
 | `--config` | No | Path to config YAML (default: config.yaml) |
 | `--dry_run` | No | Validation-only mode - performs comprehensive validation without making changes |
