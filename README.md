@@ -5,7 +5,7 @@ Migrates Slack workspace JSON exports into Google Chat spaces via the [Google Ch
 ### Features
 
 - Imports all messages (including threaded replies)
-- Uploads attachments into Google Drive with name+MD5 deduplication
+- Uploads attachments into per-channel Google Drive folders with MD5 deduplication, and converts Slack canvases and lists to Google Docs and Sheets
 - Migrates emoji reactions using per-user impersonation
 - Posts channel metadata (purpose/topic) from `channels.json`
 - Retries API calls on transient errors with exponential backoff
@@ -517,6 +517,28 @@ The migration tool writes a checkpoint file (`.migration_checkpoint.json`) in th
 If a migration is interrupted (e.g., by a crash or `Ctrl+C`), the checkpoint allows the tool to skip already-completed channels on the next run. The checkpoint file is automatically removed after a successful migration completes.
 
 > **Note:** The checkpoint tracks channel-level progress only. If a migration is interrupted mid-channel, that channel will be reprocessed from the beginning on the next run.
+
+### Attachments and Shared Drives
+
+Files attached to Slack messages, including files inside shared or forwarded messages, are migrated as follows:
+
+- **Where they go.** Small images (JPEG, PNG, GIF or WebP up to 25 MB) are attached to the Chat message directly. Everything else is uploaded to Google Drive, into one folder per channel, and linked from the message.
+- **Which shared drive.** The tool uses `shared_drive.id` if set, and stops with an error if that drive can't be opened. Otherwise it looks for a shared drive named `shared_drive.name` (default "Imported Slack Attachments") across all the admin's shared drives, and creates it only if none exists. If several drives have that name, the first is used and a warning lists them all; set `shared_drive.id` to pick one. If no shared drive can be used, the files go to a regular folder in the admin's My Drive, and each file's ownership is transferred to the Slack user who uploaded it.
+- **Access.** After a channel is imported, its folder is shared with the channel's members as readers. Re-running the sync removes people who have left the channel; the workspace admin, shared drive managers and inherited access are never removed. The person who posted a file also gets edit access to that file. External (non-workspace) users are never given Drive access.
+- **Private conversations.** With `restrict_private_channel_folders: true` (the default) and a shared drive, the folders of private channels, group DMs and DMs are [limited-access folders](https://developers.google.com/workspace/drive/api/guides/limited-expansive-access): only the folder's own members, shared drive managers and the admin can open them, not every member of the shared drive. A conversation counts as public when `channels.json` lists it and it isn't private.
+- **Canvases and lists.** With `convert_canvases: true` (the default), Slack canvases are uploaded as Google Docs and Slack Lists (from their CSV export) as Google Sheets, named after their title. If a conversion fails, or the option is off, the HTML or CSV file is uploaded instead. Canvases that aren't attached to any message (`canvases.json`) and canvas comments (`FC:` folders) are not migrated.
+- **Downloads.** Files are downloaded from the export's `url_private_download` (or `url_private`) links, only over HTTPS from Slack's file hosts (`slack.com`, `slack-edge.com`, `slack-files.com` and their subdomains). Redirects elsewhere are refused. Rate limits (429) and server errors are retried with backoff. If the export's links have expired or your workspace requires authentication, set `slack_token` (or the `SLACK_TOKEN` environment variable) to a Slack token with `files:read`; it is sent as an `Authorization: Bearer` header to Slack's hosts only.
+- **Unavailable files.** Some files can't be migrated: deleted files, files hidden by the Slack plan's history limit, files stored outside Slack (Dropbox, Box and other external links), files the export can't read, and downloads that return a sign-in page or the wrong number of bytes. These are counted as *unavailable* (`unavailable_files` in the report), not as failed uploads, and the message keeps its text.
+- **Duplicates and re-runs.** Identical files posted in the same channel are stored once. Each upload is tagged with its Slack file ID, so a re-run links files that are already in Drive without downloading them again.
+- **Large files.** Downloads are streamed to disk and uploads are sent in resumable 16 MiB chunks, so memory use doesn't grow with file size. Drive accepts files up to 5 TB; the 200 MB limit applies only to direct Chat uploads. Temporary files live in `<run output dir>/.attachment_tmp/` and are deleted after each upload; anything left behind by a killed run is removed at the next start.
+
+```yaml
+shared_drive:
+  name: "Imported Slack Attachments"   # or pin a drive: id: "0AInA6b6Ej1Q2Uk9PVA"
+slack_token: ""                        # optional; or set SLACK_TOKEN
+convert_canvases: true                 # canvases -> Docs, lists -> Sheets
+restrict_private_channel_folders: true # limited-access folders for private conversations
+```
 
 ### Output Directory and Log Files
 
