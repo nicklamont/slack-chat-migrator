@@ -133,12 +133,45 @@ class FakeDrive:
         return FakeBatch(self, callback)
 
 
+#: Drive's file query terms (developers.google.com/workspace/drive/api/
+#: guides/ref-search-terms), plus ``key``/``value`` inside ``has { }``.
+FILE_QUERY_TERMS = frozenset(
+    {
+        "name",
+        "fullText",
+        "mimeType",
+        "modifiedTime",
+        "viewedByMeTime",
+        "trashed",
+        "starred",
+        "parents",
+        "owners",
+        "writers",
+        "readers",
+        "sharedWithMe",
+        "createdTime",
+        "properties",
+        "appProperties",
+        "visibility",
+        "shortcutDetails.targetId",
+        "key",
+        "value",
+    }
+)
+_QUOTED = re.compile(r"'(?:[^'\\]|\\.)*'")
+_TERM = re.compile(r"([A-Za-z_][\w.]*)\s*(?:!=|<=|>=|=|<|>|\bcontains\b|\bhas\b)")
+
+
+def _check_file_query(q: str) -> None:
+    """Reject a files.list query term Drive doesn't know, as Drive does."""
+    for term in _TERM.findall(_QUOTED.sub("''", q)):
+        if term not in FILE_QUERY_TERMS:
+            raise http_error(400, f"Invalid Value: unknown query term {term!r}")
+
+
 def _matches(record: dict[str, Any], q: str) -> bool:
     m = re.search(r"'((?:[^'\\]|\\.)*)' in parents", q)
     if m and m.group(1).replace("\\'", "'") not in record.get("parents", []):
-        return False
-    m = re.search(r"md5Checksum ?= ?'([^']+)'", q)
-    if m and record.get("md5Checksum") != m.group(1):
         return False
     m = re.search(r"name ?= ?'((?:[^'\\]|\\.)*)'", q)
     if m and record.get("name") != m.group(1).replace("\\'", "'").replace("\\\\", "\\"):
@@ -177,6 +210,7 @@ class _Files:
 
         def run():
             q = kw.get("q", "")
+            _check_file_query(q)
             error = self.d.fail_query(q) if self.d.fail_query else None
             if error is not None:
                 raise error

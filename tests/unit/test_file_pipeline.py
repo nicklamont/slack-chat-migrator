@@ -1091,6 +1091,7 @@ class TestRerun:
         assert downloads.calls == ["F1"]
         record = fake.files_db[first.drive_id]
         assert record["appProperties"] == {
+            "slackMd5": hashlib.md5(b"report body").hexdigest(),  # noqa: S324
             "slackFileId": "F1",
             "slackChannel": "general",
         }
@@ -1738,10 +1739,35 @@ class TestCanvasConversion:
         result = upload(handler, downloads, "c", "F1", "UA", b"one")
 
         assert result.success
-        searches = [
-            kw for name, kw in fake.calls if kw.get("q", "").startswith("appProperties")
+        queries = [kw.get("q", "") for name, kw in fake.calls if name == "files.list"]
+        assert sum("key='slackFileId'" in q for q in queries) == 1
+        assert sum("key='slackMd5'" in q for q in queries) == 1
+
+    @pytest.mark.parametrize("failures", [1, 3])
+    def test_failed_listing_still_uploads_and_dedups(
+        self, tmp_path, downloads, failures
+    ):
+        """The content search is valid, so a failed listing fails no file (#125)."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        first = upload(handler, downloads, "c", "F0", "UA", b"same")
+        folder = fake.files_db[first.drive_id]["parents"][0]
+        handler.drive_uploader.folders_pre_cached.discard(folder)
+        handler.drive_uploader.file_hash_cache.clear()
+        listing = f"'{folder}' in parents and trashed=false"
+        left = iter(range(failures))
+        fake.fail_query = lambda q: (
+            http_error(500) if q == listing and next(left, None) is not None else None
+        )
+
+        results = [
+            upload(handler, downloads, "c", f"F{i}", "UA", body)
+            for i, body in enumerate([b"same", b"new one", b"new two"], start=1)
         ]
-        assert len(searches) == 1
+
+        assert [r.success for r in results] == [True, True, True]
+        assert results[0].drive_id == first.drive_id  # found by its slackMd5 tag
+        assert handler.get_file_statistics()["failed_uploads"] == 0
 
     def test_plain_csv_attachment_is_not_converted(self, tmp_path, downloads):
         fake = FakeDrive()

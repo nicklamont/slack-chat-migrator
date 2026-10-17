@@ -115,6 +115,13 @@ _CONVERSION_FAILURE_STATUSES = frozenset({400, 413, 415, 500})
 _UPLOAD_ERRORS: tuple[type[BaseException], ...] = (OSError, *DRIVE_CALL_ERRORS)
 
 
+#: appProperties key holding the MD5 of an upload's content, so a folder
+#: that couldn't be listed can still be searched by content
+#: (``md5Checksum`` is a file field, not a search term).  Converted Google
+#: files don't get it: their content differs from the uploaded bytes.
+APP_PROPERTY_SLACK_MD5 = "slackMd5"
+
+
 #: Cached Drive file: (file_id, webViewLink).
 _CachedFile = tuple[str, str | None]
 
@@ -291,7 +298,9 @@ class DriveFileUploader:
                     app_properties = file.get("appProperties") or {}
                     self.pending.read(file_id, app_properties)
                     slack_file_id = app_properties.get(DRIVE_APP_PROPERTY_SLACK_FILE_ID)
-                    md5 = file.get("md5Checksum")
+                    md5 = file.get("md5Checksum") or app_properties.get(
+                        APP_PROPERTY_SLACK_MD5
+                    )
                     if md5 or slack_file_id:
                         self.remember_file(
                             folder_id,
@@ -428,7 +437,9 @@ class DriveFileUploader:
         """Find a file with this MD5 in *folder_id*.
 
         The folder cache is trusted.  Drive is searched only when the folder
-        could not be pre-cached.
+        could not be pre-cached, by the ``slackMd5`` tag this tool sets on
+        its uploads: ``md5Checksum`` can't be searched.  Files uploaded by
+        older versions, without the tag, are found only by their Slack ID.
 
         Args:
             file_hash: MD5 hash of the file
@@ -456,7 +467,8 @@ class DriveFileUploader:
         safe_hash = escape_drive_query_value(file_hash)
         safe_folder_id = escape_drive_query_value(folder_id)
         query = (
-            f"md5Checksum='{safe_hash}' and '{safe_folder_id}' in parents"
+            f"appProperties has {{ key='{APP_PROPERTY_SLACK_MD5}' and"
+            f" value='{safe_hash}' }} and '{safe_folder_id}' in parents"
             " and trashed=false"
         )
 
@@ -651,7 +663,7 @@ class DriveFileUploader:
         channel: str | None,
         target_mime_type: str | None,
     ) -> DriveUpload | DriveUploadFailure:
-        """Upload a new file, tagged with its Slack file ID and channel.
+        """Upload a new file, tagged with its Slack file ID, channel and MD5.
 
         Raises:
             Any error from the upload; :meth:`upload_file_to_drive` turns
@@ -663,14 +675,18 @@ class DriveFileUploader:
             channel=self._get_current_channel(),
         )
         file_metadata: dict[str, Any] = {"name": filename, "parents": [folder_id]}
+        app_properties: dict[str, str] = {}
         if target_mime_type:
             file_metadata["mimeType"] = target_mime_type
+        else:
+            app_properties[APP_PROPERTY_SLACK_MD5] = file_hash
         if slack_file_id:
-            app_properties = {DRIVE_APP_PROPERTY_SLACK_FILE_ID: slack_file_id}
+            app_properties[DRIVE_APP_PROPERTY_SLACK_FILE_ID] = slack_file_id
             if channel:
                 app_properties[DRIVE_APP_PROPERTY_SLACK_CHANNEL] = _fit_app_property(
                     DRIVE_APP_PROPERTY_SLACK_CHANNEL, channel
                 )
+        if app_properties:
             file_metadata["appProperties"] = app_properties
 
         media = MediaFileUpload(

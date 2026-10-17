@@ -304,8 +304,10 @@ class TestFindFileByHash:
             "https://found_link",
         )
         query = uploader.drive_service.list_files.call_args.kwargs["q"]
-        assert "'folder1' in parents" in query
-        assert "trashed=false" in query
+        assert query == (
+            "appProperties has { key='slackMd5' and value='new_hash' }"
+            " and 'folder1' in parents and trashed=false"
+        )  # md5Checksum is a field, not a search term
 
     def test_failed_search_is_raised_not_read_as_not_found(self):
         """Reading it as "not found" would upload a duplicate (#118)."""
@@ -889,7 +891,11 @@ class TestSlackFileIndex:
         )
 
         body = uploader.drive_service.create_file.call_args.kwargs["body"]
-        assert body["appProperties"] == {"slackFileId": "F9", "slackChannel": "general"}
+        assert body["appProperties"] == {
+            "slackMd5": "h1",
+            "slackFileId": "F9",
+            "slackChannel": "general",
+        }
         assert uploader.file_hash_cache[("folder1", "h1")] == ("new", "l")
         assert uploader.find_uploaded_slack_file("folder1", "F9").file_id == "new"
 
@@ -933,3 +939,19 @@ def test_long_channel_names_fit_app_property_limit(mock_media_cls, tmp_path):
     for key, value in props.items():
         assert len(key.encode()) + len(value.encode()) <= 124
     assert channel.startswith(props["slackChannel"])
+
+
+class TestDriveQueryTerms:
+    """The fake answers only valid files.list terms, like Drive (#125)."""
+
+    def test_md5checksum_is_not_a_query_term(self):
+        from slack_chat_migrator.services.drive_adapter import DriveAdapter
+        from tests.unit.drive_fakes import FakeDrive
+
+        adapter = DriveAdapter(FakeDrive())
+
+        with pytest.raises(HttpError, match="md5Checksum"):
+            adapter.list_files(q="md5Checksum='abc' and 'F' in parents")
+        adapter.list_files(
+            q="appProperties has { key='slackMd5' and value='abc' } and 'F' in parents"
+        )
