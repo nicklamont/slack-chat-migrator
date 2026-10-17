@@ -479,6 +479,9 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
             return state
         overwrite = True
 
+    from datetime import datetime, timezone
+
+    started_at = datetime.now(timezone.utc)
     try:
         path = download_key(
             credentials, state.service_account_email, key_path, overwrite=overwrite
@@ -506,10 +509,12 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
     except Exception as e:
         console.print(f"[red]Failed to download key: {e}[/red]")
         console.print(
-            "[dim]If IAM created a key anyway, find it with 'gcloud iam"
+            "[dim]If IAM created a key anyway, it is listed by 'gcloud iam"
             " service-accounts keys list"
             f" --iam-account={state.service_account_email} --managed-by=user'"
-            " and delete any key you have no file for.[/dim]"
+            " with a CREATED_AT of about"
+            f" {started_at:%Y-%m-%d %H:%M} UTC; delete only that key, not the"
+            " account's other keys, which may be in use elsewhere.[/dim]"
         )
         state.mark_step("key", StepStatus.SKIPPED)
         return state

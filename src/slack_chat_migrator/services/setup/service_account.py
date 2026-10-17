@@ -455,12 +455,28 @@ def _delete_key_command(key_name: str, service_account_email: str) -> str:
     )
 
 
-def _maybe_created_advice(service_account_email: str) -> str:
+def _created_around(requested_at: datetime) -> str:
+    """How to recognise a key created by a request sent at *requested_at*."""
     return (
-        "IAM may have created the key anyway. Check with"
-        f" '{_list_keys_command(service_account_email)}' and delete any key"
-        " you have no file for with"
-        f" '{_delete_key_command('', service_account_email)}'."
+        "its CREATED_AT is about"
+        f" {requested_at.astimezone(timezone.utc):%Y-%m-%d %H:%M} UTC"
+    )
+
+
+def _maybe_created_advice(service_account_email: str, requested_at: datetime) -> str:
+    """Say how to find, and delete, only the key this request may have made.
+
+    The account may have other keys that are in use elsewhere (a CI system,
+    another machine), so the advice never says "delete keys you have no
+    file for".
+    """
+    return (
+        "IAM may have created the key anyway. List the account's keys with"
+        f" '{_list_keys_command(service_account_email)}': a key created by this"
+        f" request is one whose {_created_around(requested_at)}. Delete only"
+        " that key, with"
+        f" '{_delete_key_command('', service_account_email)}'; don't delete"
+        " the account's other keys, which may be in use elsewhere."
     )
 
 
@@ -535,9 +551,15 @@ def _policy_advice(constraint: str, service_account_email: str) -> str:
 
 
 def _create_failure(
-    error: BaseException, service_account_email: str
+    error: BaseException, service_account_email: str, requested_at: datetime
 ) -> BaseException | None:
     """Turn a ``keys.create`` failure into the error to raise.
+
+    Args:
+        error: What ``keys.create().execute()`` raised.
+        service_account_email: The account the key was for.
+        requested_at: When the request was sent, to identify a key it may
+            have created.
 
     Returns:
         A :class:`KeyCreateError` that says whether a key may exist, a
@@ -547,7 +569,8 @@ def _create_failure(
     email = service_account_email
     if isinstance(error, KeyboardInterrupt):
         return KeySetupInterrupted(
-            "Interrupted while IAM was creating a key; " + _maybe_created_advice(email)
+            "Interrupted while IAM was creating a key; "
+            + _maybe_created_advice(email, requested_at)
         )
     if isinstance(error, HttpError):
         status = error.resp.status
@@ -556,7 +579,7 @@ def _create_failure(
         )
         if status == 408 or status >= 500:
             return KeyCreateError(
-                f"Creating a key failed ({detail}). {_maybe_created_advice(email)}",
+                f"Creating a key failed ({detail}). {_maybe_created_advice(email, requested_at)}",
                 maybe_created=True,
                 status=status,
             )
@@ -585,7 +608,7 @@ def _create_failure(
     if isinstance(error, _LIST_ERRORS):
         return KeyCreateError(
             f"The request to create a key failed ({type(error).__name__}:"
-            f" {error}). {_maybe_created_advice(email)}",
+            f" {error}). {_maybe_created_advice(email, requested_at)}",
             maybe_created=True,
         )
     return None
@@ -652,6 +675,7 @@ def download_key(
     except BaseException:
         discard_file()
         raise
+    requested_at = datetime.now(timezone.utc)
     try:
         key = (
             service.projects()
@@ -665,7 +689,7 @@ def download_key(
         )
     except BaseException as e:
         discard_file()
-        failure = _create_failure(e, service_account_email)
+        failure = _create_failure(e, service_account_email, requested_at)
         if failure is None:
             raise
         raise failure from e
@@ -678,7 +702,7 @@ def download_key(
     except BaseException as e:
         discard_file()
         _handle_unsaved_key(
-            service, key, output_path, e, service_account_email, existed
+            service, key, output_path, e, service_account_email, existed, requested_at
         )
     return output_path
 
@@ -698,6 +722,7 @@ def _handle_unsaved_key(
     error: BaseException,
     service_account_email: str,
     overwrote: bool,
+    requested_at: datetime,
 ) -> NoReturn:
     """Delete a new key that couldn't be saved, then raise what happened.
 
@@ -709,6 +734,8 @@ def _handle_unsaved_key(
         service_account_email: The key's service account.
         overwrote: True if *output_path* held an earlier file, which is now
             truncated.
+        requested_at: When ``keys.create`` was sent, to identify the key
+            when IAM didn't return its name.
 
     Raises:
         KeyboardInterrupt: The original Ctrl-C, when the key was deleted
@@ -759,7 +786,11 @@ def _handle_unsaved_key(
         + (
             ""
             if key_name
-            else f" (find it with '{_list_keys_command(service_account_email)}')"
+            else (
+                f" (find it with '{_list_keys_command(service_account_email)}':"
+                f" it is the key whose {_created_around(requested_at)}; don't"
+                " delete the account's other keys)"
+            )
         )
         + " or in the Cloud Console (IAM > Service accounts > Keys)."
         + lost_file

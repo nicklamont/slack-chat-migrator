@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import http.client
 import json
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -753,6 +754,13 @@ class TestDownloadKey:
         assert f"keys delete <KEY_ID> --iam-account={SA}" in message
         assert "no key was created" not in message
         assert not key.exists()
+        # Only the key this request made, recognised by its creation time.
+        assert re.search(
+            r"CREATED_AT is about \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC", message
+        )
+        assert "Delete only that key" in message
+        assert "don't delete the account's other keys" in message
+        assert "no file for" not in message
 
     def test_refresh_error_before_the_request_means_no_key(
         self, tmp_path: Path
@@ -837,6 +845,8 @@ class TestDownloadKey:
         assert raised.value.deleted is False
         self._keys(service).delete.assert_not_called()
         assert f"keys list --iam-account={SA} --managed-by=user" in str(raised.value)
+        assert "CREATED_AT is about" in str(raised.value)
+        assert "don't delete the account's other keys" in str(raised.value)
 
     def test_key_that_cannot_be_deleted_is_named(self, tmp_path: Path) -> None:
         from slack_chat_migrator.services.setup.service_account import (
@@ -1410,6 +1420,8 @@ class TestKeyStep:
         assert "Failed to download key: odd" in out
         assert f"keys list --iam-account={SA} --managed-by=user" in out
         assert "No key was created" not in out
+        assert "with a CREATED_AT of about" in out
+        assert "delete only that key" in out
         assert state.step_status("key") == StepStatus.SKIPPED
 
     def test_interrupt_names_the_key_and_stops(self, tmp_path: Path, capsys) -> None:

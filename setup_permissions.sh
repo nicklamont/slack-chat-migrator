@@ -272,20 +272,22 @@ verify_existing_key() {
 
 # Function to create and download service account key
 create_service_account_key() {
+  local requested_at
   echo "3️⃣ Setting up service account key..."
 
   # Check if key file exists
   if [ ! -f "${KEY_FILE}" ]; then
     echo "   - Creating and downloading service account key to '${KEY_FILE}'..."
     # gcloud creates the output file before it calls IAM, so a failed
-    # create leaves an empty file behind: remove it, or the next run would
-    # take it for someone else's key.
+    # create leaves an empty file behind: remove it, so the next run creates
+    # the key instead of stopping at an empty file.
+    requested_at=$(date -u '+%Y-%m-%d %H:%M')
     (umask 077 && gcloud iam service-accounts keys create "${KEY_FILE}" \
       --iam-account="${SERVICE_ACCOUNT_EMAIL}" \
       --project "${PROJECT_ID}") \
       || {
         [ -s "${KEY_FILE}" ] || rm -f "${KEY_FILE}"
-        fail "Failed to create service account key (see the gcloud error above). If it was a network error, IAM may have created the key anyway: check with 'gcloud iam service-accounts keys list --iam-account=${SERVICE_ACCOUNT_EMAIL} --managed-by=user' and delete any key you have no file for."
+        fail "Failed to create service account key (see the gcloud error above). If it was a network or server (5xx) error, IAM may have created the key anyway: list the keys with 'gcloud iam service-accounts keys list --iam-account=${SERVICE_ACCOUNT_EMAIL} --managed-by=user' and delete only the one whose CREATED_AT is about ${requested_at} UTC, with 'gcloud iam service-accounts keys delete <KEY_ID> --iam-account=${SERVICE_ACCOUNT_EMAIL}'. Don't delete the account's other keys, which may be in use elsewhere."
       }
     echo "   ✅ Key file created and downloaded successfully"
   else

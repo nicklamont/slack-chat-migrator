@@ -169,6 +169,8 @@ class TestSetupPermissionsScript:
         assert result.returncode != 0
         assert "Failed to create service account key" in result.stderr
         assert "--managed-by=user" in result.stderr
+        assert "delete only the one whose CREATED_AT is about" in result.stderr
+        assert "no file for" not in result.stderr
         assert not key.exists()
         # So the next run creates the key instead of blaming "unknown".
         result = _run(tmp_path)
