@@ -21,6 +21,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 
 if TYPE_CHECKING:
     from slack_chat_migrator.core.state import MigrationState
@@ -351,6 +352,84 @@ def _is_message_share(attachment: dict) -> bool:
     return isinstance(from_url, str) and bool(_SLACK_MESSAGE_URL_RE.match(from_url))
 
 
+# The target of a ``<url>`` / ``<url|label>`` token in mrkdwn text.
+_LINK_TOKEN_TARGET_RE = re.compile(r"<([A-Za-z][A-Za-z0-9+.\-]*:[^<>|\s]*)[|>]")
+
+
+def _normalize_url(url: str) -> str:
+    """Normalise a URL for comparison: lowercase scheme and host, no trailing /."""
+    url = _decode_entities(url.strip())
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url.rstrip("/")
+    normalized = urlunsplit(
+        (
+            parts.scheme.lower(),
+            parts.netloc.lower(),
+            parts.path,
+            parts.query,
+            parts.fragment,
+        )
+    )
+    return normalized.rstrip("/")
+
+
+def _collect_link_urls(node: object, urls: set[str]) -> None:
+    """Add the ``url`` of every rich-text ``link`` element under *node*."""
+    if isinstance(node, dict):
+        if node.get("type") == "link" and isinstance(node.get("url"), str):
+            urls.add(_normalize_url(node["url"]))
+        for value in node.values():
+            if isinstance(value, (dict, list)):
+                _collect_link_urls(value, urls)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_link_urls(item, urls)
+
+
+def _message_urls(message: dict) -> set[str]:
+    """Return the normalised URLs a message links to, in text or rich text.
+
+    Args:
+        message: A Slack message dict.
+
+    Returns:
+        URLs from ``<url|...>`` tokens and bare URLs in ``text``, and from
+        rich-text ``link`` elements in ``blocks``.
+    """
+    urls: set[str] = set()
+    text = message.get("text")
+    if isinstance(text, str):
+        urls.update(
+            _normalize_url(m.group(1)) for m in _LINK_TOKEN_TARGET_RE.finditer(text)
+        )
+        urls.update(
+            _normalize_url(m.group(0))
+            for m in _BARE_URL_RE.finditer(_decode_entities(text))
+        )
+    _collect_link_urls(message.get("blocks"), urls)
+    return urls
+
+
+def _is_link_preview(attachment: dict, message_urls: set[str]) -> bool:
+    """Return True if an attachment only previews a link already in the message.
+
+    Slack adds an unfurl attachment (``from_url``/``original_url``) for most
+    links; when the link is in the message, the preview adds nothing.  An
+    attachment with bot-style content (``pretext`` or ``fields``) is never
+    treated as a preview.
+    """
+    if attachment.get("pretext") or attachment.get("fields"):
+        return False
+    unfurl_urls = [
+        attachment.get(key)
+        for key in ("from_url", "original_url")
+        if isinstance(attachment.get(key), str) and attachment.get(key)
+    ]
+    return any(_normalize_url(str(url)) in message_urls for url in unfurl_urls)
+
+
 def _attachment_str(attachment: dict, key: str) -> str:
     """Return a string attachment field, stripped, or ``""``."""
     value = attachment.get(key)
@@ -416,8 +495,7 @@ def _render_legacy_attachment(
     ``text`` (or the attachment's own ``blocks``), the ``fields`` as
     ``*title*: value`` lines and the ``footer``.  ``fallback`` is used only
     when there is nothing else and the message text doesn't already say it,
-    and never for link unfurls (``from_url``), whose URL is already in the
-    message.
+    and never for link unfurls (``from_url``).
 
     Args:
         attachment: A Slack attachment that doesn't share a message.
@@ -474,9 +552,11 @@ def _render_attachments(
 ) -> list[str]:
     """Render a message's attachments as text, in order.
 
-    Shared/forwarded Slack messages get a "Forwarded message" header; other
-    attachments (alerts, CI and ticket bots, link previews) are rendered
-    from their pretext, title, text, fields and footer.
+    Shared/forwarded Slack messages get a "Forwarded message" header.  Link
+    previews (unfurls of a URL that is already in the message) are skipped.
+    Other attachments (alerts, CI and ticket bots, previews of links the
+    message doesn't contain) are rendered from their pretext, title, text,
+    fields and footer.
 
     Args:
         message: A Slack message dict with an optional 'attachments' field.
@@ -486,12 +566,17 @@ def _render_attachments(
         One mrkdwn string per attachment that has text.
     """
     rendered: list[str] = []
+    message_urls: set[str] | None = None
     for attachment in message.get("attachments") or []:
         if not isinstance(attachment, dict):
             continue
         if _is_message_share(attachment):
             text = _render_shared_message(attachment, custom_emoji_map)
         else:
+            if message_urls is None:
+                message_urls = _message_urls(message)
+            if _is_link_preview(attachment, message_urls):
+                continue
             text = _render_legacy_attachment(
                 attachment, custom_emoji_map, str(message.get("text") or "")
             )
@@ -817,7 +902,8 @@ def parse_slack_blocks(
 
     Renders section, rich_text, header, context, divider, markdown and table
     blocks (and video titles), then the attachments: forwarded/shared
-    messages and legacy attachments (pretext, title, text, fields, footer).
+    messages and legacy attachments (pretext, title, text, fields, footer),
+    skipping previews of links the message already contains.
     Falls back to the mrkdwn ``text`` field when there are no blocks, when
     the blocks render nothing, or when any block or element type is unknown
     (so no words are silently dropped).

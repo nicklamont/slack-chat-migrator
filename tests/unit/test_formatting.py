@@ -2078,23 +2078,108 @@ class TestLegacyAttachments:
         }
         assert _render(message) == "https://example.com/page"
 
-    def test_link_unfurl_with_content(self):
+    @staticmethod
+    def _preview(url, **extra):
+        attachment = {
+            "from_url": url,
+            "original_url": url,
+            "service_name": "Example",
+            "title": "Example page",
+            "title_link": url,
+            "text": "A description",
+        }
+        attachment.update(extra)
+        return attachment
+
+    def test_preview_of_link_in_text_is_skipped(self):
         message = {
-            "text": "<https://example.com/page>",
+            "text": "read <https://example.com/page>",
+            "attachments": [self._preview("https://example.com/page")],
+        }
+        assert _render(message) == "read https://example.com/page"
+
+    def test_preview_of_labelled_link_is_skipped(self):
+        message = {
+            "text": "see <https://example.com/a?x=1&amp;y=2|the docs>",
+            "attachments": [self._preview("https://example.com/a?x=1&y=2")],
+        }
+        assert _render(message) == "see <https://example.com/a?x=1&y=2|the docs>"
+
+    def test_preview_matches_scheme_and_host_case_and_trailing_slash(self):
+        message = {
+            "text": "<HTTPS://Example.COM/page/>",
+            "attachments": [self._preview("https://example.com/page")],
+        }
+        assert _render(message) == "HTTPS://Example.COM/page/"
+
+    def test_preview_path_comparison_is_case_sensitive(self):
+        message = {
+            "text": "<https://example.com/Page>",
+            "attachments": [self._preview("https://example.com/page")],
+        }
+        assert "A description" in _render(message)
+
+    def test_preview_matched_by_original_url(self):
+        message = {
+            "text": "<https://short.example/x>",
             "attachments": [
-                {
-                    "from_url": "https://example.com/page",
-                    "service_name": "Example",
-                    "title": "Example page",
-                    "title_link": "https://example.com/page",
-                    "text": "A description",
-                }
+                self._preview(
+                    "https://example.com/long/x",
+                    original_url="https://short.example/x",
+                )
             ],
         }
+        assert _render(message) == "https://short.example/x"
+
+    def test_preview_of_rich_text_link_is_skipped(self):
+        message = {
+            "text": "",
+            "blocks": [
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [
+                                {"type": "text", "text": "read "},
+                                {
+                                    "type": "link",
+                                    "url": "https://example.com/page",
+                                    "text": "this",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "attachments": [self._preview("https://example.com/page")],
+        }
+        assert _render(message) == "read <https://example.com/page|this>"
+
+    def test_preview_of_link_not_in_message_is_rendered(self):
+        message = {
+            "text": "new post",
+            "attachments": [self._preview("https://example.com/page")],
+        }
         assert _render(message) == (
-            "https://example.com/page\n\n"
-            "<https://example.com/page|Example page>\nA description"
+            "new post\n\n<https://example.com/page|Example page>\nA description"
         )
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"pretext": "Deployed by CI"},
+            {"fields": [{"title": "Env", "value": "prod"}]},
+        ],
+    )
+    def test_bot_style_unfurl_is_rendered(self, extra):
+        message = {
+            "text": "<https://example.com/page>",
+            "attachments": [self._preview("https://example.com/page", **extra)],
+        }
+        result = _render(message)
+        assert result.startswith("https://example.com/page\n\n")
+        assert "A description" in result
 
     def test_slack_message_unfurl_is_rendered_as_forwarded(self):
         message = {

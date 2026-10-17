@@ -670,6 +670,8 @@ These are limitations of the [Google Chat Import API](https://developers.google.
   - Underline and highlight have no Google Chat equivalent and are dropped, as is the language of code blocks.
   - Bold styling around user mentions (e.g., `*<@USER>*`) is not supported by Google Chat and will display literal asterisks.
 
+- **Attachments and Link Previews**: Attachments from bots and integrations (alerts, CI, tickets) are rendered as text below the message: pretext, title, text, fields and footer. Link previews are not recreated: Slack's unfurl of a URL that is already in the message is dropped. An unfurl is rendered only when its URL isn't in the message, or when it carries bot-style `pretext` or `fields`.
+
 ### Troubleshooting
 
 #### Google Cloud SDK Issues
