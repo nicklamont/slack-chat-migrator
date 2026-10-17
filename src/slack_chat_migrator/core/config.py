@@ -28,6 +28,9 @@ CONVERSATION_TYPES = ("public", "private", "mpim", "dm")
 #: Who becomes the space manager after ``completeImport``.
 SPACE_MANAGER_CHOICES = ("admin", "creator")
 
+#: Shared drive used for attachments when ``shared_drive.name`` isn't set.
+DEFAULT_SHARED_DRIVE_NAME = "Imported Slack Attachments"
+
 
 class ImportCompletionStrategy(str, Enum):
     """Strategy for completing import mode when errors occur."""
@@ -38,10 +41,33 @@ class ImportCompletionStrategy(str, Enum):
 
 @dataclass
 class SharedDriveConfig:
-    """Configuration for the shared Google Drive used for file attachments."""
+    """Configuration for the shared Google Drive used for file attachments.
 
-    name: str = "Imported Slack Attachments"
+    ``name`` is never blank: an empty name means
+    :data:`DEFAULT_SHARED_DRIVE_NAME`.  An empty ``id`` means "not set".
+    """
+
+    name: str = DEFAULT_SHARED_DRIVE_NAME
     id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Apply the default to a blank name and check the field types.
+
+        Raises:
+            ConfigError: If ``name`` or ``id`` isn't a string.
+        """
+        if not isinstance(self.name, str):
+            raise ConfigError(
+                f"shared_drive.name must be a string, got {_describe(self.name)}"
+            )
+        if not self.name.strip():
+            self.name = DEFAULT_SHARED_DRIVE_NAME
+        if self.id is not None and not isinstance(self.id, str):
+            raise ConfigError(
+                f"shared_drive.id must be a string, got {_describe(self.id)}"
+            )
+        if not self.id:
+            self.id = None
 
     @classmethod
     def from_dict(cls, data: Any) -> SharedDriveConfig:
@@ -69,7 +95,7 @@ class SharedDriveConfig:
                 logging.WARNING,
                 "Ignoring unknown shared_drive option(s): " + ", ".join(unknown),
             )
-        name = _get_str(data, "name", cls.name, prefix="shared_drive.") or cls.name
+        name = _get_str(data, "name", DEFAULT_SHARED_DRIVE_NAME, prefix="shared_drive.")
         drive_id = _get_str(data, "id", "", prefix="shared_drive.") or None
         return cls(name=name, id=drive_id)
 
@@ -111,7 +137,9 @@ class MigrationConfig:
 
     # Optional Slack token (``files:read``) used as a Bearer header when
     # downloading export files.  Falls back to the ``SLACK_TOKEN`` env var.
-    slack_token: str = ""
+    # Kept out of repr() so print(config), debuggers and tracebacks with
+    # locals don't show it.
+    slack_token: str = field(default="", repr=False)
 
     # Durable migration state (created spaces, import deadlines, resume
     # points, uploaded files).  Empty means
@@ -142,31 +170,38 @@ class MigrationConfig:
     def __post_init__(self) -> None:
         """Validate configuration values after initialization."""
         if self.max_parallel_channels < 1:
-            raise ValueError(
+            raise ConfigError(
                 f"max_parallel_channels must be >= 1, got {self.max_parallel_channels}"
             )
         if self.file_workers < 1:
-            raise ValueError(f"file_workers must be >= 1, got {self.file_workers}")
+            raise ConfigError(f"file_workers must be >= 1, got {self.file_workers}")
         if self.space_manager not in SPACE_MANAGER_CHOICES:
-            raise ValueError(
+            raise ConfigError(
                 f"space_manager must be one of {', '.join(SPACE_MANAGER_CHOICES)},"
                 f" got {self.space_manager!r}"
             )
+        if not self.conversation_types:
+            raise ConfigError(
+                "conversation_types must list at least one of"
+                f" {', '.join(CONVERSATION_TYPES)} (leave it out to migrate"
+                " every type)"
+            )
         unknown_types = set(self.conversation_types) - set(CONVERSATION_TYPES)
         if unknown_types:
-            raise ValueError(
+            raise ConfigError(
                 f"Unknown conversation_types: {', '.join(sorted(unknown_types))}."
                 f" Valid values: {', '.join(CONVERSATION_TYPES)}"
             )
         if self.max_retries < 0:
-            raise ValueError(f"max_retries must be >= 0, got {self.max_retries}")
+            raise ConfigError(f"max_retries must be >= 0, got {self.max_retries}")
         if not (0 <= self.max_failure_percentage <= 100):
-            raise ValueError(
+            raise ConfigError(
                 f"max_failure_percentage must be between 0 and 100,"
                 f" got {self.max_failure_percentage}"
             )
         if self.retry_delay < 0:
-            raise ValueError(f"retry_delay must be >= 0, got {self.retry_delay}")
+            raise ConfigError(f"retry_delay must be >= 0, got {self.retry_delay}")
+        self.custom_emoji_map = _normalize_emoji_map(self.custom_emoji_map)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> MigrationConfig:
@@ -220,8 +255,7 @@ class MigrationConfig:
                 slack_token=_get_str(data, "slack_token", "")
                 or os.environ.get("SLACK_TOKEN", ""),
                 state_file=_get_str(data, "state_file", ""),
-                conversation_types=_get_list(data, "conversation_types")
-                or list(CONVERSATION_TYPES),
+                conversation_types=_get_conversation_types(data),
                 max_parallel_channels=_get_int(data, "max_parallel_channels", 1),
                 file_workers=_get_int(data, "file_workers", 4),
                 custom_emoji_map=_get_mapping(data, "custom_emoji_map"),
@@ -417,6 +451,40 @@ def _get_mapping(data: Mapping[str, Any], key: str) -> dict[str, str]:
     return result
 
 
+def _get_conversation_types(data: Mapping[str, Any]) -> list[str]:
+    """Return ``conversation_types``; an absent or empty value means all types.
+
+    An explicit empty list stays empty, so ``__post_init__`` rejects it
+    rather than reading it as "all".
+    """
+    if data.get("conversation_types") is None:
+        return list(CONVERSATION_TYPES)
+    return _get_list(data, "conversation_types")
+
+
+def _normalize_emoji_map(mapping: Mapping[str, str]) -> dict[str, str]:
+    """Strip the colons from ``custom_emoji_map`` keys, keeping their case.
+
+    Emoji are looked up by bare name, so ``":partyparrot:"`` becomes
+    ``"partyparrot"`` (Slack names are lowercase already).
+
+    Raises:
+        ConfigError: If a key is empty after stripping, or two keys name the
+            same emoji.
+    """
+    result: dict[str, str] = {}
+    for raw_key, value in mapping.items():
+        name = str(raw_key).strip().strip(":").strip()
+        if not name:
+            raise ConfigError(f"custom_emoji_map key {raw_key!r} is not an emoji name")
+        if name in result:
+            raise ConfigError(
+                f"custom_emoji_map lists the emoji {name!r} more than once"
+            )
+        result[name] = value
+    return result
+
+
 def normalize_channel_name(name: str) -> str:
     """Normalize a channel name from config: trim whitespace and a leading ``#``.
 
@@ -439,13 +507,13 @@ def _parse_completion_strategy(value: str) -> ImportCompletionStrategy:
         The matching enum member.
 
     Raises:
-        ValueError: If the string doesn't match a known strategy.
+        ConfigError: If the string doesn't match a known strategy.
     """
     try:
         return ImportCompletionStrategy(value)
     except ValueError:
         valid = ", ".join(s.value for s in ImportCompletionStrategy)
-        raise ValueError(
+        raise ConfigError(
             f"Invalid import_completion_strategy: {value!r}. Must be one of: {valid}"
         ) from None
 

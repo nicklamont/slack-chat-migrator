@@ -205,6 +205,30 @@ class TestMigrationConfigValidation:
         with pytest.raises(ValueError, match="max_failure_percentage must be between"):
             MigrationConfig(max_failure_percentage=101)
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"max_retries": -1},
+            {"retry_delay": -1},
+            {"max_failure_percentage": 101},
+            {"file_workers": 0},
+            {"space_manager": "owner"},
+            {"conversation_types": ["threads"]},
+            {"conversation_types": []},
+        ],
+    )
+    def test_direct_construction_raises_config_error(self, kwargs):
+        """Library callers get the same exception type as from_dict raises."""
+        with pytest.raises(ConfigError):
+            MigrationConfig(**kwargs)
+
+    def test_slack_token_is_not_in_repr(self):
+        sample = "xoxe-1-reprcheck"  # pragma: allowlist secret
+        config = MigrationConfig(slack_token=sample)
+        assert sample not in repr(config)
+        assert "slack_token" not in repr(config)
+        assert config.slack_token == sample
+
     def test_invalid_config_from_yaml(self, tmp_path):
         """Invalid values in YAML are rejected at load time."""
         config_path = tmp_path / "config.yaml"
@@ -359,6 +383,14 @@ class TestListOptions:
         config = _load(tmp_path, "conversation_types: public\n")
         assert config.conversation_types == ["public"]
 
+    @pytest.mark.parametrize(
+        "text", ["conversation_types: []\n", "conversation_types: [~]\n"]
+    )
+    def test_empty_conversation_types_list_is_an_error(self, tmp_path, text):
+        """An empty list would read as "none"; leaving the option out means all."""
+        with pytest.raises(ConfigError, match="at least one"):
+            _load(tmp_path, text)
+
 
 class TestScalarOptions:
     """Booleans, integers, numbers and strings are type-checked."""
@@ -434,6 +466,43 @@ class TestMappingOptions:
         config = _load(tmp_path, "custom_emoji_map: {100: ':hundred:'}\n")
         assert config.custom_emoji_map == {"100": ":hundred:"}
 
+    def test_custom_emoji_map_keys_lose_their_colons(self, tmp_path):
+        config = _load(
+            tmp_path,
+            "custom_emoji_map:\n"
+            "  ':partyparrot:': '\U0001f99c'\n"
+            "  ' :ShipIt: ': ':ship-it:'\n"
+            "  ':wave::skin-tone-2:': ':tada:'\n",
+        )
+        assert config.custom_emoji_map == {
+            "partyparrot": "\U0001f99c",
+            "ShipIt": ":ship-it:",
+            "wave::skin-tone-2": ":tada:",
+        }
+
+    def test_colon_keys_are_found_by_the_emoji_lookup(self):
+        from slack_chat_migrator.utils.emoji import slack_emoji_to_unicode
+
+        config = MigrationConfig(custom_emoji_map={":partyparrot:": "\U0001f99c"})
+        assert config.custom_emoji_map == {"partyparrot": "\U0001f99c"}
+        assert (
+            slack_emoji_to_unicode("partyparrot", config.custom_emoji_map)
+            == "\U0001f99c"
+        )
+
+    @pytest.mark.parametrize(
+        ("mapping", "match"),
+        [
+            ({"::": "x"}, "not an emoji name"),
+            ({":tada:": "a", "tada": "b"}, "'tada' more than once"),
+        ],
+    )
+    def test_bad_custom_emoji_map_keys(self, mapping, match):
+        with pytest.raises(ConfigError, match=match):
+            MigrationConfig(custom_emoji_map=mapping)
+        with pytest.raises(ConfigError, match=match):
+            MigrationConfig.from_dict({"custom_emoji_map": mapping})
+
     def test_shared_drive_must_be_a_mapping(self, tmp_path):
         with pytest.raises(ConfigError, match="shared_drive"):
             _load(tmp_path, "shared_drive: My Drive\n")
@@ -447,6 +516,27 @@ class TestMappingOptions:
         config = _load(tmp_path, "shared_drive:\n  name:\n")
         assert config.shared_drive.name == "Imported Slack Attachments"
         assert config.shared_drive.id is None
+
+    @pytest.mark.parametrize("name", ["", "   "])
+    def test_shared_drive_blank_name_means_the_default(self, name):
+        from slack_chat_migrator.core.config import (
+            DEFAULT_SHARED_DRIVE_NAME,
+            SharedDriveConfig,
+        )
+
+        drive = SharedDriveConfig(name=name, id="")
+        assert drive.name == DEFAULT_SHARED_DRIVE_NAME
+        assert drive.id is None
+        loaded = MigrationConfig.from_dict({"shared_drive": {"name": name}})
+        assert loaded.shared_drive.name == DEFAULT_SHARED_DRIVE_NAME
+
+    def test_shared_drive_fields_must_be_strings(self):
+        from slack_chat_migrator.core.config import SharedDriveConfig
+
+        with pytest.raises(ConfigError, match=r"shared_drive\.name"):
+            SharedDriveConfig(name=5)  # type: ignore[arg-type]
+        with pytest.raises(ConfigError, match=r"shared_drive\.id"):
+            SharedDriveConfig(id=5)  # type: ignore[arg-type]
 
     def test_space_mapping_must_be_a_mapping(self, tmp_path):
         with pytest.raises(ConfigError, match="space_mapping"):

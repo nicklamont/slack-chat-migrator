@@ -225,7 +225,7 @@ custom_emoji_map:
   shipit: ":ship-it:"               # the name of a Google Chat custom emoji
 ```
 
-The map is checked before the standard names, so it can also override them. A Slack skin tone (`approved::skin-tone-3`) is applied to the mapped emoji when that emoji supports one. A `:name:` value that isn't a standard emoji is taken as the name of a Google Chat custom emoji, and message text shows it as `:ship-it:`. The Slack export contains no emoji images, so create any custom emoji you want in Google Chat yourself before migrating.
+Keys can be written with or without their colons (`partyparrot` or `":partyparrot:"`). The map is checked before the standard names, so it can also override them. A Slack skin tone (`approved::skin-tone-3`) is applied to the mapped emoji when that emoji supports one. A `:name:` value that isn't a standard emoji is taken as the name of a Google Chat custom emoji, and message text shows it as `:ship-it:`. The Slack export contains no emoji images, so create any custom emoji you want in Google Chat yourself before migrating.
 
 > **Note:** Debug and logging options are controlled via command-line flags (`--verbose` and `--debug_api`) rather than configuration file settings. This ensures consistent logging behavior across all migration runs.
 

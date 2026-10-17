@@ -53,10 +53,6 @@ class SharedDriveManager:
         shared_drive_name = self.config.shared_drive.name
         shared_drive_id = self.config.shared_drive.id
 
-        # If no shared drive specified, use default name
-        if not shared_drive_name and not shared_drive_id:
-            shared_drive_name = "Imported Slack Attachments"
-
         # Use the configured shared drive ID, or stop
         if shared_drive_id:
             try:
