@@ -214,23 +214,23 @@ class DriveAdapter:
             file_id: Drive file ID.
             body: Permission body (``role``, ``type``, ``emailAddress``).
             fields: Response field mask.
-            send_notification_email: Send email to grantee.
+            send_notification_email: Send email to grantee.  Ignored for an
+                ownership transfer, where Drive always notifies the new owner.
             supports_all_drives: Enable shared-drive support.
             transfer_ownership: Transfer ownership to the grantee.
 
         Returns:
             Created permission resource dict.
         """
-        kwargs: dict[str, Any] = {
-            "fileId": file_id,
-            "body": body,
-            "fields": fields,
-            "sendNotificationEmail": send_notification_email,
-        }
+        kwargs: dict[str, Any] = {"fileId": file_id, "body": body, "fields": fields}
+        if transfer_ownership:
+            # Drive: sendNotificationEmail "must not be disabled for ownership
+            # transfers", so it is left at its default (true).
+            kwargs["transferOwnership"] = True
+        else:
+            kwargs["sendNotificationEmail"] = send_notification_email
         if supports_all_drives:
             kwargs["supportsAllDrives"] = True
-        if transfer_ownership:
-            kwargs["transferOwnership"] = True
         result: dict[str, Any] = self._svc.permissions().create(**kwargs).execute()
         return result
 
@@ -297,11 +297,12 @@ class DriveAdapter:
         if change.permission_id is not None:
             kwargs["permissionId"] = change.permission_id
             return self._svc.permissions().delete(**kwargs)
-        kwargs.update(
-            {"body": change.body, "fields": "id", "sendNotificationEmail": False}
-        )
+        kwargs.update({"body": change.body, "fields": "id"})
         if change.transfer_ownership:
+            # The notification can't be disabled for ownership transfers.
             kwargs["transferOwnership"] = True
+        else:
+            kwargs["sendNotificationEmail"] = False
         return self._svc.permissions().create(**kwargs)
 
     def apply_permission_changes(

@@ -56,8 +56,13 @@ def downloads():
         yield fake
 
 
-def make_handler(fake: FakeDrive, tmp_path, *, shared=True, config=None):
-    """Build a real FileHandler over *fake*, initialised like a live run."""
+def make_handler(
+    fake: FakeDrive, tmp_path, *, shared=True, config=None, transfer=False
+):
+    """Build a real FileHandler over *fake*, initialised like a live run.
+
+    *transfer* turns on ``transfer_file_ownership`` (when no *config* is given).
+    """
     state = MigrationState()
     state.context.output_dir = str(tmp_path)
     resolver = MagicMock()
@@ -68,7 +73,11 @@ def make_handler(fake: FakeDrive, tmp_path, *, shared=True, config=None):
         DriveAdapter(fake),
         MagicMock(),
         None,
-        config or MigrationConfig(shared_drive=SharedDriveConfig(name=DRIVE_NAME)),
+        config
+        or MigrationConfig(
+            shared_drive=SharedDriveConfig(name=DRIVE_NAME),
+            transfer_file_ownership=transfer,
+        ),
         "example.com",
         dict(USERS),
         resolver,
@@ -124,7 +133,7 @@ def upload(
 class TestGrants:
     def test_no_request_uses_editor_role(self, tmp_path, downloads):
         fake = FakeDrive()
-        handler = make_handler(fake, tmp_path, shared=False)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
 
         result = upload(
             handler, downloads, "c", "F1", "UA", b"one", sender="bob@example.com"
@@ -137,7 +146,7 @@ class TestGrants:
 
     def test_failed_transfer_is_counted(self, tmp_path, downloads):
         fake = FakeDrive(fail_transfer=True)
-        handler = make_handler(fake, tmp_path, shared=False)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
 
         result = upload(handler, downloads, "c", "F1", "UA", b"two")
 
@@ -154,7 +163,7 @@ class TestGrants:
 
     def test_reused_file_is_not_transferred_again(self, tmp_path, downloads):
         fake = FakeDrive()
-        handler = make_handler(fake, tmp_path, shared=False)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
 
         first = upload(handler, downloads, "c", "F1", "UA", b"same")
         second = upload(handler, downloads, "c", "F2", "UB", b"same")
@@ -206,7 +215,7 @@ class TestGrants:
 
     def test_poster_who_becomes_owner_needs_no_writer_grant(self, tmp_path, downloads):
         fake = FakeDrive()
-        handler = make_handler(fake, tmp_path, shared=False)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
 
         upload(handler, downloads, "c", "F1", "UA", b"mine")
 
@@ -230,6 +239,86 @@ class TestGrants:
             ("alice@example.com", "writer")
         ]
         assert not any(kw.get("transferOwnership") for kw in calls)
+
+
+class TestOwnershipTransfer:
+    """Transfers are opt-in and never disable Drive's notification (CR1)."""
+
+    def test_off_by_default_poster_gets_writer(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False)
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        calls = fake.permission_calls()
+        assert [(kw["body"]["emailAddress"], kw["body"]["role"]) for kw in calls] == [
+            ("alice@example.com", "writer")
+        ]
+        assert not any(kw.get("transferOwnership") for kw in calls)
+        stats = handler.get_file_statistics()
+        assert stats["ownership_transferred"] == 0
+        assert stats["ownership_transfer_failed"] == 0
+
+    @pytest.mark.parametrize(
+        "sender", [None, "bob@example.com"], ids=["single", "batched"]
+    )
+    def test_transfer_requests_keep_the_notification(self, tmp_path, downloads, sender):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine", sender=sender)
+
+        transfers = [
+            kw for kw in fake.permission_calls() if kw.get("transferOwnership")
+        ]
+        assert len(transfers) == 1
+        assert "sendNotificationEmail" not in transfers[0]
+        assert handler.get_file_statistics()["ownership_transferred"] == 1
+
+    def test_failed_batched_transfer_is_counted_and_logged(
+        self, tmp_path, downloads, caplog
+    ):
+        """Poster != owner: writer grant and transfer share a batch (TA3.3)."""
+        fake = FakeDrive(fail_transfer=True)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        result = upload(
+            handler, downloads, "c", "F1", "UA", b"shared", sender="bob@example.com"
+        )
+
+        assert result.success
+        assert fake.batch_sizes == [2]
+        stats = handler.get_file_statistics()
+        assert stats["ownership_transfer_failed"] == 1
+        assert stats["ownership_transferred"] == 0
+        bob = [
+            kw
+            for kw in fake.permission_calls()
+            if kw["body"]["emailAddress"] == "bob@example.com"
+        ]
+        assert [kw["body"]["role"] for kw in bob] == ["writer"]
+        assert (
+            fake.permissions_db[result.drive_id][0]["emailAddress"] == "bob@example.com"
+        )
+        assert any(
+            "alice@example.com" in r.getMessage() and "forbidden" in r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING"
+        )
+
+    def test_failed_batched_writer_grant_is_not_marked_granted(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive(reject_grants_to={"bob@example.com"})
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        result = upload(
+            handler, downloads, "c", "F1", "UA", b"shared", sender="bob@example.com"
+        )
+
+        assert result.success
+        assert not handler._already_granted(result.drive_id, "bob@example.com")
+        assert handler.get_file_statistics()["ownership_transferred"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -864,3 +953,19 @@ class TestCanvasConversion:
         )
         assert fake.files_db[result.drive_id]["mimeType"] == "text/csv"
         assert fake.files_db[result.drive_id]["name"] == "data.csv"
+
+
+class TestTransferConfig:
+    def test_default_is_off(self):
+        assert MigrationConfig().transfer_file_ownership is False
+        assert MigrationConfig.from_dict({}).transfer_file_ownership is False
+
+    def test_from_dict(self):
+        config = MigrationConfig.from_dict({"transfer_file_ownership": True})
+        assert config.transfer_file_ownership is True
+
+    def test_rejects_non_booleans(self):
+        from slack_chat_migrator.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="transfer_file_ownership"):
+            MigrationConfig.from_dict({"transfer_file_ownership": "yes"})

@@ -135,6 +135,9 @@ class MigrationConfig:
     migrate_pins: bool = True
     convert_canvases: bool = True
     restrict_private_channel_folders: bool = True
+    # Hand each new My Drive upload to the Slack user who uploaded it.  Off
+    # by default: Drive emails the new owner once per transferred file.
+    transfer_file_ownership: bool = False
     space_manager: str = "admin"
     public_channel_audience: str = ""
     announcement_channels: list[str] = field(default_factory=list)
@@ -231,6 +234,9 @@ class MigrationConfig:
                 convert_canvases=_get_bool(data, "convert_canvases", True),
                 restrict_private_channel_folders=_get_bool(
                     data, "restrict_private_channel_folders", True
+                ),
+                transfer_file_ownership=_get_bool(
+                    data, "transfer_file_ownership", False
                 ),
                 space_manager=_get_str(data, "space_manager", "admin"),
                 public_channel_audience=_get_str(data, "public_channel_audience", ""),

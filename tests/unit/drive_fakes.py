@@ -260,8 +260,15 @@ class _Permissions:
             body = kw["body"]
             if body["role"] not in VALID_ROLES:
                 raise http_error(400, "The provided role is not valid")
-            if kw.get("transferOwnership") and self.d.fail_transfer:
-                raise http_error(403, "forbidden")
+            if kw.get("transferOwnership"):
+                # Drive: sendNotificationEmail "must not be disabled for
+                # ownership transfers".
+                if kw.get("sendNotificationEmail") is False:
+                    raise http_error(
+                        400, "Notification required for ownership transfer"
+                    )
+                if self.d.fail_transfer:
+                    raise http_error(403, "forbidden")
             if body.get("emailAddress") in self.d.reject_grants_to:
                 raise http_error(400, "Sharing outside the domain is not allowed")
             perms = self.d.permissions_db.setdefault(kw["fileId"], [])

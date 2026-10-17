@@ -24,6 +24,12 @@ from slack_chat_migrator.types import UploadResult
 #: Path handed to mocked uploaders, which never open it.
 FAKE_PATH = "/tmp/fake_upload.bin"
 
+#: Ownership transfers are opt-in.
+TRANSFER_CONFIG = MigrationConfig(
+    shared_drive=SharedDriveConfig(name="Test Drive", id=None),
+    transfer_file_ownership=True,
+)
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1116,6 +1122,7 @@ class TestUploadToDrive:
         """Transfers ownership for internal users on regular Drive folders."""
         handler = self._make_ready_handler(
             user_map={"U123": "alice@example.com"},
+            config=TRANSFER_CONFIG,
         )
         handler._shared_drive_id = None
         handler.user_resolver.is_external_user.return_value = False
@@ -1145,6 +1152,7 @@ class TestUploadToDrive:
         """Failed ownership transfer increments failure stat."""
         handler = self._make_ready_handler(
             user_map={"U123": "alice@example.com"},
+            config=TRANSFER_CONFIG,
         )
         handler._shared_drive_id = None
         handler.user_resolver.is_external_user.return_value = False

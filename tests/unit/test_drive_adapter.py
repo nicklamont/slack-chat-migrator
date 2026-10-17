@@ -423,3 +423,49 @@ class TestApplyPermissionChanges:
         )
         assert errors == [None, None]
         assert attempts["n"] == 2  # both re-sent on their own
+
+
+class TestOwnershipTransferRequests:
+    """Drive rejects transfers with sendNotificationEmail=false (CR1)."""
+
+    def test_create_permission_omits_notification_flag_for_transfers(
+        self, adapter, mock_service
+    ):
+        adapter.create_permission(
+            "F",
+            {"role": "owner"},
+            transfer_ownership=True,
+            send_notification_email=False,
+        )
+        kwargs = mock_service.permissions().create.call_args.kwargs
+        assert kwargs["transferOwnership"] is True
+        assert "sendNotificationEmail" not in kwargs
+
+    def test_create_permission_keeps_flag_for_grants(self, adapter, mock_service):
+        adapter.create_permission("F", {"role": "reader"})
+        kwargs = mock_service.permissions().create.call_args.kwargs
+        assert kwargs["sendNotificationEmail"] is False
+
+    def test_batched_transfer_omits_notification_flag(self):
+        from slack_chat_migrator.services.drive_adapter import PermissionChange
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive()
+        errors = DriveAdapter(fake).apply_permission_changes(
+            [
+                PermissionChange(
+                    "F", body={"type": "user", "role": "writer", "emailAddress": "b@x"}
+                ),
+                PermissionChange(
+                    "F",
+                    body={"type": "user", "role": "owner", "emailAddress": "o@x"},
+                    transfer_ownership=True,
+                ),
+            ]
+        )
+        assert errors == [None, None]
+        grant, transfer = [
+            kw for name, kw in fake.calls if name == "permissions.create"
+        ]
+        assert grant["sendNotificationEmail"] is False
+        assert "sendNotificationEmail" not in transfer

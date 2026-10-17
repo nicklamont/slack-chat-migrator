@@ -1215,13 +1215,15 @@ class FileHandler:
 
         Everyone else, external members included, gets reader access through
         the channel folder.  External users never get a per-file grant.
-        Ownership is transferred only for new uploads in regular-Drive mode,
-        so a reused file keeps its owner.
+        Ownership is transferred only when ``config.transfer_file_ownership``
+        is set, only for new uploads in regular-Drive mode (a reused file
+        keeps its owner), and only to internal users.
         """
         poster = sender_email if self._is_internal_email(sender_email) else None
         owner = (
             owner_email
-            if not reused
+            if self.config.transfer_file_ownership
+            and not reused
             and not self._shared_drive_id
             and self._is_internal_email(owner_email)
             else None
@@ -1263,7 +1265,12 @@ class FileHandler:
                     file_id=file_id,
                 )
             self._count_ownership_transfer(
-                transfer_error is None, drive_file_id, owner, channel, file_id
+                transfer_error is None,
+                drive_file_id,
+                owner,
+                channel,
+                file_id,
+                error=transfer_error,
             )
             return
 
@@ -1317,8 +1324,18 @@ class FileHandler:
         new_owner_email: str,
         channel: str | None,
         file_id: str,
+        error: BaseException | None = None,
     ) -> None:
-        """Count and log one ownership transfer attempt."""
+        """Count and log one ownership transfer attempt.
+
+        Args:
+            transferred: Whether the transfer succeeded.
+            drive_file_id: The Drive file.
+            new_owner_email: The intended owner.
+            channel: Channel name for logging context.
+            file_id: Slack file ID for logging context.
+            error: Why the transfer failed, when known.
+        """
         if transferred:
             self._increment_stat("ownership_transferred")
             log_with_context(
@@ -1331,9 +1348,11 @@ class FileHandler:
             return
 
         self._increment_stat("ownership_transfer_failed")
+        cause = f": {error}" if error is not None else ""
         log_with_context(
             logging.WARNING,
-            f"Could not transfer file ownership to {new_owner_email}",
+            f"Could not transfer ownership of {drive_file_id} to"
+            f" {new_owner_email}{cause}",
             channel=channel,
             file_id=file_id,
             drive_file_id=drive_file_id,

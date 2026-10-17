@@ -54,11 +54,11 @@ def transfer_file_ownership(
             "role": "owner",
             "emailAddress": new_owner_email,
         }
+        # Drive emails the new owner; that can't be turned off for transfers.
         drive_service.create_permission(
             file_id=file_id,
             body=permission,
             transfer_ownership=True,
-            send_notification_email=False,
         )
 
         log_with_context(
