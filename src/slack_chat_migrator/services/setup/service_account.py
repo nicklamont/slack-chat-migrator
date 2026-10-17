@@ -156,18 +156,23 @@ class KeyCheck:
         reason: Why the key isn't usable, or why it couldn't be checked;
             empty exactly when *status* is ``ACTIVE``, and otherwise a
             phrase that isn't just whitespace.
+        has_bom: True if the file starts with a UTF-8 byte order mark,
+            which google-auth can't read whatever the key's state: always
+            for ``HAS_BOM``, never for ``ACTIVE`` or ``UNREADABLE``.
     """
 
     status: KeyStatus
     reason: str = ""
+    has_bom: bool = False
 
     def __post_init__(self) -> None:
-        """Enforce "reason is empty iff the key is active".
+        """Enforce "reason is empty iff the key is active", and *has_bom*.
 
         Raises:
             ValueError: If *status* isn't a :class:`KeyStatus` or *reason*
-                isn't a string, an ``ACTIVE`` result has a reason, or any
-                other result has none (or only whitespace).
+                isn't a string, an ``ACTIVE`` result has a reason, any
+                other result has none (or only whitespace), or *has_bom*
+                contradicts *status*.
         """
         if not isinstance(self.status, KeyStatus):
             raise ValueError(f"KeyCheck.status must be a KeyStatus: {self.status!r}")
@@ -181,6 +186,18 @@ class KeyCheck:
             raise ValueError(
                 "KeyCheck.reason must be empty for an ACTIVE key and given"
                 f" otherwise (status={self.status.value}, reason={self.reason!r})"
+            )
+        if self.status is KeyStatus.HAS_BOM:
+            bom_ok = self.has_bom is True
+        elif self.status in (KeyStatus.ACTIVE, KeyStatus.UNREADABLE):
+            bom_ok = self.has_bom is False
+        else:
+            bom_ok = isinstance(self.has_bom, bool)
+        if not bom_ok:
+            raise ValueError(
+                "KeyCheck.has_bom must be True for HAS_BOM and False for ACTIVE"
+                f" and UNREADABLE (status={self.status.value},"
+                f" has_bom={self.has_bom!r})"
             )
 
 
@@ -365,7 +382,8 @@ def check_existing_key(
         )
     # google-auth rejects a UTF-8 byte order mark too ("Unexpected UTF-8
     # BOM"), so a file with one is never reported ACTIVE: the key inside is
-    # checked as usual, and an active one is HAS_BOM (fixable by rewriting).
+    # checked as usual, an active one is HAS_BOM (fixable by rewriting), and
+    # any other result has has_bom set.
     has_bom = raw.startswith(codecs.BOM_UTF8)
     if has_bom:
         raw = raw[len(codecs.BOM_UTF8) :]
@@ -381,10 +399,11 @@ def check_existing_key(
             KeyStatus.HAS_BOM,
             "it starts with a UTF-8 byte order mark, which google-auth can't"
             " read (the key itself is active)",
+            has_bom=True,
         )
-    return KeyCheck(
-        check.status, f"{check.reason} (and it starts with a UTF-8 byte order mark)"
-    )
+    # The BOM doesn't change what the key check found; has_bom says that the
+    # file can't be used as it is either way.
+    return KeyCheck(check.status, check.reason, has_bom=True)
 
 
 def _check_key_text(

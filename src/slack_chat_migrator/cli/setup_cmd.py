@@ -550,50 +550,75 @@ def _forget_failed_key_file(state, key_path: Path) -> None:  # type: ignore[no-u
 
 def _offer_bom_rewrite(state, key_path: Path):  # type: ignore[no-untyped-def]
     """Offer to rewrite an active key file without its UTF-8 byte order mark."""
-    from slack_chat_migrator.services.setup.service_account import (
-        rewrite_without_bom,
-    )
     from slack_chat_migrator.services.setup.setup_service import StepStatus
 
-    console = get_console()
-    if click.confirm(
+    rewrote = _rewrite_bom_if_confirmed(
+        key_path,
         f"{key_path} holds an active key of {state.service_account_email}, but"
         " it starts with a UTF-8 byte order mark, which google-auth can't"
         " read. Rewrite it without the byte order mark? (Same key; no new key"
         " is created.)",
-        default=True,
-    ):
-        try:
-            rewritten = rewrite_without_bom(key_path)
-        except (OSError, ValueError) as e:
-            console.print(
-                f"[red]Couldn't rewrite {escape(str(key_path))}: {escape(str(e))}[/red]"
-            )
-        else:
-            state.key_path = str(key_path)
-            # Name the file that changed: a symlink's target, not the link.
-            rewrote = escape(str(key_path))
-            if key_path.is_symlink():
-                rewrote = f"{escape(str(rewritten))} (the file {rewrote} links to)"
-            console.print(
-                f"[green]Rewrote {rewrote} without the byte order mark; reusing"
-                " the key (no new key created).[/green]"
-            )
-            state.mark_step("key", StepStatus.COMPLETE)
-            return state
-    console.print(
+    )
+    if rewrote is None:
+        return _keep_bom_file_unused(state, key_path)
+    state.key_path = str(key_path)
+    get_console().print(
+        f"[green]Rewrote {rewrote} without the byte order mark; reusing"
+        " the key (no new key created).[/green]"
+    )
+    state.mark_step("key", StepStatus.COMPLETE)
+    return state
+
+
+def _rewrite_bom_if_confirmed(key_path: Path, question: str) -> str | None:
+    """Ask *question*; on yes, rewrite *key_path* without its byte order mark.
+
+    Returns:
+        The rewritten file, escaped for Rich (for a symlink, its target and
+        the link), or None if the user declined or the rewrite failed (the
+        error is printed).
+    """
+    from slack_chat_migrator.services.setup.service_account import (
+        rewrite_without_bom,
+    )
+
+    console = get_console()
+    if not click.confirm(question, default=True):
+        return None
+    try:
+        rewritten = rewrite_without_bom(key_path)
+    except (OSError, ValueError) as e:
+        console.print(
+            f"[red]Couldn't rewrite {escape(str(key_path))}: {escape(str(e))}[/red]"
+        )
+        return None
+    # Name the file that changed: a symlink's target, not the link.
+    rewrote = escape(str(key_path))
+    if key_path.is_symlink():
+        rewrote = f"{escape(str(rewritten))} (the file {rewrote} links to)"
+    return rewrote
+
+
+def _keep_bom_file_unused(state, key_path: Path):  # type: ignore[no-untyped-def]
+    """Leave a key file with a byte order mark as it is, and don't use it."""
+    from slack_chat_migrator.services.setup.setup_service import StepStatus
+
+    get_console().print(
         "[dim]Kept the file unchanged. google-auth can't read it as it is, so"
         " re-save it as UTF-8 without a byte order mark and re-run setup, or"
         " choose another path to create a new key.[/dim]"
     )
-    if state.key_path == str(key_path):
-        state.key_path = None
+    _forget_failed_key_file(state, key_path)
     state.mark_step("key", StepStatus.SKIPPED)
     return state
 
 
 def _keep_unchecked_key_file(state, key_path: Path, check):  # type: ignore[no-untyped-def]
-    """Keep a key file that couldn't be checked, and say why."""
+    """Keep a key file that couldn't be checked, and say why.
+
+    A file with a byte order mark can't be used as it is, whatever IAM
+    would say about its key, so the user is offered to rewrite it first.
+    """
     from slack_chat_migrator.services.setup.service_account import KeyStatus
     from slack_chat_migrator.services.setup.setup_service import StepStatus
 
@@ -604,9 +629,25 @@ def _keep_unchecked_key_file(state, key_path: Path, check):  # type: ignore[no-u
             f" active key for {escape(state.service_account_email)}:"
             f" {escape(check.reason)}[/yellow]"
         )
+        if check.has_bom:
+            rewrote = _rewrite_bom_if_confirmed(
+                key_path,
+                f"{key_path} also starts with a UTF-8 byte order mark, which"
+                " google-auth can't read, so it can't be used as it is."
+                " Rewrite it without the byte order mark? (Only the mark is"
+                " removed; no new key is created.)",
+            )
+            if rewrote is None:
+                return _keep_bom_file_unused(state, key_path)
+            console.print(
+                f"[green]Rewrote {rewrote} without the byte order mark (no new"
+                " key created).[/green]"
+            )
+            kept = "Its key is still unchecked; the next steps use it as is."
+        else:
+            kept = "Kept the existing file unchanged; the next steps use it as is."
         console.print(
-            "[dim]Kept the existing file unchanged; the next steps use it"
-            " as is. Re-run setup once the problem is fixed to check it"
+            f"[dim]{kept} Re-run setup once the problem is fixed to check it"
             " again, or choose another path to create a new key.[/dim]"
         )
         state.key_path = str(key_path)
@@ -620,8 +661,7 @@ def _keep_unchecked_key_file(state, key_path: Path, check):  # type: ignore[no-u
             "[dim]Left it unchanged. Fix the file (or its permissions) and"
             " re-run setup, or choose another path to create a new key.[/dim]"
         )
-        if state.key_path == str(key_path):
-            state.key_path = None
+        _forget_failed_key_file(state, key_path)
     state.mark_step("key", StepStatus.SKIPPED)
     return state
 

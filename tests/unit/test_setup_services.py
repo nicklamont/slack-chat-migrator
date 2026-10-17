@@ -558,10 +558,14 @@ def _stat_with_owner(st: os.stat_result, uid: int, gid: int) -> os.stat_result:
     return os.stat_result(fields)
 
 
-def _key_check(status: str, reason: str = ""):  # type: ignore[no-untyped-def]
+def _key_check(  # type: ignore[no-untyped-def]
+    status: str, reason: str = "", *, has_bom: bool | None = None
+):
     from slack_chat_migrator.services.setup.service_account import KeyCheck, KeyStatus
 
-    return KeyCheck(KeyStatus[status], reason)
+    if has_bom is None:
+        has_bom = status == "HAS_BOM"
+    return KeyCheck(KeyStatus[status], reason, has_bom=has_bom)
 
 
 class TestDownloadKey:
@@ -1313,9 +1317,22 @@ class TestCheckExistingKey:
 
         check = self._check(self._bom_file(tmp_path), _iam_with_key(disabled=True))
         assert check.status is KeyStatus.INACTIVE
-        assert check.reason == (
-            "it is disabled (and it starts with a UTF-8 byte order mark)"
-        )
+        assert check.reason == "it is disabled"
+        assert check.has_bom is True
+
+    def test_unchecked_key_with_a_bom_says_so(self, tmp_path: Path) -> None:
+        """The reason stays the list error; has_bom carries the BOM."""
+        from slack_chat_migrator.services.setup.service_account import KeyStatus
+
+        check = self._check(self._bom_file(tmp_path), _iam_failing(_http_error(403)))
+        assert check.status is KeyStatus.UNKNOWN
+        assert check.reason.startswith("listing the keys failed with HTTP 403")
+        assert "byte order mark" not in check.reason
+        assert check.has_bom is True
+
+    def test_file_without_a_bom_has_none(self, tmp_path: Path) -> None:
+        check = self._check(self._key_file(tmp_path), _iam_failing(_http_error(403)))
+        assert check.has_bom is False
 
     def test_rewrite_without_bom_keeps_the_key(self, tmp_path: Path) -> None:
         import os
@@ -1591,6 +1608,34 @@ class TestKeyCheck:
         with pytest.raises(ValueError, match="KeyStatus"):
             KeyCheck("active")  # type: ignore[arg-type]
 
+    @pytest.mark.parametrize(
+        ("status", "has_bom"),
+        [
+            ("HAS_BOM", False),
+            ("ACTIVE", True),
+            ("UNREADABLE", True),
+            ("UNKNOWN", 1),
+        ],
+    )
+    def test_has_bom_matches_the_status(self, status: str, has_bom: Any) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeyCheck,
+            KeyStatus,
+        )
+
+        reason = "" if status == "ACTIVE" else "why"
+        with pytest.raises(ValueError, match="has_bom"):
+            KeyCheck(KeyStatus[status], reason, has_bom=has_bom)
+
+    @pytest.mark.parametrize("status", ["INACTIVE", "NOT_A_KEY", "UNKNOWN"])
+    def test_other_statuses_may_have_a_bom(self, status: str) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeyCheck,
+            KeyStatus,
+        )
+
+        assert KeyCheck(KeyStatus[status], "why", has_bom=True).has_bom is True
+
 
 class TestKeyStep:
     """The wizard's key step acts on each KeyCheck status."""
@@ -1831,6 +1876,65 @@ class TestKeyStep:
         assert state.key_path is None
         assert state.step_status("key") == StepStatus.SKIPPED
         assert "google-auth can't read it" in capsys.readouterr().out
+
+    def _unchecked_bom_step(
+        self, tmp_path: Path, confirm_answer: bool, rewrite_error: Exception | None
+    ):  # type: ignore[no-untyped-def]
+        with patch(
+            "slack_chat_migrator.services.setup.service_account.rewrite_without_bom",
+            side_effect=rewrite_error,
+        ) as rewrite:
+            state, key, confirm, download = self._run_key_step(
+                tmp_path,
+                _key_check(
+                    "UNKNOWN", "listing the keys failed with HTTP 403.", has_bom=True
+                ),
+                confirm_answer=confirm_answer,
+                resumed=True,
+            )
+        download.assert_not_called()
+        assert state.step_status("key") == StepStatus.SKIPPED
+        return state, key, confirm, rewrite
+
+    def test_unchecked_bom_file_is_rewritten_when_the_user_agrees(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        state, key, confirm, rewrite = self._unchecked_bom_step(
+            tmp_path, confirm_answer=True, rewrite_error=None
+        )
+        rewrite.assert_called_once_with(key)
+        assert "also starts with a UTF-8 byte order mark" in confirm.call_args.args[0]
+        assert "no new key is created" in confirm.call_args.args[0]
+        # Still unchecked, but now readable: the next steps use it
+        assert state.key_path == str(key)
+        out = " ".join(capsys.readouterr().out.split())
+        assert "HTTP 403." in out
+        assert "without the byte order mark (no new key created)" in out
+        assert "Its key is still unchecked; the next steps use it as is." in out
+        assert "Kept the existing file unchanged" not in out
+
+    @pytest.mark.parametrize(
+        ("confirm_answer", "rewrite_error"),
+        [(False, None), (True, PermissionError(13, "Permission denied"))],
+        ids=["declined", "rewrite-failed"],
+    )
+    def test_unchecked_bom_file_left_as_is_is_not_used(
+        self,
+        tmp_path: Path,
+        capsys,
+        confirm_answer: bool,
+        rewrite_error: Exception | None,
+    ) -> None:
+        """google-auth can't read it, so the next steps mustn't use it."""
+        state, key, _, rewrite = self._unchecked_bom_step(
+            tmp_path, confirm_answer=confirm_answer, rewrite_error=rewrite_error
+        )
+        assert rewrite.called is confirm_answer
+        assert key.read_text() == "{}"
+        assert state.key_path is None
+        out = " ".join(capsys.readouterr().out.split())
+        assert "google-auth can't read it as it is" in out
+        assert "the next steps use it" not in out
 
     def test_bom_rewrite_through_a_symlink_names_the_target(
         self, tmp_path: Path, capsys
