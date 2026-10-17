@@ -189,6 +189,7 @@ The config file is validated before anything is migrated, so a typo can't silent
 - If you pass `--config` and the file doesn't exist, the command fails. Without `--config`, a missing `config.yaml` means "use the defaults" (all channels, no user overrides), and a warning says so. `validate` is stricter: it stops when the config file is missing and, in a terminal, offers to create one with `init` (without a terminal it exits with status 1).
 - A file that isn't valid YAML, or whose top level isn't a mapping, is an error.
 - Values are type-checked. Booleans must be YAML `true`/`false` (not the string `"false"`), counts must be whole numbers, and `retry_delay` must be a number. List options such as `include_channels` also accept a single name (`include_channels: general` means `[general]`, with a warning) or an empty value. Channel names may be numeric and may start with `#`.
+- A key written twice in the same mapping (an option, or the same channel in `space_mapping`) is an error that names both lines; YAML would otherwise silently keep the last one. In `space_mapping`, `custom_emoji_map` and `user_mapping_overrides`, keys that YAML reads as something other than a name, such as unquoted `yes`, `no`, `on`, `off` or a date, are errors too: quote them.
 - An unknown option that looks like a misspelling of a real one (for example `include_channel` or `max_retry`) is an error with a "did you mean" hint. Other unknown options are ignored with a warning.
 
 Config errors exit with status 1 and name the offending option.
@@ -203,7 +204,7 @@ space_mapping:
   "random": "AAAABbTr456"   # Use this space ID for the random channel
 ```
 
-Keys are channel names (a leading `#` is ignored) and values are space IDs, with or without the `spaces/` prefix. A `space_mapping` that isn't a mapping, an entry without a space ID, or a channel listed twice is a config error.
+Keys are channel names (a leading `#` is ignored) and values are space IDs, with or without the `spaces/` prefix. A `space_mapping` that isn't a mapping, an entry without a space ID, or a channel listed twice (including two spellings of one channel, such as `general` and `"#general"`) is a config error. When you paste the block the tool logs for a duplicate, keep only the line for the space you want.
 
 When duplicate spaces are found, the tool will:
 1. Skip those specific channels (not abort the entire migration)
@@ -224,7 +225,7 @@ custom_emoji_map:
   shipit: ":ship-it:"               # the name of a Google Chat custom emoji
 ```
 
-Keys can be written with or without their colons (`partyparrot` or `":partyparrot:"`). The map is checked before the standard names, so it can also override them. A Slack skin tone (`approved::skin-tone-3`) is applied to the mapped emoji when that emoji supports one. A `:name:` value that isn't a standard emoji is taken as the name of a Google Chat custom emoji, and message text shows it as `:ship-it:`. The Slack export contains no emoji images, so create any custom emoji you want in Google Chat yourself before migrating.
+Keys can be written with or without their colons and in any case (`partyparrot`, `":PartyParrot:"`); two keys that differ only in that way are an error. The map is checked before the standard names, so it can also override them. A Slack skin tone (`approved::skin-tone-3`) is applied to the mapped emoji when that emoji supports one. A `:name:` value that isn't a standard emoji is taken as the name of a Google Chat custom emoji, and message text shows it as `:ship-it:`. The Slack export contains no emoji images, so create any custom emoji you want in Google Chat yourself before migrating.
 
 > **Note:** Debug and logging options are controlled via command-line flags (`--verbose` and `--debug_api`) rather than configuration file settings. This ensures consistent logging behavior across all migration runs.
 

@@ -8,6 +8,7 @@ configuration.
 
 from __future__ import annotations
 
+import datetime
 import difflib
 import logging
 import os
@@ -28,7 +29,8 @@ CONVERSATION_TYPES = ("public", "private", "mpim", "dm")
 #: Who becomes the space manager after ``completeImport``.
 SPACE_MANAGER_CHOICES = ("admin", "creator")
 
-#: Shared drive used for attachments when ``shared_drive.name`` isn't set.
+#: Shared drive name used when neither ``shared_drive.id`` nor
+#: ``shared_drive.name`` is set (a configured ``id`` wins over any name).
 DEFAULT_SHARED_DRIVE_NAME = "Imported Slack Attachments"
 
 
@@ -44,7 +46,8 @@ class SharedDriveConfig:
     """Configuration for the shared Google Drive used for file attachments.
 
     ``name`` is never blank: an empty name means
-    :data:`DEFAULT_SHARED_DRIVE_NAME`.  An empty ``id`` means "not set".
+    :data:`DEFAULT_SHARED_DRIVE_NAME`.  ``id`` is stripped, and an empty or
+    whitespace-only ``id`` means "not set" (None).
     """
 
     name: str = DEFAULT_SHARED_DRIVE_NAME
@@ -66,8 +69,8 @@ class SharedDriveConfig:
             raise ConfigError(
                 f"shared_drive.id must be a string, got {_describe(self.id)}"
             )
-        if not self.id:
-            self.id = None
+        if self.id is not None:
+            self.id = self.id.strip() or None
 
     @classmethod
     def from_dict(cls, data: Any) -> SharedDriveConfig:
@@ -137,8 +140,9 @@ class MigrationConfig:
 
     # Optional Slack token (``files:read``) used as a Bearer header when
     # downloading export files.  Falls back to the ``SLACK_TOKEN`` env var.
-    # Kept out of repr() so print(config), debuggers and tracebacks with
-    # locals don't show it.
+    # Kept out of repr(), so the repr-based views (print(config), pdb's
+    # ``p config``, tracebacks with locals) don't show it; the attribute
+    # itself stays readable.
     slack_token: str = field(default="", repr=False)
 
     # Durable migration state (created spaces, import deadlines, resume
@@ -168,7 +172,20 @@ class MigrationConfig:
     announcement_channels: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        """Validate configuration values after initialization."""
+        """Validate and normalise the values after initialization.
+
+        Checks every field's type (so direct construction fails like
+        ``from_dict`` does), coerces ``import_completion_strategy`` to its
+        enum, checks the ranges, and normalises ``custom_emoji_map`` keys
+        (see :func:`_normalize_emoji_map`).
+
+        Raises:
+            ConfigError: If a value has the wrong type or is out of range.
+        """
+        _check_field_types(self)
+        self.import_completion_strategy = _parse_completion_strategy(
+            self.import_completion_strategy
+        )
         if self.max_parallel_channels < 1:
             raise ConfigError(
                 f"max_parallel_channels must be >= 1, got {self.max_parallel_channels}"
@@ -447,34 +464,121 @@ def _get_mapping(data: Mapping[str, Any], key: str) -> dict[str, str]:
                 f"Config option '{key}' entry {raw_key!r} must be a string,"
                 f" got {_describe(raw_value)}"
             )
-        result[str(raw_key)] = str(raw_value)
+        result[_mapping_key(raw_key, f"Config option '{key}'")] = str(raw_value)
     return result
 
 
-def _get_conversation_types(data: Mapping[str, Any]) -> list[str]:
-    """Return ``conversation_types``; an absent or empty value means all types.
+#: What each annotated field type must hold, for direct construction.
+_FIELD_TYPE_CHECKS: dict[str, tuple[str, Any]] = {
+    "bool": ("true or false", lambda v: isinstance(v, bool)),
+    "int": (
+        "a whole number",
+        lambda v: isinstance(v, int) and not isinstance(v, bool),
+    ),
+    "float": (
+        "a number",
+        lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    ),
+    "str": ("a string", lambda v: isinstance(v, str)),
+    "list[str]": (
+        "a list of strings",
+        lambda v: isinstance(v, list) and all(isinstance(i, str) for i in v),
+    ),
+    "dict[str, str]": (
+        "a mapping of strings",
+        lambda v: (
+            isinstance(v, Mapping) and all(isinstance(i, str) for i in v.values())
+        ),
+    ),
+    "SharedDriveConfig": (
+        "a SharedDriveConfig",
+        lambda v: isinstance(v, SharedDriveConfig),
+    ),
+}
 
-    An explicit empty list stays empty, so ``__post_init__`` rejects it
-    rather than reading it as "all".
+
+def _check_field_types(config: Any) -> None:
+    """Check each dataclass field of *config* against its annotation.
+
+    Fields whose annotation isn't in :data:`_FIELD_TYPE_CHECKS` (such as the
+    completion-strategy enum, which is coerced instead) are skipped.
+
+    Raises:
+        ConfigError: If a field holds the wrong type.
+    """
+    for f in fields(config):
+        check = _FIELD_TYPE_CHECKS.get(str(f.type))
+        value = getattr(config, f.name)
+        if check is not None and not check[1](value):
+            raise ConfigError(f"{f.name} must be {check[0]}, got {_describe(value)}")
+
+
+def _mapping_key(raw_key: Any, option: str) -> str:
+    """Return a mapping key from the config as a string.
+
+    YAML turns some unquoted keys into other types: ``yes``/``no``/``on``/
+    ``off`` into booleans and ``2024-01-01`` into a date.  Their text can't
+    be recovered, so they are rejected with a hint to quote them.
+
+    Args:
+        raw_key: The key as YAML parsed it.
+        option: The option name, for the message.
+
+    Returns:
+        The key: strings as they are, integers as their digits.
+
+    Raises:
+        ConfigError: For any other key type.
+    """
+    if isinstance(raw_key, str):
+        return raw_key
+    if isinstance(raw_key, bool):
+        raise ConfigError(
+            f"{option} has a key that YAML read as the boolean {raw_key}"
+            " (written as yes, no, on, off, true or false); quote it, for"
+            " example 'yes': ..."
+        )
+    if isinstance(raw_key, int):
+        return str(raw_key)
+    if isinstance(raw_key, (datetime.date, datetime.datetime)):
+        raise ConfigError(
+            f"{option} has a key that YAML read as the date"
+            f" {raw_key.isoformat()}; quote it, for example"
+            f" '{raw_key.isoformat()}': ..."
+        )
+    raise ConfigError(
+        f"{option} key {raw_key!r} isn't a name; quote it, for example '{raw_key}': ..."
+    )
+
+
+def _get_conversation_types(data: Mapping[str, Any]) -> list[str]:
+    """Return ``conversation_types``.
+
+    An absent or null value (``conversation_types:`` with nothing after it)
+    means all types.  ``[]`` or ``""`` is passed on as an empty list, so
+    ``__post_init__`` rejects it rather than reading it as "all".
     """
     if data.get("conversation_types") is None:
         return list(CONVERSATION_TYPES)
     return _get_list(data, "conversation_types")
 
 
-def _normalize_emoji_map(mapping: Mapping[str, str]) -> dict[str, str]:
-    """Strip the colons from ``custom_emoji_map`` keys, keeping their case.
+def _normalize_emoji_map(mapping: Mapping[Any, str]) -> dict[str, str]:
+    """Normalise ``custom_emoji_map`` keys to bare, lowercase emoji names.
 
-    Emoji are looked up by bare name, so ``":partyparrot:"`` becomes
-    ``"partyparrot"`` (Slack names are lowercase already).
+    Emoji are looked up by the bare lowercase name Slack uses, so
+    ``":PartyParrot:"`` becomes ``"partyparrot"``; otherwise such a key
+    would silently never match.
 
     Raises:
-        ConfigError: If a key is empty after stripping, or two keys name the
-            same emoji.
+        ConfigError: If a key isn't a name (a YAML boolean or date), is
+            empty after stripping, or two keys name the same emoji (also
+            when they differ only in case or colons).
     """
     result: dict[str, str] = {}
     for raw_key, value in mapping.items():
-        name = str(raw_key).strip().strip(":").strip()
+        key = _mapping_key(raw_key, "custom_emoji_map")
+        name = key.strip().strip(":").strip().lower()
         if not name:
             raise ConfigError(f"custom_emoji_map key {raw_key!r} is not an emoji name")
         if name in result:
@@ -497,7 +601,9 @@ def normalize_channel_name(name: str) -> str:
     return name.strip().lstrip("#").strip()
 
 
-def _parse_completion_strategy(value: str) -> ImportCompletionStrategy:
+def _parse_completion_strategy(
+    value: str | ImportCompletionStrategy,
+) -> ImportCompletionStrategy:
     """Convert a raw string to an ImportCompletionStrategy enum member.
 
     Args:
@@ -561,15 +667,55 @@ def load_config(config_path: Path, *, required: bool = False) -> MigrationConfig
     return config
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """A ``SafeLoader`` that rejects a key repeated in the same mapping.
+
+    PyYAML keeps the last of two identical keys without a word, so pasting
+    the duplicate-space block the tool logs (one ``"general": ...`` line per
+    candidate space) or writing an option twice would silently pick one.
+    Keys pulled in with a ``<<`` merge may still be overridden.
+    """
+
+    def construct_mapping(
+        self, node: yaml.MappingNode, deep: bool = False
+    ) -> dict[Any, Any]:
+        """Construct a mapping, raising on a repeated key.
+
+        Raises:
+            yaml.constructor.ConstructorError: If a key appears twice.
+        """
+        first_line: dict[Any, int] = {}
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                seen = key in first_line
+            except TypeError:  # unhashable; the base class reports it
+                continue
+            if seen:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r} (first on line"
+                    f" {first_line[key]}); remove one of the entries",
+                    key_node.start_mark,
+                )
+            first_line[key] = key_node.start_mark.line + 1
+        return super().construct_mapping(node, deep=deep)
+
+
 def _read_yaml(config_path: Path) -> Any:
-    """Read and parse a YAML config file.
+    """Read and parse a YAML config file, rejecting duplicate keys.
 
     Raises:
-        ConfigError: If the file can't be read or isn't valid YAML.
+        ConfigError: If the file can't be read or isn't valid YAML, which
+            includes a key repeated in the same mapping.
     """
     try:
         with open(config_path, encoding="utf-8") as f:
-            return yaml.safe_load(f)
+            # A SafeLoader subclass: it constructs only plain YAML types.
+            return yaml.load(f, Loader=_UniqueKeyLoader)  # noqa: S506
     except yaml.YAMLError as e:
         raise ConfigError(f"Config file {config_path} is not valid YAML: {e}") from e
     except (OSError, UnicodeDecodeError) as e:
@@ -608,11 +754,7 @@ def parse_space_mapping(value: Any) -> dict[str, str]:
         )
     result: dict[str, str] = {}
     for raw_channel, raw_space in value.items():
-        if isinstance(raw_channel, bool) or not isinstance(raw_channel, (str, int)):
-            raise ConfigError(
-                f"space_mapping key {raw_channel!r} must be a channel name"
-            )
-        channel = normalize_channel_name(str(raw_channel))
+        channel = normalize_channel_name(_mapping_key(raw_channel, "space_mapping"))
         if not channel:
             raise ConfigError(
                 f"space_mapping key {raw_channel!r} is not a channel name"
@@ -654,7 +796,8 @@ def load_space_mapping(config_path: Path) -> dict[str, str]:
         doesn't exist or has no ``space_mapping``.
 
     Raises:
-        ConfigError: If the file can't be read, isn't valid YAML, or its
+        ConfigError: If the file can't be read, isn't valid YAML (duplicate
+            keys included), its top level isn't a mapping, or its
             ``space_mapping`` is malformed.
     """
     if not config_path.exists():
