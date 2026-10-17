@@ -150,6 +150,28 @@ class TestGetOrCreateSharedDrive:
         result = manager.get_or_create_shared_drive()
 
         assert result is None
+        assert manager.last_error and "Test Drive" in manager.last_error
+
+    def test_network_error_is_reported_not_raised(self):
+        manager, drive_service = _make_manager(
+            shared_drive_id=None, shared_drive_name="Test Drive"
+        )
+        drive_service.list_drives.side_effect = ConnectionResetError("reset")
+
+        assert manager.get_or_create_shared_drive() is None
+        assert manager.last_error and "reset" in manager.last_error
+
+    def test_success_clears_the_last_error(self):
+        manager, drive_service = _make_manager(
+            shared_drive_id=None, shared_drive_name="Test Drive"
+        )
+        manager.last_error = "old"
+        drive_service.list_drives.return_value = {
+            "drives": [{"id": "d", "name": "Test Drive"}]
+        }
+
+        assert manager.get_or_create_shared_drive() == "d"
+        assert manager.last_error is None
 
 
 class TestFindOrCreateSharedDrive:

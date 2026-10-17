@@ -183,6 +183,18 @@ class TestCreateRegularDriveFolder:
 
         assert result is None
 
+    @pytest.mark.parametrize(
+        "error", [_make_http_error(403), TimeoutError("slow")], ids=["http", "net"]
+    )
+    def test_root_folder_lookup_returns_the_reason(self, error):
+        svc = _make_drive_service()
+        svc.list_files.side_effect = error
+
+        lookup = FolderManager(svc).find_or_create_root_folder("attachments")
+
+        assert lookup.folder_id is None
+        assert lookup.error and "attachments" in lookup.error
+
 
 # -----------------------------------------------------------
 # get_channel_folder_id

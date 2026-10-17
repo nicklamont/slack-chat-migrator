@@ -13,6 +13,7 @@ from googleapiclient.errors import HttpError
 from slack_chat_migrator.constants import DRIVES_PAGE_SIZE
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.exceptions import ConfigError
+from slack_chat_migrator.services.drive_adapter import DRIVE_CALL_ERRORS
 from slack_chat_migrator.utils.api import escape_drive_query_value
 from slack_chat_migrator.utils.logging import (
     log_with_context,
@@ -38,17 +39,21 @@ class SharedDriveManager:
         """
         self.drive_service = drive_service
         self.config = config
+        #: Why the last :meth:`get_or_create_shared_drive` found no drive.
+        self.last_error: str | None = None
 
     def get_or_create_shared_drive(self) -> str | None:
         """Get or create the shared drive for storing attachments.
 
         Returns:
-            Shared drive ID if successful, None otherwise
+            Shared drive ID if successful, None otherwise (the reason is in
+            :attr:`last_error`)
 
         Raises:
             ConfigError: If ``shared_drive.id`` is configured but the drive
                 can't be opened.  A new drive is never created in its place.
         """
+        self.last_error = None
         # Get shared drive configuration
         shared_drive_name = self.config.shared_drive.name
         shared_drive_id = self.config.shared_drive.id
@@ -76,17 +81,8 @@ class SharedDriveManager:
             drive_id_result: str | None = shared_drive_id
             return drive_id_result
 
-        try:
-            # Find existing shared drive by name or create new one
-            if shared_drive_name:
-                return self._find_or_create_shared_drive(shared_drive_name)
-            return None
-
-        except HttpError as e:
-            log_with_context(
-                logging.ERROR, f"Failed to get or create shared drive: {e}"
-            )
-            return None
+        # Find existing shared drive by name or create new one
+        return self._find_or_create_shared_drive(shared_drive_name)
 
     def _find_drives_by_name(self, drive_name: str) -> list[dict[str, str]]:
         """Return every shared drive named *drive_name*, across all pages.
@@ -165,6 +161,9 @@ class SharedDriveManager:
             )
 
             created_drive_id: str | None = created_drive.get("id")
+            if not created_drive_id:
+                self.last_error = "Drive returned no ID for the new shared drive"
+                return None
 
             log_with_context(
                 logging.INFO,
@@ -174,7 +173,10 @@ class SharedDriveManager:
 
             return created_drive_id
 
-        except HttpError as e:
+        except DRIVE_CALL_ERRORS as e:
+            self.last_error = (
+                f"could not find or create shared drive {drive_name!r}: {e}"
+            )
             log_with_context(
                 logging.ERROR,
                 f"Failed to find or create shared drive {drive_name}: {e}",

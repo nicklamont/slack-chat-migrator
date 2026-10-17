@@ -15,7 +15,7 @@ from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.services.drive import DriveUpload, DriveUploadFailure
 from slack_chat_migrator.services.drive.folder_manager import FolderLookup
-from slack_chat_migrator.services.files.file import FileHandler
+from slack_chat_migrator.services.files.file import DriveStatus, FileHandler
 from slack_chat_migrator.services.files.file_download import (
     DownloadResult,
     DownloadStatus,
@@ -775,7 +775,8 @@ class TestInitializeSharedDriveAndFolder:
         """When shared drive creation returns None, fall back to regular folder."""
         handler = _make_handler()
         handler.shared_drive_manager.get_or_create_shared_drive.return_value = None
-        handler.folder_manager.create_regular_drive_folder.return_value = (
+        handler.shared_drive_manager.last_error = "403 insufficient permissions"
+        handler.folder_manager.find_or_create_root_folder.return_value = FolderLookup(
             "regular_folder"
         )
         handler._pre_cache_root_folder = MagicMock()
@@ -784,10 +785,13 @@ class TestInitializeSharedDriveAndFolder:
 
         assert handler._shared_drive_id is None
         assert handler._root_folder_id == "regular_folder"
-        handler.folder_manager.create_regular_drive_folder.assert_called_once_with(
+        handler.folder_manager.find_or_create_root_folder.assert_called_once_with(
             "Imported Slack Attachments"
         )
         handler._pre_cache_root_folder.assert_called_once()
+        assert handler.drive_ready
+        assert handler.drive_status.mode == "my_drive"
+        assert "403 insufficient permissions" in handler.drive_status.detail
 
     def test_http_error_falls_back_to_fallback_folder(self):
         """When an HttpError occurs, fall back to 'Slack Attachments Fallback'."""
@@ -795,16 +799,66 @@ class TestInitializeSharedDriveAndFolder:
         handler.shared_drive_manager.get_or_create_shared_drive.side_effect = HttpError(
             Response({"status": "500"}), b"error"
         )
-        handler.folder_manager.create_regular_drive_folder.return_value = (
+        handler.folder_manager.find_or_create_root_folder.return_value = FolderLookup(
             "fallback_folder"
         )
 
         handler._initialize_shared_drive_and_folder()
 
         assert handler._root_folder_id == "fallback_folder"
-        handler.folder_manager.create_regular_drive_folder.assert_called_once_with(
+        handler.folder_manager.find_or_create_root_folder.assert_called_once_with(
             "Slack Attachments Fallback"
         )
+
+    def test_no_shared_drive_and_no_folder_is_not_ready(self):
+        """SF12: the status says Drive isn't usable, and why."""
+        handler = _make_handler()
+        handler.shared_drive_manager.get_or_create_shared_drive.return_value = None
+        handler.shared_drive_manager.last_error = "quota exceeded"
+        handler.folder_manager.find_or_create_root_folder.return_value = FolderLookup(
+            None, "could not find or create folder: 403"
+        )
+
+        handler._initialize_shared_drive_and_folder()
+
+        status = handler.drive_status
+        assert not handler.drive_ready
+        assert status.mode == "none"
+        assert status.root_folder_id is None
+        assert "quota exceeded" in status.detail
+        assert "403" in status.detail
+
+    def test_shared_drive_is_ready(self):
+        handler = _make_handler()
+        handler.shared_drive_manager.get_or_create_shared_drive.return_value = "SD"
+        handler._pre_cache_root_folder = MagicMock()
+
+        handler._initialize_shared_drive_and_folder()
+
+        assert handler.drive_status == DriveStatus(
+            True, "shared_drive", "SD", "shared drive SD"
+        )
+
+
+class TestDriveStatus:
+    """Drive readiness for the preflight (SF12)."""
+
+    def test_not_ready_before_initialization(self):
+        handler = _make_handler()
+        assert handler.drive_status.mode == "not_initialized"
+        assert handler.drive_ready is False
+
+    def test_given_folder_is_ready(self):
+        handler = _make_handler(folder_id="ROOT")
+        assert handler.drive_status == DriveStatus(
+            True, "folder", "ROOT", "attachment folder ROOT"
+        )
+
+    def test_ready_needs_a_root_folder(self):
+        with pytest.raises(ValueError, match="root folder"):
+            DriveStatus(True, "shared_drive", None)
+        with pytest.raises(ValueError, match="root folder"):
+            DriveStatus(False, "none", "X")
 
     def test_default_drive_name_when_nothing_configured(self):
         """When name and ID are both empty, use default 'Imported Slack Attachments'."""

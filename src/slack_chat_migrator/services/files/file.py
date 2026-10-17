@@ -9,7 +9,7 @@ import logging
 import mimetypes
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import requests
 from googleapiclient.errors import HttpError
@@ -39,6 +39,7 @@ from slack_chat_migrator.services.drive.folder_manager import (
     FolderLookup,
     FolderSyncResult,
 )
+from slack_chat_migrator.services.drive_adapter import DRIVE_CALL_ERRORS
 from slack_chat_migrator.services.files.file_download import (
     AUTH_FAILURE_REASONS,
     REASON_EXTERNAL,
@@ -80,6 +81,37 @@ logger = logging.getLogger("slack_chat_migrator")
 #: downloads (401/403, sign-in pages) are.
 SKIP_REASON_UNAVAILABLE = "unavailable"
 SKIP_REASON_GOOGLE_DOCS_LINK = "google_docs_link"
+
+
+#: How attachments are stored; see :class:`DriveStatus`.
+DriveMode = Literal["not_initialized", "folder", "shared_drive", "my_drive", "none"]
+
+
+@dataclass(frozen=True)
+class DriveStatus:
+    """Where attachments go on Drive, or why they can't go anywhere.
+
+    Attributes:
+        ready: There is an attachment root folder, so uploads can be tried.
+        mode: ``shared_drive`` (the shared drive's root), ``my_drive`` (a
+            regular Drive folder, because no shared drive could be used),
+            ``folder`` (a root folder given to FileHandler),
+            ``not_initialized`` (before :meth:`FileHandler.ensure_drive_initialized`)
+            or ``none`` (neither a shared drive nor a folder could be set up).
+        root_folder_id: The attachment root; set exactly when *ready*.
+        detail: One line for the preflight: what is used, and why a
+            fallback was needed or what failed.
+    """
+
+    ready: bool
+    mode: DriveMode
+    root_folder_id: str | None = None
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        """Reject a ready status without a root folder, and the reverse."""
+        if self.ready != bool(self.root_folder_id):
+            raise ValueError("a DriveStatus is ready exactly when it has a root folder")
 
 
 @dataclass(frozen=True)
@@ -236,11 +268,14 @@ class FileHandler:
         self._shared_drive_id: str | None = None
         self._root_folder_id: str | None = None
         self._drive_initialized = False
+        self._drive_status = DriveStatus(
+            False, "not_initialized", detail="Drive is not initialized yet"
+        )
 
         # Don't initialize drive structures during construction - defer until needed
         # This avoids expensive operations before permission validation
         if folder_id:
-            self._root_folder_id = folder_id
+            self.folder_id = folder_id
             self._drive_initialized = True
 
     def ensure_drive_initialized(self) -> None:
@@ -273,6 +308,25 @@ class FileHandler:
             value: The Drive folder ID to set, or None to clear.
         """
         self._root_folder_id = value
+        self._drive_status = (
+            DriveStatus(True, "folder", value, f"attachment folder {value}")
+            if value
+            else DriveStatus(False, "none", detail="no attachment folder is set")
+        )
+
+    @property
+    def drive_status(self) -> DriveStatus:
+        """Where attachments go, or why they can't go anywhere.
+
+        Set by :meth:`ensure_drive_initialized` (and by setting
+        :attr:`folder_id`); reading it initializes nothing.
+        """
+        return self._drive_status
+
+    @property
+    def drive_ready(self) -> bool:
+        """Whether Drive uploads can be tried (``drive_status.ready``)."""
+        return self._drive_status.ready
 
     def _get_current_channel(self) -> str | None:
         """Return the current channel name for logging context."""
@@ -287,41 +341,69 @@ class FileHandler:
         """Initialize the shared drive and root folder for attachments.
 
         Delegates shared drive creation/validation to :class:`SharedDriveManager`
-        (single source of truth), then sets the root folder ID and pre-caches
-        file hashes for deduplication.
+        (single source of truth).  Without a shared drive, a regular Drive
+        folder is used instead.  Sets the root folder ID and
+        :attr:`drive_status`, then pre-caches the root folder for
+        deduplication.  A configured ``shared_drive.id`` that can't be
+        opened raises ``ConfigError``; other failures only show in the
+        status.
         """
+        fallback_name = "Imported Slack Attachments"
         try:
             # SharedDriveManager handles: validate configured ID → find by
             # name → create new drive.  No need to duplicate that here.
             self._shared_drive_id = (
                 self.shared_drive_manager.get_or_create_shared_drive()
             )
-
-            if self._shared_drive_id:
-                self._root_folder_id = self._shared_drive_id
-                log_with_context(
-                    logging.DEBUG,
-                    f"Using shared drive root as attachment folder: {self._shared_drive_id}",
-                )
-            else:
-                log_with_context(
-                    logging.WARNING,
-                    "Could not set up shared drive, falling back to regular Drive folder",
-                )
-                self._root_folder_id = self.folder_manager.create_regular_drive_folder(
-                    "Imported Slack Attachments"
-                )
-
-            self._pre_cache_root_folder()
-
+            shared_error = self.shared_drive_manager.last_error
         except HttpError as e:
+            self._shared_drive_id = None
+            shared_error = str(e)
+            fallback_name = "Slack Attachments Fallback"
+
+        if self._shared_drive_id:
+            self._root_folder_id = self._shared_drive_id
+            self._drive_status = DriveStatus(
+                True,
+                "shared_drive",
+                self._shared_drive_id,
+                f"shared drive {self._shared_drive_id}",
+            )
             log_with_context(
-                logging.ERROR,
-                f"Failed to initialize shared drive and folder: {e}. Using fallback.",
+                logging.DEBUG,
+                f"Using shared drive root as attachment folder: {self._shared_drive_id}",
             )
-            self._root_folder_id = self.folder_manager.create_regular_drive_folder(
-                "Slack Attachments Fallback"
+        else:
+            why = f"shared drive unavailable: {shared_error or 'no drive returned'}"
+            log_with_context(
+                logging.WARNING,
+                f"Could not set up shared drive ({why}), falling back to"
+                f" regular Drive folder {fallback_name!r}",
             )
+            lookup = self.folder_manager.find_or_create_root_folder(fallback_name)
+            self._root_folder_id = lookup.folder_id
+            self._drive_status = (
+                DriveStatus(
+                    True,
+                    "my_drive",
+                    lookup.folder_id,
+                    f"regular Drive folder {fallback_name!r} ({why})",
+                )
+                if lookup.folder_id
+                else DriveStatus(
+                    False,
+                    "none",
+                    detail=f"{why}; regular Drive folder: {lookup.error}",
+                )
+            )
+            if not lookup.folder_id:
+                log_with_context(
+                    logging.ERROR,
+                    "Drive is not available for attachments"
+                    f" ({self._drive_status.detail}); every Drive upload will fail",
+                )
+
+        self._pre_cache_root_folder()
 
     def _pre_cache_root_folder(self) -> None:
         """Pre-cache the root folder's files and learn its channel folders.
@@ -346,7 +428,7 @@ class FileHandler:
             folders = self.folder_manager.list_child_folders(
                 self._root_folder_id, self._shared_drive_id
             )
-        except HttpError as e:
+        except DRIVE_CALL_ERRORS as e:
             # Don't fail the entire process if subfolder caching fails
             log_with_context(
                 logging.WARNING,

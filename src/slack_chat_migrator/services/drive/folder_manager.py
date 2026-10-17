@@ -300,65 +300,70 @@ class FolderManager:
                 return folders
 
     def create_regular_drive_folder(self, folder_name: str) -> str | None:
-        """Create a regular Drive folder with domain permissions as fallback.
+        """Find or create a regular (My Drive) folder for attachments.
+
+        Same as :meth:`find_or_create_root_folder`, returning only the ID.
+        """
+        return self.find_or_create_root_folder(folder_name).folder_id
+
+    def find_or_create_root_folder(self, folder_name: str) -> FolderLookup:
+        """Find or create a regular Drive folder, used when there is no shared drive.
+
+        No domain-wide permission is set, to avoid org-wide access: each
+        channel folder gets its members' permissions.
 
         Args:
-            folder_name: Name of the folder to create
+            folder_name: Name of the folder.
 
         Returns:
-            Folder ID if successful, None otherwise
+            The folder, or why it couldn't be found or created.
         """
         try:
-            # Search for existing folder
             safe_name = escape_drive_query_value(folder_name)
-            query = f"name = '{safe_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-
+            query = (
+                f"name = '{safe_name}' and mimeType = '{DRIVE_FOLDER_MIME_TYPE}'"
+                " and trashed = false"
+            )
             log_with_context(
                 logging.DEBUG,
                 f"Searching for existing regular Drive folder: {folder_name}",
             )
-
-            results = self.drive_service.list_files(q=query, fields="files(id, name)")
-
-            files = results.get("files", [])
-            if files:
-                existing_folder_id: str | None = files[0]["id"]
+            files = self.drive_service.list_files(
+                q=query, fields="files(id, name)"
+            ).get("files", [])
+            if files and files[0].get("id"):
+                existing_folder_id: str = files[0]["id"]
                 log_with_context(
                     logging.INFO,
-                    f"Found existing regular Drive folder: {folder_name} (ID: {existing_folder_id})",
+                    f"Found existing regular Drive folder: {folder_name}"
+                    f" (ID: {existing_folder_id})",
                 )
+                return FolderLookup(existing_folder_id)
 
-                # Note: No domain-wide permissions set to avoid org-wide access
-                # Individual channel folders will have their own space-specific permissions
-                return existing_folder_id
-
-            # Create new folder
             log_with_context(
                 logging.INFO, f"Creating regular Drive folder: {folder_name}"
             )
-
-            folder_metadata = {
-                "name": folder_name,
-                "mimeType": "application/vnd.google-apps.folder",
-            }
-            folder = self.drive_service.create_file(body=folder_metadata, fields="id")
-
+            folder = self.drive_service.create_file(
+                body={"name": folder_name, "mimeType": DRIVE_FOLDER_MIME_TYPE},
+                fields="id",
+            )
             new_folder_id: str | None = folder.get("id")
-            # Note: No domain-wide permissions set to avoid org-wide access
-            # Individual channel folders will have their own space-specific permissions
-
+            if not new_folder_id:
+                return FolderLookup(None, "Drive returned no folder ID")
             log_with_context(
                 logging.INFO,
-                f"Successfully created regular Drive folder: {folder_name} (ID: {new_folder_id})",
+                f"Successfully created regular Drive folder: {folder_name}"
+                f" (ID: {new_folder_id})",
             )
+            return FolderLookup(new_folder_id)
 
-            return new_folder_id
-
-        except HttpError as e:
+        except DRIVE_CALL_ERRORS as e:
             log_with_context(
                 logging.ERROR, f"Failed to create regular Drive folder: {e}"
             )
-            return None
+            return FolderLookup(
+                None, f"could not find or create folder {folder_name!r}: {e}"
+            )
 
     def _folder_query(self, name: str, parent_folder_id: str) -> str:
         """Drive query for a non-trashed folder named *name* in a parent."""
