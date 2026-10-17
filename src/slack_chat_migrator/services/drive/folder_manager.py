@@ -5,8 +5,8 @@ Folder management for Google Drive integration.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
@@ -573,7 +573,7 @@ class FolderManager:
         errors = self.drive_service.apply_permission_changes(changes) if changes else []
         failed_count = 0
         external_failed = 0
-        for change, error in zip(changes, errors):
+        for change, error in zip(changes, errors, strict=True):
             if error is None:
                 continue
             grantee = (change.body or {}).get("emailAddress")

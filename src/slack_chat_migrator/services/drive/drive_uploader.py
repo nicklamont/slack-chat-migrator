@@ -8,7 +8,7 @@ import hashlib
 import logging
 import mimetypes
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from slack_chat_migrator.services.drive_adapter import PermissionChange
 
@@ -62,7 +62,7 @@ class DriveUpload:
 
 
 #: Cached Drive file: (file_id, webViewLink).
-_CachedFile = tuple[str, Optional[str]]
+_CachedFile = tuple[str, str | None]
 
 #: Drive limits each appProperties entry to 124 bytes of key plus value.
 _APP_PROPERTY_MAX_BYTES = 124

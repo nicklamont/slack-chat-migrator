@@ -19,8 +19,8 @@ import shutil
 import sys
 import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from slack_chat_migrator.constants import (
     ATTACHMENT_TEMP_DIRNAME,
