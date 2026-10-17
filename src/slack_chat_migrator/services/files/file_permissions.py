@@ -10,9 +10,27 @@ if TYPE_CHECKING:
 
 from googleapiclient.errors import HttpError
 
+from slack_chat_migrator.services.drive_adapter import PermissionChange
 from slack_chat_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_chat_migrator")
+
+
+def ownership_transfer_change(file_id: str, new_owner_email: str) -> PermissionChange:
+    """Describe an ownership transfer, for batching with other grants.
+
+    Args:
+        file_id: ID of the file to transfer.
+        new_owner_email: Email of the new owner.
+
+    Returns:
+        The PermissionChange to pass to ``DriveAdapter.apply_permission_changes``.
+    """
+    return PermissionChange(
+        file_id,
+        body={"type": "user", "role": "owner", "emailAddress": new_owner_email},
+        transfer_ownership=True,
+    )
 
 
 def transfer_file_ownership(

@@ -32,6 +32,7 @@ from slack_chat_migrator.services.files.file_download import (
     unavailable_reason,
 )
 from slack_chat_migrator.services.files.file_permissions import (
+    ownership_transfer_change,
     transfer_file_ownership,
 )
 from slack_chat_migrator.services.files.temp_files import (
@@ -132,7 +133,12 @@ class FileHandler:
 
         # Initialize modular services
         self.shared_drive_manager = SharedDriveManager(drive_service, config)
-        self.folder_manager = FolderManager(drive_service, workspace_domain)
+        self.folder_manager = FolderManager(
+            drive_service,
+            workspace_domain,
+            is_external=self._is_external_email,
+            protected_emails=self._protected_emails,
+        )
         self.drive_uploader = DriveFileUploader(drive_service, workspace_domain)
         self.chat_uploader = ChatFileUploader(chat_service)
 
@@ -952,7 +958,16 @@ class FileHandler:
 
     def _is_internal_email(self, email: str | None) -> bool:
         """True for a mapped email that belongs to the workspace."""
-        return bool(email) and not self.user_resolver.is_external_user(email)
+        return bool(email) and not self._is_external_email(email or "")
+
+    def _is_external_email(self, email: str) -> bool:
+        """True for an email outside the workspace (never granted Drive access)."""
+        return bool(self.user_resolver.is_external_user(email))
+
+    def _protected_emails(self) -> list[str]:
+        """Accounts whose channel-folder access a permission sync never removes."""
+        admin = getattr(self.user_resolver, "workspace_admin", None)
+        return [admin] if isinstance(admin, str) and admin else []
 
     def _apply_file_permissions(
         self,
@@ -987,11 +1002,38 @@ class FileHandler:
             )
 
         # The new owner needs no separate writer grant.
-        if (
+        grant_poster = bool(
             poster
             and poster != owner
             and not self._already_granted(drive_file_id, poster)
-        ):
+        )
+
+        if grant_poster and owner and poster:
+            # Two calls on one file: send them as one batch request.
+            writer_error, transfer_error = self.drive_service.apply_permission_changes(
+                [
+                    self.drive_uploader.poster_permission_change(
+                        drive_file_id, poster, self._shared_drive_id
+                    ),
+                    ownership_transfer_change(drive_file_id, owner),
+                ]
+            )
+            if writer_error is None:
+                self._mark_granted(drive_file_id, poster)
+            else:
+                log_with_context(
+                    logging.WARNING,
+                    f"Failed to set writer permission for message poster on file"
+                    f" {drive_file_id}: {writer_error}",
+                    channel=channel,
+                    file_id=file_id,
+                )
+            self._count_ownership_transfer(
+                transfer_error is None, drive_file_id, owner, channel, file_id
+            )
+            return
+
+        if grant_poster and poster:
             if self.drive_uploader.set_message_poster_permission(
                 drive_file_id, poster, self._shared_drive_id
             ):
@@ -1028,7 +1070,22 @@ class FileHandler:
         Returns:
             True if the transfer succeeded.  Both outcomes are counted.
         """
-        if self._transfer_file_ownership(drive_file_id, new_owner_email):
+        transferred = self._transfer_file_ownership(drive_file_id, new_owner_email)
+        self._count_ownership_transfer(
+            transferred, drive_file_id, new_owner_email, channel, file_id
+        )
+        return transferred
+
+    def _count_ownership_transfer(
+        self,
+        transferred: bool,
+        drive_file_id: str,
+        new_owner_email: str,
+        channel: str | None,
+        file_id: str,
+    ) -> None:
+        """Count and log one ownership transfer attempt."""
+        if transferred:
             self._increment_stat("ownership_transferred")
             log_with_context(
                 logging.DEBUG,
@@ -1037,7 +1094,7 @@ class FileHandler:
                 file_id=file_id,
                 drive_file_id=drive_file_id,
             )
-            return True
+            return
 
         self._increment_stat("ownership_transfer_failed")
         log_with_context(
@@ -1047,7 +1104,6 @@ class FileHandler:
             file_id=file_id,
             drive_file_id=drive_file_id,
         )
-        return False
 
     def get_file_statistics(self) -> dict[str, Any]:
         """Get detailed file upload statistics.

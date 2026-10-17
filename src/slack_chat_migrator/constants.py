@@ -70,6 +70,9 @@ DRIVE_ROLE_WRITER = "writer"
 DRIVE_ROLE_READER = "reader"
 DRIVES_PAGE_SIZE = 100  # drives.list maximum (the API default is 10)
 DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+# Roles a folder permission sync never removes.
+DRIVE_PROTECTED_ROLES = frozenset({"owner", "organizer", "fileOrganizer"})
+DRIVE_BATCH_MAX_REQUESTS = 100  # calls per Drive batch request
 # appProperties keys that tag uploads with their Slack origin, so a re-run
 # can find an already-uploaded file without downloading it again.
 DRIVE_APP_PROPERTY_SLACK_FILE_ID = "slackFileId"

@@ -71,6 +71,14 @@ class DryRunFiles:
             }
         )
 
+    def update(self, **kwargs: Any) -> DryRunRequest:
+        file_id = kwargs.get("fileId", "unknown")
+        log_with_context(
+            logging.DEBUG,
+            f"[DRY RUN] Would update Drive file {file_id}",
+        )
+        return DryRunRequest({"id": file_id, **kwargs.get("body", {})})
+
     def delete(self, **kwargs: Any) -> DryRunRequest:
         file_id = kwargs.get("fileId", "unknown")
         log_with_context(
@@ -97,6 +105,34 @@ class DryRunPermissions:
             f"[DRY RUN] Would create permission on {file_id} for {email}",
         )
         return DryRunRequest({"id": "dry-run-permission"})
+
+    def list(self, **kwargs: Any) -> DryRunRequest:
+        return DryRunRequest({"permissions": []})
+
+    def delete(self, **kwargs: Any) -> DryRunRequest:
+        log_with_context(
+            logging.DEBUG,
+            f"[DRY RUN] Would delete permission {kwargs.get('permissionId')}"
+            f" on {kwargs.get('fileId', 'unknown')}",
+        )
+        return DryRunRequest({})
+
+
+class DryRunBatch:
+    """Stub for ``new_batch_http_request()``: runs each request in order."""
+
+    def __init__(self, callback: Any = None) -> None:
+        self._callback = callback
+        self._requests: list[tuple[str, DryRunRequest]] = []
+
+    def add(self, request: DryRunRequest, request_id: str | None = None) -> None:
+        self._requests.append((request_id or str(len(self._requests)), request))
+
+    def execute(self) -> None:
+        for request_id, request in self._requests:
+            response = request.execute()
+            if self._callback is not None:
+                self._callback(request_id, response, None)
 
 
 # ---------------------------------------------------------------------------
@@ -157,3 +193,6 @@ class DryRunDriveService:
 
     def drives(self) -> DryRunDrives:
         return DryRunDrives()
+
+    def new_batch_http_request(self, callback: Any = None) -> DryRunBatch:
+        return DryRunBatch(callback)

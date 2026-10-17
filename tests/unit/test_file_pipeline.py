@@ -491,3 +491,42 @@ class TestListingsArePaged:
 
         assert fake.count("drives.create") == 0
         assert fake.count("files.create") == 0  # no fallback folder either
+
+
+# ---------------------------------------------------------------------------
+# Drive call budget (P3)
+# ---------------------------------------------------------------------------
+
+
+class TestDriveCallBudget:
+    @pytest.mark.parametrize(
+        ("shared", "poster"),
+        [(True, None), (False, None), (False, "bob@example.com")],
+        ids=["shared-drive", "regular-poster-is-owner", "regular-other-poster"],
+    )
+    def test_new_file_costs_at_most_two_calls(
+        self, tmp_path, downloads, shared, poster
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=shared)
+        upload(handler, downloads, "c", "F0", "UA", b"warm-up")  # folder + listing
+        fake.calls.clear()
+        fake.batch_sizes.clear()
+
+        for i in range(1, 6):
+            upload(
+                handler,
+                downloads,
+                "c",
+                f"F{i}",
+                "UA",
+                f"unique {i}".encode(),
+                sender=poster,
+            )
+
+        # Requests sent inside a batch share the batch's round trip.
+        sub_requests = sum(fake.batch_sizes)
+        round_trips = len(fake.calls) - sub_requests
+        assert round_trips <= 2 * 5
+        assert fake.count("files.get") == 0
+        assert fake.count("files.list") == 0

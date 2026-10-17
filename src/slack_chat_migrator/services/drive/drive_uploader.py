@@ -10,6 +10,8 @@ import mimetypes
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
+from slack_chat_migrator.services.drive_adapter import PermissionChange
+
 if TYPE_CHECKING:
     from slack_chat_migrator.services.drive_adapter import DriveAdapter
 
@@ -464,6 +466,21 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
             return None
+
+    @staticmethod
+    def poster_permission_change(
+        file_id: str, message_poster_email: str, shared_drive_id: str | None = None
+    ) -> PermissionChange:
+        """Describe the poster's ``writer`` grant, for batching."""
+        return PermissionChange(
+            file_id,
+            body={
+                "type": "user",
+                "role": DRIVE_ROLE_WRITER,
+                "emailAddress": message_poster_email,
+            },
+            supports_all_drives=bool(shared_drive_id),
+        )
 
     def set_message_poster_permission(
         self,

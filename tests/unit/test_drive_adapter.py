@@ -195,3 +195,151 @@ class TestCreateDrive:
         mock_service.drives().create.assert_called_once_with(
             body=body, requestId="req-123"
         )
+
+
+# ---------------------------------------------------------------------------
+# Permissions listing, deletion and batching
+# ---------------------------------------------------------------------------
+
+
+class TestPermissionHelpers:
+    def test_list_permissions_reads_every_page(self):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive()
+        fake.permissions_db["F"] = [
+            {"id": f"p{i}", "type": "user", "role": "reader", "emailAddress": f"u{i}@x"}
+            for i in range(250)
+        ]
+        perms = DriveAdapter(fake).list_permissions("F", supports_all_drives=True)
+        assert len(perms) == 250
+        lists = [kw for name, kw in fake.calls if name == "permissions.list"]
+        assert len(lists) == 3
+        assert all(kw["supportsAllDrives"] for kw in lists)
+
+    def test_delete_permission(self, adapter, mock_service):
+        adapter.delete_permission("F", "p1", supports_all_drives=True)
+        mock_service.permissions().delete.assert_called_once_with(
+            fileId="F", permissionId="p1", supportsAllDrives=True
+        )
+
+    def test_update_file(self, adapter, mock_service):
+        adapter.update_file("F", {"inheritedPermissionsDisabled": True})
+        mock_service.files().update.assert_called_once_with(
+            fileId="F", body={"inheritedPermissionsDisabled": True}, fields="id"
+        )
+
+
+class TestApplyPermissionChanges:
+    @staticmethod
+    def _create(file_id, email, **kw):
+        from slack_chat_migrator.services.drive_adapter import PermissionChange
+
+        return PermissionChange(
+            file_id,
+            body={"type": "user", "role": "reader", "emailAddress": email},
+            **kw,
+        )
+
+    def test_single_change_is_sent_directly(self):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive()
+        errors = DriveAdapter(fake).apply_permission_changes([self._create("F", "a@x")])
+        assert errors == [None]
+        assert fake.batch_sizes == []
+        assert fake.count("permissions.create") == 1
+
+    def test_several_changes_share_one_batch(self):
+        from slack_chat_migrator.services.drive_adapter import PermissionChange
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive()
+        fake.permissions_db["F"] = [{"id": "old", "type": "user", "role": "reader"}]
+        changes = [
+            self._create("F", "a@x"),
+            PermissionChange("F", permission_id="old"),
+            PermissionChange(
+                "F",
+                body={"type": "user", "role": "owner", "emailAddress": "o@x"},
+                transfer_ownership=True,
+            ),
+        ]
+        errors = DriveAdapter(fake).apply_permission_changes(changes)
+
+        assert errors == [None, None, None]
+        assert fake.batch_sizes == [3]
+        transfer = [kw for name, kw in fake.calls if name == "permissions.create"][-1]
+        assert transfer["transferOwnership"] is True
+
+    def test_errors_are_reported_per_change(self):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive()
+        bad = self._create("F", "b@x")
+        object.__setattr__(
+            bad, "body", {"type": "user", "role": "editor", "emailAddress": "b@x"}
+        )
+        errors = DriveAdapter(fake).apply_permission_changes(
+            [self._create("F", "a@x"), bad]
+        )
+        assert errors[0] is None
+        assert errors[1] is not None and errors[1].resp.status == 400
+
+    def test_rate_limited_batch_items_are_resent_alone(self):
+        from googleapiclient.errors import HttpError
+        from httplib2 import Response
+
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive()
+        attempts = {"n": 0}
+        original_create = fake.permissions().create
+
+        class Permissions:
+            def create(self, **kw):
+                request = original_create(**kw)
+                inner = request._fn
+
+                def flaky():
+                    attempts["n"] += 1
+                    if attempts["n"] == 1:
+                        raise HttpError(Response({"status": "429"}), b"slow down")
+                    return inner()
+
+                request._fn = flaky
+                return request
+
+        fake.permissions = lambda: Permissions()
+        errors = DriveAdapter(fake).apply_permission_changes(
+            [self._create("F", "a@x"), self._create("F", "b@x")]
+        )
+        assert errors == [None, None]
+        assert attempts["n"] == 3  # 2 in the batch, then 1 retry
+
+    def test_without_batch_support_runs_sequentially(self):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive()
+
+        class NoBatch:
+            def permissions(self):
+                return fake.permissions()
+
+        errors = DriveAdapter(NoBatch()).apply_permission_changes(
+            [self._create("F", "a@x"), self._create("F", "b@x")]
+        )
+        assert errors == [None, None]
+        assert fake.count("permissions.create") == 2
+        assert fake.batch_sizes == []
+
+    def test_retry_wrapper_is_unwrapped_for_batches(self):
+        from slack_chat_migrator.utils.api import RetryWrapper
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive()
+        errors = DriveAdapter(RetryWrapper(fake)).apply_permission_changes(
+            [self._create("F", "a@x"), self._create("F", "b@x")]
+        )
+        assert errors == [None, None]
+        assert fake.batch_sizes == [2]
