@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import BatchHttpRequest
 
+from slack_chat_migrator.utils.emoji import slack_emoji_to_unicode
 from slack_chat_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
@@ -75,6 +77,25 @@ def process_reactions_batch(
     _execute_reaction_batches(state, user_batches, message_id)
 
 
+def convert_reaction_emoji(
+    name: str, custom_emoji_map: Mapping[str, object] | None = None
+) -> str | None:
+    """Convert a Slack reaction name to the Unicode emoji Chat expects.
+
+    Handles skin tones (``thumbsup::skin-tone-2``), Slack-only names
+    (``man-shrugging``, ``flag-us``) and ``config.custom_emoji_map``.
+
+    Args:
+        name: The Slack reaction name.
+        custom_emoji_map: Optional Slack name to Unicode/``:name:`` mapping.
+
+    Returns:
+        The Unicode emoji, or ``None`` for custom or unknown emoji, which
+        must not be sent as ``emoji.unicode``.
+    """
+    return slack_emoji_to_unicode(name, custom_emoji_map)
+
+
 def _group_and_filter_reactions(
     ctx: MigrationContext,
     state: MigrationState,
@@ -100,10 +121,20 @@ def _group_and_filter_reactions(
 
     for react in reactions:
         try:
-            import emoji
-
-            emo = emoji.emojize(f":{react['name']}:", language="alias")
             emoji_name = react["name"]
+            emo = convert_reaction_emoji(emoji_name, ctx.config.custom_emoji_map)
+            if emo is None:
+                # Custom or unknown emoji have no Unicode form; never send
+                # them as emoji.unicode.
+                log_with_context(
+                    logging.INFO,
+                    f"Skipping reaction :{emoji_name}: on message {message_id}:"
+                    " custom or unknown emoji",
+                    message_id=message_id,
+                    emoji=emoji_name,
+                    channel=state.context.current_channel,
+                )
+                continue
             emoji_users = react.get("users", [])
 
             log_with_context(
