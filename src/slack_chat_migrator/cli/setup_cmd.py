@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import click
+from rich.markup import escape
 
 from slack_chat_migrator.cli.common import EXIT_INTERRUPTED, cli
 from slack_chat_migrator.cli.renderers import (
@@ -454,6 +455,8 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
             )
             state.mark_step("key", StepStatus.COMPLETE)
             return state
+        if check.status is KeyStatus.HAS_BOM:
+            return _offer_bom_rewrite(state, key_path)
         if check.status is KeyStatus.INACTIVE:
             question = (
                 f"{key_path} holds a key for {state.service_account_email} that"
@@ -531,6 +534,46 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
     return state
 
 
+def _offer_bom_rewrite(state, key_path: Path):  # type: ignore[no-untyped-def]
+    """Offer to rewrite an active key file without its UTF-8 byte order mark."""
+    from slack_chat_migrator.services.setup.service_account import (
+        rewrite_without_bom,
+    )
+    from slack_chat_migrator.services.setup.setup_service import StepStatus
+
+    console = get_console()
+    if click.confirm(
+        f"{key_path} holds an active key of {state.service_account_email}, but"
+        " it starts with a UTF-8 byte order mark, which google-auth can't"
+        " read. Rewrite it without the byte order mark? (Same key; no new key"
+        " is created.)",
+        default=True,
+    ):
+        try:
+            rewrite_without_bom(key_path)
+        except (OSError, ValueError) as e:
+            console.print(
+                f"[red]Couldn't rewrite {escape(str(key_path))}: {escape(str(e))}[/red]"
+            )
+        else:
+            state.key_path = str(key_path)
+            console.print(
+                f"[green]Rewrote {escape(str(key_path))} without the byte order"
+                " mark; reusing the key (no new key created).[/green]"
+            )
+            state.mark_step("key", StepStatus.COMPLETE)
+            return state
+    console.print(
+        "[dim]Kept the file unchanged. google-auth can't read it as it is, so"
+        " re-save it as UTF-8 without a byte order mark and re-run setup, or"
+        " choose another path to create a new key.[/dim]"
+    )
+    if state.key_path == str(key_path):
+        state.key_path = None
+    state.mark_step("key", StepStatus.SKIPPED)
+    return state
+
+
 def _keep_unchecked_key_file(state, key_path: Path, check):  # type: ignore[no-untyped-def]
     """Keep a key file that couldn't be checked, and say why."""
     from slack_chat_migrator.services.setup.service_account import KeyStatus
@@ -602,16 +645,26 @@ def _copy_to_clipboard(text: str) -> bool:
     return False
 
 
-def _read_client_id(key_path: str) -> str | None:
-    """Read the client_id (OAuth2 client ID) from a service account key file."""
+def _read_client_id(key_path: str) -> str:
+    """Read the client_id (OAuth2 client ID) from a service account key file.
+
+    The file is read the way google-auth reads it (strict UTF-8 JSON), so a
+    file the migration couldn't load fails here too.
+
+    Raises:
+        ValueError: If the file can't be read or parsed, or has no
+            ``client_id``.
+    """
     import json
 
     try:
-        data = json.loads(Path(key_path).read_text())
-        result: str | None = data.get("client_id")
-        return result
-    except Exception:
-        return None
+        data = json.loads(Path(key_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ValueError(f"Can't read the key file {key_path}: {e}") from e
+    client_id = data.get("client_id") if isinstance(data, dict) else None
+    if not isinstance(client_id, str) or not client_id:
+        raise ValueError(f"The key file {key_path} has no client_id")
+    return client_id
 
 
 def _get_required_scopes() -> list[str]:
@@ -715,7 +768,16 @@ def _step_delegation(state):  # type: ignore[no-untyped-def]
         state.mark_step("delegation", StepStatus.SKIPPED)
         return state
 
-    client_id = _read_client_id(state.key_path)
+    try:
+        client_id = _read_client_id(state.key_path)
+    except ValueError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        console.print(
+            "[dim]Re-run setup to check the key file (step 4) before setting up"
+            " domain-wide delegation.[/dim]"
+        )
+        state.mark_step("delegation", StepStatus.SKIPPED)
+        return state
     scopes_csv = ",".join(_get_required_scopes())
 
     prereq_lines = [
@@ -723,12 +785,7 @@ def _step_delegation(state):  # type: ignore[no-untyped-def]
         "  1. Go to https://admin.google.com/ac/owl/domainwidedelegation",
         "  2. Click [bold]Add new[/bold] and enter:",
     ]
-    if client_id:
-        prereq_lines.append(f"     Client ID: [bold]{client_id}[/bold]")
-    else:
-        prereq_lines.append(
-            "     Client ID: [dim](find in your key file under 'client_id')[/dim]"
-        )
+    prereq_lines.append(f"     Client ID: [bold]{escape(client_id)}[/bold]")
     # Try to copy scopes to clipboard
     copied = _copy_to_clipboard(scopes_csv)
 

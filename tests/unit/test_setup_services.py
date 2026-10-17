@@ -1136,15 +1136,77 @@ class TestCheckExistingKey:
         assert check.status is KeyStatus.UNREADABLE
         assert str(error.strerror) in check.reason
 
-    def test_utf8_bom_is_accepted(self, tmp_path: Path) -> None:
+    def _bom_file(self, tmp_path: Path, **fields: Any) -> Path:
+        key = tmp_path / "key.json"
+        data = {"client_email": SA, "private_key_id": "kid1", **fields}
+        key.write_bytes(b"\xef\xbb\xbf" + json.dumps(data).encode())
+        return key
+
+    def test_active_key_with_a_utf8_bom_is_not_active(self, tmp_path: Path) -> None:
+        """google-auth rejects the BOM, so the file can't be reused as it is."""
         from slack_chat_migrator.services.setup.service_account import KeyStatus
 
-        key = tmp_path / "key.json"
-        key.write_bytes(
-            b"\xef\xbb\xbf"
-            + json.dumps({"client_email": SA, "private_key_id": "kid1"}).encode()
+        check = self._check(self._bom_file(tmp_path), _iam_with_key("kid1"))
+        assert check.status is KeyStatus.HAS_BOM
+        assert "byte order mark" in check.reason
+        assert "the key itself is active" in check.reason
+
+    def test_google_auth_really_rejects_the_bom(self, tmp_path: Path) -> None:
+        from google.oauth2 import service_account as google_sa
+
+        with pytest.raises(ValueError, match="BOM"):
+            google_sa.Credentials.from_service_account_file(
+                str(self._bom_file(tmp_path))
+            )
+
+    def test_inactive_key_with_a_bom_stays_inactive(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup.service_account import KeyStatus
+
+        check = self._check(self._bom_file(tmp_path), _iam_with_key(disabled=True))
+        assert check.status is KeyStatus.INACTIVE
+        assert check.reason == (
+            "it is disabled (and it starts with a UTF-8 byte order mark)"
         )
+
+    def test_rewrite_without_bom_keeps_the_key(self, tmp_path: Path) -> None:
+        import os
+        import stat
+
+        from slack_chat_migrator.services.setup.service_account import (
+            KeyStatus,
+            rewrite_without_bom,
+        )
+
+        key = self._bom_file(tmp_path, private_key="PK")  # pragma: allowlist secret
+        os.chmod(key, 0o644)
+        rewrite_without_bom(key)
+        assert key.read_bytes()[:1] == b"{"
+        assert json.loads(key.read_text())["private_key_id"] == "kid1"
+        assert stat.S_IMODE(key.stat().st_mode) == 0o600
+        assert [p.name for p in tmp_path.iterdir()] == ["key.json"]
         assert self._check(key, _iam_with_key("kid1")).status is KeyStatus.ACTIVE
+
+    def test_failed_rewrite_leaves_the_file_intact(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            rewrite_without_bom,
+        )
+
+        key = self._bom_file(tmp_path)
+        before = key.read_bytes()
+        with patch("os.replace", side_effect=OSError(28, "No space left on device")):
+            with pytest.raises(OSError):
+                rewrite_without_bom(key)
+        assert key.read_bytes() == before
+        assert [p.name for p in tmp_path.iterdir()] == ["key.json"]
+
+    def test_rewrite_refuses_a_file_without_bom(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            rewrite_without_bom,
+        )
+
+        key = self._key_file(tmp_path)
+        with pytest.raises(ValueError, match="byte order mark"):
+            rewrite_without_bom(key)
 
     @pytest.mark.parametrize("encoding", ["utf-16", "utf-16-be"])
     def test_utf16_is_named(self, tmp_path: Path, encoding: str) -> None:
@@ -1439,6 +1501,42 @@ class TestKeyStep:
             )
         assert NEW_KEY_NAME in capsys.readouterr().out
 
+    def test_bom_file_is_rewritten_when_the_user_agrees(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        with patch(
+            "slack_chat_migrator.services.setup.service_account.rewrite_without_bom"
+        ) as rewrite:
+            state, key, confirm, download = self._run_key_step(
+                tmp_path,
+                _key_check("HAS_BOM", "it starts with a UTF-8 byte order mark"),
+                confirm_answer=True,
+            )
+        rewrite.assert_called_once_with(key)
+        assert "Rewrite it without the byte order mark?" in confirm.call_args.args[0]
+        assert "no new key" in confirm.call_args.args[0]
+        download.assert_not_called()
+        assert state.key_path == str(key)
+        assert state.step_status("key") == StepStatus.COMPLETE
+
+    def test_declined_bom_rewrite_keeps_the_file_unused(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        with patch(
+            "slack_chat_migrator.services.setup.service_account.rewrite_without_bom"
+        ) as rewrite:
+            state, key, _, download = self._run_key_step(
+                tmp_path,
+                _key_check("HAS_BOM", "it starts with a UTF-8 byte order mark"),
+                confirm_answer=False,
+            )
+        rewrite.assert_not_called()
+        download.assert_not_called()
+        assert key.read_text() == "{}"
+        assert state.key_path is None
+        assert state.step_status("key") == StepStatus.SKIPPED
+        assert "google-auth can't read it" in capsys.readouterr().out
+
     def test_unknown_future_status_never_records_the_key_path(
         self, tmp_path: Path
     ) -> None:
@@ -1451,6 +1549,48 @@ class TestKeyStep:
         state = _keep_unchecked_key_file(state, key, check)
         assert state.key_path is None
         assert state.step_status("key") == StepStatus.SKIPPED
+
+
+class TestReadClientId:
+    def test_reads_the_client_id(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.cli.setup_cmd import _read_client_id
+
+        key = tmp_path / "key.json"
+        key.write_text(json.dumps({"client_id": "1234"}))
+        assert _read_client_id(str(key)) == "1234"
+
+    @pytest.mark.parametrize(
+        ("content", "match"),
+        [
+            (b"\xef\xbb\xbf" + b'{"client_id": "1"}', "Can't read the key file"),
+            (b"not json", "Can't read the key file"),
+            (b"{}", "has no client_id"),
+        ],
+    )
+    def test_fails_loudly(self, tmp_path: Path, content: bytes, match: str) -> None:
+        from slack_chat_migrator.cli.setup_cmd import _read_client_id
+
+        key = tmp_path / "key.json"
+        key.write_bytes(content)
+        with pytest.raises(ValueError, match=match):
+            _read_client_id(str(key))
+
+    def test_delegation_step_stops_on_an_unreadable_key(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        from slack_chat_migrator.cli.setup_cmd import _step_delegation
+
+        key = tmp_path / "key.json"
+        key.write_bytes(b"\xef\xbb\xbf{}")
+        state = SetupState(project_id="p", service_account_email=SA)
+        state.key_path = str(key)
+        with patch(
+            "slack_chat_migrator.services.setup.delegation.test_delegation"
+        ) as delegation:
+            state = _step_delegation(state)
+        delegation.assert_not_called()
+        assert state.step_status("delegation") == StepStatus.SKIPPED
+        assert "Can't read the key file" in capsys.readouterr().out
 
 
 class TestSetupCommandInterrupt:

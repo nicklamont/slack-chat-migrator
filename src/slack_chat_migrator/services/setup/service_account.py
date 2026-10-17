@@ -127,6 +127,11 @@ class KeyStatus(str, Enum):
 
     #: The file holds a usable key of the service account.
     ACTIVE = "active"
+    #: The file holds an active key of the account but starts with a UTF-8
+    #: byte order mark, which google-auth can't read.  Rewriting the file
+    #: without the BOM (:func:`rewrite_without_bom`) makes it usable; no new
+    #: key is needed.
+    HAS_BOM = "has_bom"
     #: The file holds a key of the account that is deleted, disabled or
     #: expired.
     INACTIVE = "inactive"
@@ -325,7 +330,9 @@ def check_existing_key(
     is ``UNREADABLE``, and a key that can't be checked (the keys can't be
     listed, or its expiry can't be parsed) is ``UNKNOWN``; neither is ever
     reported as an inactive key, so a working key file isn't overwritten
-    because of a permission or network problem.
+    because of a permission or network problem.  Only a file google-auth
+    can load is ``ACTIVE``: an active key in a file with a UTF-8 byte order
+    mark is ``HAS_BOM``.
 
     Args:
         credentials: Google OAuth2 credentials.
@@ -341,16 +348,40 @@ def check_existing_key(
     except OSError as e:
         return KeyCheck(KeyStatus.UNREADABLE, f"it can't be read ({e.strerror or e})")
     if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-        # google-auth can't load it either; say why rather than "not text".
+        # google-auth reads key files as UTF-8 only; say why it can't be used.
         return KeyCheck(
             KeyStatus.NOT_A_KEY,
-            "it is saved as UTF-16, not UTF-8 (if it holds a key of this"
-            " account, that key stays active in IAM)",
+            "it is saved as UTF-16, so it can't be read as a key file (if it"
+            " holds a key of this account, that key stays active in IAM)",
         )
+    # google-auth rejects a UTF-8 byte order mark too ("Unexpected UTF-8
+    # BOM"), so a file with one is never reported ACTIVE: the key inside is
+    # checked as usual, and an active one is HAS_BOM (fixable by rewriting).
+    has_bom = raw.startswith(codecs.BOM_UTF8)
+    if has_bom:
+        raw = raw[len(codecs.BOM_UTF8) :]
     try:
-        text = raw.decode("utf-8-sig")  # tolerate a UTF-8 byte order mark
+        text = raw.decode("utf-8")
     except UnicodeDecodeError:
         return KeyCheck(KeyStatus.NOT_A_KEY, "it isn't UTF-8 text")
+    check = _check_key_text(credentials, service_account_email, text, now)
+    if not has_bom:
+        return check
+    if check.status is KeyStatus.ACTIVE:
+        return KeyCheck(
+            KeyStatus.HAS_BOM,
+            "it starts with a UTF-8 byte order mark, which google-auth can't"
+            " read (the key itself is active)",
+        )
+    return KeyCheck(
+        check.status, f"{check.reason} (and it starts with a UTF-8 byte order mark)"
+    )
+
+
+def _check_key_text(
+    credentials: Any, service_account_email: str, text: str, now: datetime | None
+) -> KeyCheck:
+    """Check the decoded text of a key file (see :func:`check_existing_key`)."""
     try:
         data = json.loads(text)
     except ValueError as e:
@@ -367,6 +398,36 @@ def check_existing_key(
             KeyStatus.UNKNOWN, _describe_list_error(e, service_account_email)
         )
     return _assess_key(key, now)
+
+
+def rewrite_without_bom(key_path: Path) -> None:
+    """Rewrite a key file without its UTF-8 byte order mark, atomically.
+
+    The same key is kept (no new key is created in IAM).  The new content is
+    written to a private (``0600``) temporary file next to *key_path*, which
+    then replaces it, so the old file stays intact if anything fails.
+
+    Args:
+        key_path: A key file that starts with a UTF-8 BOM.
+
+    Raises:
+        ValueError: If the file doesn't start with a UTF-8 BOM.
+        OSError: If the file can't be read or rewritten.
+    """
+    raw = key_path.read_bytes()
+    if not raw.startswith(codecs.BOM_UTF8):
+        raise ValueError(f"{key_path} doesn't start with a UTF-8 byte order mark")
+    temp = key_path.with_name(f".{key_path.name}.{os.getpid()}.tmp")
+    fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw[len(codecs.BOM_UTF8) :])
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp, key_path)
+    except BaseException:
+        _remove_quietly(temp)
+        raise
 
 
 def _rebuild_error(
