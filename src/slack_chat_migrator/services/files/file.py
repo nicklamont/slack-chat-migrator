@@ -1410,7 +1410,8 @@ class FileHandler:
             channel: Channel name for logging context.
             file_id: Slack file ID for logging context.
             user_email: Mapped email of the Slack user who uploaded the file
-                (the ownership-transfer target in regular-Drive mode).
+                (the ownership-transfer target in regular-Drive mode, when
+                ``config.transfer_file_ownership`` is set).
             sender_email: Email of the message sender, who gets ``writer``
                 access.  Callers pass None for external senders.
             file_hash: MD5 of the content, if known.

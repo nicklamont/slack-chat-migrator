@@ -50,7 +50,7 @@ class DriveUploadSource(str, enum.Enum):
     NEW = "new"  # uploaded now
     HASH = "hash"  # identical content already in the folder
     #: This Slack file, tagged with its Slack ID: uploaded earlier in this
-    #: run (for another message) or by an earlier run.
+    #: run (for another space) or by an earlier run.
     SLACK_ID = "slack_id"
 
 

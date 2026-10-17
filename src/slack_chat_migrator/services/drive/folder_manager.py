@@ -268,7 +268,7 @@ class FolderManager:
             ``inheritedPermissionsDisabled``.
 
         Raises:
-            HttpError: If a page can't be listed.
+            Any of ``DRIVE_CALL_ERRORS`` if a page can't be listed.
         """
         safe_parent = escape_drive_query_value(parent_folder_id)
         query = (
@@ -375,7 +375,7 @@ class FolderManager:
         """Find a non-trashed folder by name; cache and return its ID.
 
         Raises:
-            HttpError: If the search fails.
+            Any of ``DRIVE_CALL_ERRORS`` if the search fails.
         """
         query = self._folder_query(name, parent_folder_id)
         fields = "files(id, name, inheritedPermissionsDisabled)"
@@ -477,7 +477,7 @@ class FolderManager:
         """Create a channel folder, limited-access when *restricted*.
 
         Raises:
-            HttpError: If the folder can't be created.
+            Any of ``DRIVE_CALL_ERRORS`` if the folder can't be created.
         """
         log_with_context(
             logging.INFO, f"Creating channel folder: {channel}", channel=channel
@@ -550,8 +550,9 @@ class FolderManager:
             Folder ID if found, None if there is no such folder.
 
         Raises:
-            HttpError: If the search fails (it never means "no folder").
-                :meth:`find_channel_folder` returns the error instead.
+            Any of ``DRIVE_CALL_ERRORS`` if the search fails (it never
+            means "no folder").  :meth:`find_channel_folder` returns the
+            error instead.
         """
         name = self._sanitize_folder_name(channel)
         cached = self.folder_cache.get((parent_folder_id, name))

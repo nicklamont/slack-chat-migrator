@@ -6,12 +6,12 @@ Downloads stream straight to a temp file through one pooled
 computed, so the content is never held in memory and is hashed only once.
 
 Each download returns a :class:`DownloadResult` whose status says whether the
-file was fetched (``OK``); doesn't exist any more and should not count as a
-failure (``UNAVAILABLE``: deleted, hidden by a plan limit, stored outside
-Slack, not readable by the export, no URL, HTTP 404/410); couldn't be
-fetched (``FAILED``: HTTP 401/403, a sign-in page, a host off the
-allow-list, the wrong length, or errors that outlast the retries); or is a
-Google Docs/Drive link that needs no download.
+file was fetched (``OK``); can't be fetched by any retry or token and should
+not count as a failure (``UNAVAILABLE``: deleted, hidden by a plan limit,
+stored outside Slack, not readable by the exporting workspace, no URL, HTTP
+404/410); couldn't be fetched this time (``FAILED``: HTTP 401/403, a sign-in
+page, a host off the allow-list, the wrong length, or errors that outlast
+the retries); or is a Google Docs/Drive link that needs no download.
 """
 
 from __future__ import annotations
@@ -66,9 +66,10 @@ class DownloadStatus(str, enum.Enum):
     GOOGLE_DRIVE_FILE = "google_drive_file"
 
 
-# Reasons a file is UNAVAILABLE: it doesn't exist (any more) or isn't in
-# Slack, so it isn't counted as a failed upload.  HTTP 404/410 give
-# ``http_404``/``http_410``.
+# Reasons a file is UNAVAILABLE: no retry or token can fetch it (deleted,
+# hidden by the plan limit, stored outside Slack, not readable by the
+# exporting workspace, no URL), so it isn't counted as a failed upload.
+# HTTP 404/410 give ``http_404``/``http_410``.
 REASON_DELETED = "deleted"
 REASON_HIDDEN_BY_LIMIT = "hidden_by_limit"
 REASON_EXTERNAL = "external"
