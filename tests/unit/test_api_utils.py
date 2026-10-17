@@ -1631,3 +1631,41 @@ class TestOptionalScopes:
         assert default is not extended
         requested = [c.kwargs["scopes"] for c in mock_creds.call_args_list]
         assert requested == [REQUIRED_SCOPES, scopes]
+
+
+class TestDocumentedRetryLimits:
+    """The limits the RetryWrapper docstring and the README state."""
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_conflict_is_raised_at_once(self, mock_sleep):
+        inner = MagicMock()
+        inner.execute.side_effect = _make_http_error(409, "Already exists")
+        with pytest.raises(HttpError) as raised:
+            RetryWrapper(inner, max_retries=3, retry_delay=2).execute()
+        assert raised.value.resp.status == 409
+        assert inner.execute.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_rate_limit_retry_after_is_not_capped(self, mock_sleep):
+        assert MAX_BACKOFF_SECONDS < 120 < RATE_LIMIT_BUDGET_SECONDS
+        inner = MagicMock()
+        inner.execute.side_effect = [
+            _make_http_error(429, "Too Many", headers={"retry-after": "120"}),
+            "ok",
+        ]
+        assert RetryWrapper(inner, max_retries=3, retry_delay=2).execute() == "ok"
+        mock_sleep.assert_called_once_with(120.0)
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_rate_limit_retry_after_beyond_the_budget_gives_up(self, mock_sleep):
+        assert RATE_LIMIT_BUDGET_SECONDS < 400
+        inner = MagicMock()
+        inner.execute.side_effect = [
+            _make_http_error(429, "Too Many", headers={"retry-after": "400"}),
+            "ok",
+        ]
+        with pytest.raises(HttpError):
+            RetryWrapper(inner, max_retries=3, retry_delay=2).execute()
+        assert inner.execute.call_count == 1
+        mock_sleep.assert_not_called()
