@@ -1618,7 +1618,8 @@ class TestCanvasConversion:
         assert doc_downloads.calls == [SLACK_LIST["id"]]
         listings = [kw for name, kw in fake.calls if kw.get("q") == listing]
         assert len(listings) == 2  # tried again with the next upload
-        assert rerun.get_file_statistics()["folder_listing_failures"] == 2
+        # Counted per folder, not per attempt.
+        assert rerun.get_file_statistics()["folder_listing_failures"] == 1
 
     def test_failed_search_makes_no_second_canvas(self, tmp_path, doc_downloads):
         """Listing and per-file search both fail: fail the file, no new copy."""

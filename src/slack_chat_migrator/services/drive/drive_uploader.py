@@ -142,9 +142,9 @@ class DriveFileUploader:
 
         Args:
             drive_service: DriveAdapter instance wrapping the Google Drive API
-            on_listing_failure: Called with the folder ID and the error each
-                time a folder's files can't be listed, so the caller can
-                count it.
+            on_listing_failure: Called with the folder ID and the error the
+                first time a folder's files can't be listed, so the caller
+                can count folders, not attempts.
             on_flag_write_failure: Called with the file ID and the error when
                 a pending grant or transfer can't be recorded on the file.
         """
@@ -227,9 +227,9 @@ class DriveFileUploader:
 
         If the listing fails, the folder isn't marked as cached: the next
         upload into it lists it again, and until then each file is looked up
-        with its own search (by Slack ID, then by MD5).  The failure is
-        logged (a warning the first time per folder) and reported to
-        *on_listing_failure*; it is never raised.
+        with its own search (by Slack ID, then by MD5).  The first failure
+        per folder is logged as a warning and reported to
+        *on_listing_failure*; nothing is raised.
 
         Args:
             folder_id: ID of the folder to cache files from
@@ -321,7 +321,8 @@ class DriveFileUploader:
                 " folder again with the next upload",
                 channel=self._get_current_channel(),
             )
-            self._on_listing_failure(folder_id, e)
+            if failures == 1:
+                self._on_listing_failure(folder_id, e)
             return 0
 
     def find_uploaded_slack_file(

@@ -195,8 +195,9 @@ class FolderManager:
 
         A limited-access folder (``inheritedPermissionsDisabled``) is open
         only to people with direct access, plus shared drive managers, not
-        to every member of the shared drive.  A failure isn't remembered:
-        the next call (the next file, or the next run) tries again.
+        to every member of the shared drive.  A failure isn't cached: the
+        next call (the next file, or the next run) tries again.  Only a
+        response that confirms ``inheritedPermissionsDisabled`` counts.
 
         Args:
             folder_id: Folder to restrict.
@@ -218,9 +219,10 @@ class FolderManager:
         except DRIVE_CALL_ERRORS as e:
             self._log_restriction_failure(folder_id, channel, str(e))
             return False
-        if response.get("inheritedPermissionsDisabled") is False:
+        if response.get("inheritedPermissionsDisabled") is not True:
+            # Fail closed: a response that doesn't confirm it isn't proof.
             self._log_restriction_failure(
-                folder_id, channel, "Drive kept inherited permissions on"
+                folder_id, channel, "Drive didn't confirm inherited permissions off"
             )
             return False
         self.restricted_folders.add(folder_id)

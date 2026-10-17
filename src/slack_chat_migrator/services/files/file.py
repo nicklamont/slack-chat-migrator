@@ -1483,7 +1483,7 @@ class FileHandler:
         return is_external_email(email, self._internal_domains)
 
     def _count_listing_failure(self, folder_id: str, error: BaseException) -> None:
-        """Count a Drive folder whose files couldn't be listed (retried)."""
+        """Count a Drive folder whose files couldn't be listed (once per folder)."""
         self._increment_stat("folder_listing_failures")
 
     def _count_folder_sync(self, channel: str, result: FolderSyncResult) -> None:

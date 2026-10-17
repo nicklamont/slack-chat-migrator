@@ -675,6 +675,15 @@ class TestEnsureRestricted:
         errors = [r for r in caplog.records if r.levelname == "ERROR"]
         assert len(errors) == 1  # said loudly once, then quietly
 
+    def test_response_without_the_field_is_not_restricted(self):
+        """Fail closed: no confirmation means not restricted (#137)."""
+        svc = MagicMock()
+        svc.update_file.return_value = {"id": "F"}
+        fm = FolderManager(svc)
+
+        assert fm.ensure_restricted("F", "hr", "SD") is False
+        assert "F" not in fm.restricted_folders
+
     def test_network_error_fails_closed(self):
         svc = MagicMock()
         svc.update_file.side_effect = TimeoutError("timed out")

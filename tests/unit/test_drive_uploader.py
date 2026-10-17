@@ -852,16 +852,21 @@ class TestSlackFileIndex:
 
         assert failure == DriveUploadFailure("RefreshError: invalid_grant")
 
-    def test_listing_failure_warns_once_per_folder(self, caplog):
-        uploader = _make_uploader()
+    def test_listing_failure_warns_and_reports_once_per_folder(self, caplog):
+        reported = []
+        uploader = DriveFileUploader(
+            MagicMock(), on_listing_failure=lambda f, e: reported.append(f)
+        )
         uploader.drive_service.list_files.side_effect = TimeoutError("slow")
 
         uploader.pre_cache_folder_file_hashes("folder1")
         uploader.pre_cache_folder_file_hashes("folder1")
+        uploader.pre_cache_folder_file_hashes("folder2")
 
-        assert uploader.listing_failures == {"folder1": 2}
+        assert uploader.listing_failures == {"folder1": 2, "folder2": 1}
+        assert reported == ["folder1", "folder2"]
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert len(warnings) == 1
+        assert len(warnings) == 2
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_upload_is_tagged_and_remembered(self, mock_media_cls, tmp_path):
