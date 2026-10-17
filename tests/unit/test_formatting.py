@@ -164,7 +164,7 @@ class TestParseSlackBlocks:
             ],
             "text": "",
         }
-        assert parse_slack_blocks(message) == "_quoted text_"
+        assert parse_slack_blocks(message) == "> quoted text"
 
     def test_rich_text_preformatted(self):
         message = {
@@ -499,9 +499,8 @@ class TestParseSlackBlocksForwardedMessages:
             ],
         }
         result = parse_slack_blocks(message)
-        # Level 2 should use hollow bullet (indent 6 is > 4 and <= 8)
-        assert "\u25e6" in result  # ◦ character
-        assert "level two bullet" in result
+        # Six spaces of indent is one nest level: four spaces in Chat
+        assert "\n    * level two bullet" in result
 
     def test_forwarded_message_indented_bullets_level3(self):
         """Covers lines 222-226: deeply indented bullets (indent > 8)."""
@@ -515,9 +514,8 @@ class TestParseSlackBlocksForwardedMessages:
             ],
         }
         result = parse_slack_blocks(message)
-        # Level 3+ should use small bullet (indent 10 is > 8)
-        assert "\u25aa" in result  # ▪ character
-        assert "deep bullet" in result
+        # Ten spaces of indent is two nest levels
+        assert "\n        * deep bullet" in result
 
     def test_forwarded_message_very_deep_bullets(self):
         """Covers line 224: indent_level > 12 triggers level 3."""
@@ -531,8 +529,7 @@ class TestParseSlackBlocksForwardedMessages:
             ],
         }
         result = parse_slack_blocks(message)
-        assert "\u25aa" in result  # ▪ character
-        assert "very deep bullet" in result
+        assert "\n            * very deep bullet" in result
 
     def test_forwarded_message_single_bullet_char(self):
         """Covers edge case: bullet character with no trailing text."""
@@ -626,7 +623,7 @@ class TestParseSlackBlocksIndentedLists:
     """Tests for indented list handling in rich_text blocks."""
 
     def test_bullet_list_indent_level_1(self):
-        """Covers lines 303-304, 319-320: indent level 1 bullet uses hollow bullet."""
+        """An indent-1 bullet list nests by four spaces."""
         message = {
             "blocks": [
                 {
@@ -660,12 +657,11 @@ class TestParseSlackBlocksIndentedLists:
             "text": "",
         }
         result = parse_slack_blocks(message)
-        # indent level 1: uses ◦ hollow bullet
-        assert "\u25e6 sub item" in result
-        assert "* top item" in result
+        # Chat nests bullets by four spaces per level
+        assert result == "* top item\n    * sub item"
 
     def test_bullet_list_indent_level_2(self):
-        """Covers lines 305-306: indent level 2+ bullet uses small bullet."""
+        """An indent-2 bullet list nests by eight spaces."""
         message = {
             "blocks": [
                 {
@@ -699,8 +695,7 @@ class TestParseSlackBlocksIndentedLists:
             "text": "",
         }
         result = parse_slack_blocks(message)
-        # indent level 2: uses ▪ small bullet
-        assert "\u25aa deep item" in result
+        assert result == "* top item\n        * deep item"
 
     def test_numbered_list_indent_level_1(self):
         """Covers lines 329-330: indented numbered list."""
@@ -747,10 +742,7 @@ class TestParseSlackBlocksIndentedLists:
             "text": "",
         }
         result = parse_slack_blocks(message)
-        assert "1. top numbered" in result
-        # indent level 1: 4 + 5*1 = 9 spaces
-        assert "         1. nested first" in result
-        assert "         2. nested second" in result
+        assert result == ("1. top numbered\n    1. nested first\n    2. nested second")
 
 
 class TestParseSlackBlocksListFlush:
@@ -822,7 +814,7 @@ class TestParseSlackBlocksListFlush:
         }
         result = parse_slack_blocks(message)
         assert "* list before quote" in result
-        assert "_quoted after list_" in result
+        assert "> quoted after list" in result
 
     def test_list_items_flushed_before_preformatted(self):
         """Covers lines 353-354: accumulated list items flushed before rich_text_preformatted."""
@@ -1104,7 +1096,7 @@ class TestParseSlackBlocksMultipleBlocks:
         assert "footer" in result
 
     def test_rich_text_quote_with_multiple_paragraphs(self):
-        """Quote with multiple paragraphs should each be italicized."""
+        """Every line of a quote, blank ones included, is quoted."""
         message = {
             "blocks": [
                 {
@@ -1125,8 +1117,7 @@ class TestParseSlackBlocksMultipleBlocks:
             "text": "",
         }
         result = parse_slack_blocks(message)
-        assert "_paragraph one_" in result
-        assert "_paragraph two_" in result
+        assert result == "> paragraph one\n>\n> paragraph two"
 
     def test_forwarded_message_empty_text_stripped(self):
         """Forwarded attachment with whitespace-only text should not produce output."""
@@ -1889,3 +1880,101 @@ class TestBlockTypes:
         mapping = {"tada": ":confetti_ball:", "partyparrot": ":party-blob:"}
         result = parse_slack_blocks(message, custom_emoji_map=mapping)
         assert result == "\U0001f38a:party-blob:"
+
+
+# --- Chat block quotes and nested lists ---
+
+
+class TestChatQuotesAndNestedLists:
+    """Quotes use Chat's ">" and lists nest by four spaces per level."""
+
+    @staticmethod
+    def _list(style, indent, *items, offset=None):
+        element = {
+            "type": "rich_text_list",
+            "style": style,
+            "indent": indent,
+            "elements": [_section({"type": "text", "text": t}) for t in items],
+        }
+        if offset is not None:
+            element["offset"] = offset
+        return element
+
+    def test_quote_lines_are_prefixed(self):
+        message = _rich(
+            {
+                "type": "rich_text_quote",
+                "elements": [
+                    {"type": "text", "text": "first line\n"},
+                    {"type": "text", "text": "bold", "style": {"bold": True}},
+                    {"type": "text", "text": " second"},
+                ],
+            },
+            _section({"type": "text", "text": "Yes, agreed!"}),
+        )
+        assert _render(message) == "> first line\n> *bold* second\n\nYes, agreed!"
+
+    def test_quote_keeps_mentions_and_links(self):
+        message = _rich(
+            {
+                "type": "rich_text_quote",
+                "elements": [
+                    {"type": "user", "user_id": "U1"},
+                    {"type": "text", "text": " said "},
+                    {"type": "link", "url": "https://x.example", "text": "this"},
+                ],
+            }
+        )
+        assert _render(message, user_map={"U1": "a@example.com"}) == (
+            "> <users/a@example.com> said <https://x.example|this>"
+        )
+
+    def test_three_level_bullet_list(self):
+        message = _rich(
+            self._list("bullet", 0, "Breakfast"),
+            self._list("bullet", 1, "Eggs"),
+            self._list("bullet", 2, "Scrambled", "Over easy"),
+            self._list("bullet", 1, "Toast"),
+            self._list("bullet", 0, "Lunch"),
+        )
+        assert parse_slack_blocks(message) == (
+            "* Breakfast\n"
+            "    * Eggs\n"
+            "        * Scrambled\n"
+            "        * Over easy\n"
+            "    * Toast\n"
+            "* Lunch"
+        )
+
+    def test_mixed_ordered_and_bullet_nesting(self):
+        message = _rich(
+            _section({"type": "text", "text": "Steps:\n"}),
+            self._list("ordered", 0, "Install", "Configure"),
+            self._list("bullet", 1, "config.yaml", "users"),
+            self._list("ordered", 2, "check", "fix"),
+            self._list("ordered", 0, "Run", offset=2),
+        )
+        assert parse_slack_blocks(message) == (
+            "Steps:\n\n"
+            "1. Install\n"
+            "2. Configure\n"
+            "    * config.yaml\n"
+            "    * users\n"
+            "        1. check\n"
+            "        2. fix\n"
+            "3. Run"
+        )
+
+    def test_forwarded_nested_bullets(self):
+        message = {
+            "text": "",
+            "attachments": [
+                {
+                    "is_share": True,
+                    "text": "Plan\n\N{BULLET} one\n    \N{WHITE BULLET} sub"
+                    "\n        \N{BLACK SMALL SQUARE} subsub",
+                }
+            ],
+        }
+        result = parse_slack_blocks(message)
+        assert result.endswith("Plan\n* one\n    * sub\n        * subsub")

@@ -394,8 +394,21 @@ def _extract_forwarded_messages(
     return forwarded_texts
 
 
+# A bullet line in Slack's plain text (bullet, white bullet or small square).
+_SLACK_BULLET_LINE_RE = re.compile(
+    r"^([ \t]*)[\N{BULLET}\N{WHITE BULLET}\N{BLACK SMALL SQUARE}][ \t]*(.*)$"
+)
+
+# Chat markup nests list items by four spaces per level.
+_LIST_INDENT = "    "
+
+
 def _convert_bullets_to_gchat(text: str) -> str:
-    """Convert Slack bullet formatting to Google Chat compatible bullets.
+    """Convert Slack bullet lines to Google Chat bullets.
+
+    Slack's plain text writes list items as lines starting with a bullet
+    character, nested ones indented.  Chat reads ``* item``, nested by four
+    spaces per level.
 
     Args:
         text: Text that may contain bullet-point lines.
@@ -403,34 +416,15 @@ def _convert_bullets_to_gchat(text: str) -> str:
     Returns:
         Text with bullets converted to Google Chat format.
     """
-    lines = text.split("\n")
-    improved_lines: list[str] = []
-
-    for line in lines:
-        stripped = line.strip()
-        if re.match(r"^\s+\N{BULLET}", line):
-            indent_level = len(line) - len(line.lstrip())
-            content = (
-                stripped[1:].strip() if stripped.startswith("\N{BULLET}") else stripped
-            )
-            if indent_level <= 4:
-                improved_lines.append(f"* {content}")
-            elif indent_level <= 8:
-                indent_spaces = " " * (4 + 5)
-                improved_lines.append(f"{indent_spaces}\N{WHITE BULLET} {content}")
-            else:
-                level = 2 if indent_level <= 12 else 3
-                indent_spaces = " " * (4 + (5 * level))
-                improved_lines.append(
-                    f"{indent_spaces}\N{BLACK SMALL SQUARE} {content}"
-                )
-        elif stripped.startswith("\N{BULLET}"):
-            content = stripped[1:].strip() if len(stripped) > 1 else ""
-            improved_lines.append(f"* {content}")
-        else:
-            improved_lines.append(line)
-
-    return "\n".join(improved_lines)
+    lines: list[str] = []
+    for line in text.split("\n"):
+        match = _SLACK_BULLET_LINE_RE.match(line)
+        if not match:
+            lines.append(line)
+            continue
+        level = len(match.group(1).expandtabs(4)) // 4
+        lines.append(f"{_LIST_INDENT * level}* {match.group(2).strip()}")
+    return "\n".join(lines)
 
 
 def _combine_with_forwarded(main_text: str, forwarded_texts: list[str]) -> str:
@@ -451,18 +445,13 @@ def _combine_with_forwarded(main_text: str, forwarded_texts: list[str]) -> str:
 
 
 def _rich_text_list_prefix(style: str, indent: int, number: int) -> str:
-    """Return the line prefix for a list item at nesting level *indent*."""
-    if style == "ordered":
-        marker = f"{number}."
-    elif indent == 0:
-        marker = "*"
-    elif indent == 1:
-        marker = "\N{WHITE BULLET}"
-    else:
-        marker = "\N{BLACK SMALL SQUARE}"
-    if indent == 0:
-        return f"{marker} "
-    return " " * (4 + 5 * indent) + f"{marker} "
+    """Return the line prefix for a list item at nesting level *indent*.
+
+    Chat markup nests ``*`` bullets by four spaces per level.  It has no
+    numbered lists, so ordered items are numbered explicitly.
+    """
+    marker = f"{number}." if style == "ordered" else "*"
+    return f"{_LIST_INDENT * indent}{marker} "
 
 
 def _parse_rich_text_list(
@@ -520,10 +509,10 @@ def _parse_rich_text_list(
 
 
 def _render_rich_text_quote(element: dict, rctx: _RenderContext) -> str:
-    """Render a ``rich_text_quote`` element (italic paragraphs)."""
+    """Render a ``rich_text_quote`` element as a Chat ``>`` block quote."""
     quote_content = _parse_rich_text_elements(element.get("elements", []), rctx)
-    paragraphs = quote_content.strip().split("\n\n")
-    return "\n\n".join(f"_{p.strip()}_" for p in paragraphs if p.strip())
+    lines = quote_content.strip("\n").split("\n")
+    return "\n".join(f"> {line}" if line.strip() else ">" for line in lines)
 
 
 def _parse_rich_text_block(block: dict, rctx: _RenderContext | None = None) -> str:
