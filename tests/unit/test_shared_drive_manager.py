@@ -2,10 +2,12 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
+from slack_chat_migrator.exceptions import ConfigError
 from slack_chat_migrator.services.drive.shared_drive_manager import (
     SharedDriveManager,
 )
@@ -64,23 +66,22 @@ class TestGetOrCreateSharedDrive:
 
         assert result == "configured-id"
 
-    def test_configured_drive_id_fails_falls_back_to_name(self):
+    def test_inaccessible_configured_drive_id_raises(self):
+        """A bad shared_drive.id stops the run instead of creating a drive (I13)."""
         manager, drive_service = _make_manager(
             shared_drive_name="Fallback Drive",
             shared_drive_id="bad-id",
         )
-        # First call: get by ID fails
         drive_service.get_drive.side_effect = _make_http_error(404, b"Not Found")
-        # Second call: list drives finds existing by name
         drive_service.list_drives.return_value = {
-            "drives": [
-                {"id": "found-id", "name": "Fallback Drive"},
-            ]
+            "drives": [{"id": "found-id", "name": "Fallback Drive"}]
         }
 
-        result = manager.get_or_create_shared_drive()
+        with pytest.raises(ConfigError, match="bad-id"):
+            manager.get_or_create_shared_drive()
 
-        assert result == "found-id"
+        drive_service.list_drives.assert_not_called()
+        drive_service.create_drive.assert_not_called()
 
     def test_no_drive_id_finds_existing_by_name(self):
         manager, drive_service = _make_manager(
@@ -190,3 +191,72 @@ class TestFindOrCreateSharedDrive:
         result = manager._find_or_create_shared_drive("Some Drive")
 
         assert result is None
+
+
+class TestSharedDrivePaging:
+    """drives.list is read page by page (I13)."""
+
+    def _manager(self, fake, **config):
+        from slack_chat_migrator.services.drive_adapter import DriveAdapter
+
+        manager = SharedDriveManager(
+            DriveAdapter(fake),
+            MigrationConfig(shared_drive=SharedDriveConfig(**config)),
+        )
+        return manager
+
+    def test_target_on_page_three_is_found(self):
+        from tests.unit.drive_fakes import FakeDrive
+
+        drives = [{"id": f"D{i}", "name": f"Team {i}"} for i in range(24)]
+        drives.append({"id": "SD1", "name": "Imported Slack Attachments"})
+        # The server returns 10 per page and ignores the name filter.
+        fake = FakeDrive(drives=drives, drive_page_cap=10, honor_drive_query=False)
+
+        result = self._manager(
+            fake, name="Imported Slack Attachments"
+        ).get_or_create_shared_drive()
+
+        assert result == "SD1"
+        lists = [kw for name, kw in fake.calls if name == "drives.list"]
+        assert len(lists) == 3
+        assert lists[0]["pageSize"] == 100
+        assert lists[0]["q"] == "name = 'Imported Slack Attachments'"
+        assert [kw.get("pageToken") for kw in lists] == [None, "10", "20"]
+        assert fake.count("drives.create") == 0
+
+    def test_name_query_is_escaped(self):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive(drives=[{"id": "X", "name": "Bob's files"}])
+        result = self._manager(fake, name="Bob's files").get_or_create_shared_drive()
+        assert result == "X"
+        query = next(kw["q"] for name, kw in fake.calls if name == "drives.list")
+        assert query == "name = 'Bob\\'s files'"
+
+    def test_duplicate_names_pick_first_without_creating(self, caplog):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive(
+            drives=[
+                {"id": "A", "name": "Imported Slack Attachments"},
+                {"id": "B", "name": "Imported Slack Attachments"},
+            ]
+        )
+        result = self._manager(
+            fake, name="Imported Slack Attachments"
+        ).get_or_create_shared_drive()
+
+        assert result == "A"
+        assert fake.count("drives.create") == 0
+        assert "shared_drive.id" in caplog.text
+
+    def test_created_when_absent(self):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive(drives=[{"id": "D1", "name": "Other"}])
+        result = self._manager(
+            fake, name="Imported Slack Attachments"
+        ).get_or_create_shared_drive()
+        assert result.startswith("NEWDRIVE")
+        assert fake.count("drives.create") == 1

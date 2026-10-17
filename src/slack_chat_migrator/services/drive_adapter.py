@@ -222,13 +222,34 @@ class DriveAdapter:
         result: dict[str, Any] = self._svc.drives().get(driveId=drive_id).execute()
         return result
 
-    def list_drives(self) -> dict[str, Any]:
-        """List shared drives.
+    def list_drives(
+        self,
+        page_size: int = 100,
+        page_token: str | None = None,
+        *,
+        q: str | None = None,
+        fields: str | None = None,
+    ) -> dict[str, Any]:
+        """List shared drives the caller is a member of (one page).
+
+        Args:
+            page_size: Maximum drives per page (the API allows 1-100 and
+                returns at most 10 when it is omitted).
+            page_token: Continuation token from ``nextPageToken``.
+            q: Optional search query, e.g. ``name = 'Attachments'``.
+            fields: Optional response field mask.
 
         Returns:
-            Raw API response dict with ``drives`` key.
+            Raw API response dict with ``drives`` and ``nextPageToken`` keys.
         """
-        result: dict[str, Any] = self._svc.drives().list().execute()
+        kwargs: dict[str, Any] = {"pageSize": page_size}
+        if page_token is not None:
+            kwargs["pageToken"] = page_token
+        if q is not None:
+            kwargs["q"] = q
+        if fields is not None:
+            kwargs["fields"] = fields
+        result: dict[str, Any] = self._svc.drives().list(**kwargs).execute()
         return result
 
     def create_drive(

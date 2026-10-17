@@ -69,6 +69,7 @@ class FakeDrive:
         file_page_cap: int | None = None,
         fail_conversion: bool = False,
         reject_inherited_flag_on_create: bool = False,
+        honor_drive_query: bool = True,
     ):
         self.files_db: dict[str, dict[str, Any]] = {}
         self.permissions_db: dict[str, list[dict[str, Any]]] = {}
@@ -81,6 +82,7 @@ class FakeDrive:
         self.file_page_cap = file_page_cap
         self.fail_conversion = fail_conversion
         self.reject_inherited_flag_on_create = reject_inherited_flag_on_create
+        self.honor_drive_query = honor_drive_query
 
     # -- helpers ------------------------------------------------------------
 
@@ -306,7 +308,7 @@ class _Drives:
         def run():
             drives = list(self.d.drives_db)
             m = re.search(r"name = '((?:[^'\\]|\\.)*)'", kw.get("q", ""))
-            if m:
+            if m and self.d.honor_drive_query:
                 wanted = m.group(1).replace("\\'", "'").replace("\\\\", "\\")
                 drives = [d for d in drives if d["name"] == wanted]
             page, token = _page(drives, kw, 10, self.d.drive_page_cap)

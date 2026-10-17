@@ -68,6 +68,8 @@ MARKUP_SYNTAX = "MARKUP_SYNTAX_CHAT"
 # reader; there is no "editor".
 DRIVE_ROLE_WRITER = "writer"
 DRIVE_ROLE_READER = "reader"
+DRIVES_PAGE_SIZE = 100  # drives.list maximum (the API default is 10)
+DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 # appProperties keys that tag uploads with their Slack origin, so a re-run
 # can find an already-uploaded file without downloading it again.
 DRIVE_APP_PROPERTY_SLACK_FILE_ID = "slackFileId"

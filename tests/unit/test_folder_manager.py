@@ -55,7 +55,7 @@ class TestGetOrCreateChannelFolder:
         result = fm.get_or_create_channel_folder("general", "parent123")
 
         assert result == "chan_folder_id"
-        assert fm.folder_cache["folder_general"] == "chan_folder_id"
+        assert fm.folder_cache[("parent123", "general")] == "chan_folder_id"
 
     def test_creates_channel_folder_in_shared_drive(self):
         svc = _make_drive_service()
@@ -84,7 +84,7 @@ class TestGetOrCreateChannelFolder:
 
         assert result == "existing_chan"
         svc.create_file.assert_not_called()
-        assert fm.folder_cache["folder_general"] == "existing_chan"
+        assert fm.folder_cache[("parent123", "general")] == "existing_chan"
 
     def test_returns_cached_folder_id(self):
         svc = _make_drive_service()
@@ -93,7 +93,7 @@ class TestGetOrCreateChannelFolder:
         svc.get_file.return_value = {"id": "cached_id"}
 
         fm = FolderManager(svc)
-        fm.folder_cache["folder_general"] = "cached_id"
+        fm.folder_cache[("parent123", "general")] = "cached_id"
 
         result = fm.get_or_create_channel_folder("general", "parent123")
 
@@ -112,12 +112,12 @@ class TestGetOrCreateChannelFolder:
         svc.create_file.return_value = {"id": "new_id"}
 
         fm = FolderManager(svc)
-        fm.folder_cache["folder_general"] = "stale_id"
+        fm.folder_cache[("parent123", "general")] = "stale_id"
 
         result = fm.get_or_create_channel_folder("general", "parent123")
 
         assert result == "new_id"
-        assert fm.folder_cache["folder_general"] == "new_id"
+        assert fm.folder_cache[("parent123", "general")] == "new_id"
 
     def test_http_error_returns_none(self):
         svc = _make_drive_service()
@@ -209,7 +209,7 @@ class TestGetChannelFolderId:
     def test_returns_cached_folder_id(self):
         svc = _make_drive_service()
         fm = FolderManager(svc)
-        fm.folder_cache["general:parent123"] = "cached_id"
+        fm.folder_cache[("parent123", "general")] = "cached_id"
 
         result = fm.get_channel_folder_id("general", "parent123")
 
@@ -225,7 +225,7 @@ class TestGetChannelFolderId:
         result = fm.get_channel_folder_id("general", "parent123")
 
         assert result == "found_id"
-        assert fm.folder_cache["general:parent123"] == "found_id"
+        assert fm.folder_cache[("parent123", "general")] == "found_id"
 
     def test_no_matching_folder_returns_none(self):
         svc = _make_drive_service()

@@ -5,10 +5,11 @@ Folder management for Google Drive integration.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
 
+from slack_chat_migrator.constants import DRIVE_FILES_PAGE_SIZE, DRIVE_FOLDER_MIME_TYPE
 from slack_chat_migrator.utils.api import escape_drive_query_value
 from slack_chat_migrator.utils.logging import (
     log_with_context,
@@ -34,7 +35,65 @@ class FolderManager:
         """
         self.drive_service = drive_service
         self.workspace_domain = workspace_domain
-        self.folder_cache: dict[str, str] = {}
+        # (parent_folder_id, folder name) -> folder ID, shared by every lookup
+        self.folder_cache: dict[tuple[str, str], str] = {}
+
+    def remember_folder(self, parent_folder_id: str, name: str, folder_id: str) -> None:
+        """Record a known folder so lookups by name need no API call.
+
+        The first folder seen for a name wins, matching what a search returns.
+        """
+        self.folder_cache.setdefault(
+            (parent_folder_id, self._sanitize_folder_name(name)), folder_id
+        )
+
+    def list_child_folders(
+        self, parent_folder_id: str, shared_drive_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List every non-trashed folder directly inside *parent_folder_id*.
+
+        All pages are read.
+
+        Args:
+            parent_folder_id: Parent folder (or shared drive root) ID.
+            shared_drive_id: ID of the shared drive (if applicable).
+
+        Returns:
+            Folder resources with ``id`` and ``name``.
+
+        Raises:
+            HttpError: If a page can't be listed.
+        """
+        safe_parent = escape_drive_query_value(parent_folder_id)
+        query = (
+            f"'{safe_parent}' in parents and mimeType = '{DRIVE_FOLDER_MIME_TYPE}'"
+            " and trashed = false"
+        )
+        list_kwargs: dict[str, Any] = {
+            "q": query,
+            "fields": "nextPageToken, files(id, name)",
+            "page_size": DRIVE_FILES_PAGE_SIZE,
+        }
+        if shared_drive_id:
+            list_kwargs.update(
+                {
+                    "corpora": "drive",
+                    "drive_id": shared_drive_id,
+                    "include_items_from_all_drives": True,
+                    "supports_all_drives": True,
+                }
+            )
+
+        folders: list[dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            response = self.drive_service.list_files(
+                **list_kwargs, page_token=page_token
+            )
+            folders.extend(f for f in response.get("files", []) if f.get("id"))
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                return folders
 
     def create_regular_drive_folder(self, folder_name: str) -> str | None:
         """Create a regular Drive folder with domain permissions as fallback.
@@ -111,7 +170,7 @@ class FolderManager:
             The folder ID if successful, None otherwise
         """
         # Check cache
-        cache_key = f"folder_{channel}"
+        cache_key = (parent_folder_id, self._sanitize_folder_name(channel))
         if cache_key in self.folder_cache:
             folder_id: str = self.folder_cache[cache_key]
 
@@ -241,7 +300,7 @@ class FolderManager:
             Folder ID if found, None otherwise
         """
         # First check cache
-        cache_key = f"{channel}:{parent_folder_id}"
+        cache_key = (parent_folder_id, self._sanitize_folder_name(channel))
         if cache_key in self.folder_cache:
             folder_id: str = self.folder_cache[cache_key]
             log_with_context(

@@ -40,7 +40,6 @@ from slack_chat_migrator.services.files.temp_files import (
     sweep_stale_temp_dirs,
 )
 from slack_chat_migrator.types import UploadResult
-from slack_chat_migrator.utils.api import escape_drive_query_value
 from slack_chat_migrator.utils.logging import log_with_context
 from slack_chat_migrator.utils.mime import resolve_drive_mime_type
 
@@ -229,10 +228,12 @@ class FileHandler:
             )
 
     def _pre_cache_root_folder(self) -> None:
-        """Pre-cache file hashes from the root folder and its subfolders.
+        """Pre-cache the root folder's files and learn its channel folders.
 
-        This helps improve deduplication by building a hash cache of all
-        existing files before starting any channel uploads.
+        Every page of the subfolder listing is read, and each folder's ID is
+        handed to the folder cache, so finding a channel's folder later
+        needs no search.  A channel folder's own files are cached when the
+        first upload goes into it.
         """
         if not self._root_folder_id:
             return
@@ -243,78 +244,38 @@ class FileHandler:
                 "Pre-caching file hashes from root folder to improve deduplication",
             )
 
-            # First, pre-cache files directly in the root folder
             file_count = self.drive_uploader.pre_cache_folder_file_hashes(
                 self._root_folder_id, self._shared_drive_id
             )
-
             log_with_context(
                 logging.DEBUG, f"Pre-cached {file_count} files from root folder"
             )
-
-            # Then, find all channel subfolders and pre-cache them as well
-            # This is important for migrations that are being resumed
-            try:
-                # Query for all folders under the root folder
-                safe_root = escape_drive_query_value(self._root_folder_id)
-                query = f"'{safe_root}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
-
-                list_kwargs: dict[str, Any] = {
-                    "q": query,
-                    "fields": "files(id,name)",
-                    "page_size": 1000,
-                }
-
-                if self._shared_drive_id:
-                    list_kwargs.update(
-                        {
-                            "corpora": "drive",
-                            "drive_id": self._shared_drive_id,
-                            "include_items_from_all_drives": True,
-                            "supports_all_drives": True,
-                        }
-                    )
-
-                response = self.drive_service.list_files(**list_kwargs)
-                folders = response.get("files", [])
-
-                total_subfolders = len(folders)
-                folders_processed = 0
-                total_files_cached = file_count
-
-                for folder in folders:
-                    folder_id = folder.get("id")
-
-                    if folder_id:
-                        file_count = self.drive_uploader.pre_cache_folder_file_hashes(
-                            folder_id, self._shared_drive_id
-                        )
-                        total_files_cached += file_count
-                        folders_processed += 1
-
-                        if folders_processed % 10 == 0:
-                            log_with_context(
-                                logging.DEBUG,
-                                f"Pre-cached {folders_processed}/{total_subfolders} subfolders ({total_files_cached} total files)",
-                            )
-
-                log_with_context(
-                    logging.DEBUG,
-                    f"Completed pre-caching {total_files_cached} files from {folders_processed} channel folders",
-                )
-
-            except HttpError as e:
-                # Don't fail the entire process if subfolder caching fails
-                log_with_context(
-                    logging.WARNING,
-                    f"Error pre-caching channel subfolders: {e}. Continuing with available cache.",
-                )
-
         except HttpError as e:
             log_with_context(
                 logging.WARNING,
                 f"Failed to pre-cache file hashes from root folder: {e}. Continuing without pre-cache.",
             )
+
+        try:
+            folders = self.folder_manager.list_child_folders(
+                self._root_folder_id, self._shared_drive_id
+            )
+        except HttpError as e:
+            # Don't fail the entire process if subfolder caching fails
+            log_with_context(
+                logging.WARNING,
+                f"Error pre-caching channel subfolders: {e}. Continuing with available cache.",
+            )
+            return
+
+        for folder in folders:
+            self.folder_manager.remember_folder(
+                self._root_folder_id, folder.get("name", ""), folder["id"]
+            )
+        log_with_context(
+            logging.DEBUG,
+            f"Found {len(folders)} existing channel folders",
+        )
 
     def upload_attachment(
         self,

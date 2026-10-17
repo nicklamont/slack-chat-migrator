@@ -177,7 +177,15 @@ class TestGetDrive:
 class TestListDrives:
     def test_calls_drives_list(self, adapter, mock_service):
         adapter.list_drives()
-        mock_service.drives().list.assert_called_once_with()
+        mock_service.drives().list.assert_called_once_with(pageSize=100)
+
+    def test_passes_paging_and_query(self, adapter, mock_service):
+        adapter.list_drives(
+            page_size=50, page_token="tok", q="name = 'x'", fields="drives(id)"
+        )
+        mock_service.drives().list.assert_called_once_with(
+            pageSize=50, pageToken="tok", q="name = 'x'", fields="drives(id)"
+        )
 
 
 class TestCreateDrive:

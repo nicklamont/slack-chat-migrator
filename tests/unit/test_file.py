@@ -837,40 +837,32 @@ class TestPreCacheRootFolder:
             "root123", "drive123"
         )
 
-    def test_caches_subfolders(self):
-        """Pre-caches files from channel subfolders."""
+    def test_seeds_folder_cache_from_every_subfolder(self):
+        """Channel folders are learned up front; their files are cached lazily."""
         handler = _make_handler()
         handler._root_folder_id = "root123"
         handler._shared_drive_id = "drive123"
-        handler.drive_uploader.pre_cache_folder_file_hashes.side_effect = [
-            3,  # root folder
-            2,  # subfolder 1
-            4,  # subfolder 2
+        handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 3
+        handler.folder_manager.list_child_folders.return_value = [
+            {"id": "folder_a", "name": "general"},
+            {"id": "folder_b", "name": "random"},
         ]
-        handler.drive_service.list_files.return_value = {
-            "files": [
-                {"id": "folder_a", "name": "general"},
-                {"id": "folder_b", "name": "random"},
-            ]
-        }
 
         handler._pre_cache_root_folder()
 
-        assert handler.drive_uploader.pre_cache_folder_file_hashes.call_count == 3
-
-    def test_caches_subfolders_without_shared_drive(self):
-        """Pre-caches subfolders without shared drive params."""
-        handler = _make_handler()
-        handler._root_folder_id = "root123"
-        handler._shared_drive_id = None
-        handler.drive_uploader.pre_cache_folder_file_hashes.side_effect = [5, 2]
-        handler.drive_service.list_files.return_value = {
-            "files": [{"id": "sub1", "name": "general"}]
-        }
-
-        handler._pre_cache_root_folder()
-
-        assert handler.drive_uploader.pre_cache_folder_file_hashes.call_count == 2
+        handler.folder_manager.list_child_folders.assert_called_once_with(
+            "root123", "drive123"
+        )
+        handler.folder_manager.remember_folder.assert_any_call(
+            "root123", "general", "folder_a"
+        )
+        handler.folder_manager.remember_folder.assert_any_call(
+            "root123", "random", "folder_b"
+        )
+        # Only the root folder's files are listed at start-up.
+        handler.drive_uploader.pre_cache_folder_file_hashes.assert_called_once_with(
+            "root123", "drive123"
+        )
 
     def test_subfolder_listing_http_error_continues(self):
         """HttpError when listing subfolders does not fail the process."""
@@ -878,12 +870,13 @@ class TestPreCacheRootFolder:
         handler._root_folder_id = "root123"
         handler._shared_drive_id = "drive123"
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 5
-        handler.drive_service.list_files.side_effect = HttpError(
+        handler.folder_manager.list_child_folders.side_effect = HttpError(
             Response({"status": "500"}), b"error"
         )
 
         # Should not raise
         handler._pre_cache_root_folder()
+        handler.folder_manager.remember_folder.assert_not_called()
 
     def test_root_cache_http_error_continues(self):
         """HttpError when caching root folder does not fail the process."""
@@ -896,21 +889,6 @@ class TestPreCacheRootFolder:
 
         # Should not raise
         handler._pre_cache_root_folder()
-
-    def test_skips_folder_with_no_id(self):
-        """Folders without an 'id' key are skipped."""
-        handler = _make_handler()
-        handler._root_folder_id = "root123"
-        handler._shared_drive_id = None
-        handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 2
-        handler.drive_service.list_files.return_value = {
-            "files": [{"name": "no_id_folder"}]  # no "id" key
-        }
-
-        handler._pre_cache_root_folder()
-
-        # Only called once (for root), not for the folder without ID
-        handler.drive_uploader.pre_cache_folder_file_hashes.assert_called_once()
 
 
 # ===========================================================================

@@ -437,3 +437,57 @@ class TestRerun:
         assert again.metadata["source"] == "slack_id"
         assert fake.count("files.create") == 0
         assert fake.count("permissions.create") == 0
+
+
+# ---------------------------------------------------------------------------
+# Shared drive and folder listings are paged (I13)
+# ---------------------------------------------------------------------------
+
+
+class TestListingsArePaged:
+    def test_existing_drive_on_page_three_is_reused(self, tmp_path):
+        drives = [{"id": f"D{i}", "name": f"Team {i}"} for i in range(24)]
+        drives.append({"id": "SD1", "name": DRIVE_NAME})
+        fake = FakeDrive(drives=drives, drive_page_cap=10, honor_drive_query=False)
+
+        handler = make_handler(fake, tmp_path)
+
+        assert handler.shared_drive_id == "SD1"
+        assert fake.count("drives.create") == 0
+
+    def test_every_page_of_channel_folders_is_read(self, tmp_path):
+        fake = FakeDrive(file_page_cap=1000)
+        fake.drives_db.append({"id": "SD1", "name": DRIVE_NAME})
+        for i in range(1500):
+            fake.add_folder(f"fold{i}", f"chan{i}", "SD1")
+
+        handler = make_handler(fake, tmp_path)
+
+        folder_lists = [
+            kw
+            for name, kw in fake.calls
+            if name == "files.list" and "vnd.google-apps.folder" in kw.get("q", "")
+        ]
+        assert len(folder_lists) == 2
+        assert "nextPageToken" in folder_lists[0]["fields"]
+        assert len(handler.folder_manager.folder_cache) == 1500
+        fake.calls.clear()
+        # A known channel folder is found without a search.
+        assert folder_of(handler, "chan1499") == "fold1499"
+        assert not any(
+            name == "files.list" and "name =" in kw.get("q", "")
+            for name, kw in fake.calls
+        )
+
+    def test_inaccessible_configured_drive_stops_initialisation(self, tmp_path):
+        from slack_chat_migrator.exceptions import ConfigError
+
+        fake = FakeDrive(drives=[{"id": "SD1", "name": DRIVE_NAME}])
+        config = MigrationConfig(
+            shared_drive=SharedDriveConfig(name=DRIVE_NAME, id="0AMissing")
+        )
+        with pytest.raises(ConfigError, match="0AMissing"):
+            make_handler(fake, tmp_path, config=config)
+
+        assert fake.count("drives.create") == 0
+        assert fake.count("files.create") == 0  # no fallback folder either
