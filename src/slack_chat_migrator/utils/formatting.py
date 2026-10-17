@@ -26,10 +26,12 @@ if TYPE_CHECKING:
     from slack_chat_migrator.core.state import MigrationState
     from slack_chat_migrator.utils.user_validation import UnmappedUserTracker
 
+from slack_chat_migrator.constants import MESSAGE_MAX_BYTES
 from slack_chat_migrator.utils.emoji import (
     apply_skin_tone,
     chat_custom_emoji_name,
     emoji_from_codepoints,
+    is_emoji_modifier_or_joiner,
     slack_emoji_to_unicode,
     split_skin_tone,
 )
@@ -1279,3 +1281,128 @@ def convert_formatting(
         original_text=text,
     )
     return _convert_mrkdwn(text, ctx)
+
+
+# --- Message size ---------------------------------------------------------
+
+_FENCE = "```"
+_FENCE_REOPEN = "```\n"
+_FENCE_CLOSE = "\n```"
+# Smallest budget that leaves room for fence markers and some text.
+_MIN_SPLIT_BYTES = 64
+_WHITESPACE_RE = re.compile(r"[ \t]+")
+
+
+def _utf8_len(text: str) -> int:
+    """Return the size of *text* in UTF-8 bytes."""
+    return len(text.encode("utf-8"))
+
+
+def _chars_fitting(text: str, budget: int) -> int:
+    """Return how many leading characters of *text* fit in *budget* bytes."""
+    head = text[:budget].encode("utf-8")[:budget]
+    # A multi-byte character cut in half is dropped, never split.
+    return len(head.decode("utf-8", errors="ignore"))
+
+
+def _safe_hard_cut(text: str, cut: int) -> int:
+    """Move a hard cut back so it doesn't split an emoji or a code fence."""
+    while cut > 1 and (
+        is_emoji_modifier_or_joiner(text[cut])
+        or text[cut - 1] == "\N{ZERO WIDTH JOINER}"
+        or (text[cut - 1] == "`" and text[cut] == "`")
+    ):
+        cut -= 1
+    return cut
+
+
+def _choose_split(text: str, cut: int) -> tuple[int, int]:
+    """Pick where to split *text*, at or before character index *cut*.
+
+    Prefers a paragraph break, then a line break, then whitespace in the
+    second half of the window, and otherwise any line break, before falling
+    back to a hard cut.  The separator itself is dropped.
+
+    Returns:
+        ``(end, next_start)``: the part is ``text[:end]`` and the rest
+        starts at ``text[next_start:]``.
+    """
+    window = text[:cut]
+    half = cut // 2
+    paragraph = window.rfind("\n\n")
+    if paragraph >= half and paragraph > 0:
+        return paragraph, paragraph + 2
+    line = window.rfind("\n")
+    if line >= half and line > 0:
+        return line, line + 1
+    spaces = [m for m in _WHITESPACE_RE.finditer(window) if m.start() > 0]
+    if spaces and spaces[-1].start() >= half:
+        return spaces[-1].start(), spaces[-1].end()
+    if line > 0:
+        return line, line + 1
+    hard = _safe_hard_cut(text, cut)
+    return hard, hard
+
+
+def _avoid_splitting_token(text: str, end: int, next_start: int) -> tuple[int, int]:
+    """Move a split back to before a ``<...>`` token it would cut in two."""
+    opening = text.rfind("<", 0, end)
+    if opening > 0 and opening > text.rfind(">", 0, end):
+        closing = text.find(">", end)
+        if closing != -1 and "\n" not in text[opening:closing]:
+            return opening, opening
+    return end, next_start
+
+
+def split_message_text(text: str, max_bytes: int = MESSAGE_MAX_BYTES) -> list[str]:
+    """Split message text into parts that fit Chat's message size limit.
+
+    Google Chat rejects a message over 32,000 bytes.  Parts are measured in
+    UTF-8 bytes and split at a paragraph break where possible, else a line
+    break, else whitespace; a hard cut never splits a character, an emoji
+    sequence or a ``<...>`` link/mention token.  When a split falls inside a
+    code block, the part closes the fence and the next part reopens it.
+
+    Args:
+        text: The Chat message text.
+        max_bytes: Budget per part.  Pass less than ``MESSAGE_MAX_BYTES`` to
+            leave room for what the caller adds (attribution prefix, edit
+            marker, Drive links, the rest of the request body).
+
+    Returns:
+        ``[text]`` when it fits, otherwise the parts in order, each at most
+        *max_bytes* bytes.
+
+    Raises:
+        ValueError: If *max_bytes* is too small to split sensibly.
+    """
+    if max_bytes < _MIN_SPLIT_BYTES:
+        raise ValueError(
+            f"max_bytes must be at least {_MIN_SPLIT_BYTES}, got {max_bytes}"
+        )
+    if _utf8_len(text) <= max_bytes:
+        return [text]
+
+    parts: list[str] = []
+    rest = text
+    in_code = False
+    while rest:
+        prefix = _FENCE_REOPEN if in_code else ""
+        if _utf8_len(prefix) + _utf8_len(rest) <= max_bytes:
+            parts.append(prefix + rest)
+            break
+        budget = max_bytes - _utf8_len(prefix) - _utf8_len(_FENCE_CLOSE)
+        end, next_start = _choose_split(rest, _chars_fitting(rest, budget))
+        end, next_start = _avoid_splitting_token(rest, end, next_start)
+        if end <= 0:
+            # Nothing but a token fits; cut it rather than loop forever.
+            end = next_start = _safe_hard_cut(rest, _chars_fitting(rest, budget))
+        piece = rest[:end]
+        if in_code ^ (piece.count(_FENCE) % 2 == 1):
+            parts.append(prefix + piece + _FENCE_CLOSE)
+            in_code = True
+        else:
+            parts.append(prefix + piece)
+            in_code = False
+        rest = rest[next_start:]
+    return parts

@@ -105,3 +105,8 @@ CHANNEL_EVENT_SUBTYPES = frozenset(
 # Export records of an edit or deletion; the edited text is already in the
 # original message (with an ``edited`` field).
 EDIT_LOG_SUBTYPES = frozenset({MESSAGE_CHANGED_SUBTYPE, MESSAGE_DELETED_SUBTYPE})
+
+# --- Google Chat message size ---
+# messages.create: "The maximum message size, including the message
+# contents, is 32,000 bytes."  Measured in UTF-8 bytes.
+MESSAGE_MAX_BYTES = 32000
