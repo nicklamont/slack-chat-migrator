@@ -409,34 +409,77 @@ def _check_key_text(
     return _assess_key(key, now)
 
 
-def rewrite_without_bom(key_path: Path) -> None:
+def rewrite_without_bom(key_path: Path) -> Path:
     """Rewrite a key file without its UTF-8 byte order mark, atomically.
 
-    The same key is kept (no new key is created in IAM).  The new content is
-    written to a private (``0600``) temporary file next to *key_path*, which
-    then replaces it, so the old file stays intact if anything fails.
+    The same key is kept (no new key is created in IAM).  A symlink is
+    followed and its target rewritten, so the key stays in one file.  The
+    new content is written to a private (``0600``) temporary file next to
+    that file, with its owner and group, which then replaces it, so the old
+    file stays intact if anything fails.
 
     Args:
         key_path: A key file that starts with a UTF-8 BOM.
 
+    Returns:
+        The file that was rewritten: *key_path*, or the file it links to.
+
     Raises:
-        ValueError: If the file doesn't start with a UTF-8 BOM.
+        ValueError: If the file doesn't start with a UTF-8 BOM, has more
+            than one hard link (the other names would keep the BOM and a
+            second copy of the key), or belongs to another user whom the
+            rewritten file can't be given (only root can).
         OSError: If the file can't be read or rewritten.
     """
-    raw = key_path.read_bytes()
+    real = Path(os.path.realpath(key_path))
+    raw = real.read_bytes()
     if not raw.startswith(codecs.BOM_UTF8):
-        raise ValueError(f"{key_path} doesn't start with a UTF-8 byte order mark")
-    temp = key_path.with_name(f".{key_path.name}.{os.getpid()}.tmp")
+        raise ValueError(f"{real} doesn't start with a UTF-8 byte order mark")
+    original = real.stat()
+    if original.st_nlink > 1:
+        raise ValueError(
+            f"{real} has {original.st_nlink} hard links, which would keep the"
+            " byte order mark (and a copy of the key) if only this name were"
+            " rewritten; re-save the file as UTF-8 without a byte order mark"
+        )
+    temp = real.with_name(f".{real.name}.{os.getpid()}.tmp")
     fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "wb") as f:
+            _keep_owner(f.fileno(), original, real)
             f.write(raw[len(codecs.BOM_UTF8) :])
             f.flush()
             os.fsync(f.fileno())
-        os.replace(temp, key_path)
+        os.replace(temp, real)
     except BaseException:
         _remove_quietly(temp)
         raise
+    return real
+
+
+def _keep_owner(fd: int, original: os.stat_result, path: Path) -> None:
+    """Give the open file *fd* the owner and group of *path* (*original*).
+
+    Raises:
+        ValueError: If *path* belongs to another user and *fd* can't be
+            given that owner (only root can).
+    """
+    if not hasattr(os, "fchown"):  # Windows: no POSIX owners
+        return
+    current = os.fstat(fd)
+    if (current.st_uid, current.st_gid) == (original.st_uid, original.st_gid):
+        return
+    try:
+        os.fchown(fd, original.st_uid, original.st_gid)
+    except PermissionError:
+        if current.st_uid != original.st_uid:
+            raise ValueError(
+                f"{path} belongs to another user (uid {original.st_uid}), and"
+                " only root can give the rewritten file that owner; run setup"
+                " as that user"
+            ) from None
+        # Only the group differs: the file is 0600, so its group can't read
+        # it either way.
 
 
 def _rebuild_error(

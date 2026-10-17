@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import http.client
 import json
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -548,6 +549,13 @@ def _fail_on_close(*errors: BaseException) -> Iterator[None]:
 
     with patch.object(sa, "os", _Os()):
         yield
+
+
+def _stat_with_owner(st: os.stat_result, uid: int, gid: int) -> os.stat_result:
+    """*st* with another owner and group."""
+    fields = list(st[:10])
+    fields[4], fields[5] = uid, gid
+    return os.stat_result(fields)
 
 
 def _key_check(status: str, reason: str = ""):  # type: ignore[no-untyped-def]
@@ -1340,6 +1348,112 @@ class TestCheckExistingKey:
         assert key.read_bytes() == before
         assert [p.name for p in tmp_path.iterdir()] == ["key.json"]
 
+    def test_rewrite_follows_a_symlink(self, tmp_path: Path) -> None:
+        """The target is rewritten: the key isn't copied next to the link."""
+        import os
+        import stat
+
+        from slack_chat_migrator.services.setup.service_account import (
+            rewrite_without_bom,
+        )
+
+        secrets = tmp_path / "secrets"
+        secrets.mkdir()
+        target = self._bom_file(secrets)
+        project = tmp_path / "project"
+        project.mkdir()
+        link = project / "key.json"
+        link.symlink_to(target)
+
+        assert rewrite_without_bom(link) == Path(os.path.realpath(target))
+        assert link.is_symlink()
+        assert target.read_bytes()[:1] == b"{"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert [p.name for p in secrets.iterdir()] == ["key.json"]
+        assert [p.name for p in project.iterdir()] == ["key.json"]
+
+    def test_rewrite_refuses_a_hard_linked_file(self, tmp_path: Path) -> None:
+        import os
+
+        from slack_chat_migrator.services.setup.service_account import (
+            rewrite_without_bom,
+        )
+
+        key = self._bom_file(tmp_path)
+        other = tmp_path / "copy.json"
+        os.link(key, other)
+        before = key.read_bytes()
+        with pytest.raises(ValueError, match="has 2 hard links"):
+            rewrite_without_bom(key)
+        assert key.read_bytes() == before
+        assert other.read_bytes() == before
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["copy.json", "key.json"]
+
+    @pytest.mark.skipif(
+        not hasattr(os, "geteuid") or os.geteuid() != 0, reason="needs root"
+    )
+    def test_rewrite_keeps_the_owner_when_run_as_root(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            rewrite_without_bom,
+        )
+
+        key = self._bom_file(tmp_path)
+        os.chown(key, 65534, 65534)
+        rewrite_without_bom(key)
+        assert key.read_bytes()[:1] == b"{"
+        assert (key.stat().st_uid, key.stat().st_gid) == (65534, 65534)
+
+    @pytest.mark.skipif(not hasattr(os, "fchown"), reason="no POSIX owners")
+    def test_rewrite_gives_the_new_file_the_old_owner(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup import service_account as sa
+
+        key = self._bom_file(tmp_path)
+        mine = key.stat()
+        theirs = _stat_with_owner(mine, mine.st_uid + 1, mine.st_gid + 1)
+        with (
+            patch.object(sa.Path, "stat", return_value=theirs),
+            patch("os.fchown") as fchown,
+        ):
+            sa.rewrite_without_bom(key)
+        fchown.assert_called_once()
+        assert fchown.call_args.args[1:] == (mine.st_uid + 1, mine.st_gid + 1)
+        assert key.read_bytes()[:1] == b"{"
+
+    @pytest.mark.skipif(not hasattr(os, "fchown"), reason="no POSIX owners")
+    def test_rewrite_refuses_another_users_file_without_root(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-root rewrite would take the key away from its owner."""
+        from slack_chat_migrator.services.setup import service_account as sa
+
+        key = self._bom_file(tmp_path)
+        before = key.read_bytes()
+        mine = key.stat()
+        theirs = _stat_with_owner(mine, mine.st_uid + 1, mine.st_gid)
+        with (
+            patch.object(sa.Path, "stat", return_value=theirs),
+            patch("os.fchown", side_effect=PermissionError(1, "denied")),
+            pytest.raises(ValueError, match="belongs to another user"),
+        ):
+            sa.rewrite_without_bom(key)
+        assert key.read_bytes() == before
+        assert [p.name for p in tmp_path.iterdir()] == ["key.json"]
+
+    @pytest.mark.skipif(not hasattr(os, "fchown"), reason="no POSIX owners")
+    def test_rewrite_ignores_a_group_it_cannot_keep(self, tmp_path: Path) -> None:
+        """The new file is 0600, so its group has no access anyway."""
+        from slack_chat_migrator.services.setup import service_account as sa
+
+        key = self._bom_file(tmp_path)
+        mine = key.stat()
+        theirs = _stat_with_owner(mine, mine.st_uid, mine.st_gid + 1)
+        with (
+            patch.object(sa.Path, "stat", return_value=theirs),
+            patch("os.fchown", side_effect=PermissionError(1, "denied")),
+        ):
+            sa.rewrite_without_bom(key)
+        assert key.read_bytes()[:1] == b"{"
+
     def test_rewrite_refuses_a_file_without_bom(self, tmp_path: Path) -> None:
         from slack_chat_migrator.services.setup.service_account import (
             rewrite_without_bom,
@@ -1717,6 +1831,28 @@ class TestKeyStep:
         assert state.key_path is None
         assert state.step_status("key") == StepStatus.SKIPPED
         assert "google-auth can't read it" in capsys.readouterr().out
+
+    def test_bom_rewrite_through_a_symlink_names_the_target(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        from slack_chat_migrator.cli.setup_cmd import _offer_bom_rewrite
+
+        target = tmp_path / "secrets" / "key.json"
+        target.parent.mkdir()
+        target.write_bytes(b"\xef\xbb\xbf{}")
+        link = tmp_path / "key.json"
+        link.symlink_to(target)
+        state = SetupState(project_id="p", service_account_email=SA)
+        with patch(
+            "slack_chat_migrator.cli.setup_cmd.click.confirm", return_value=True
+        ):
+            state = _offer_bom_rewrite(state, link)
+        assert state.step_status("key") == StepStatus.COMPLETE
+        assert state.key_path == str(link)
+        assert target.read_bytes() == b"{}"
+        flat = "".join(capsys.readouterr().out.split())
+        real = os.path.realpath(target)
+        assert f"Rewrote{real}(thefile{link}linksto)withoutthebyteordermark" in flat
 
     @pytest.mark.parametrize(
         "error",

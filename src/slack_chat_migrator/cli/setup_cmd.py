@@ -564,16 +564,20 @@ def _offer_bom_rewrite(state, key_path: Path):  # type: ignore[no-untyped-def]
         default=True,
     ):
         try:
-            rewrite_without_bom(key_path)
+            rewritten = rewrite_without_bom(key_path)
         except (OSError, ValueError) as e:
             console.print(
                 f"[red]Couldn't rewrite {escape(str(key_path))}: {escape(str(e))}[/red]"
             )
         else:
             state.key_path = str(key_path)
+            # Name the file that changed: a symlink's target, not the link.
+            rewrote = escape(str(key_path))
+            if key_path.is_symlink():
+                rewrote = f"{escape(str(rewritten))} (the file {rewrote} links to)"
             console.print(
-                f"[green]Rewrote {escape(str(key_path))} without the byte order"
-                " mark; reusing the key (no new key created).[/green]"
+                f"[green]Rewrote {rewrote} without the byte order mark; reusing"
+                " the key (no new key created).[/green]"
             )
             state.mark_step("key", StepStatus.COMPLETE)
             return state
