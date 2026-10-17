@@ -22,6 +22,7 @@ from slack_chat_migrator.constants import (
     HTTP_RATE_LIMIT,
     HTTP_SERVER_ERROR_MIN,
 )
+from slack_chat_migrator.utils.api import RETRYABLE_NETWORK_ERRORS
 
 
 @dataclass(frozen=True)
@@ -35,8 +36,10 @@ class PermissionChange:
     transfer_ownership: bool = False
 
 
-def _retry_individually(error: HttpError) -> bool:
+def _retry_individually(error: Exception) -> bool:
     """Whether a call that failed inside a batch is worth sending again alone."""
+    if not isinstance(error, HttpError):
+        return True  # transport-level failure of that part of the batch
     status = int(getattr(error.resp, "status", 0) or 0)
     return (
         status in (HTTP_FORBIDDEN, HTTP_RATE_LIMIT) or status >= HTTP_SERVER_ERROR_MIN
@@ -303,7 +306,7 @@ class DriveAdapter:
 
     def apply_permission_changes(
         self, changes: list[PermissionChange]
-    ) -> list[HttpError | None]:
+    ) -> list[Exception | None]:
         """Create and delete permissions, batching several into one request.
 
         A single change is sent on its own.  Several are sent as Drive batch
@@ -316,9 +319,11 @@ class DriveAdapter:
 
         Returns:
             One entry per change, in order: None on success, else the error.
+            Errors are returned, never raised, including network errors
+            that outlast the retries.
         """
         requests = [self._permission_request(change) for change in changes]
-        results: list[HttpError | None] = [None] * len(requests)
+        results: list[Exception | None] = [None] * len(requests)
         raw_service = getattr(self._svc, "_wrapped_obj", self._svc)
         new_batch = getattr(raw_service, "new_batch_http_request", None)
 
@@ -331,19 +336,24 @@ class DriveAdapter:
                     exception: Exception | None,
                     _offset: int = start,
                 ) -> None:
-                    if isinstance(exception, HttpError):
+                    if exception is not None:
                         results[_offset + int(request_id)] = exception
 
                 batch = new_batch(callback=callback)
-                for index, request in enumerate(
-                    requests[start : start + DRIVE_BATCH_MAX_REQUESTS]
-                ):
+                chunk = requests[start : start + DRIVE_BATCH_MAX_REQUESTS]
+                for index, request in enumerate(chunk):
                     # Batches take the raw request, not the retry wrapper.
                     batch.add(
                         getattr(request, "_wrapped_obj", request),
                         request_id=str(index),
                     )
-                batch.execute()
+                try:
+                    batch.execute()
+                except (HttpError, *RETRYABLE_NETWORK_ERRORS) as e:
+                    # The whole batch request failed; every call in it is
+                    # re-sent on its own through the retry-wrapped service.
+                    for offset in range(len(chunk)):
+                        results[start + offset] = e
             pending = [
                 i
                 for i, error in enumerate(results)
@@ -356,7 +366,7 @@ class DriveAdapter:
             try:
                 requests[index].execute()
                 results[index] = None
-            except HttpError as e:
+            except (HttpError, *RETRYABLE_NETWORK_ERRORS) as e:
                 results[index] = e
         return results
 

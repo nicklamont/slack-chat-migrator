@@ -343,3 +343,83 @@ class TestApplyPermissionChanges:
         )
         assert errors == [None, None]
         assert fake.batch_sizes == [2]
+
+    def test_failed_batch_request_falls_back_to_individual_calls(self):
+        """A transport error on the batch POST re-sends every call alone."""
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive()
+        original_batch = fake.new_batch_http_request
+
+        def broken_batch(callback=None):
+            batch = original_batch(callback)
+
+            def execute():
+                raise ConnectionResetError("connection reset by peer")
+
+            batch.execute = execute
+            return batch
+
+        fake.new_batch_http_request = broken_batch
+        errors = DriveAdapter(fake).apply_permission_changes(
+            [self._create("F", "a@x"), self._create("F", "b@x")]
+        )
+        assert errors == [None, None]
+        assert fake.count("permissions.create") == 2
+
+    def test_network_errors_are_returned_not_raised(self):
+        """A call that still fails with a network error is reported per change."""
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive()
+        original_create = fake.permissions().create
+
+        class Permissions:
+            def create(self, **kw):
+                request = original_create(**kw)
+
+                def timeout():
+                    raise TimeoutError("read timed out")
+
+                request._fn = timeout
+                return request
+
+        fake.permissions = lambda: Permissions()
+        errors = DriveAdapter(fake).apply_permission_changes([self._create("F", "a@x")])
+        assert len(errors) == 1 and isinstance(errors[0], TimeoutError)
+
+    def test_non_http_error_in_batch_part_is_not_counted_as_success(self):
+        """A batch part failing with a non-HttpError is retried individually."""
+        from tests.unit.drive_fakes import FakeBatch, FakeDrive
+
+        fake = FakeDrive()
+        attempts = {"n": 0}
+
+        class PartlyBrokenBatch(FakeBatch):
+            def execute(self):
+                for rid, _request, callback in self.requests:
+                    callback(rid, None, OSError("socket closed"))
+
+        fake.new_batch_http_request = lambda callback=None: PartlyBrokenBatch(
+            fake, callback
+        )
+        original_create = fake.permissions().create
+
+        class Permissions:
+            def create(self, **kw):
+                request = original_create(**kw)
+                inner = request._fn
+
+                def counted():
+                    attempts["n"] += 1
+                    return inner()
+
+                request._fn = counted
+                return request
+
+        fake.permissions = lambda: Permissions()
+        errors = DriveAdapter(fake).apply_permission_changes(
+            [self._create("F", "a@x"), self._create("F", "b@x")]
+        )
+        assert errors == [None, None]
+        assert attempts["n"] == 2  # both re-sent on their own
