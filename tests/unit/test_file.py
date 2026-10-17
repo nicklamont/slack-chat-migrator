@@ -122,10 +122,10 @@ def _make_handler(
         )
     # No Drive file from an earlier run unless a test says otherwise.
     handler.drive_uploader.find_uploaded_slack_file.return_value = None
-    # Tests configure get_or_create_channel_folder; the lookup wraps it.
-    folder_manager = handler.folder_manager
-    folder_manager.find_or_create_channel_folder.side_effect = lambda *args, **kwargs: (
-        FolderLookup(folder_manager.get_or_create_channel_folder(*args, **kwargs))
+    # Every channel has a folder unless a test says otherwise.  Folder
+    # failures are tested against the real FolderManager (test_file_pipeline).
+    handler.folder_manager.find_or_create_channel_folder.return_value = FolderLookup(
+        "channel_folder"
     )
 
     return handler
@@ -1161,8 +1161,8 @@ class TestUploadToDrive:
         """Upload to drive with channel folder creation."""
         handler = self._make_ready_handler()
         _use_drive(handler, shared_drive="drive123")
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1190,8 +1190,8 @@ class TestUploadToDrive:
 
     def test_failed_drive_upload_returns_its_cause(self):
         handler = self._make_ready_handler()
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUploadFailure(
@@ -1222,18 +1222,23 @@ class TestUploadToDrive:
         assert result.upload_type == "drive"
         assert result.drive_id == "file_id"
         assert result.url == "https://drive.google.com/file/d/file_id/view"
-        handler.folder_manager.get_or_create_channel_folder.assert_not_called()
+        handler.folder_manager.find_or_create_channel_folder.assert_not_called()
 
-    def test_no_folder_id_is_an_error(self):
-        """No folder means a failed result that says so."""
+    def test_no_drive_fails_each_file_with_the_setup_cause(self):
+        """Each file's error says why Drive isn't available."""
         handler = self._make_ready_handler()
-        handler.folder_id = None
+        handler._drive_status = DriveStatus(
+            "none", detail="could not find or create shared drive 'X': reset"
+        )
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
         result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
         assert not result.success
-        assert result.error.startswith("No Drive folder")
+        assert result.error == (
+            "No Drive folder (drive_unavailable): Drive is not available"
+            " (could not find or create shared drive 'X': reset)"
+        )
 
     def test_ownership_transfer_for_internal_user_no_shared_drive(self):
         """Transfers ownership for internal users on regular Drive folders."""
@@ -1242,8 +1247,8 @@ class TestUploadToDrive:
             config=TRANSFER_CONFIG,
         )
         handler.user_resolver.is_external_user.return_value = False
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1271,8 +1276,8 @@ class TestUploadToDrive:
             config=TRANSFER_CONFIG,
         )
         handler.user_resolver.is_external_user.return_value = False
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1303,8 +1308,8 @@ class TestUploadToDrive:
             user_map={"UEXT": "ext@other.com"},
         )
         handler.user_resolver.is_external_user.return_value = True
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1331,8 +1336,8 @@ class TestUploadToDrive:
         )
         _use_drive(handler, shared_drive="drive123")
         handler.user_resolver.is_external_user.return_value = False
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1510,25 +1515,28 @@ class TestUploadToDrive:
         assert result.drive_id == "file_id"
         assert result.mime_type == "text/plain"
 
-    def test_http_error_returns_an_error_result(self):
+    def test_missing_folder_fails_the_file_with_the_cause(self):
         handler = self._make_ready_handler()
-        handler.folder_manager.get_or_create_channel_folder.side_effect = HttpError(
-            Response({"status": "500"}), b"error"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup(None, "could not find or create the folder: 500")
         )
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
         result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
 
         assert not result.success
-        assert result.error and result.error.startswith(
-            "Drive upload failed: HttpError"
+        assert result.error == (
+            "No Drive folder (folder_unavailable): could not find or create the"
+            " folder: 500"
         )
+        handler.drive_uploader.upload_file_to_drive.assert_not_called()
+        assert handler.file_stats["channel_folder_failures"] == 1
 
     def test_channel_folder_already_processed(self):
         """Second upload to same channel folder uses cache."""
         handler = self._make_ready_handler()
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1564,8 +1572,8 @@ class TestUploadToDrive:
             user_map={"U123": "alice@example.com"},
         )
         _use_drive(handler, shared_drive="drive123")
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"

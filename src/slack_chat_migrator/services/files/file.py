@@ -264,6 +264,7 @@ class FileHandler:
             "folder_grant_failures": 0,
             "folder_removal_failures": 0,
             "restricted_folder_failures": 0,
+            "channel_folder_failures": 0,
             "download_auth_failures": 0,
             "files_by_channel": {},
         }
@@ -1244,60 +1245,61 @@ class FileHandler:
                 error=f"Drive upload failed: {type(e).__name__}: {e}", name=name
             )
 
-    def _resolve_upload_folder(self, channel: str | None, file_id: str) -> str | None:
-        """Get or create the target Drive folder for an upload.
-
-        Returns the folder ID, or None if no valid folder is available.
-        """
-        return self._choose_upload_folder(channel, file_id).folder_id
-
     def _choose_upload_folder(self, channel: str | None, file_id: str) -> FolderLookup:
         """Get or create the target Drive folder for an upload, or say why not.
 
-        A private conversation whose folder can't be made limited-access
-        gets no folder: its files are never stored in an open one, neither
-        its own folder nor the root.  The folder returned has been listed
-        into the dedup caches (or listing it failed, and is retried with the
-        next file), so the upload itself doesn't list it again.
+        A conversation's files go only into its own folder, never into the
+        root folder, whose permissions don't include the channel's members.
+        If the channel folder can't be found or created (any HttpError,
+        network or auth error), or a private conversation's folder can't be
+        made limited-access, there is no folder: the file fails with the
+        cause, and a re-run retries it.  Files without a channel go into the
+        root.  The folder returned has been listed into the dedup caches (or
+        listing it failed, and is retried with the next file), so the upload
+        itself doesn't list it again.
         """
-        lookup = FolderLookup(None)
-
-        restricted = bool(channel) and self.should_restrict_folder(channel or "")
-        if channel and self._root_folder_id:
-            lookup = self.folder_manager.find_or_create_channel_folder(
-                channel,
-                self._root_folder_id,
-                self._shared_drive_id,
-                restricted=restricted,
+        root = self._root_folder_id
+        if not root:
+            return FolderLookup(
+                None, f"Drive is not available ({self._drive_status.detail})"
             )
-            if lookup.folder_id:
-                self.drive_uploader.pre_cache_folder_file_hashes(
-                    lookup.folder_id, self._shared_drive_id
-                )
-                return lookup
-            if restricted:
-                return lookup
-
-        if self._root_folder_id:
+        if not channel:
             self.drive_uploader.pre_cache_folder_file_hashes(
-                self._root_folder_id, self._shared_drive_id
+                root, self._shared_drive_id
             )
-            return FolderLookup(self._root_folder_id)
+            return FolderLookup(root)
 
-        log_with_context(
-            logging.ERROR,
-            "No valid folder ID available for file upload",
-            channel=channel,
-            file_id=file_id,
+        lookup = self.folder_manager.find_or_create_channel_folder(
+            channel,
+            root,
+            self._shared_drive_id,
+            restricted=self.should_restrict_folder(channel),
         )
-        return FolderLookup(None, lookup.error or "no Drive folder is available")
+        if lookup.folder_id:
+            self.drive_uploader.pre_cache_folder_file_hashes(
+                lookup.folder_id, self._shared_drive_id
+            )
+        return lookup
 
     def _folder_failure(self, lookup: FolderLookup, name: str) -> UploadResult:
-        """The failed result for a file that has no usable Drive folder."""
+        """The failed result for a file that has no usable Drive folder.
+
+        Counted in ``restricted_folder_failures`` (a private folder that
+        couldn't be made limited-access) or ``channel_folder_failures`` (a
+        folder that couldn't be found or created), and in
+        ``failed_uploads`` by the caller.
+        """
         if lookup.restriction_failed:
             self._increment_stat("restricted_folder_failures")
+            cause = "folder_restricted"
+        elif self._root_folder_id:
+            self._increment_stat("channel_folder_failures")
+            cause = "folder_unavailable"
+        else:
+            cause = "drive_unavailable"
         return UploadResult(
-            error=f"No Drive folder: {lookup.error or 'unknown error'}", name=name
+            error=f"No Drive folder ({cause}): {lookup.error or 'unknown error'}",
+            name=name,
         )
 
     def set_conversation_type(self, channel: str, conversation_type: str) -> None:
@@ -1717,6 +1719,7 @@ class FileHandler:
             "folder_grant_failures": self.file_stats["folder_grant_failures"],
             "folder_removal_failures": self.file_stats["folder_removal_failures"],
             "restricted_folder_failures": self.file_stats["restricted_folder_failures"],
+            "channel_folder_failures": self.file_stats["channel_folder_failures"],
             "download_auth_failures": self.file_stats["download_auth_failures"],
             "files_by_channel": dict(self.file_stats["files_by_channel"]),
             "success_rate": successful / max(1, successful + failed) * 100,

@@ -614,7 +614,7 @@ class TestContentType:
 
 def folder_of(handler, channel):
     """Drive folder ID FileHandler uses for *channel*."""
-    return handler._resolve_upload_folder(channel, "lookup")
+    return handler._choose_upload_folder(channel, "lookup").folder_id
 
 
 class TestDedupScope:
@@ -1053,6 +1053,49 @@ class TestLimitedAccessFolders:
         assert result.folder_id is None
         assert handler.get_file_statistics()["folder_sync_failures"] == 0
 
+    @pytest.mark.parametrize(
+        "error",
+        [http_error(503), http_error(403), ConnectionResetError("reset")],
+        ids=["503", "403", "network"],
+    )
+    @pytest.mark.parametrize("shared", [True, False], ids=["shared", "my_drive"])
+    def test_public_files_never_fall_back_to_the_root(
+        self, tmp_path, downloads, error, shared
+    ):
+        """The root's permissions don't include the channel's members (#118)."""
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path, shared=shared)
+        handler.folder_manager.folder_cache.clear()
+        fake.fail_query = lambda q: error if "mimeType" in q else None
+
+        result = upload(handler, downloads, "general", "F1", "UA", b"x", space=None)
+
+        assert not result.success
+        assert result.error and "folder_unavailable" in result.error
+        assert not [
+            kw for name, kw in fake.calls if name == "files.create"
+        ]  # nothing stored, in the root or anywhere
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 1
+        assert stats["channel_folder_failures"] == 1
+        assert downloads.calls == []  # failed before downloading
+
+    def test_file_without_a_channel_goes_into_the_root(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        downloads.content["F1"] = b"x"
+
+        result = handler.upload_attachment(
+            {
+                "id": "F1",
+                "name": "a.pdf",
+                "url_private": "https://files.slack.com/files-pri/T-F1/a.pdf",
+            }
+        )
+
+        assert result.success
+        assert fake.files_db[result.drive_id]["parents"] == ["SD1"]
+
     def test_private_files_never_fall_back_to_the_root(self, tmp_path, downloads):
         fake = FakeDrive()
         handler = make_meta_handler(fake, tmp_path)
@@ -1204,14 +1247,17 @@ class TestCanvasConversion:
         self, tmp_path, doc_downloads
     ):
         fake = FakeDrive()
-        handler = make_handler(fake, tmp_path)
+        handler = make_meta_handler(fake, tmp_path)  # "general" is public
         fake.failing["files.create"] = ConnectionResetError("connection reset")
 
         result = post_document(handler, CANVAS)
 
         assert not result.success
-        assert result.error and result.error.startswith("No Drive folder:")
+        assert result.error and result.error.startswith(
+            "No Drive folder (folder_unavailable):"
+        )
         assert "connection reset" in result.error
+        assert handler.get_file_statistics()["channel_folder_failures"] == 1
 
     def test_conversion_can_be_turned_off(self, tmp_path, doc_downloads):
         fake = FakeDrive()
