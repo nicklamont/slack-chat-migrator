@@ -11,12 +11,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from slack_chat_migrator.types import FailedMessage, MigrationSummary, SkippedReaction
-
-if TYPE_CHECKING:
-    from slack_chat_migrator.services.chat_adapter import ChatAdapter
 
 
 def _default_migration_summary() -> MigrationSummary:
@@ -63,9 +60,12 @@ class MessageState:
 
 @dataclass
 class UserState:
-    """User validation and delegation caching."""
+    """User validation caching.
 
-    chat_delegates: dict[str, ChatAdapter] = field(default_factory=dict)
+    Impersonated Chat clients themselves are cached (bounded, with a TTL)
+    by ``utils.api.get_gcp_service``.
+    """
+
     valid_users: dict[str, bool] = field(default_factory=dict)
     external_users: set[str] = field(default_factory=set)
     skipped_reactions: list[SkippedReaction] = field(default_factory=list)

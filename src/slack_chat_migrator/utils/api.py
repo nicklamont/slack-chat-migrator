@@ -17,7 +17,9 @@ import socket
 import ssl
 import threading
 import time
-from typing import Any
+from collections import OrderedDict
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import httplib2
 from google.auth.exceptions import TransportError
@@ -33,6 +35,9 @@ from slack_chat_migrator.constants import (
     HTTP_UNAUTHORIZED,
 )
 from slack_chat_migrator.utils.logging import log_with_context
+
+if TYPE_CHECKING:
+    from slack_chat_migrator.core.config import MigrationConfig
 
 logger = logging.getLogger("slack_chat_migrator")
 
@@ -62,20 +67,54 @@ REQUIRED_SCOPES = [
     "https://www.googleapis.com/auth/drive",  # Full Drive scope covers all drive.file permissions plus shared drives
 ]
 
-# Cache for service instances: maps key → (service, created_at)
-_service_cache: dict[str, tuple[Any, float]] = {}
+#: Lists custom emoji, so reactions can use them (``use_chat_custom_emoji``).
+#: Optional: only requested when that option is on, so existing domain-wide
+#: delegation entries keep working.
+CUSTOM_EMOJI_SCOPE = "https://www.googleapis.com/auth/chat.customemojis.readonly"
+
+
+def scopes_for(config: MigrationConfig | None) -> list[str]:
+    """Return the OAuth scopes a migration with *config* needs.
+
+    Args:
+        config: The migration config, or None for the defaults.
+
+    Returns:
+        :data:`REQUIRED_SCOPES`, plus :data:`CUSTOM_EMOJI_SCOPE` when
+        ``use_chat_custom_emoji`` is enabled.
+    """
+    scopes = list(REQUIRED_SCOPES)
+    if config is not None and config.use_chat_custom_emoji:
+        scopes.append(CUSTOM_EMOJI_SCOPE)
+    return scopes
+
+
+#: Most API clients kept at once.  Each holds its own httplib2 connection
+#: pool (about 0.8 MB), and there is one per impersonated user, so the cache
+#: is a bounded LRU rather than one entry per user in the workspace.
+SERVICE_CACHE_MAX_ENTRIES = 256
+
+_ServiceKey = tuple[str, str, str, str, tuple[str, ...]]
+
+# Cache for service instances: maps key → (service, created_at), LRU order
+_service_cache: OrderedDict[_ServiceKey, tuple[Any, float]] = OrderedDict()
+# Parsed service-account credentials, per (creds_path, scopes); each user's
+# client is derived from them with ``with_subject``.
+_credentials_cache: dict[tuple[str, tuple[str, ...]], Any] = {}
 _service_cache_lock = threading.Lock()
 _SERVICE_CACHE_TTL = 2700  # 45 minutes
 
 
 def clear_service_cache() -> None:
-    """Clear the cached GCP service instances.
+    """Clear the cached GCP service instances and credentials.
 
     Call this after authentication failures (401) to force
-    re-creation of service objects on next use.
+    re-creation of service objects (including per-user delegates)
+    on next use.
     """
     with _service_cache_lock:
         _service_cache.clear()
+        _credentials_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +721,33 @@ def slack_ts_to_rfc3339(ts: str) -> str:
     return f"{base}.{micros}Z"
 
 
+def _service_account_credentials(creds_path: str, scopes: tuple[str, ...]) -> Any:
+    """Load (once) the service-account credentials for *creds_path*.
+
+    Raises:
+        FileNotFoundError: If *creds_path* does not exist.
+        ValueError: If the credentials file has an invalid format.
+    """
+    key = (creds_path, scopes)
+    with _service_cache_lock:
+        cached = _credentials_cache.get(key)
+    if cached is not None:
+        return cached
+    # This is the critical step: The code must explicitly request the
+    # scopes that you authorized in the Admin Console.
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            creds_path, scopes=list(scopes)
+        )
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"Credential file not found: {creds_path}") from e
+    except (ValueError, json.JSONDecodeError) as e:
+        raise ValueError(f"Invalid credential file format in {creds_path}: {e}") from e
+    with _service_cache_lock:
+        _credentials_cache[key] = creds
+    return creds
+
+
 def get_gcp_service(
     creds_path: str,
     user_email: str,
@@ -690,8 +756,14 @@ def get_gcp_service(
     channel: str | None = None,
     max_retries: int = 3,
     retry_delay: float = 1.0,
+    scopes: Sequence[str] | None = None,
 ) -> Any:
     """Get a Google API client service using service account impersonation.
+
+    Clients are cached per (credentials, user, API, scopes) in a bounded LRU
+    cache with a 45-minute TTL; :func:`clear_service_cache` empties it.  The
+    service-account key file is parsed once and each user's credentials are
+    derived with ``with_subject``.
 
     Args:
         creds_path: Path to the service account JSON key file.
@@ -701,6 +773,8 @@ def get_gcp_service(
         channel: Optional channel name for contextual log messages.
         max_retries: Maximum retry attempts for transient errors.
         retry_delay: Initial delay in seconds between retries.
+        scopes: OAuth scopes to request (default :data:`REQUIRED_SCOPES`;
+            see :func:`scopes_for`).
 
     Returns:
         A RetryWrapper-wrapped Google API service object.
@@ -709,7 +783,8 @@ def get_gcp_service(
         FileNotFoundError: If *creds_path* does not exist.
         ValueError: If the credentials file has an invalid format.
     """
-    cache_key = f"{creds_path}:{user_email}:{api}:{version}"
+    scope_key = tuple(scopes) if scopes is not None else tuple(REQUIRED_SCOPES)
+    cache_key: _ServiceKey = (creds_path, user_email, api, version, scope_key)
     with _service_cache_lock:
         if cache_key in _service_cache:
             cached_service, created_at = _service_cache[cache_key]
@@ -721,11 +796,7 @@ def get_gcp_service(
                     channel=channel,
                 )
             else:
-                log_with_context(
-                    logging.DEBUG,
-                    f"Using cached service for {api} as {user_email}",
-                    channel=channel,
-                )
+                _service_cache.move_to_end(cache_key)
                 return cached_service
 
     # Credential creation intentionally happens outside the lock to avoid
@@ -737,18 +808,7 @@ def get_gcp_service(
             channel=channel,
         )
 
-        # This is the critical step: The code must explicitly request the
-        # scopes that you authorized in the Admin Console.
-        try:
-            creds = service_account.Credentials.from_service_account_file(
-                creds_path, scopes=REQUIRED_SCOPES
-            )
-        except FileNotFoundError as e:
-            raise FileNotFoundError(f"Credential file not found: {creds_path}") from e
-        except (ValueError, json.JSONDecodeError) as e:
-            raise ValueError(
-                f"Invalid credential file format in {creds_path}: {e}"
-            ) from e
+        creds = _service_account_credentials(creds_path, scope_key)
 
         # Impersonate the target user
         delegated = creds.with_subject(user_email)
@@ -772,6 +832,9 @@ def get_gcp_service(
 
         with _service_cache_lock:
             _service_cache[cache_key] = (wrapped_service, time.time())
+            _service_cache.move_to_end(cache_key)
+            while len(_service_cache) > SERVICE_CACHE_MAX_ENTRIES:
+                _service_cache.popitem(last=False)
         return wrapped_service
     except Exception as e:
         log_with_context(

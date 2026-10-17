@@ -17,16 +17,22 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import BatchHttpRequest, HttpRequest
 
 from slack_chat_migrator.utils.api import (
+    CUSTOM_EMOJI_SCOPE,
     MAX_BACKOFF_SECONDS,
     RATE_LIMIT_BUDGET_SECONDS,
     RATE_LIMIT_MAX_ATTEMPTS,
+    REQUIRED_SCOPES,
+    SERVICE_CACHE_MAX_ENTRIES,
     RetryWrapper,
+    _credentials_cache,
     _service_cache,
+    clear_service_cache,
     escape_drive_query_value,
     get_gcp_service,
     http_error_reasons,
     is_rate_limit_error,
     retry_after_seconds,
+    scopes_for,
     slack_ts_to_rfc3339,
 )
 
@@ -903,9 +909,9 @@ class TestGetGcpService:
     @pytest.fixture(autouse=True)
     def _clear_cache(self):
         """Ensure the service cache is empty before and after each test."""
-        _service_cache.clear()
+        clear_service_cache()
         yield
-        _service_cache.clear()
+        clear_service_cache()
 
     @patch("slack_chat_migrator.utils.api.build")
     @patch(
@@ -1127,9 +1133,9 @@ class TestServiceCacheTTL:
     @pytest.fixture(autouse=True)
     def _clear_cache(self):
         """Ensure the service cache is empty before and after each test."""
-        _service_cache.clear()
+        clear_service_cache()
         yield
-        _service_cache.clear()
+        clear_service_cache()
 
     @patch("slack_chat_migrator.utils.api.build")
     @patch(
@@ -1146,7 +1152,13 @@ class TestServiceCacheTTL:
         assert mock_build.call_count == 1
 
         # Artificially age the cache entry past TTL
-        cache_key = "/path/creds.json:user@example.com:chat:v1"
+        cache_key = (
+            "/path/creds.json",
+            "user@example.com",
+            "chat",
+            "v1",
+            tuple(REQUIRED_SCOPES),
+        )
         old_service, _ = _service_cache[cache_key]
         _service_cache[cache_key] = (old_service, 0.0)  # epoch = very old
 
@@ -1178,15 +1190,15 @@ class TestServiceCache401Eviction:
 
     @pytest.fixture(autouse=True)
     def _clear_cache(self):
-        _service_cache.clear()
+        clear_service_cache()
         yield
-        _service_cache.clear()
+        clear_service_cache()
 
     @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_401_clears_service_cache(self, _sleep):
         """A 401 HttpError in _wrap_execute should clear the service cache."""
         # Pre-populate the cache with a fake entry
-        _service_cache["fake:key"] = (MagicMock(), 999999999.0)
+        _service_cache[("c", "u", "chat", "v1", ())] = (MagicMock(), 999999999.0)
         assert len(_service_cache) == 1
 
         inner = MagicMock()
@@ -1202,7 +1214,7 @@ class TestServiceCache401Eviction:
     @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_403_does_not_clear_service_cache(self, _sleep):
         """A 403 HttpError should NOT clear the service cache."""
-        _service_cache["fake:key"] = (MagicMock(), 999999999.0)
+        _service_cache[("c", "u", "chat", "v1", ())] = (MagicMock(), 999999999.0)
         assert len(_service_cache) == 1
 
         inner = MagicMock()
@@ -1498,3 +1510,105 @@ class TestRealDiscoveryService:
         )
         assert result == {"attachmentDataRef": {"resourceName": "ref"}}
         mock_sleep.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Bounded caches, credential reuse and optional scopes (issue #119)
+# ---------------------------------------------------------------------------
+
+_FROM_FILE = "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
+
+
+class TestBoundedServiceCache:
+    """The per-user client cache is an LRU with a fixed size."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        clear_service_cache()
+        yield
+        clear_service_cache()
+
+    @patch("slack_chat_migrator.utils.api.build")
+    @patch(_FROM_FILE)
+    def test_cache_is_bounded(self, mock_creds, mock_build):
+        mock_build.side_effect = lambda *a, **k: MagicMock()
+        for i in range(SERVICE_CACHE_MAX_ENTRIES + 50):
+            get_gcp_service("/c.json", f"u{i}@example.com", "chat", "v1")
+        assert len(_service_cache) == SERVICE_CACHE_MAX_ENTRIES
+        # The oldest entries were evicted, the newest kept
+        users = {key[1] for key in _service_cache}
+        assert "u0@example.com" not in users
+        assert f"u{SERVICE_CACHE_MAX_ENTRIES + 49}@example.com" in users
+
+    @patch("slack_chat_migrator.utils.api.build")
+    @patch(_FROM_FILE)
+    def test_recently_used_entry_survives_eviction(self, mock_creds, mock_build):
+        mock_build.side_effect = lambda *a, **k: MagicMock()
+        first = get_gcp_service("/c.json", "keep@example.com", "chat", "v1")
+        for i in range(SERVICE_CACHE_MAX_ENTRIES - 1):
+            get_gcp_service("/c.json", f"u{i}@example.com", "chat", "v1")
+        # Touch the first entry, then overflow the cache
+        assert get_gcp_service("/c.json", "keep@example.com", "chat", "v1") is first
+        get_gcp_service("/c.json", "new@example.com", "chat", "v1")
+        assert get_gcp_service("/c.json", "keep@example.com", "chat", "v1") is first
+        users = {key[1] for key in _service_cache}
+        assert "u0@example.com" not in users
+
+    @patch("slack_chat_migrator.utils.api.build")
+    @patch(_FROM_FILE)
+    def test_credentials_loaded_once_per_file(self, mock_creds, mock_build):
+        base = mock_creds.return_value
+        get_gcp_service("/c.json", "a@example.com", "chat", "v1")
+        get_gcp_service("/c.json", "b@example.com", "chat", "v1")
+        get_gcp_service("/c.json", "a@example.com", "drive", "v3")
+        mock_creds.assert_called_once()
+        assert base.with_subject.call_count == 3
+
+    @patch("slack_chat_migrator.utils.api.build")
+    @patch(_FROM_FILE)
+    def test_clear_service_cache_clears_credentials(self, mock_creds, mock_build):
+        get_gcp_service("/c.json", "a@example.com", "chat", "v1")
+        clear_service_cache()
+        assert not _service_cache and not _credentials_cache
+        get_gcp_service("/c.json", "a@example.com", "chat", "v1")
+        assert mock_creds.call_count == 2
+        assert mock_build.call_count == 2
+
+
+class TestOptionalScopes:
+    """scopes_for() adds optional scopes only when the config needs them."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        clear_service_cache()
+        yield
+        clear_service_cache()
+
+    def test_default_scopes_unchanged(self):
+        from slack_chat_migrator.core.config import MigrationConfig
+
+        assert scopes_for(MigrationConfig()) == REQUIRED_SCOPES
+        assert scopes_for(None) == REQUIRED_SCOPES
+        assert CUSTOM_EMOJI_SCOPE not in REQUIRED_SCOPES
+
+    def test_custom_emoji_scope_added(self):
+        from slack_chat_migrator.core.config import MigrationConfig
+
+        scopes = scopes_for(MigrationConfig(use_chat_custom_emoji=True))
+        assert scopes == [*REQUIRED_SCOPES, CUSTOM_EMOJI_SCOPE]
+
+    def test_scopes_for_returns_a_copy(self):
+        scopes_for(None).append("x")
+        assert "x" not in REQUIRED_SCOPES
+
+    @patch("slack_chat_migrator.utils.api.build")
+    @patch(_FROM_FILE)
+    def test_get_gcp_service_requests_given_scopes(self, mock_creds, mock_build):
+        scopes = [*REQUIRED_SCOPES, CUSTOM_EMOJI_SCOPE]
+        default = get_gcp_service("/c.json", "a@example.com", "chat", "v1")
+        extended = get_gcp_service(
+            "/c.json", "a@example.com", "chat", "v1", scopes=scopes
+        )
+        assert default is not extended
+        requested = [c.kwargs["scopes"] for c in mock_creds.call_args_list]
+        assert requested == [REQUIRED_SCOPES, scopes]

@@ -79,7 +79,9 @@ class TestGetDelegate:
         assert result is resolver.chat
 
     @patch("slack_chat_migrator.services.user_resolver.get_gcp_service")
-    def test_valid_email_first_call_creates_and_caches_service(self, mock_get_service):
+    def test_valid_email_first_call_creates_and_validates_service(
+        self, mock_get_service
+    ):
         resolver = _make_resolver()
         mock_service = MagicMock(name="impersonated_service")
         mock_get_service.return_value = mock_service
@@ -97,24 +99,63 @@ class TestGetDelegate:
         )
         mock_service.spaces.return_value.list.return_value.execute.assert_called_once()
         assert resolver.state.users.valid_users["user@example.com"] is True
-        # Delegate is now wrapped in ChatAdapter
-        cached = resolver.state.users.chat_delegates["user@example.com"]
-        assert isinstance(cached, ChatAdapter)
-        assert cached._svc is mock_service
+        # Delegate is wrapped in ChatAdapter
         assert isinstance(result, ChatAdapter)
         assert result._svc is mock_service
 
     @patch("slack_chat_migrator.services.user_resolver.get_gcp_service")
-    def test_valid_email_already_cached_returns_from_cache(self, mock_get_service):
+    def test_validated_user_reuses_cached_client_without_revalidating(
+        self, mock_get_service
+    ):
         resolver = _make_resolver()
         cached_service = MagicMock(name="cached_service")
+        mock_get_service.return_value = cached_service
         resolver.state.users.valid_users["user@example.com"] = True
-        resolver.state.users.chat_delegates["user@example.com"] = cached_service
 
         result = resolver.get_delegate("user@example.com")
 
+        # The client comes from the (bounded) service cache in utils.api;
+        # no second impersonation check is made.
+        mock_get_service.assert_called_once()
+        cached_service.spaces.assert_not_called()
+        assert isinstance(result, ChatAdapter)
+        assert result._svc is cached_service
+
+    @patch("slack_chat_migrator.services.user_resolver.get_gcp_service")
+    def test_invalid_user_falls_back_without_api_calls(self, mock_get_service):
+        resolver = _make_resolver()
+        resolver.state.users.valid_users["bad@example.com"] = False
+
+        assert resolver.get_delegate("bad@example.com") is resolver.chat
         mock_get_service.assert_not_called()
-        assert result is cached_service
+
+    @patch("slack_chat_migrator.services.user_resolver.get_gcp_service")
+    def test_rebuild_failure_falls_back_to_admin(self, mock_get_service):
+        resolver = _make_resolver()
+        resolver.state.users.valid_users["user@example.com"] = True
+        mock_get_service.side_effect = FileNotFoundError("key file gone")
+
+        assert resolver.get_delegate("user@example.com") is resolver.chat
+
+    def test_delegates_bounded_and_rebuilt_after_cache_clear(self):
+        """Delegates live in the bounded utils.api cache, cleared on a 401."""
+        from slack_chat_migrator.utils import api
+
+        api.clear_service_cache()
+        resolver = _make_resolver()
+        with (
+            patch.object(api, "build", side_effect=lambda *a, **k: MagicMock()),
+            patch.object(api.service_account.Credentials, "from_service_account_file"),
+        ):
+            for i in range(api.SERVICE_CACHE_MAX_ENTRIES + 20):
+                resolver.get_delegate(f"u{i}@example.com")
+            assert len(api._service_cache) <= api.SERVICE_CACHE_MAX_ENTRIES
+
+            first = resolver.get_delegate("u300@example.com")._svc
+            assert resolver.get_delegate("u300@example.com")._svc is first
+            api.clear_service_cache()
+            assert resolver.get_delegate("u300@example.com")._svc is not first
+        api.clear_service_cache()
 
     @patch("slack_chat_migrator.services.user_resolver.get_gcp_service")
     def test_http_error_falls_back_to_admin_chat(self, mock_get_service):

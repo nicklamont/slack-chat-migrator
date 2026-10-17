@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import signal
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -49,13 +50,50 @@ from slack_chat_migrator.services.spaces.discovery import (
 )
 from slack_chat_migrator.services.user import generate_user_map
 from slack_chat_migrator.services.user_resolver import UserResolver
-from slack_chat_migrator.utils.api import get_gcp_service
+from slack_chat_migrator.utils.api import get_gcp_service, scopes_for
 from slack_chat_migrator.utils.logging import create_output_directory, log_with_context
 from slack_chat_migrator.utils.user_validation import (
     initialize_unmapped_user_tracking,
     log_unmapped_user_summary_for_dry_run,
     scan_channel_members_for_unmapped_users,
 )
+
+#: Returned by _install_sigint_handler() when no handler was installed.
+_SIGINT_NOT_INSTALLED = object()
+
+
+def _raise_keyboard_interrupt(signum: int, frame: Any) -> None:
+    """Handle SIGINT (Ctrl+C) gracefully.
+
+    Raises KeyboardInterrupt so the existing ``except BaseException``
+    block in ``migrate()`` handles logging and cleanup in one place.
+
+    Args:
+        signum: Signal number received.
+        frame: Current stack frame (unused).
+    """
+    raise KeyboardInterrupt("Migration interrupted by signal")
+
+
+def _install_sigint_handler() -> Any:
+    """Install the SIGINT handler and return the previous one.
+
+    ``signal.signal()`` only works in the main thread; when the migrator is
+    driven from a worker thread (library use), Ctrl-C handling is left to
+    the caller and nothing is installed.
+
+    Returns:
+        The previous handler, or ``_SIGINT_NOT_INSTALLED``.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return _SIGINT_NOT_INSTALLED
+    return signal.signal(signal.SIGINT, _raise_keyboard_interrupt)
+
+
+def _restore_sigint_handler(previous: Any) -> None:
+    """Restore the handler returned by :func:`_install_sigint_handler`."""
+    if previous is not _SIGINT_NOT_INSTALLED:
+        signal.signal(signal.SIGINT, previous)
 
 
 class SlackToChatMigrator:
@@ -229,6 +267,8 @@ class SlackToChatMigrator:
                 "Initializing Google Chat and Drive API services...",
             )
             creds_path_str = str(self.creds_path)
+            # The admin Chat client also requests the optional scopes the
+            # config needs (e.g. custom emoji).
             raw_chat = get_gcp_service(
                 creds_path_str,
                 self.workspace_admin,
@@ -236,6 +276,7 @@ class SlackToChatMigrator:
                 "v1",
                 max_retries=self.config.max_retries,
                 retry_delay=self.config.retry_delay,
+                scopes=scopes_for(self.config),
             )
             self.chat = ChatAdapter(raw_chat)
             self.drive = DriveAdapter(
@@ -389,20 +430,7 @@ class SlackToChatMigrator:
         log_with_context(logging.INFO, "Starting migration process")
 
         # Set up signal handler to ensure we log migration status on interrupt
-        def signal_handler(signum: int, frame: Any) -> None:
-            """Handle SIGINT (Ctrl+C) gracefully.
-
-            Raises KeyboardInterrupt so the existing ``except BaseException``
-            block handles logging and cleanup in one place.
-
-            Args:
-                signum: Signal number received.
-                frame: Current stack frame (unused).
-            """
-            raise KeyboardInterrupt("Migration interrupted by signal")
-
-        # Install the signal handler
-        old_signal_handler = signal.signal(signal.SIGINT, signal_handler)
+        old_signal_handler = _install_sigint_handler()
 
         try:
             self._emit_phase("Initializing")
@@ -565,6 +593,6 @@ class SlackToChatMigrator:
             raise
         finally:
             # Restore the original signal handler
-            signal.signal(signal.SIGINT, old_signal_handler)
+            _restore_sigint_handler(old_signal_handler)
             # Always ensure proper cleanup of channel log handlers
             cleanup_channel_handlers(self.state)

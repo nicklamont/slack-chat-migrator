@@ -56,6 +56,7 @@ flowchart LR
   - https://www.googleapis.com/auth/chat.spaces.readonly
   - https://www.googleapis.com/auth/chat.memberships.readonly
   - https://www.googleapis.com/auth/drive (for file uploads and shared drive creation)
+  - Optional: https://www.googleapis.com/auth/chat.customemojis.readonly, only if you set `use_chat_custom_emoji: true` (the tool requests it only then, so existing delegation entries keep working)
 - Slack export folder:
   ```
   export_root/
@@ -727,6 +728,7 @@ If you prefer not to use the setup script, follow these steps manually:
      - `https://www.googleapis.com/auth/chat.spaces.readonly`
      - `https://www.googleapis.com/auth/chat.memberships.readonly`
      - `https://www.googleapis.com/auth/drive`
+     - Only if you set `use_chat_custom_emoji: true`: `https://www.googleapis.com/auth/chat.customemojis.readonly`. Requesting a scope that isn't authorized makes every API call fail, so the tool asks for this one only when that option is on.
 
 #### Migration Issues
 

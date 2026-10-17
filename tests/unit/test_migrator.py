@@ -253,10 +253,6 @@ class TestInitCaches:
         assert m.chat is None
         assert m.drive is None
 
-    def test_chat_delegates_empty(self, tmp_path):
-        m = _make_migrator(tmp_path)
-        assert m.state.users.chat_delegates == {}
-
     def test_valid_users_empty(self, tmp_path):
         m = _make_migrator(tmp_path)
         assert m.state.users.valid_users == {}
@@ -757,6 +753,21 @@ class TestInitializeApiServices:
         assert isinstance(m.drive, DriveAdapter)
         assert isinstance(m.drive._svc, DryRunDriveService)
         assert m._api_services_initialized is True
+
+    @patch("slack_chat_migrator.core.migrator.get_gcp_service")
+    def test_admin_chat_requests_scopes_for_config(self, mock_gcp_service, tmp_path):
+        """The admin Chat client asks for optional scopes the config needs."""
+        from slack_chat_migrator.utils.api import CUSTOM_EMOJI_SCOPE, REQUIRED_SCOPES
+
+        (tmp_path / "config.yaml").write_text("use_chat_custom_emoji: true\n")
+        m = _make_migrator(tmp_path, dry_run=False)
+        mock_gcp_service.side_effect = [MagicMock(), MagicMock()]
+        with patch.object(m, "_initialize_dependent_services"):
+            m._initialize_api_services()
+
+        chat_call, drive_call = mock_gcp_service.call_args_list
+        assert chat_call.kwargs["scopes"] == [*REQUIRED_SCOPES, CUSTOM_EMOJI_SCOPE]
+        assert drive_call.kwargs.get("scopes") is None
 
     @patch("slack_chat_migrator.core.migrator.get_gcp_service")
     def test_no_double_initialization(self, mock_gcp_service, tmp_path):
