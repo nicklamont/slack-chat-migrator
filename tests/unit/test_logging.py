@@ -12,15 +12,17 @@ import slack_chat_migrator.utils.logging as log_module
 from slack_chat_migrator.utils.logging import (
     EnhancedFormatter,
     ImmediateFlushHandler,
-    JsonFormatter,
+    RedactingFilter,
     _extract_api_operation,
+    create_output_directory,
     ensure_channel_log_created,
     get_logger,
     is_debug_api_enabled,
     log_api_request,
     log_api_response,
-    log_failed_message,
     log_with_context,
+    make_private_dir,
+    open_private,
     sanitize_for_log,
     setup_channel_logger,
     setup_logger,
@@ -42,63 +44,6 @@ def _clean_logger():
         logger.removeHandler(handler)
     # Reset the module-level debug flag
     log_module._DEBUG_API_ENABLED.set(False)
-
-
-# --- JsonFormatter tests ---
-
-
-class TestJsonFormatter:
-    """Tests for JsonFormatter."""
-
-    def test_basic_format_contains_required_keys(self):
-        formatter = JsonFormatter()
-        record = logging.LogRecord(
-            name="slack_chat_migrator",
-            level=logging.INFO,
-            pathname="test.py",
-            lineno=1,
-            msg="test message",
-            args=(),
-            exc_info=None,
-        )
-        result = json.loads(formatter.format(record))
-        assert result["level"] == "INFO"
-        assert result["message"] == "test message"
-        assert result["module"] == "test"
-        assert "time" in result
-
-    def test_excludes_standard_record_attributes(self):
-        formatter = JsonFormatter()
-        record = logging.LogRecord(
-            name="slack_chat_migrator",
-            level=logging.INFO,
-            pathname="test.py",
-            lineno=1,
-            msg="hello",
-            args=(),
-            exc_info=None,
-        )
-        result = json.loads(formatter.format(record))
-        # Standard attributes that should be excluded from the extra data
-        for key in ("args", "exc_info", "lineno", "pathname", "funcName"):
-            assert key not in result
-
-    def test_includes_extra_attributes(self):
-        formatter = JsonFormatter()
-        record = logging.LogRecord(
-            name="slack_chat_migrator",
-            level=logging.INFO,
-            pathname="test.py",
-            lineno=1,
-            msg="hello",
-            args=(),
-            exc_info=None,
-        )
-        record.channel = "general"
-        record.custom_field = "custom_value"
-        result = json.loads(formatter.format(record))
-        assert result["channel"] == "general"
-        assert result["custom_field"] == "custom_value"
 
 
 # --- EnhancedFormatter tests ---
@@ -552,52 +497,6 @@ class TestLogApiResponse:
             assert call_kwargs["channel"] == "dev"
 
 
-# --- log_failed_message tests ---
-
-
-class TestLogFailedMessage:
-    """Tests for log_failed_message()."""
-
-    def test_logs_error_with_ts_and_error(self):
-        logger = setup_logger()
-        with patch.object(logger, "error") as mock_error:
-            log_failed_message(
-                "general",
-                {"ts": "12345.6", "error": "rate_limited", "payload": {}},
-            )
-            mock_error.assert_called_once()
-            call_msg = mock_error.call_args[0][0]
-            assert "12345.6" in call_msg
-            assert "rate_limited" in call_msg
-            call_extra = mock_error.call_args[1]["extra"]
-            assert call_extra["channel"] == "general"
-
-    def test_logs_debug_payload(self):
-        logger = setup_logger()
-        with patch.object(logger, "debug") as mock_debug:
-            log_failed_message(
-                "general",
-                {"ts": "1", "error": "err", "payload": {"text": "hello"}},
-            )
-            mock_debug.assert_called()
-            # At least one debug call should have the payload
-            payload_logged = any(
-                "hello" in str(call) for call in mock_debug.call_args_list
-            )
-            assert payload_logged
-
-    def test_handles_non_serializable_payload(self):
-        logger = setup_logger()
-        # A set is not JSON serializable
-        with patch.object(logger, "debug") as mock_debug:
-            log_failed_message(
-                "general",
-                {"ts": "1", "error": "err", "payload": {1, 2, 3}},
-            )
-            # Should still log without raising
-            mock_debug.assert_called()
-
-
 # --- get_logger tests ---
 
 
@@ -639,8 +538,13 @@ class TestSetupMainLogFile:
         result = setup_main_log_file(str(tmp_path))
         assert isinstance(result, ImmediateFlushHandler)
 
-    def test_handler_level_is_debug(self, tmp_path):
+    def test_handler_level_is_info_by_default(self, tmp_path):
+        """DEBUG detail (message payloads) only reaches disk with --debug_api."""
         result = setup_main_log_file(str(tmp_path))
+        assert result.level == logging.INFO
+
+    def test_handler_level_is_debug_with_debug_api(self, tmp_path):
+        result = setup_main_log_file(str(tmp_path), debug_api=True)
         assert result.level == logging.DEBUG
 
     def test_handler_uses_enhanced_formatter(self, tmp_path):
@@ -740,9 +644,25 @@ class TestSetupChannelLogger:
         result = setup_channel_logger(str(tmp_path), "general")
         assert isinstance(result, ImmediateFlushHandler)
 
-    def test_handler_level_is_debug(self, tmp_path):
+    def test_handler_level_is_info_by_default(self, tmp_path):
+        """Message payloads are DEBUG and only reach disk with --debug_api."""
         result = setup_channel_logger(str(tmp_path), "general")
+        assert result.level == logging.INFO
+
+    def test_handler_level_is_debug_with_debug_api(self, tmp_path):
+        result = setup_channel_logger(str(tmp_path), "general", debug_api=True)
         assert result.level == logging.DEBUG
+
+    def test_debug_payload_not_written_without_debug_api(self, tmp_path):
+        handler = setup_channel_logger(str(tmp_path), "general")
+        log_with_context(
+            logging.DEBUG,
+            "Complete message payload for 1.0: {'text': 'secret plans'}",
+            channel="general",
+        )
+        handler.close()
+        log_file = tmp_path / "channel_logs" / "general_migration.log"
+        assert "secret plans" not in log_file.read_text()
 
     def test_channel_filter_passes_matching_channel(self, tmp_path):
         handler = setup_channel_logger(str(tmp_path), "general")
@@ -987,3 +907,213 @@ class TestEnhancedFormatterSanitization:
         result = formatter.format(record)
         assert "xoxb-secret" not in result
         assert "token=[REDACTED]" in result
+
+
+# --- Secrets, permissions and handler hygiene (issues #112, #119) ---
+
+SLACK_FILE_URL = (
+    "https://files.slack.com/files-pri/T0ABC-F0ABC/report.pdf?t=xoxe-1234567890-abcdef"
+)
+
+
+class TestSlackTokenRedaction:
+    """sanitize_for_log() and the RedactingFilter remove Slack tokens."""
+
+    def test_redacts_file_url_token(self):
+        result = sanitize_for_log(SLACK_FILE_URL)
+        assert "xoxe-1234567890" not in result
+        assert "?t=[REDACTED]" in result
+        assert "files.slack.com/files-pri/T0ABC-F0ABC/report.pdf" in result
+
+    def test_redacts_t_param_after_ampersand(self):
+        result = sanitize_for_log("https://x.slack.com/f?a=1&t=abc.def-123&b=2")
+        assert "abc.def-123" not in result
+        assert "&b=2" in result
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "xoxp-1234-5678-abcd",
+            "xoxb-12345-67890-AbCdEf",
+            "xoxp-1-abc",
+            "xoxa-2-abc",
+            "xoxs-12-abc",
+            "xoxr-3-abc",
+            "xapp-1-A0-123-abc",
+        ],
+    )
+    def test_redacts_bare_tokens(self, token):
+        result = sanitize_for_log(f"token value {token} end")
+        assert token not in result
+        assert "[REDACTED]" in result
+        assert result.endswith(" end")
+
+    def test_redacts_token_in_json(self):
+        result = sanitize_for_log(f'{{"url_private": "{SLACK_FILE_URL}"}}')
+        assert "1234567890-abcdef" not in result
+
+    def test_redacts_rotating_token(self):
+        result = sanitize_for_log("refresh xoxe.xoxp-1-Mi0yLTE2 done")
+        assert "Mi0yLTE2" not in result
+
+    def test_does_not_touch_ordinary_words(self):
+        text = "Processing channel xoxo-party and taxonomy=fine"
+        assert sanitize_for_log(text) == text
+
+    def test_filter_redacts_message_args_and_extras(self):
+        record = logging.LogRecord(
+            "slack_chat_migrator",
+            logging.INFO,
+            __file__,
+            1,
+            "url=%s",
+            (SLACK_FILE_URL,),
+            None,
+        )
+        record.error_details = f"failed {SLACK_FILE_URL}"
+        assert RedactingFilter().filter(record) is True
+        assert "xoxe-1234567890" not in record.getMessage()
+        assert "xoxe-1234567890" not in record.error_details
+
+    def test_no_token_in_any_log_file(self, tmp_path):
+        """End to end: main log, channel log and console are all redacted."""
+        import io
+
+        setup_logger(output_dir=str(tmp_path), debug_api=True)
+        stream = io.StringIO()
+        console = logging.getLogger("slack_chat_migrator").handlers[0]
+        console.setStream(stream)
+        channel_handler = setup_channel_logger(str(tmp_path), "general", debug_api=True)
+        log_with_context(logging.ERROR, f"Failed to download {SLACK_FILE_URL}")
+        log_with_context(
+            logging.DEBUG, f"Downloading {SLACK_FILE_URL}", channel="general"
+        )
+        log_with_context(
+            logging.DEBUG,
+            "API call",
+            channel="general",
+            api_data=f'{{"u": "{SLACK_FILE_URL}"}}',
+        )
+        channel_handler.close()
+        texts = [
+            (tmp_path / "migration.log").read_text(),
+            (tmp_path / "channel_logs" / "general_migration.log").read_text(),
+            stream.getvalue(),
+        ]
+        for text in texts:
+            assert "xoxe-1234567890" not in text
+        assert "Failed to download" in texts[0]
+        assert "Downloading" in texts[1]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+class TestPrivatePermissions:
+    """Output directories are 0700 and log files 0600, whatever the umask."""
+
+    @pytest.fixture(autouse=True)
+    def _permissive_umask(self):
+        old = os.umask(0o022)
+        yield
+        os.umask(old)
+
+    def test_create_output_directory_is_private(self, tmp_path):
+        out = create_output_directory(str(tmp_path / "migration_logs"))
+        assert os.stat(out).st_mode & 0o777 == 0o700
+        assert os.stat(os.path.join(out, "channel_logs")).st_mode & 0o777 == 0o700
+        assert os.stat(tmp_path / "migration_logs").st_mode & 0o777 == 0o700
+        assert os.path.basename(out).startswith("run_")
+
+    def test_log_files_are_private(self, tmp_path):
+        setup_main_log_file(str(tmp_path))
+        handler = setup_channel_logger(str(tmp_path), "general")
+        handler.close()
+        ensure_channel_log_created(str(tmp_path), "random")
+        for path in (
+            tmp_path / "migration.log",
+            tmp_path / "channel_logs" / "general_migration.log",
+            tmp_path / "channel_logs" / "random_migration.log",
+        ):
+            assert os.stat(path).st_mode & 0o777 == 0o600, path
+
+    def test_open_private_tightens_existing_file(self, tmp_path):
+        path = tmp_path / "report.yaml"
+        path.write_text("old")
+        os.chmod(path, 0o644)
+        with open_private(str(path), "a") as f:
+            f.write(" new")
+        assert os.stat(path).st_mode & 0o777 == 0o600
+        assert path.read_text() == "old new"
+
+    def test_make_private_dir_tightens_existing_dir(self, tmp_path):
+        target = tmp_path / "logs"
+        target.mkdir(mode=0o755)
+        make_private_dir(str(target))
+        assert os.stat(target).st_mode & 0o777 == 0o700
+
+
+class TestLogWithContextExcInfo:
+    """exc_info/stack_info reach the logger (tracebacks are kept)."""
+
+    def _capture(self):
+        records: list[logging.LogRecord] = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.getLogger("slack_chat_migrator")
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(_Collect())
+        return records
+
+    def test_exc_info_true_records_traceback(self):
+        records = self._capture()
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            log_with_context(logging.ERROR, "Migration failed: boom", exc_info=True)
+        assert records[-1].exc_info is not None
+        assert records[-1].exc_info[0] is RuntimeError
+
+    def test_traceback_in_formatted_output(self, tmp_path):
+        setup_logger(output_dir=str(tmp_path))
+        try:
+            raise ValueError("kaboom")
+        except ValueError:
+            log_with_context(logging.ERROR, "Migration failed: kaboom", exc_info=True)
+        text = (tmp_path / "migration.log").read_text()
+        assert "Traceback (most recent call last)" in text
+        assert "ValueError: kaboom" in text
+
+    def test_stack_info_passed_through(self):
+        records = self._capture()
+        log_with_context(logging.WARNING, "where am I", stack_info=True)
+        assert records[-1].stack_info
+
+    def test_record_attributed_to_caller(self):
+        records = self._capture()
+        log_with_context(logging.INFO, "caller check")
+        assert records[-1].funcName == "test_record_attributed_to_caller"
+
+    def test_no_exc_info_by_default(self):
+        records = self._capture()
+        log_with_context(logging.INFO, "plain")
+        assert records[-1].exc_info is None
+
+
+class TestSetupLoggerClosesHandlers:
+    """Calling setup_logger() twice closes the old file handlers."""
+
+    def test_old_file_handler_closed(self, tmp_path):
+        first = tmp_path / "first"
+        setup_logger(output_dir=str(first))
+        old = [
+            h
+            for h in logging.getLogger("slack_chat_migrator").handlers
+            if isinstance(h, ImmediateFlushHandler)
+        ]
+        assert old and old[0].stream is not None and not old[0].stream.closed
+        stream = old[0].stream
+        setup_logger(output_dir=str(tmp_path / "second"))
+        assert stream.closed
+        assert old[0] not in logging.getLogger("slack_chat_migrator").handlers

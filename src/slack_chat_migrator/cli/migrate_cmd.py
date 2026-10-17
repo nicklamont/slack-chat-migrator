@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-import datetime
 import logging
-import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -35,7 +33,11 @@ from slack_chat_migrator.exceptions import (
     ConfigError,
     PermissionCheckError,
 )
-from slack_chat_migrator.utils.logging import log_with_context, setup_logger
+from slack_chat_migrator.utils.logging import (
+    create_output_directory,
+    log_with_context,
+    setup_logger,
+)
 from slack_chat_migrator.utils.permissions import validate_permissions
 
 # Create logger instance
@@ -941,14 +943,10 @@ def _print_preflight_status(label: str, status: str = "ok", detail: str = "") ->
 def create_migration_output_directory() -> str:
     """Create output directory for migration with timestamp.
 
+    The run directory (``migration_logs/run_<timestamp>``) and its
+    ``channel_logs`` folder are private to the current user (mode ``0700``).
+
     Returns:
         The path to the newly created output directory.
     """
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = f"migration_logs/run_{timestamp}"
-
-    # Create subdirectories
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(os.path.join(output_dir, "channel_logs"), exist_ok=True)
-
-    return output_dir
+    return create_output_directory("migration_logs")

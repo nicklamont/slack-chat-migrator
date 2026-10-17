@@ -4,10 +4,8 @@ Main migrator class for the Slack to Google Chat migration tool
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
-import os
 import signal
 import time
 from pathlib import Path
@@ -52,7 +50,7 @@ from slack_chat_migrator.services.spaces.discovery import (
 from slack_chat_migrator.services.user import generate_user_map
 from slack_chat_migrator.services.user_resolver import UserResolver
 from slack_chat_migrator.utils.api import get_gcp_service
-from slack_chat_migrator.utils.logging import log_with_context
+from slack_chat_migrator.utils.logging import create_output_directory, log_with_context
 from slack_chat_migrator.utils.user_validation import (
     initialize_unmapped_user_tracking,
     log_unmapped_user_summary_for_dry_run,
@@ -414,15 +412,12 @@ class SlackToChatMigrator:
 
             # Output directory should already be set up by CLI, but provide a sensible default
             if not self.state.context.output_dir:
-                # Create default output directory with timestamp
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.state.context.output_dir = f"migration_logs/run_{timestamp}"
+                # Create a private default output directory with timestamp
+                self.state.context.output_dir = create_output_directory()
                 log_with_context(
                     logging.INFO,
                     f"Using default output directory: {self.state.context.output_dir}",
                 )
-                # Create the directory
-                os.makedirs(self.state.context.output_dir, exist_ok=True)
 
             # Reset per-run state
             self.state.reset_for_run()

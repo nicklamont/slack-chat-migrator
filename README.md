@@ -309,10 +309,12 @@ Complete import mode on spaces that are stuck.
 
 The migration tool provides two levels of debug logging:
 
-- **`--verbose` / `-v`**: Enables verbose console output showing DEBUG level messages. Useful for understanding the migration flow and troubleshooting issues.
-- **`--debug_api`**: Enables detailed HTTP API request/response logging to files. This creates very large log files but is invaluable for diagnosing API-related issues or developing the tool. Only enable this when specifically needed.
+- **`--verbose` / `-v`**: Enables verbose console output showing DEBUG level messages. Useful for understanding the migration flow and troubleshooting issues. It doesn't change what is written to the log files.
+- **`--debug_api`**: Writes DEBUG detail to the log files: HTTP API request/response data and full message payloads (message text). This creates very large log files but is invaluable for diagnosing API-related issues or developing the tool. Only enable this when specifically needed. Without it, log files record INFO and above, and failure logs list message and file IDs instead of message content.
 
 Both options are independent and can be used together for maximum debugging information.
+
+Slack tokens (`xoxb-…`, `xoxp-…`, `xoxe-…`), `t=`/`token=` URL parameters and `Bearer` tokens are redacted from every log line, on the console and in the files.
 
 > **Note:** The `--skip_permission_check` option (on `migrate`) bypasses validation of service account permissions. Only use this if you're certain your service account is properly configured and you're encountering false positives in the permission check.
 
@@ -538,20 +540,20 @@ migration_logs/
 ├── run_20250806_153200/          # Timestamped run directory
 │   ├── migration.log             # Main migration log
 │   ├── migration_report.yaml     # Summary report
-│   ├── channel_logs/            # Per-channel detailed logs
-│   │   ├── general_migration.log
-│   │   └── random_migration.log
-│   └── failed_messages.txt       # Failed messages (if any)
+│   └── channel_logs/            # Per-channel detailed logs
+│       ├── general_migration.log
+│       └── random_migration.log
 ```
 
 **Log File Types:**
 
 - **migration.log**: Main log file containing overall migration progress, errors, and system messages
-- **channel_logs/*.log**: Per-channel detailed logs with message-level details (when `--debug_api` is enabled)
+- **channel_logs/*.log**: Per-channel logs. A "FAILED MESSAGES DETAILS" section at the end lists each failed message by timestamp, error, user and file IDs. Message-level details (payloads, API request/response data) are added only when `--debug_api` is enabled.
 - **migration_report.yaml**: Structured summary report with statistics and recommendations
-- **failed_messages.txt**: Details of any messages that failed to migrate (created only if there are failures)
 
-> **Note:** When using `--debug_api`, channel logs can become quite large as they include complete API request/response data.
+The run directory is created with mode `0700` and the files in it with mode `0600`, so other local users can't read them.
+
+> **Note:** When using `--debug_api`, channel logs can become quite large as they include complete API request/response data and message content. Treat those logs as sensitive.
 
 ### Migration Reports
 

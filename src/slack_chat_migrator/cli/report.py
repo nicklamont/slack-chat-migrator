@@ -17,7 +17,12 @@ from rich.panel import Panel
 from rich.table import Table
 
 from slack_chat_migrator.types import FailedMessage
-from slack_chat_migrator.utils.logging import log_with_context
+from slack_chat_migrator.utils.logging import (
+    log_with_context,
+    make_private_dir,
+    open_private,
+    sanitize_for_log,
+)
 
 if TYPE_CHECKING:
     from slack_chat_migrator.core.config import MigrationConfig
@@ -301,11 +306,15 @@ def _print_migration_summary_plain(
 
 def _group_failed_messages(
     state: MigrationState,
+    include_payloads: bool = False,
 ) -> dict[str, list[FailedMessage]]:
     """Group failed messages by channel and write detailed failure logs.
 
     Args:
         state: Migration state containing failed messages.
+        include_payloads: Write the (redacted) message payloads into the
+            failure logs.  Only set with ``--debug_api``; otherwise only
+            message and file IDs are written.
 
     Returns:
         Dict mapping channel names to their list of FailedMessage entries.
@@ -330,43 +339,78 @@ def _group_failed_messages(
             logging.WARNING,
             f"Channel {channel} had {len(failures)} failed messages",
         )
-        _write_failure_log(state.context.output_dir, channel, failures)
+        _write_failure_log(
+            state.context.output_dir, channel, failures, include_payloads
+        )
 
     return failed_by_channel
+
+
+def _describe_failed_payload(payload: Any) -> str:
+    """Summarize a failed Slack message by IDs only (no text, names or URLs).
+
+    Args:
+        payload: The raw Slack message (or Chat payload) that failed.
+
+    Returns:
+        A one-line description such as ``user=U1 subtype=- files=F1,F2``.
+    """
+    if not isinstance(payload, dict):
+        return f"<{type(payload).__name__}>"
+    parts = [
+        f"user={payload.get('user') or payload.get('bot_id') or '-'}",
+        f"subtype={payload.get('subtype') or '-'}",
+    ]
+    if payload.get("thread_ts"):
+        parts.append(f"thread_ts={payload['thread_ts']}")
+    files = payload.get("files")
+    if isinstance(files, list) and files:
+        file_ids = [str(f.get("id", "?")) for f in files if isinstance(f, dict)]
+        parts.append(f"files={','.join(file_ids)}")
+    return " ".join(parts)
 
 
 def _write_failure_log(
     output_dir: str | None,
     channel: str,
     failures: list[FailedMessage],
+    include_payloads: bool = False,
 ) -> None:
     """Write detailed failure information to a channel-specific log file.
+
+    Message content only reaches disk with ``--debug_api``
+    (*include_payloads*), and is redacted with :func:`sanitize_for_log`.
+    Otherwise each entry records the message and file IDs only.
 
     Args:
         output_dir: Base output directory for logs, or None to skip.
         channel: Channel name for the log file.
         failures: List of failed message entries to write.
+        include_payloads: Include the redacted message payloads.
     """
     if not output_dir:
         return
 
     logs_dir = os.path.join(output_dir, "channel_logs")
-    os.makedirs(logs_dir, exist_ok=True)
+    make_private_dir(logs_dir)
     log_file = os.path.join(logs_dir, f"{channel}_migration.log")
 
     try:
         mode = "a" if os.path.exists(log_file) else "w"
-        with open(log_file, mode, encoding="utf-8") as f:
+        with open_private(log_file, mode) as f:
             f.write(f"\n\n{'=' * 50}\nFAILED MESSAGES DETAILS\n{'=' * 50}\n\n")
             for failed_msg in failures:
                 f.write(f"Timestamp: {failed_msg.get('ts')}\n")
-                f.write(f"Error: {failed_msg.get('error')}\n")
+                f.write(f"Error: {sanitize_for_log(str(failed_msg.get('error')))}\n")
                 payload = failed_msg.get("payload")
-                if payload:
+                if payload and include_payloads:
                     try:
-                        f.write(f"Payload: {json.dumps(payload, indent=2)}\n")
+                        text = json.dumps(payload, indent=2)
                     except (TypeError, ValueError):
-                        f.write(f"Payload: {payload!r}\n")
+                        text = repr(payload)
+                    f.write(f"Payload: {sanitize_for_log(text)}\n")
+                elif payload:
+                    f.write(f"Message: {_describe_failed_payload(payload)}\n")
                 f.write("\n" + "-" * 40 + "\n\n")
 
         log_with_context(
@@ -580,7 +624,7 @@ def generate_report(
     output_dir = state.context.output_dir or "."
     report_path = os.path.join(output_dir, "migration_report.yaml")
 
-    failed_by_channel = _group_failed_messages(state)
+    failed_by_channel = _group_failed_messages(state, include_payloads=ctx.debug_api)
 
     # File statistics
     file_stats: dict[str, Any] = {}
@@ -640,7 +684,7 @@ def generate_report(
             external_mappings.append(f'  "{user_id}": ""  # {email}')
         report["external_user_mappings_for_config"] = external_mappings
 
-    with open(report_path, "w", encoding="utf-8") as f:
+    with open_private(report_path, "w") as f:
         yaml.dump(report, f, default_flow_style=False)
 
     log_with_context(logging.INFO, f"Migration report generated: {report_path}")

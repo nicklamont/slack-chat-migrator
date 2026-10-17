@@ -5,11 +5,12 @@ Logging module for the Slack to Google Chat migration tool
 from __future__ import annotations
 
 import contextvars
+import datetime
 import json
 import logging
 import os
 import re
-from typing import Any
+from typing import IO, Any
 
 from slack_chat_migrator.constants import (
     RESPONSE_FALLBACK_LENGTH,
@@ -21,79 +22,158 @@ _DEBUG_API_ENABLED: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "_DEBUG_API_ENABLED", default=False
 )
 
+#: Permissions for the run output directory and the files written into it.
+#: Logs can contain user names, channel names and (with ``--debug_api``)
+#: message content, so they are private to the user running the migration.
+PRIVATE_DIR_MODE = 0o700
+PRIVATE_FILE_MODE = 0o600
+
+_BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*", re.IGNORECASE)
+# Secrets in URL query strings.  Slack export file URLs carry the file
+# token as ``?t=xoxe-...``.
+_QUERY_SECRET_RE = re.compile(
+    r"([?&](?:t|token|access_token|key)=)[^&\s#'\"]+", re.IGNORECASE
+)
+_KEY_VALUE_SECRET_RE = re.compile(
+    r"\b(token|access_token|key)=[A-Za-z0-9\-._~+/]+=*", re.IGNORECASE
+)
+# Bare Slack tokens: xoxa-, xoxb-, xoxp-, xoxo-, xoxs-, xoxe-, xoxr-, xapp-,
+# which always continue with a digit (``xoxb-1234-...``, ``xoxe-1-...``).
+_SLACK_TOKEN_RE = re.compile(r"\b(xox[abposer]|xapp)-\d[A-Za-z0-9-]*")
+
 
 def sanitize_for_log(text: str) -> str:
-    """Redact sensitive tokens and credentials from log text."""
-    text = re.sub(
-        r"Bearer\s+[A-Za-z0-9\-._~+/]+=*",
-        "Bearer [REDACTED]",
-        text,
-        flags=re.IGNORECASE,
-    )
-    text = re.sub(
-        r"\b(token|access_token|key)=[A-Za-z0-9\-._~+/]+=*",
-        r"\1=[REDACTED]",
-        text,
-        flags=re.IGNORECASE,
-    )
+    """Redact sensitive tokens and credentials from log text.
+
+    Redacts ``Bearer`` tokens, secret query parameters (``t=``, ``token=``,
+    ``access_token=``, ``key=``) and bare Slack tokens (``xoxb-...``,
+    ``xoxp-...``, ``xoxe-...``, ``xapp-...``).
+
+    Args:
+        text: The text to sanitize.
+
+    Returns:
+        The text with secrets replaced by ``[REDACTED]``.
+    """
+    text = _BEARER_RE.sub("Bearer [REDACTED]", text)
+    text = _QUERY_SECRET_RE.sub(r"\1[REDACTED]", text)
+    text = _KEY_VALUE_SECRET_RE.sub(r"\1=[REDACTED]", text)
+    text = _SLACK_TOKEN_RE.sub(r"\1-[REDACTED]", text)
     return text
 
 
+# Attributes every LogRecord has; anything else came in via ``extra=``.
+_STANDARD_RECORD_ATTRS = frozenset(
+    logging.LogRecord("", 0, "", 0, "", None, None).__dict__
+) | {"message", "asctime"}
+
+
+class RedactingFilter(logging.Filter):
+    """Filter that redacts secrets from every record a handler emits.
+
+    It rewrites the formatted message and any string ``extra`` fields (such
+    as ``api_data``, ``response`` or ``error_details``) with
+    :func:`sanitize_for_log`, so no handler writes Slack file tokens or
+    bearer tokens, whatever the formatter.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Redact *record* in place and let it through.
+
+        Args:
+            record: The log record to sanitize.
+
+        Returns:
+            Always True.
+        """
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        sanitized = sanitize_for_log(message)
+        if sanitized != message:
+            record.msg = sanitized
+            record.args = None
+        for name, value in list(record.__dict__.items()):
+            if name not in _STANDARD_RECORD_ATTRS and isinstance(value, str) and value:
+                record.__dict__[name] = sanitize_for_log(value)
+        return True
+
+
+def _make_private(path: str, mode: int) -> None:
+    """Best-effort ``chmod`` (a no-op where unsupported, e.g. on Windows)."""
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def make_private_dir(path: str) -> None:
+    """Create *path* (and parents) and restrict it to the current user.
+
+    Args:
+        path: Directory to create.
+    """
+    os.makedirs(path, mode=PRIVATE_DIR_MODE, exist_ok=True)
+    _make_private(path, PRIVATE_DIR_MODE)
+
+
+def open_private(path: str, mode: str = "w", encoding: str = "utf-8") -> IO[str]:
+    """Open a text file for writing that only the current user can read.
+
+    New files are created with mode ``0600``; existing files are changed to
+    ``0600`` before they are written.
+
+    Args:
+        path: File to open.
+        mode: ``"w"`` (truncate) or ``"a"`` (append).
+        encoding: Text encoding.
+
+    Returns:
+        The open text stream.
+    """
+    flags = os.O_WRONLY | os.O_CREAT
+    flags |= os.O_APPEND if "a" in mode else os.O_TRUNC
+    fd = os.open(path, flags, PRIVATE_FILE_MODE)
+    _make_private(path, PRIVATE_FILE_MODE)
+    return os.fdopen(fd, mode, encoding=encoding)
+
+
+def create_output_directory(base_dir: str = "migration_logs") -> str:
+    """Create a private, timestamped run directory with a ``channel_logs`` folder.
+
+    Args:
+        base_dir: Parent directory for run directories.
+
+    Returns:
+        The path of the new run directory (``<base_dir>/run_<timestamp>``).
+    """
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(base_dir, f"run_{timestamp}")
+    make_private_dir(base_dir)
+    make_private_dir(output_dir)
+    make_private_dir(os.path.join(output_dir, "channel_logs"))
+    return output_dir
+
+
+def _file_log_level(debug_api: bool) -> int:
+    """Level for log files: DEBUG detail (including payloads) needs --debug_api."""
+    return logging.DEBUG if debug_api else logging.INFO
+
+
 class ImmediateFlushHandler(logging.FileHandler):
-    """FileHandler that flushes after every emit for real-time log visibility."""
+    """FileHandler that flushes after every emit for real-time log visibility.
+
+    Log files are created private to the current user (mode ``0600``).
+    """
+
+    def _open(self) -> Any:
+        """Open the log file with private permissions."""
+        return open_private(self.baseFilename, self.mode, self.encoding or "utf-8")
 
     def emit(self, record: logging.LogRecord) -> None:
         super().emit(record)
         self.flush()
-
-
-class JsonFormatter(logging.Formatter):
-    """Logging formatter that outputs records as single-line JSON objects."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        """Format a log record as a JSON string.
-
-        Args:
-            record: The log record to format.
-
-        Returns:
-            A JSON-encoded string containing the log data.
-        """
-        data = {
-            "time": self.formatTime(record, self.datefmt),
-            "level": record.levelname,
-            "message": record.getMessage(),
-            "module": record.module,
-        }
-        # Include any additional attributes from the record
-        for key, value in record.__dict__.items():
-            if key not in (
-                "args",
-                "asctime",
-                "created",
-                "exc_info",
-                "exc_text",
-                "filename",
-                "funcName",
-                "id",
-                "levelname",
-                "levelno",
-                "lineno",
-                "module",
-                "msecs",
-                "message",
-                "msg",
-                "name",
-                "pathname",
-                "process",
-                "processName",
-                "relativeCreated",
-                "stack_info",
-                "thread",
-                "threadName",
-            ):
-                data[key] = value
-        return json.dumps(data)
 
 
 def setup_main_log_file(
@@ -110,15 +190,18 @@ def setup_main_log_file(
         The file handler for the main log file
     """
     # Create the logs directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
+    make_private_dir(output_dir)
 
     # Create the log file path
     log_file = os.path.join(output_dir, "migration.log")
 
     # Create file handler with immediate flushing for real-time log visibility.
     # This is important in case the migration fails and we want to preserve logs.
+    # DEBUG detail (which includes message payloads) is only written to disk
+    # with --debug_api.
     file_handler = ImmediateFlushHandler(log_file, mode="w")
-    file_handler.setLevel(logging.DEBUG)  # Always use DEBUG level for file handlers
+    file_handler.setLevel(_file_log_level(debug_api))
+    file_handler.addFilter(RedactingFilter())
 
     # Create formatter - always use EnhancedFormatter but conditionally include API details
     formatter = EnhancedFormatter(
@@ -280,16 +363,21 @@ def setup_logger(
 
     logger = logging.getLogger("slack_chat_migrator")
 
-    # Clear any existing handlers to prevent duplicate messages
-    if logger.handlers:
-        for handler in logger.handlers[:]:
-            logger.removeHandler(handler)
+    # Clear (and close) any existing handlers to prevent duplicate messages
+    # and leaked file descriptors when setup_logger() is called again.
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
 
     logger.setLevel(logging.DEBUG)  # Always set logger to DEBUG to capture all logs
 
     # Create console handler with appropriate level based on verbose flag
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console_handler.addFilter(RedactingFilter())
 
     # Create the enhanced formatter that handles both verbose and API details
     formatter = EnhancedFormatter(verbose=verbose, include_api_details=debug_api)
@@ -361,14 +449,16 @@ def setup_channel_logger(
     Args:
         output_dir: The output directory path
         channel: The channel name
-        verbose: If True, set file handler to DEBUG level; otherwise INFO level
+        verbose: If True, use the detailed format (module and line numbers)
+        debug_api: If True, also write DEBUG records (message payloads and
+            API request/response data); otherwise INFO and above only
 
     Returns:
         The file handler for the channel log
     """
     # Create the channel logs directory if it doesn't exist
     logs_dir = os.path.join(output_dir, "channel_logs")
-    os.makedirs(logs_dir, exist_ok=True)
+    make_private_dir(logs_dir)
 
     # Create the log file path
     log_file = os.path.join(logs_dir, f"{channel}_migration.log")
@@ -376,7 +466,8 @@ def setup_channel_logger(
     # Create file handler with immediate flushing for real-time log visibility.
     # This is important in case the migration fails and we want to preserve logs.
     file_handler = ImmediateFlushHandler(log_file, mode="w")
-    file_handler.setLevel(logging.DEBUG)  # Always use DEBUG level for file handlers
+    file_handler.setLevel(_file_log_level(debug_api))
+    file_handler.addFilter(RedactingFilter())
 
     # Create formatter - use EnhancedFormatter with appropriate settings
     formatter = EnhancedFormatter(verbose=verbose, include_api_details=debug_api)
@@ -438,7 +529,7 @@ def ensure_channel_log_created(
     """
     # Create the channel logs directory if it doesn't exist
     logs_dir = os.path.join(output_dir, "channel_logs")
-    os.makedirs(logs_dir, exist_ok=True)
+    make_private_dir(logs_dir)
 
     # Create the log file path
     log_file = os.path.join(logs_dir, f"{channel}_migration.log")
@@ -446,7 +537,7 @@ def ensure_channel_log_created(
     # Create an empty log file or write a header if it doesn't exist
     if not os.path.exists(log_file):
         try:
-            with open(log_file, "w", encoding="utf-8") as f:
+            with open_private(log_file, "w") as f:
                 if dry_run:
                     f.write(f"# Channel migration log for {channel} (DRY RUN)\n")
                     f.write(
@@ -478,8 +569,14 @@ def log_with_context(level: int, message: str, **kwargs: Any) -> None:
     Args:
         level: The logging level (e.g., logging.INFO)
         message: The log message
-        **kwargs: Additional context to include in the log record
+        **kwargs: Additional context to include in the log record.
+            ``exc_info`` and ``stack_info`` are passed through to the
+            logger, so ``exc_info=True`` inside an ``except`` block records
+            the traceback.
     """
+    exc_info = kwargs.pop("exc_info", None)
+    stack_info = bool(kwargs.pop("stack_info", False))
+
     # Filter out None values from kwargs
     filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
@@ -526,7 +623,15 @@ def log_with_context(level: int, message: str, **kwargs: Any) -> None:
         extras = filtered_kwargs
 
     logger = logging.getLogger("slack_chat_migrator")
-    logger.log(level, message, extra=extras)
+    # stacklevel=2 attributes the record to the caller, not this helper.
+    logger.log(
+        level,
+        message,
+        extra=extras,
+        exc_info=exc_info,
+        stack_info=stack_info,
+        stacklevel=2,
+    )
 
 
 def _extract_api_operation(method: str, url: str) -> str:
@@ -669,32 +774,6 @@ def log_api_response(
     )
 
 
-def log_failed_message(channel: str, failed_msg: dict[str, Any]) -> None:
-    """
-    Log details of a failed message to the channel log.
-
-    Args:
-        channel: The channel name
-        failed_msg: The failed message data
-    """
-    logger.error(
-        f"Failed to send message: TS={failed_msg.get('ts')}, Error={failed_msg.get('error')}",
-        extra={"channel": channel},
-    )
-
-    # Log payload details at debug level
-    try:
-        payload_str = json.dumps(failed_msg.get("payload", {}), indent=2)
-        logger.debug(
-            f"Failed message payload: {payload_str}", extra={"channel": channel}
-        )
-    except (TypeError, ValueError):
-        logger.debug(
-            f"Failed message payload (not JSON serializable): {failed_msg.get('payload', {})!r}",
-            extra={"channel": channel},
-        )
-
-
 def is_debug_api_enabled() -> bool:
     """Check if API debug logging is enabled.
 
@@ -718,6 +797,7 @@ def get_logger() -> logging.Logger:
         handler.setLevel(logging.INFO)
         formatter = EnhancedFormatter()
         handler.setFormatter(formatter)
+        handler.addFilter(RedactingFilter())
         slack_logger.addHandler(handler)
     return slack_logger
 

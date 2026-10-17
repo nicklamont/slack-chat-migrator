@@ -352,6 +352,24 @@ class TestHandleException:
             logging.ERROR, "Migration failed: unexpected", exc_info=True
         )
 
+    def test_generic_exception_log_has_traceback(self, tmp_path):
+        """The "Migration failed" entry in migration.log includes the traceback."""
+        from slack_chat_migrator.utils.logging import setup_logger
+
+        logger = setup_logger(output_dir=str(tmp_path))
+        try:
+            try:
+                raise RuntimeError("unexpected")
+            except RuntimeError as e:
+                handle_exception(e)
+        finally:
+            for handler in logger.handlers[:]:
+                logger.removeHandler(handler)
+                handler.close()
+        text = (tmp_path / "migration.log").read_text()
+        assert "Migration failed: unexpected" in text
+        assert "Traceback (most recent call last)" in text
+
 
 class TestMigrateExceptionPaths:
     """Tests for exception paths in the migrate command."""

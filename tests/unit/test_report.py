@@ -52,6 +52,7 @@ def _make_ctx(
     workspace_admin: str = "admin@example.com",
     export_root: str = "/tmp/slack_export",
     config: MigrationConfig | None = None,
+    debug_api: bool = False,
 ) -> MigrationContext:
     """Build a MigrationContext with sensible test defaults."""
     return MigrationContext(
@@ -62,7 +63,7 @@ def _make_ctx(
         dry_run=dry_run,
         update_mode=False,
         verbose=False,
-        debug_api=False,
+        debug_api=debug_api,
         config=config or MigrationConfig(),
         user_map=user_map
         if user_map is not None
@@ -423,7 +424,57 @@ class TestGenerateReport:
         assert "FAILED MESSAGES DETAILS" in content
         assert "Timestamp: 1234.56" in content
         assert "Error: timeout" in content
+        # Message content only reaches disk with --debug_api
+        assert "hello" not in content
+        assert "Message: user=" in content
+
+    @patch("slack_chat_migrator.cli.report.log_with_context")
+    def test_failure_log_records_ids_not_content(self, mock_log, tmp_path):
+        url = "https://files.slack.com/files-pri/T1-F1/a.pdf?t=xoxe-1-secret"
+        state = _make_state(output_dir=str(tmp_path))
+        state.messages.failed_messages = [
+            _make_failed(
+                channel="general",
+                ts="1234.56",
+                error="boom",
+                payload={
+                    "user": "U001",
+                    "text": "confidential",
+                    "thread_ts": "1200.0",
+                    "files": [{"id": "F1", "name": "a.pdf", "url_private": url}],
+                },
+            ),
+        ]
+        user_resolver = MagicMock()
+        user_resolver.is_external_user.return_value = False
+        generate_report(_make_ctx(), state, user_resolver)
+
+        content = (tmp_path / "channel_logs" / "general_migration.log").read_text()
+        assert "Message: user=U001 subtype=- thread_ts=1200.0 files=F1" in content
+        assert "confidential" not in content
+        assert "xoxe-" not in content
+        assert "a.pdf" not in content
+
+    @patch("slack_chat_migrator.cli.report.log_with_context")
+    def test_failure_log_payload_redacted_with_debug_api(self, mock_log, tmp_path):
+        url = "https://files.slack.com/files-pri/T1-F1/a.pdf?t=xoxe-1-secret"
+        state = _make_state(output_dir=str(tmp_path))
+        state.messages.failed_messages = [
+            _make_failed(
+                channel="general",
+                ts="1234.56",
+                error="boom",
+                payload={"text": "hello", "files": [{"url_private": url}]},
+            ),
+        ]
+        user_resolver = MagicMock()
+        user_resolver.is_external_user.return_value = False
+        generate_report(_make_ctx(debug_api=True), state, user_resolver)
+
+        content = (tmp_path / "channel_logs" / "general_migration.log").read_text()
         assert '"text": "hello"' in content
+        assert "xoxe-1-secret" not in content
+        assert "?t=[REDACTED]" in content
 
     @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_failed_messages_with_no_payload(self, mock_log, tmp_path):
@@ -852,7 +903,7 @@ class TestGenerateReport:
     @patch("slack_chat_migrator.cli.report.log_with_context")
     def test_failed_message_payload_not_serializable(self, mock_log, tmp_path):
         """When payload can't be JSON-serialized, it should use repr fallback."""
-        ctx = _make_ctx()
+        ctx = _make_ctx(debug_api=True)
         state = _make_state(output_dir=str(tmp_path))
 
         # Create an object that can't be JSON-serialized
