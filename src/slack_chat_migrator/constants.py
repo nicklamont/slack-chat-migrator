@@ -64,3 +64,44 @@ PERMISSION_DENIED_ERROR = "PERMISSION_DENIED"
 API_THROTTLE_MESSAGE_SECONDS = 0.05
 API_THROTTLE_MEMBER_SECONDS = 0.1
 API_THROTTLE_DISCOVERY_SECONDS = 0.2
+
+# --- Slack non-content subtypes ---
+# Channel events and edit-log records that carry no user content. The
+# message sender decides how to skip them (SYSTEM_SUBTYPES above is the set
+# it currently filters).
+GROUP_JOIN_SUBTYPE = "group_join"
+GROUP_LEAVE_SUBTYPE = "group_leave"
+TOMBSTONE_SUBTYPE = "tombstone"  # placeholder for a deleted thread parent
+HUDDLE_THREAD_SUBTYPE = "huddle_thread"  # skip only when it has no text
+MESSAGE_CHANGED_SUBTYPE = "message_changed"
+MESSAGE_DELETED_SUBTYPE = "message_deleted"
+CHANNEL_EVENT_SUBTYPES = frozenset(
+    {
+        CHANNEL_JOIN_SUBTYPE,
+        CHANNEL_LEAVE_SUBTYPE,
+        GROUP_JOIN_SUBTYPE,
+        GROUP_LEAVE_SUBTYPE,
+        "channel_topic",
+        "channel_purpose",
+        "channel_name",
+        "channel_archive",
+        "channel_unarchive",
+        "channel_convert_to_private",
+        "channel_convert_to_public",
+        "channel_posting_permissions",
+        "group_topic",
+        "group_purpose",
+        "group_name",
+        "group_archive",
+        "group_unarchive",
+        "pinned_item",
+        "unpinned_item",
+        "bot_add",
+        "bot_remove",
+        "bot_enable",
+        "bot_disable",
+    }
+)
+# Export records of an edit or deletion; the edited text is already in the
+# original message (with an ``edited`` field).
+EDIT_LOG_SUBTYPES = frozenset({MESSAGE_CHANGED_SUBTYPE, MESSAGE_DELETED_SUBTYPE})

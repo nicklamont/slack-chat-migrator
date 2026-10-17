@@ -1,5 +1,7 @@
 """Unit tests for the formatting module."""
 
+import os
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -8,6 +10,7 @@ from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.utils.formatting import (
     _parse_rich_text_elements,
     convert_formatting,
+    format_epoch_utc,
     parse_slack_blocks,
 )
 
@@ -1978,3 +1981,197 @@ class TestChatQuotesAndNestedLists:
         }
         result = parse_slack_blocks(message)
         assert result.endswith("Plan\n* one\n    * sub\n        * subsub")
+
+
+# --- legacy attachments and UTC timestamps ---
+
+
+@pytest.fixture
+def far_from_utc(monkeypatch):
+    """Run the test with the host in a time zone far from UTC."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset() is not available on this platform")
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+class TestLegacyAttachments:
+    """Bot and integration attachments are rendered as text."""
+
+    def test_attachment_only_bot_post(self):
+        message = {
+            "type": "message",
+            "subtype": "bot_message",
+            "text": "",
+            "attachments": [
+                {
+                    "fallback": "PR #1: Fix bug",
+                    "pretext": "New pull request",
+                    "title": "PR #1: Fix bug",
+                    "title_link": "https://github.example/acme/app/pull/1",
+                    "text": "Fixes the *login* crash &amp; adds tests",
+                    "fields": [
+                        {"title": "Repo", "value": "acme/app", "short": True},
+                        {"title": "Status", "value": "open", "short": True},
+                    ],
+                    "footer": "GitHub",
+                }
+            ],
+        }
+        assert _render(message) == (
+            "New pull request\n"
+            "<https://github.example/acme/app/pull/1|PR #1: Fix bug>\n"
+            "Fixes the *login* crash & adds tests\n"
+            "*Repo*: acme/app\n"
+            "*Status*: open\n"
+            "GitHub"
+        )
+
+    def test_message_text_and_attachment_are_both_kept(self):
+        message = {
+            "text": "see alert",
+            "attachments": [{"title": "CPU high", "text": "host-1 at 99%"}],
+        }
+        assert _render(message) == "see alert\n\n*CPU high*\nhost-1 at 99%"
+
+    def test_attachment_after_blocks(self):
+        message = {
+            "text": "deploy",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "deploy"}}
+            ],
+            "attachments": [{"text": "build <https://ci.example/1|#1> passed"}],
+        }
+        assert _render(message) == "deploy\n\nbuild <https://ci.example/1|#1> passed"
+
+    def test_fallback_only_when_nothing_else(self):
+        message = {"text": "", "attachments": [{"fallback": "Alert: disk full"}]}
+        assert _render(message) == "Alert: disk full"
+
+    def test_fallback_not_repeated_from_message_text(self):
+        message = {
+            "text": "Alert: disk full",
+            "attachments": [{"fallback": "Alert: disk full", "color": "danger"}],
+        }
+        assert _render(message) == "Alert: disk full"
+
+    def test_fallback_ignored_when_content_present(self):
+        message = {
+            "text": "",
+            "attachments": [{"fallback": "summary", "text": "details"}],
+        }
+        assert _render(message) == "details"
+
+    def test_link_unfurl_without_content_renders_nothing(self):
+        message = {
+            "text": "<https://example.com/page>",
+            "attachments": [
+                {
+                    "from_url": "https://example.com/page",
+                    "fallback": "example.com",
+                    "image_url": "https://example.com/i.png",
+                }
+            ],
+        }
+        assert _render(message) == "https://example.com/page"
+
+    def test_link_unfurl_with_content(self):
+        message = {
+            "text": "<https://example.com/page>",
+            "attachments": [
+                {
+                    "from_url": "https://example.com/page",
+                    "service_name": "Example",
+                    "title": "Example page",
+                    "title_link": "https://example.com/page",
+                    "text": "A description",
+                }
+            ],
+        }
+        assert _render(message) == (
+            "https://example.com/page\n\n"
+            "<https://example.com/page|Example page>\nA description"
+        )
+
+    def test_slack_message_unfurl_is_rendered_as_forwarded(self):
+        message = {
+            "text": "<https://acme.slack.com/archives/C0123/p1700000000000100>",
+            "attachments": [
+                {
+                    "from_url": "https://acme.slack.com/archives/C0123/p1700000000000100",
+                    "author_name": "Alice",
+                    "text": "original words",
+                    "ts": "1700000000.000100",
+                }
+            ],
+        }
+        result = parse_slack_blocks(message)
+        assert "*Forwarded message from Alice" in result
+        assert result.endswith("original words")
+
+    def test_attachment_blocks_are_rendered(self):
+        message = {
+            "text": "",
+            "attachments": [
+                {
+                    "color": "#36a64f",
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": "*Deployed* v2"},
+                        }
+                    ],
+                }
+            ],
+        }
+        assert _render(message) == "*Deployed* v2"
+
+    def test_fields_without_title_or_value(self):
+        message = {
+            "text": "",
+            "attachments": [
+                {
+                    "fields": [
+                        {"title": "Only title", "value": ""},
+                        {"title": "", "value": "only value"},
+                        "not-a-dict",
+                    ]
+                }
+            ],
+        }
+        assert _render(message) == "*Only title*\nonly value"
+
+    def test_non_dict_attachments_are_ignored(self):
+        assert parse_slack_blocks({"text": "hi", "attachments": ["x", None]}) == "hi"
+
+
+class TestTimestampsInUtc:
+    """Forward times don't depend on the host's time zone."""
+
+    def test_forward_time_is_utc_and_labelled(self, far_from_utc):
+        message = {
+            "text": "",
+            "attachments": [
+                {
+                    "is_share": True,
+                    "author_name": "Alice",
+                    "text": "hello",
+                    "ts": "1700000000",
+                }
+            ],
+        }
+        result = parse_slack_blocks(message)
+        assert "(originally sent November 14, 2023 at 10:13 PM UTC)" in result
+
+    def test_format_epoch_utc(self, far_from_utc):
+        assert format_epoch_utc("1700000000.000100") == "2023-11-14 22:13 UTC"
+        assert format_epoch_utc(1700000000, "%H:%M:%S %Z") == "22:13:20 UTC"
+        assert format_epoch_utc("not-a-ts") is None
+        assert format_epoch_utc(None) is None
+
+    def test_tz_fixture_really_changes_local_time(self, far_from_utc):
+        assert os.environ["TZ"] == "Asia/Tokyo"
+        assert time.localtime(1700000000).tm_hour == 7

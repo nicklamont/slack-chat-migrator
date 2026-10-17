@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
 
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.core.context import MigrationContext
@@ -92,3 +95,47 @@ class TestEmojiInPayloadText:
             ctx,
         )
         assert text == "\U0001f99c `key:ok:value` \U0001f389"
+
+
+class TestEditMarker:
+    """The edit marker is in UTC, whatever the host's time zone."""
+
+    @pytest.mark.skipif(not hasattr(time, "tzset"), reason="needs time.tzset()")
+    @pytest.mark.parametrize("zone", ["UTC", "America/Los_Angeles", "Asia/Tokyo"])
+    def test_edit_time_is_utc(self, monkeypatch: pytest.MonkeyPatch, zone: str) -> None:
+        monkeypatch.setenv("TZ", zone)
+        time.tzset()
+        try:
+            text = _payload_text(
+                {"ts": "1699999000.000100", "user": "U001", "text": "fixed"},
+                is_edited=True,
+                edited_ts="1700000000.000000",
+            )
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+        assert text == "fixed\n\n_(edited at 2023-11-14 22:13:20 UTC)_"
+
+    def test_invalid_edit_ts_is_shown_raw(self) -> None:
+        text = _payload_text(
+            {"ts": "1699999000.000100", "user": "U001", "text": "fixed"},
+            is_edited=True,
+            edited_ts="garbage",
+        )
+        assert text == "fixed\n\n_(edited at garbage)_"
+
+
+class TestAttachmentText:
+    """Legacy attachments reach the payload text."""
+
+    def test_attachment_only_bot_post(self) -> None:
+        text = _payload_text(
+            {
+                "ts": "1700000000.000100",
+                "subtype": "bot_message",
+                "bot_id": "B1",
+                "text": "",
+                "attachments": [{"title": "CPU high", "text": "host-1 at 99%"}],
+            }
+        )
+        assert "*CPU high*\nhost-1 at 99%" in text

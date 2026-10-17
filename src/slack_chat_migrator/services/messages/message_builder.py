@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import logging
 import time
@@ -10,7 +9,11 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from slack_chat_migrator.utils.api import slack_ts_to_rfc3339
-from slack_chat_migrator.utils.formatting import convert_formatting, parse_slack_blocks
+from slack_chat_migrator.utils.formatting import (
+    convert_formatting,
+    format_epoch_utc,
+    parse_slack_blocks,
+)
 from slack_chat_migrator.utils.logging import (
     log_with_context,
 )
@@ -85,11 +88,10 @@ def build_message_payload(
         custom_emoji_map=ctx.config.custom_emoji_map,
     )
 
-    # For edited messages, add an edit indicator
+    # For edited messages, add an edit indicator (UTC, so it doesn't depend
+    # on the migration host's time zone)
     if is_edited:
-        edit_time = datetime.datetime.fromtimestamp(float(edited_ts)).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        edit_time = format_epoch_utc(edited_ts, "%Y-%m-%d %H:%M:%S UTC") or edited_ts
         formatted_text = f"{formatted_text}\n\n_(edited at {edit_time})_"
 
     # Convert Slack timestamp to RFC3339 format for Google Chat

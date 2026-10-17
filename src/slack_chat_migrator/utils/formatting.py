@@ -333,65 +333,166 @@ def _parse_rich_text_elements(
     )
 
 
-def _extract_forwarded_messages(
+# A Slack message permalink (``https://acme.slack.com/archives/C0123/p1700...``).
+_SLACK_MESSAGE_URL_RE = re.compile(
+    r"^https://[^/\s]*\bslack\.com/archives/[A-Z0-9]+/p\d+", re.IGNORECASE
+)
+
+
+def _is_message_share(attachment: dict) -> bool:
+    """Return True if an attachment shares or unfurls a Slack message."""
+    if attachment.get("is_share") or attachment.get("is_msg_unfurl"):
+        return True
+    from_url = attachment.get("from_url")
+    return isinstance(from_url, str) and bool(_SLACK_MESSAGE_URL_RE.match(from_url))
+
+
+def _attachment_str(attachment: dict, key: str) -> str:
+    """Return a string attachment field, stripped, or ``""``."""
+    value = attachment.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _render_shared_message(
+    attachment: dict, custom_emoji_map: Mapping[str, object] | None
+) -> str:
+    """Render a forwarded/shared Slack message attachment.
+
+    The header names the author and the original time, in UTC.
+
+    Args:
+        attachment: An ``is_share``/``is_msg_unfurl`` attachment.
+        custom_emoji_map: ``config.custom_emoji_map``, for nested blocks.
+
+    Returns:
+        ``*Forwarded message from X (originally sent ...):*`` plus the
+        shared text, or ``""`` when the attachment has no text.
+    """
+    author_info = ""
+    if attachment.get("author_name"):
+        author_info = f" from {attachment['author_name']}"
+    elif attachment.get("author_subname"):
+        author_info = f" from {attachment['author_subname']}"
+
+    timestamp_info = ""
+    if attachment.get("ts"):
+        readable_time = format_epoch_utc(attachment["ts"], "%B %d, %Y at %I:%M %p UTC")
+        if readable_time:
+            timestamp_info = f" (originally sent {readable_time})"
+        else:
+            timestamp_info = f" (originally sent at {attachment['ts']})"
+
+    # Prefer rich message_blocks over plain text
+    forwarded_text = ""
+    for msg_block in attachment.get("message_blocks") or []:
+        if "message" in msg_block and "blocks" in msg_block["message"]:
+            forwarded_text = parse_slack_blocks(msg_block["message"], custom_emoji_map)
+            break
+
+    if not forwarded_text:
+        forwarded_text = attachment.get("text") or attachment.get("fallback") or ""
+
+    if not forwarded_text.strip():
+        return ""
+
+    forwarded_text = _convert_bullets_to_gchat(forwarded_text.strip())
+    header = f"*Forwarded message{author_info}{timestamp_info}:*"
+    return f"{header}\n{forwarded_text}"
+
+
+def _render_legacy_attachment(
+    attachment: dict,
+    custom_emoji_map: Mapping[str, object] | None,
+    message_text: str = "",
+) -> str:
+    """Render a legacy (secondary) attachment, as bots and integrations post.
+
+    Renders ``pretext``, the ``title`` (linked to ``title_link``), the
+    ``text`` (or the attachment's own ``blocks``), the ``fields`` as
+    ``*title*: value`` lines and the ``footer``.  ``fallback`` is used only
+    when there is nothing else and the message text doesn't already say it,
+    and never for link unfurls (``from_url``), whose URL is already in the
+    message.
+
+    Args:
+        attachment: A Slack attachment that doesn't share a message.
+        custom_emoji_map: ``config.custom_emoji_map``, for nested blocks.
+        message_text: The message's own ``text``, to avoid repeating it.
+
+    Returns:
+        The attachment as mrkdwn lines, or ``""``.
+    """
+    parts: list[str] = []
+    pretext = _attachment_str(attachment, "pretext")
+    if pretext:
+        parts.append(pretext)
+
+    title = _attachment_str(attachment, "title")
+    title_link = _attachment_str(attachment, "title_link")
+    if title and title_link:
+        parts.append(f"<{title_link}|{title}>")
+    elif title:
+        parts.append(f"*{title}*")
+
+    body = _attachment_str(attachment, "text")
+    if not body and attachment.get("blocks"):
+        body = parse_slack_blocks(
+            {"blocks": attachment["blocks"], "text": ""}, custom_emoji_map
+        ).strip()
+    if body:
+        parts.append(_convert_bullets_to_gchat(body))
+
+    for field_data in attachment.get("fields") or []:
+        if not isinstance(field_data, dict):
+            continue
+        field_title = _attachment_str(field_data, "title")
+        field_value = _attachment_str(field_data, "value")
+        if field_title and field_value:
+            parts.append(f"*{field_title}*: {field_value}")
+        elif field_title or field_value:
+            parts.append(f"*{field_title}*" if field_title else field_value)
+
+    footer = _attachment_str(attachment, "footer")
+    if footer:
+        parts.append(footer)
+
+    if not parts and not attachment.get("from_url"):
+        fallback = _attachment_str(attachment, "fallback")
+        if fallback and fallback not in message_text:
+            parts.append(fallback)
+
+    return "\n".join(parts)
+
+
+def _render_attachments(
     message: dict, custom_emoji_map: Mapping[str, object] | None = None
 ) -> list[str]:
-    """Extract forwarded/shared message content from Slack attachments.
+    """Render a message's attachments as text, in order.
 
-    Processes attachments that represent forwarded messages, extracting
-    text content with author and timestamp metadata. Converts bullet
-    formatting to Google Chat compatible format.
+    Shared/forwarded Slack messages get a "Forwarded message" header; other
+    attachments (alerts, CI and ticket bots, link previews) are rendered
+    from their pretext, title, text, fields and footer.
 
     Args:
         message: A Slack message dict with an optional 'attachments' field.
         custom_emoji_map: ``config.custom_emoji_map``, for nested blocks.
 
     Returns:
-        List of formatted forwarded message strings.
+        One mrkdwn string per attachment that has text.
     """
-    forwarded_texts: list[str] = []
-    for attachment in message.get("attachments", []):
-        if not (attachment.get("is_share") or attachment.get("is_msg_unfurl")):
+    rendered: list[str] = []
+    for attachment in message.get("attachments") or []:
+        if not isinstance(attachment, dict):
             continue
-
-        author_info = ""
-        if attachment.get("author_name"):
-            author_info = f" from {attachment['author_name']}"
-        elif attachment.get("author_subname"):
-            author_info = f" from {attachment['author_subname']}"
-
-        timestamp_info = ""
-        if attachment.get("ts"):
-            try:
-                timestamp = float(attachment["ts"])
-                readable_time = datetime.fromtimestamp(timestamp).strftime(
-                    "%B %d, %Y at %I:%M %p"
-                )
-                timestamp_info = f" (originally sent {readable_time})"
-            except (ValueError, OSError):
-                timestamp_info = f" (originally sent at {attachment['ts']})"
-
-        # Prefer rich message_blocks over plain text
-        forwarded_text = ""
-        if "message_blocks" in attachment:
-            for msg_block in attachment.get("message_blocks", []):
-                if "message" in msg_block and "blocks" in msg_block["message"]:
-                    forwarded_text = parse_slack_blocks(
-                        msg_block["message"], custom_emoji_map
-                    )
-                    break
-
-        if not forwarded_text:
-            forwarded_text = attachment.get("text") or attachment.get("fallback") or ""
-
-        if not forwarded_text.strip():
-            continue
-
-        forwarded_text = _convert_bullets_to_gchat(forwarded_text.strip())
-        header = f"*Forwarded message{author_info}{timestamp_info}:*"
-        forwarded_texts.append(f"{header}\n{forwarded_text}")
-
-    return forwarded_texts
+        if _is_message_share(attachment):
+            text = _render_shared_message(attachment, custom_emoji_map)
+        else:
+            text = _render_legacy_attachment(
+                attachment, custom_emoji_map, str(message.get("text") or "")
+            )
+        if text.strip():
+            rendered.append(text)
+    return rendered
 
 
 # A bullet line in Slack's plain text (bullet, white bullet or small square).
@@ -427,15 +528,15 @@ def _convert_bullets_to_gchat(text: str) -> str:
     return "\n".join(lines)
 
 
-def _combine_with_forwarded(main_text: str, forwarded_texts: list[str]) -> str:
-    """Combine main message text with forwarded message content.
+def _combine_with_attachments(main_text: str, forwarded_texts: list[str]) -> str:
+    """Combine main message text with rendered attachments.
 
     Args:
         main_text: The primary message text.
-        forwarded_texts: List of formatted forwarded message strings.
+        forwarded_texts: Rendered attachments (forwarded messages, alerts...).
 
     Returns:
-        Combined text, preferring forwarded content when main text is empty.
+        Combined text, using only the attachments when main text is empty.
     """
     if not main_text.strip() and forwarded_texts:
         return "\n\n".join(forwarded_texts)
@@ -710,10 +811,11 @@ def parse_slack_blocks(
     """Render a Slack message as mrkdwn, from its blocks or its ``text``.
 
     Renders section, rich_text, header, context, divider, markdown and table
-    blocks (and video titles), plus forwarded/shared message content from
-    the attachments.  Falls back to the mrkdwn ``text`` field when there are
-    no blocks, when the blocks render nothing, or when any block or element
-    type is unknown (so no words are silently dropped).
+    blocks (and video titles), then the attachments: forwarded/shared
+    messages and legacy attachments (pretext, title, text, fields, footer).
+    Falls back to the mrkdwn ``text`` field when there are no blocks, when
+    the blocks render nothing, or when any block or element type is unknown
+    (so no words are silently dropped).
 
     Args:
         message: A Slack message dict with 'blocks' and/or 'text' fields.
@@ -722,12 +824,12 @@ def parse_slack_blocks(
     Returns:
         Escaped mrkdwn for :func:`convert_formatting`.
     """
-    forwarded_texts = _extract_forwarded_messages(message, custom_emoji_map)
+    attachment_texts = _render_attachments(message, custom_emoji_map)
     text_field = str(message.get("text") or "")
 
     blocks = message.get("blocks")
     if not blocks or not isinstance(blocks, list):
-        return _combine_with_forwarded(text_field, forwarded_texts)
+        return _combine_with_attachments(text_field, attachment_texts)
 
     rctx = _RenderContext(
         labels=_harvest_labels(text_field), custom_emoji_map=custom_emoji_map
@@ -746,7 +848,7 @@ def parse_slack_blocks(
     elif not result:
         result = text_field
 
-    return _combine_with_forwarded(result, forwarded_texts)
+    return _combine_with_attachments(result, attachment_texts)
 
 
 # --- mrkdwn to Google Chat conversion -------------------------------------
