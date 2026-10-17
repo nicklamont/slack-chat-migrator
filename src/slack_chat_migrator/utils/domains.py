@@ -1,9 +1,9 @@
 """Who counts as internal: users on the workspace's Google Workspace domains.
 
 The internal domains are the workspace admin's domain plus
-``config.workspace_domains``.  :meth:`UserResolver.is_external_user` makes
-the decision for the whole tool; :func:`is_external_email` gives the same
-answer where no resolver is at hand.
+``config.workspace_domains``.  :meth:`UserResolver.is_external_user` uses
+these helpers and makes the decision for the whole tool; FileHandler and
+FolderManager call them directly only when they have no resolver.
 """
 
 from __future__ import annotations

@@ -21,6 +21,7 @@ from slack_chat_migrator.services.files.file_download import (
     DownloadResult,
     DownloadStatus,
 )
+from slack_chat_migrator.services.user_resolver import UserResolver
 from tests.unit.drive_fakes import FakeDrive, http_error
 
 USERS = {
@@ -328,6 +329,35 @@ class TestWorkspaceDomains:
         assert self._post(handler, downloads, "ext@other.org").success
 
         assert self._grants(fake) == []
+
+    def test_production_wiring_honours_workspace_domains(self, tmp_path, downloads):
+        """A real UserResolver, as the migrator passes it (#89)."""
+        fake = FakeDrive()
+        config = MigrationConfig(
+            shared_drive=SharedDriveConfig(name=DRIVE_NAME),
+            workspace_domains=["corp.example.net"],
+        )
+        users = {**USERS, "UC": self.CORP}
+        resolver = UserResolver(
+            config=config,
+            state=MigrationState(),
+            chat=MagicMock(),
+            creds_path=None,
+            user_map=users,
+            unmapped_user_tracker=MagicMock(),
+            export_root=str(tmp_path),
+            workspace_admin="admin@example.com",
+            workspace_domain="example.com",
+        )
+        handler = make_handler(fake, tmp_path, config=config)
+        handler.user_resolver = resolver
+        handler.user_map = users
+
+        result = self._post(handler, downloads, self.CORP)
+
+        assert result.success
+        assert self._grants(fake) == [(self.CORP, "writer")]
+        assert handler.get_file_statistics()["external_user_files"] == 0
 
     def test_the_resolver_decides_when_there_is_one(self, tmp_path, downloads):
         """The resolver's answer wins, so the whole tool agrees on who is internal."""

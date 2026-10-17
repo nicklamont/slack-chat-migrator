@@ -865,6 +865,7 @@ src/slack_chat_migrator/
 │   └── user_resolver.py           # User identity resolution and impersonation
 └── utils/                         # Shared utilities
     ├── api.py                     # API retry logic, credential handling
+    ├── domains.py                 # Internal domains: admin's domain + workspace_domains
     ├── emoji.py                   # Slack emoji names → Unicode (skin tones, custom map)
     ├── formatting.py              # Slack blocks/mrkdwn → Chat text, message splitting
     ├── logging.py                 # Logging setup and utilities
