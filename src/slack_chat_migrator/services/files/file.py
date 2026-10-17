@@ -30,6 +30,7 @@ from slack_chat_migrator.services.drive import (
 from slack_chat_migrator.services.drive.drive_uploader import SOURCE_SLACK_ID
 from slack_chat_migrator.services.drive.folder_manager import FolderLookup
 from slack_chat_migrator.services.files.file_download import (
+    AUTH_FAILURE_REASONS,
     REASON_EXTERNAL,
     DownloadResult,
     DownloadStatus,
@@ -63,9 +64,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger("slack_chat_migrator")
 
 
-#: ``UploadResult.skip_reason`` for files that can't be fetched (deleted,
-#: hidden, external, sign-in page, ...).  The detailed reason is in
-#: ``metadata["unavailable_reason"]``.  Such files are not failures.
+#: ``UploadResult.skip_reason`` for files that don't exist any more or aren't
+#: in Slack (deleted, hidden, external, ...).  The detailed reason is in
+#: ``metadata["unavailable_reason"]``.  Such files are not failures; refused
+#: downloads (401/403, sign-in pages) are.
 SKIP_REASON_UNAVAILABLE = "unavailable"
 SKIP_REASON_GOOGLE_DOCS_LINK = "google_docs_link"
 
@@ -185,6 +187,7 @@ class FileHandler:
             "ownership_transfer_failed": 0,
             "external_folder_grant_failures": 0,
             "restricted_folder_failures": 0,
+            "download_auth_failures": 0,
             "files_by_channel": {},
         }
 
@@ -474,7 +477,7 @@ class FileHandler:
             )
             if outcome is not None:
                 return outcome
-            assert download.path is not None
+            file_path = download.file_path  # an OK result always has one
 
             if document is not None:
                 return self._upload_document(
@@ -486,7 +489,7 @@ class FileHandler:
             # Try direct Chat upload for eligible small images
             direct_result = self._try_direct_upload(
                 file_obj,
-                download.path,
+                file_path,
                 download.size,
                 mime_type,
                 channel,
@@ -501,7 +504,7 @@ class FileHandler:
             # Fall back to Drive upload, reusing the same temp file
             drive_result = self._try_drive_upload(
                 file_obj,
-                download.path,
+                file_path,
                 channel,
                 sender_email,
                 file_id,
@@ -565,7 +568,7 @@ class FileHandler:
         A failed conversion falls back to a plain ``.html``/``.csv`` upload.
         """
         file_id = file_obj.get("id") or "unknown"
-        assert download.path is not None
+        file_path = download.file_path  # only called for OK results
         attempts: list[tuple[str, str | None]] = []
         if document.target_mime:
             attempts.append((document.title, document.target_mime))
@@ -574,7 +577,7 @@ class FileHandler:
         for drive_name, target_mime in attempts:
             result = self._upload_to_drive(
                 file_obj,
-                download.path,
+                file_path,
                 channel,
                 sender_email,
                 file_hash=download.md5,
@@ -760,12 +763,38 @@ class FileHandler:
 
         log_with_context(
             logging.ERROR,
-            f"Failed to download file {name}, skipping attachment processing",
+            f"Failed to download file {name} ({download.reason}), skipping"
+            " attachment processing",
             channel=channel,
             file_id=file_id,
             reason=download.reason or "",
         )
+        if download.reason in AUTH_FAILURE_REASONS:
+            self._note_auth_failure()
         return UploadResult(error=f"Download failed: {download.reason}", name=name)
+
+    def _note_auth_failure(self) -> None:
+        """Count a refused download and say how to fix it (first, then every 100)."""
+        self._increment_stat("download_auth_failures")
+        count = self.file_stats["download_auth_failures"]
+        if count != 1 and count % 100:
+            return
+        if self.config.slack_token:
+            fix = (
+                "slack_token is set but was refused: check that it is a token"
+                " of this workspace with the files:read scope"
+            )
+        else:
+            fix = (
+                "set slack_token in config.yaml (or the SLACK_TOKEN environment"
+                " variable) to a Slack token with files:read, or re-export"
+            )
+        log_with_context(
+            logging.ERROR,
+            f"{count} attachment download(s) refused so far (HTTP 401/403 or a"
+            f" sign-in page instead of the file): {fix}. These files are"
+            " counted as failed.",
+        )
 
     def _resolve_mime_type(
         self,
@@ -1411,6 +1440,7 @@ class FileHandler:
                 "external_folder_grant_failures"
             ],
             "restricted_folder_failures": self.file_stats["restricted_folder_failures"],
+            "download_auth_failures": self.file_stats["download_auth_failures"],
             "files_by_channel": dict(self.file_stats["files_by_channel"]),
             "success_rate": successful / max(1, successful + failed) * 100,
         }

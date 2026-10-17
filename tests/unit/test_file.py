@@ -1,5 +1,6 @@
 """Unit tests for the file handling module."""
 
+import dataclasses
 import hashlib
 import os
 import tempfile
@@ -451,8 +452,9 @@ class TestUploadStrategy:
     def test_large_image_goes_to_drive(self):
         """Images larger than 25MB should bypass direct upload."""
         handler = self._make_ready_handler()
-        download = _ok_download(b"\x89PNG")
-        download.size = 26 * 1024 * 1024  # as measured while streaming
+        download = dataclasses.replace(
+            _ok_download(b"\x89PNG"), size=26 * 1024 * 1024
+        )  # as measured while streaming
         handler._download_file = MagicMock(return_value=download)
         handler._upload_to_drive = MagicMock(
             return_value=UploadResult(
@@ -1635,7 +1637,7 @@ class TestUnavailableFiles:
     def test_unavailable_result_is_cached(self):
         handler = _make_handler(folder_id="root")
         handler._download_file = MagicMock(
-            return_value=DownloadResult(DownloadStatus.UNAVAILABLE, reason="html_page")
+            return_value=DownloadResult(DownloadStatus.UNAVAILABLE, reason="http_404")
         )
         handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
         second = handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
@@ -1765,7 +1767,7 @@ def test_unavailable_slack_download_url_is_not_kept():
     signed_url = "https://files.slack.com/files-pri/T-F/a.png?t=xoxe-secret"
     handler._download_file = MagicMock(
         return_value=DownloadResult(
-            DownloadStatus.UNAVAILABLE, reason="html_page", url=signed_url
+            DownloadStatus.UNAVAILABLE, reason="http_404", url=signed_url
         )
     )
     result = handler.upload_attachment(
@@ -1773,3 +1775,59 @@ def test_unavailable_slack_download_url_is_not_kept():
     )
     assert result.skip_reason == "unavailable"
     assert result.url is None
+
+
+class TestRefusedDownloads:
+    """401/403 and sign-in pages are failures, with a slack_token hint (SF4)."""
+
+    def _handler(self, token=""):
+        config = MigrationConfig(
+            shared_drive=SharedDriveConfig(name="Test Drive"), slack_token=token
+        )
+        handler = _make_handler(folder_id="root", config=config)
+        return handler
+
+    @pytest.mark.parametrize("reason", ["auth", "html_page"])
+    def test_counted_as_failed_with_reason(self, reason):
+        handler = self._handler()
+        handler._download_file = MagicMock(
+            return_value=DownloadResult(DownloadStatus.FAILED, reason=reason)
+        )
+
+        result = handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
+
+        assert result.error == f"Download failed: {reason}"
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 1
+        assert stats["unavailable_files"] == 0
+        assert stats["download_auth_failures"] == 1
+
+    @pytest.mark.parametrize(
+        ("token", "hint"),
+        [("", "set slack_token"), ("xoxp-x", "slack_token is set but was refused")],
+    )
+    def test_hint_is_logged_once_then_every_100(self, caplog, token, hint):
+        handler = self._handler(token)
+        handler._download_file = MagicMock(
+            return_value=DownloadResult(DownloadStatus.FAILED, reason="auth")
+        )
+
+        for i in range(150):
+            handler.upload_attachment({"id": f"F{i}", "name": "a.png"}, "general")
+
+        hints = [
+            r
+            for r in caplog.records
+            if r.levelname == "ERROR" and hint in r.getMessage()
+        ]
+        assert len(hints) == 2  # the 1st and the 100th
+        assert handler.get_file_statistics()["download_auth_failures"] == 150
+
+    def test_other_failures_give_no_token_hint(self, caplog):
+        handler = self._handler()
+        handler._download_file = MagicMock(
+            return_value=DownloadResult(DownloadStatus.FAILED, reason="http_503")
+        )
+        handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
+        assert "slack_token" not in caplog.text
+        assert handler.get_file_statistics()["download_auth_failures"] == 0
