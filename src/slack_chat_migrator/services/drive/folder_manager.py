@@ -23,6 +23,7 @@ from slack_chat_migrator.services.drive_adapter import (
     PermissionChange,
     http_status,
     is_drive_call_error,
+    is_transient_error,
 )
 from slack_chat_migrator.utils.api import escape_drive_query_value
 from slack_chat_migrator.utils.domains import (
@@ -48,18 +49,23 @@ class FolderLookup:
             folder).
         restriction_failed: The folder exists but couldn't be made
             limited-access, so a private conversation's files must not go in.
+        retryable: The failure may go away (a network or server error, a
+            rate limit); False for a refusal such as a 403 or 404.
     """
 
     folder_id: str | None
     error: str | None = None
     restriction_failed: bool = False
+    retryable: bool = False
 
     def __post_init__(self) -> None:
-        """Reject a folder with an error, and a restriction failure without one."""
+        """Reject a folder with an error, and failure flags without one."""
         if self.folder_id is not None and self.error is not None:
             raise ValueError("a FolderLookup with a folder has no error")
-        if self.restriction_failed and not self.error:
-            raise ValueError("a failed restriction needs an error")
+        if (self.restriction_failed or self.retryable) and not self.error:
+            raise ValueError(
+                "a failed restriction or a retryable failure needs an error"
+            )
 
 
 @dataclass(frozen=True)
@@ -161,6 +167,8 @@ class FolderManager:
         # restricting each other folder has failed (it is retried each time).
         self.restricted_folders: set[str] = set()
         self.restriction_failures: dict[str, int] = {}
+        # Whether each folder's last failed restriction may go away.
+        self.restriction_retryable: dict[str, bool] = {}
 
     def _is_outside_workspace_domains(self, email: str) -> bool:
         """Default external check: the email is on no internal domain."""
@@ -221,16 +229,19 @@ class FolderManager:
         except DRIVE_CALL_CANDIDATES as e:
             if not is_drive_call_error(e):
                 raise
+            self.restriction_retryable[folder_id] = is_transient_error(e)
             self._log_restriction_failure(folder_id, channel, str(e))
             return False
         if response.get("inheritedPermissionsDisabled") is not True:
             # Fail closed: a response that doesn't confirm it isn't proof.
+            self.restriction_retryable[folder_id] = False
             self._log_restriction_failure(
                 folder_id, channel, "Drive didn't confirm inherited permissions off"
             )
             return False
         self.restricted_folders.add(folder_id)
         self.restriction_failures.pop(folder_id, None)
+        self.restriction_retryable.pop(folder_id, None)
         log_with_context(
             logging.INFO,
             f"Limited access to the {channel} folder to its members",
@@ -251,7 +262,7 @@ class FolderManager:
             f" folder could not be made limited-access ({cause}). Make the"
             " workspace admin a Manager of the shared drive, or set"
             " restrict_private_channel_folders: false to accept drive-wide"
-            " visibility. Retrying with the next file.",
+            " visibility. Tried again with the next file.",
             channel=channel,
             folder_id=folder_id,
         )
@@ -348,7 +359,7 @@ class FolderManager:
             )
             new_folder_id: str | None = folder.get("id")
             if not new_folder_id:
-                return FolderLookup(None, "Drive returned no folder ID")
+                return FolderLookup(None, "Drive returned no folder ID", retryable=True)
             log_with_context(
                 logging.INFO,
                 f"Successfully created regular Drive folder: {folder_name}"
@@ -363,7 +374,9 @@ class FolderManager:
                 logging.ERROR, f"Failed to create regular Drive folder: {e}"
             )
             return FolderLookup(
-                None, f"could not find or create folder {folder_name!r}: {e}"
+                None,
+                f"could not find or create folder {folder_name!r}: {e}",
+                retryable=is_transient_error(e),
             )
 
     def _folder_query(self, name: str, parent_folder_id: str) -> str:
@@ -452,7 +465,9 @@ class FolderManager:
                     channel, name, parent_folder_id, shared_drive_id, restricted
                 )
                 if not folder_id:
-                    return FolderLookup(None, "Drive returned no folder ID")
+                    return FolderLookup(
+                        None, "Drive returned no folder ID", retryable=True
+                    )
         except DRIVE_CALL_CANDIDATES as e:
             if not is_drive_call_error(e):
                 raise
@@ -462,7 +477,11 @@ class FolderManager:
                 channel=channel,
                 error=str(e),
             )
-            return FolderLookup(None, f"could not find or create the folder: {e}")
+            return FolderLookup(
+                None,
+                f"could not find or create the folder: {e}",
+                retryable=is_transient_error(e),
+            )
 
         if restricted and not self.ensure_restricted(
             folder_id, channel, shared_drive_id
@@ -471,6 +490,7 @@ class FolderManager:
                 None,
                 "the private conversation's folder could not be made limited-access",
                 restriction_failed=True,
+                retryable=self.restriction_retryable.get(folder_id, False),
             )
         return FolderLookup(folder_id)
 
@@ -609,7 +629,11 @@ class FolderManager:
                 channel=channel,
                 error=str(e),
             )
-            return FolderLookup(None, f"could not look up the folder: {e}")
+            return FolderLookup(
+                None,
+                f"could not look up the folder: {e}",
+                retryable=is_transient_error(e),
+            )
 
     def sync_channel_folder(
         self,

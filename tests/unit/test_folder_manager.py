@@ -42,6 +42,45 @@ class TestFolderLookupInvariants:
         with pytest.raises(ValueError, match="needs an error"):
             FolderLookup(None, restriction_failed=True)
 
+    def test_retryable_needs_an_error(self):
+        with pytest.raises(ValueError, match="needs an error"):
+            FolderLookup(None, retryable=True)
+
+    @pytest.mark.parametrize(
+        ("error", "retryable"),
+        [
+            (_make_http_error(503), True),
+            (_make_http_error(403), False),
+            (_make_http_error(404), False),
+            (TimeoutError("slow"), True),
+        ],
+        ids=["503", "403", "404", "timeout"],
+    )
+    def test_lookup_failures_say_whether_they_may_go_away(self, error, retryable):
+        svc = MagicMock()
+        svc.list_files.side_effect = error
+
+        lookup = FolderManager(svc).find_or_create_channel_folder("c", "ROOT")
+
+        assert lookup.retryable is retryable
+
+    @pytest.mark.parametrize(
+        ("error", "retryable"),
+        [(_make_http_error(403), False), (_make_http_error(503), True)],
+        ids=["403", "503"],
+    )
+    def test_restriction_failures_say_whether_they_may_go_away(self, error, retryable):
+        svc = MagicMock()
+        svc.list_files.return_value = {"files": [{"id": "F", "name": "hr"}]}
+        svc.update_file.side_effect = error
+
+        lookup = FolderManager(svc).find_or_create_channel_folder(
+            "hr", "ROOT", "SD", restricted=True
+        )
+
+        assert lookup.restriction_failed
+        assert lookup.retryable is retryable
+
     def test_valid_states(self):
         assert FolderLookup("F").folder_id == "F"
         assert FolderLookup(None).error is None  # looked up, no folder

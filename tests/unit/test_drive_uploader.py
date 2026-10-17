@@ -372,6 +372,25 @@ class TestUploadFileToDrive:
         assert isinstance(failure, DriveUploadFailure)
         assert "HttpError 500" in failure.reason
         assert not failure.conversion_failed  # no target type: not a conversion
+        assert failure.retryable  # a server error may go away
+
+    @pytest.mark.parametrize(
+        ("status", "retryable"), [(400, False), (403, False), (404, False), (429, True)]
+    )
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_http_failures_are_retryable_only_when_transient(
+        self, mock_media_cls, tmp_path, status, retryable
+    ):
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        test_file = tmp_path / "a.txt"
+        test_file.write_bytes(b"data")
+        uploader.drive_service.create_file.side_effect = _http_error(status)
+
+        failure = uploader.upload_file_to_drive(str(test_file), "a.txt", "folder1")
+
+        assert isinstance(failure, DriveUploadFailure)
+        assert failure.retryable is retryable
 
     @pytest.mark.parametrize(
         ("status", "conversion"), [(400, True), (413, True), (500, True), (403, False)]
@@ -406,7 +425,9 @@ class TestUploadFileToDrive:
 
         failure = uploader.upload_file_to_drive(str(test_file), "a.txt", "folder1")
 
-        assert failure == DriveUploadFailure("ConnectionResetError: reset")
+        assert failure == DriveUploadFailure(
+            "ConnectionResetError: reset", retryable=True
+        )
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_reuses_existing_file_by_hash(self, mock_media_cls, tmp_path):
@@ -840,6 +861,7 @@ class TestSlackFileIndex:
 
         assert isinstance(failure, DriveUploadFailure)
         assert "earlier upload" in failure.reason
+        assert failure.retryable
         uploader.drive_service.create_file.assert_not_called()
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
@@ -852,7 +874,9 @@ class TestSlackFileIndex:
 
         failure = uploader.upload_file_to_drive(str(test_file), "a.txt", "folder1")
 
-        assert failure == DriveUploadFailure("RefreshError: invalid_grant")
+        assert failure == DriveUploadFailure(
+            "RefreshError: invalid_grant", retryable=True
+        )
 
     def test_listing_failure_warns_and_reports_once_per_folder(self, caplog):
         reported = []

@@ -144,6 +144,24 @@ class DownloadResult:
         return self.status is DownloadStatus.OK
 
     @property
+    def retryable(self) -> bool:
+        """For ``FAILED``: whether a later attempt may succeed.
+
+        True for network errors and HTTP 408, 429 and 5xx.  Refusals (401,
+        403, a sign-in page, a host off the allow-list), a wrong length,
+        too many redirects, other 4xx and local write errors are permanent.
+        """
+        reason = self.reason or ""
+        if self.status is not DownloadStatus.FAILED:
+            return False
+        if reason.startswith("network_error:"):
+            return True
+        if reason.startswith("http_") and reason[5:].isdigit():
+            status = int(reason[5:])
+            return status in (408, 429) or status >= 500
+        return False
+
+    @property
     def file_path(self) -> str:
         """The downloaded file of an ``OK`` result.
 

@@ -226,6 +226,12 @@ class UploadResult:
     error: str | None = None
     cached: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: For a failed upload: True when a later attempt may succeed (a network
+    #: or server error, a rate limit, a folder or Drive unavailable for such
+    #: a reason, a dedup search that failed), so the message should be held
+    #: back and retried.  False for permanent failures (a refused or
+    #: wrong-sized download, a host off the allow-list, a 4xx refusal).
+    retryable: bool = False
 
     @property
     def success(self) -> bool:

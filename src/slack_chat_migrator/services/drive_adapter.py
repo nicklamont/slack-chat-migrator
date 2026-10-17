@@ -35,6 +35,7 @@ from slack_chat_migrator.constants import (
 from slack_chat_migrator.utils.api import (
     HTTP_REQUEST_TIMEOUT,
     RETRYABLE_NETWORK_ERRORS,
+    is_rate_limit_error,
 )
 
 #: Network failures with a class of their own.  Built from the shared retry
@@ -123,6 +124,24 @@ def is_drive_call_error(error: BaseException) -> bool:
     local OSErrors such as a full disk, which handlers re-raise.
     """
     return isinstance(error, DRIVE_CALL_ERRORS) or is_network_error(error)
+
+
+def is_transient_error(error: BaseException) -> bool:
+    """Whether a later attempt may succeed where *error* failed.
+
+    True for network errors (including network-down OSErrors), credentials
+    that couldn't be refreshed (a later run with working credentials can
+    succeed), and HTTP 408, 429, 5xx and rate-limit 403s.  False for other
+    HTTP errors (400, 404, a 403 that isn't a rate limit) and local errors.
+    """
+    if isinstance(error, HttpError):
+        status = http_status(error) or 0
+        return (
+            status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
+            or status >= HTTP_SERVER_ERROR_MIN
+            or is_rate_limit_error(error)
+        )
+    return isinstance(error, RefreshError) or is_network_error(error)
 
 
 def is_fatal_local_error(error: BaseException) -> bool:

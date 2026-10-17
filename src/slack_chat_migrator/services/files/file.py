@@ -43,6 +43,7 @@ from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_ERRORS,
     is_drive_call_error,
     is_fatal_local_error,
+    is_transient_error,
 )
 from slack_chat_migrator.services.files.file_download import (
     AUTH_FAILURE_REASONS,
@@ -275,6 +276,8 @@ class FileHandler:
         self._conversation_types: dict[str, ConversationType] = {}
         # Hosts whose downloads were refused (each is explained once).
         self._refused_hosts: set[str] = set()
+        # Channels whose missing folder was logged as an error.
+        self._folder_errors_logged: set[str | None] = set()
 
         # Initialize file upload statistics
         self.file_stats: dict[str, Any] = {
@@ -600,7 +603,9 @@ class FileHandler:
                 file_id=file_id,
                 error=str(e),
             )
-            return UploadResult(error=str(e), name=name)
+            return UploadResult(
+                error=str(e), name=name, retryable=is_transient_error(e)
+            )
 
     def process_file(
         self,
@@ -645,7 +650,7 @@ class FileHandler:
             lookup = self._choose_upload_folder(channel, file_id)
             if lookup.folder_id is None:
                 # Fail before downloading a file there's nowhere to put.
-                return self._folder_failure(lookup, name)
+                return self._folder_failure(lookup, name, channel)
             folder_id = lookup.folder_id
             existing = self._find_existing_upload(
                 file_obj, folder_id, name, channel, sender_email
@@ -858,8 +863,8 @@ class FileHandler:
 
         The upload was made earlier in this run (for another space) or by an
         earlier run.  Missing grants are made again, as for any reused file.
-        If Drive can't be searched, the file fails (a re-run retries it)
-        rather than being uploaded a second time.
+        If Drive can't be searched, the file fails as retryable rather than
+        being uploaded a second time.
         """
         file_id = file_obj.get("id")
         if not folder_id or not file_id:
@@ -872,11 +877,16 @@ class FileHandler:
             if not is_drive_call_error(e):
                 raise
             # Not knowing whether it's there, don't make a second copy.
-            return UploadResult(
-                error="Could not check Drive for an earlier upload of this file:"
-                f" {type(e).__name__}: {e}",
-                name=name,
+            error = (
+                "Could not check Drive for an earlier upload of this file:"
+                f" {type(e).__name__}: {e}"
             )
+            log_with_context(
+                logging.ERROR,
+                f"Not uploading {name}: {error}. It fails as retryable.",
+                file_id=file_id,
+            )
+            return UploadResult(error=error, name=name, retryable=True)
         if existing is None:
             return None
         log_with_context(
@@ -1002,7 +1012,11 @@ class FileHandler:
             self._note_auth_failure()
         elif download.reason == REASON_DISALLOWED_HOST:
             self._note_disallowed_host(download.refused_host or "unknown host")
-        return UploadResult(error=f"Download failed: {download.reason}", name=name)
+        return UploadResult(
+            error=f"Download failed: {download.reason}",
+            name=name,
+            retryable=download.retryable,
+        )
 
     def _note_disallowed_host(self, host: str) -> None:
         """Say once per host why its downloads are refused and what to do."""
@@ -1283,7 +1297,7 @@ class FileHandler:
             if not folder_id:
                 lookup = self._choose_upload_folder(channel, file_id)
                 if lookup.folder_id is None:
-                    return self._folder_failure(lookup, name)
+                    return self._folder_failure(lookup, name, channel)
                 folder_id = lookup.folder_id
 
             return self._execute_drive_upload(
@@ -1303,7 +1317,9 @@ class FileHandler:
             if is_fatal_local_error(e):
                 raise  # a full disk would fail every file in turn
             return UploadResult(
-                error=f"Drive upload failed: {type(e).__name__}: {e}", name=name
+                error=f"Drive upload failed: {type(e).__name__}: {e}",
+                name=name,
+                retryable=is_transient_error(e),
             )
 
     def _choose_upload_folder(self, channel: str | None, file_id: str) -> FolderLookup:
@@ -1314,10 +1330,10 @@ class FileHandler:
         If the channel folder can't be found or created (any HttpError,
         network or auth error), or a private conversation's folder can't be
         made limited-access, there is no folder: the file fails with the
-        cause, and a re-run retries it.  Files without a channel go into the
-        root.  The folder returned has been listed into the dedup caches (or
-        listing it failed, and is retried with the next file), so the upload
-        itself doesn't list it again.
+        cause, as retryable when the cause may go away.  Files without a
+        channel go into the root.  The folder returned has been listed into
+        the dedup caches (or listing it failed, and is retried with the next
+        file), so the upload itself doesn't list it again.
         """
         root = self._root_folder_id
         if not root:
@@ -1342,14 +1358,21 @@ class FileHandler:
             )
         return lookup
 
-    def _folder_failure(self, lookup: FolderLookup, name: str) -> UploadResult:
+    def _folder_failure(
+        self, lookup: FolderLookup, name: str, channel: str | None
+    ) -> UploadResult:
         """The failed result for a file that has no usable Drive folder.
 
         Counted in ``restricted_folder_failures`` (a private folder that
         couldn't be made limited-access) or ``channel_folder_failures`` (a
         folder that couldn't be found or created), and in
-        ``failed_uploads`` by the caller.
+        ``failed_uploads`` by the caller.  The result is retryable when the
+        cause may go away (see :attr:`FolderLookup.retryable`); a file that
+        failed because Drive isn't set up is retryable too.  A
+        ``folder_unavailable`` failure is logged as an error once per
+        channel (a restriction failure logs its own).
         """
+        retryable = lookup.retryable
         if lookup.restriction_failed:
             self._increment_stat("restricted_folder_failures")
             cause = "folder_restricted"
@@ -1358,10 +1381,17 @@ class FileHandler:
             cause = "folder_unavailable"
         else:
             cause = "drive_unavailable"
-        return UploadResult(
-            error=f"No Drive folder ({cause}): {lookup.error or 'unknown error'}",
-            name=name,
-        )
+            retryable = True
+        error = f"No Drive folder ({cause}): {lookup.error or 'unknown error'}"
+        if cause == "folder_unavailable" and channel not in self._folder_errors_logged:
+            self._folder_errors_logged.add(channel)
+            log_with_context(
+                logging.ERROR,
+                f"Files of {channel} are not uploaded: {error}"
+                f" ({'retryable' if retryable else 'permanent'})",
+                channel=channel,
+            )
+        return UploadResult(error=error, name=name, retryable=retryable)
 
     def set_conversation_type(
         self, channel: str, conversation_type: ConversationType
@@ -1452,6 +1482,7 @@ class FileHandler:
                 error=f"Drive upload failed: {upload.reason}",
                 name=name,
                 metadata={META_CONVERSION_FAILED: upload.conversion_failed},
+                retryable=upload.retryable,
             )
 
         # Never raises: a failed grant doesn't make the upload fail.

@@ -489,6 +489,75 @@ class TestOwnershipTransfer:
         assert handler.get_file_statistics()["ownership_transferred"] == 1
 
 
+class TestRetryableFailures:
+    """Each failed file says whether a later attempt may fix it (#118)."""
+
+    def test_folder_unavailable_for_a_server_error_is_retryable(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path)
+        handler.folder_manager.folder_cache.clear()
+        fake.fail_query = lambda q: http_error(503) if "mimeType" in q else None
+
+        first = upload(handler, downloads, "general", "F1", "UA", b"x", space=None)
+        second = upload(handler, downloads, "general", "F2", "UA", b"y", space=None)
+
+        assert first.retryable and second.retryable
+        errors = [
+            r
+            for r in caplog.records
+            if r.levelname == "ERROR" and "general" in r.getMessage()
+        ]
+        assert len(errors) == 1  # once per channel
+
+    def test_folder_refused_with_a_403_is_permanent(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path)
+        handler.folder_manager.folder_cache.clear()
+        fake.fail_query = lambda q: http_error(403) if "mimeType" in q else None
+
+        result = upload(handler, downloads, "general", "F1", "UA", b"x", space=None)
+
+        assert not result.success
+        assert result.retryable is False
+
+    def test_failed_dedup_search_is_retryable(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F0", "UA", b"zero")
+        folder = next(iter(handler.drive_uploader.folders_pre_cached - {"SD1"}))
+        handler.drive_uploader.folders_pre_cached.discard(folder)
+        fake.fail_query = lambda q: (
+            http_error(500)
+            if q.startswith(f"'{folder}'") or q.startswith("appProperties")
+            else None
+        )
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"one")
+
+        assert not result.success
+        assert result.retryable
+
+    @pytest.mark.parametrize(
+        ("reason", "retryable"),
+        [("network_error:ConnectionError", True), ("http_503", True), ("auth", False)],
+    )
+    def test_download_failures_carry_the_flag(self, tmp_path, reason, retryable):
+        handler = make_handler(FakeDrive(), tmp_path)
+        handler._download_file = MagicMock(
+            return_value=DownloadResult(DownloadStatus.FAILED, reason=reason)
+        )
+
+        result = handler.upload_attachment(
+            {"id": "F1", "name": "a.pdf", "url_private": "https://files.slack.com/x"},
+            "c",
+        )
+
+        assert not result.success
+        assert result.retryable is retryable
+
+
 class TestUploadErrorsAreCounted:
     """Every upload error comes back as a counted failure (#118)."""
 

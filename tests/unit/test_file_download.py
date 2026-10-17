@@ -789,6 +789,35 @@ def test_network_error_logs_do_not_leak_tokens(dest, caplog):
         assert "SECRET" not in str(getattr(record, "error", ""))
 
 
+class TestRetryable:
+    """Which failed downloads a later attempt may fix (#96)."""
+
+    @pytest.mark.parametrize(
+        ("reason", "retryable"),
+        [
+            ("network_error:ConnectionError", True),
+            ("http_500", True),
+            ("http_503", True),
+            ("http_429", True),
+            ("http_408", True),
+            ("http_400", False),
+            ("auth", False),
+            ("html_page", False),
+            ("disallowed_host", False),
+            ("size_mismatch", False),
+            ("too_many_redirects", False),
+            ("write_error", False),
+        ],
+    )
+    def test_failed_reasons(self, reason, retryable):
+        result = fd.DownloadResult(DownloadStatus.FAILED, reason=reason)
+        assert result.retryable is retryable
+
+    def test_unavailable_is_not_a_failure(self):
+        result = fd.DownloadResult(DownloadStatus.UNAVAILABLE, reason="http_500")
+        assert result.retryable is False
+
+
 class TestLocalWriteErrors:
     """A full disk stops the run; other write errors fail one file (#96)."""
 

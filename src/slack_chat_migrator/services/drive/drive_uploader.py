@@ -20,6 +20,7 @@ from slack_chat_migrator.services.drive_adapter import (
     http_status,
     is_drive_call_error,
     is_fatal_local_error,
+    is_transient_error,
 )
 
 if TYPE_CHECKING:
@@ -97,10 +98,14 @@ class DriveUploadFailure:
         conversion_failed: Drive refused to convert the upload into the
             requested Google type (HTTP 400, 413, 415 or 500 with a target
             type).  A plain upload of the same file may still work.
+        retryable: A later attempt may succeed (see
+            :func:`~slack_chat_migrator.services.drive_adapter.is_transient_error`;
+            a failed dedup search and a missing file ID count too).
     """
 
     reason: str
     conversion_failed: bool = False
+    retryable: bool = False
 
 
 #: Statuses that, for an upload with a target Google type, mean the
@@ -414,7 +419,7 @@ class DriveFileUploader:
                 logging.WARNING,
                 f"Could not search Drive folder {folder_id} for Slack file"
                 f" {slack_file_id} ({e}); not uploading it, so no second copy"
-                " is made. A re-run retries it.",
+                " is made. It fails as retryable.",
                 channel=self._get_current_channel(),
             )
             raise
@@ -602,11 +607,14 @@ class DriveFileUploader:
                 f"Drive refused the upload: {e}",
                 conversion_failed=bool(target_mime_type)
                 and status in _CONVERSION_FAILURE_STATUSES,
+                retryable=is_transient_error(e),
             )
         except _UPLOAD_ERRORS as e:
             if is_fatal_local_error(e):
                 raise  # a full disk would fail every file in turn
-            return DriveUploadFailure(f"{type(e).__name__}: {e}")
+            return DriveUploadFailure(
+                f"{type(e).__name__}: {e}", retryable=is_transient_error(e)
+            )
 
     def _find_existing(
         self,
@@ -639,7 +647,8 @@ class DriveFileUploader:
                 raise
             return DriveUploadFailure(
                 "could not check the folder for an earlier upload"
-                f" ({type(e).__name__}: {e})"
+                f" ({type(e).__name__}: {e})",
+                retryable=True,
             )
         if not existing_file_id:
             return None
@@ -704,7 +713,7 @@ class DriveFileUploader:
 
         file_id = file.get("id")
         if not file_id:
-            return DriveUploadFailure("Drive returned no file ID")
+            return DriveUploadFailure("Drive returned no file ID", retryable=True)
         url = file.get("webViewLink")
         self.created_this_run.add(file_id)
         self.remember_file(
