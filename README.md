@@ -132,7 +132,7 @@ shared_drive:
 # Optional: Channels to exclude from migration (by name)
 exclude_channels:
   - "random"
-  - "shitposting"
+  - "off-topic"
 
 # Optional: Channels to include in migration (if specified, only these will be processed)
 include_channels: []
@@ -161,8 +161,9 @@ ignore_bots: false
 # Whether to abort the entire migration if errors are encountered in a channel
 abort_on_error: false
 
-# Maximum percentage of message failures allowed per channel before skipping
-# If more than this percentage of messages fail in a channel, the channel will be skipped
+# Maximum percentage of a channel's messages that may fail to import.
+# Only when more than this percentage fail is the channel marked as failed
+# (and its import not completed); the other messages are still imported.
 max_failure_percentage: 10
 
 # Strategy for completing import mode when errors occur
@@ -469,8 +470,7 @@ The migration processes each channel through the following stages:
 ```mermaid
 flowchart TD
     A[Create Space in Import Mode] --> B[Add Historical Members]
-    B --> C[Post Channel Intro\npurpose / topic]
-    C --> D[Import Messages\nattachments & reactions]
+    B --> D[Import Messages\nattachments & reactions]
     D --> E{Errors?}
     E -->|No| F[Complete Import Mode]
     E -->|Yes| G{import_completion_strategy}
@@ -483,10 +483,9 @@ flowchart TD
 
 1. **Create Space**: Creates a Google Chat space in import mode
 2. **Add Historical Members**: Adds users who were in the Slack channel (with `createTime`/`deleteTime` for accurate membership history)
-3. **Send Intro**: Posts channel metadata (purpose/topic) as the first message
-4. **Import Messages**: Migrates all messages with their attachments and reactions
-5. **Complete Import**: Finishes the import mode for the space
-6. **Add Regular Members**: Adds all members back to the space as regular members
+3. **Import Messages**: Migrates all messages with their attachments and reactions
+4. **Complete Import**: Finishes the import mode for the space
+5. **Add Regular Members**: Adds all members back to the space as regular members
 
 #### Error Handling
 
@@ -494,7 +493,7 @@ The tool provides several configurable options for handling errors during migrat
 
 1. **Abort on Error**: When enabled (`abort_on_error: true`), the migration stops after the first channel with errors; the run counts as failed (exit status 1) and no post-migration import completion runs. When disabled (default), the migration will continue processing other channels even if errors occur, and the run still exits with status 1 if any channel had errors.
 
-2. **Maximum Failure Percentage**: Controls how many message failures are tolerated within a channel before skipping the rest of that channel (`max_failure_percentage: 10` by default). If the failure rate exceeds this percentage, the channel processing will stop.
+2. **Maximum Failure Percentage**: The share of a channel's messages that may fail to import (`max_failure_percentage: 10` by default). A channel is marked as failed, and its import isn't completed, only when its failure rate exceeds this percentage; the remaining messages are still attempted. Failed messages are listed in the report either way.
 
 3. **Import Completion Strategy**: Determines how to handle import mode completion when errors occur:
    - `skip_on_error` (default): Don't complete import mode if there were errors

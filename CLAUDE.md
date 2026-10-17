@@ -10,10 +10,14 @@ In **dry-run mode**, `DryRunChatService`/`DryRunDriveService` are injected in pl
 
 ```
 src/slack_chat_migrator/
+├── __main__.py     # `python -m slack_chat_migrator` entry point
+├── constants.py    # Centralized constants (HTTP codes, limits, prefixes)
+├── exceptions.py   # MigratorError hierarchy (ConfigError, PermissionCheckError, …)
+├── types.py        # TypedDicts and result types shared across modules
 ├── cli/            # CLI entry points and report generation
 │   ├── commands.py    # CLI facade — re-exports from sub-modules
-│   ├── common.py      # Shared CLI infrastructure (DefaultGroup, options, InterruptHandler)
-│   ├── migrate_cmd.py # migrate command and MigrationOrchestrator
+│   ├── common.py      # Shared CLI infrastructure (DefaultGroup, options, --yes, exit codes, InterruptHandler)
+│   ├── migrate_cmd.py # migrate command, MigrationOrchestrator, --complete flow
 │   ├── validate_cmd.py
 │   ├── cleanup_cmd.py   # (deprecated — use migrate --complete)
 │   ├── init_cmd.py      # Interactive config.yaml generator
@@ -26,7 +30,8 @@ src/slack_chat_migrator/
 │       └── plain_renderer.py  # Plain text fallback
 ├── core/           # Core logic
 │   ├── channel_processor.py # Per-channel migration orchestration
-│   ├── cleanup.py           # Post-migration cleanup (import mode completion, members)
+│   ├── checkpoint.py        # Checkpoint file for skipping completed channels on re-run
+│   ├── cleanup.py           # Post-migration cleanup of this run's spaces (import mode completion, members)
 │   ├── config.py            # YAML config loading and validation
 │   ├── context.py           # MigrationContext frozen dataclass (immutable config)
 │   ├── migration_logging.py # Migration success/failure logging
@@ -58,25 +63,28 @@ src/slack_chat_migrator/
 │   │   ├── setup_service.py    # Orchestrator and persistent state
 │   │   ├── gcp_project.py      # Project creation/selection
 │   │   ├── api_enablement.py   # API enablement
-│   │   ├── service_account.py  # SA creation, key download, role grants
+│   │   ├── service_account.py  # SA creation, key download/reuse
 │   │   └── delegation.py       # Domain-wide delegation test
 │   ├── spaces/     # Space lifecycle management
 │   │   ├── discovery.py           # Space discovery and mapping for resumption
 │   │   ├── historical_membership.py # Historical member import (createTime/deleteTime)
 │   │   ├── regular_membership.py  # Regular member addition (post-import)
-│   │   └── space_creator.py      # Space creation, listing, and import mode cleanup
+│   │   └── space_creator.py      # Space creation, listing, and `--complete` (import mode completion)
 │   ├── user.py              # User mapping (Slack → Google)
 │   └── user_resolver.py     # User identity resolution and impersonation
 └── utils/          # Shared utilities
-    ├── api.py      # API retry logic, credential handling
+    ├── api.py      # API retry policy (RetryWrapper), bounded client cache, scopes, credentials
     ├── formatting.py
-    ├── logging.py
-    ├── permissions.py
+    ├── logging.py  # Logger setup, secret redaction, private log files
+    ├── mime.py     # MIME type helpers
+    ├── permissions.py # Pre-migration permission checks
     └── user_validation.py
 tests/
 ├── unit/           # Fast, isolated tests
-└── integration/    # Tests requiring external services
+└── integration/    # Dry-run pipeline and CLI tests (no credentials needed)
 ```
+
+Tests run from a temporary working directory (autouse fixture in `tests/conftest.py`), so they never write `migration_logs/` into the checkout.
 
 ## Development Setup
 
@@ -119,5 +127,5 @@ cz check --message "fix: description"
 
 1. `cz bump` — bumps version in `__init__.py`, updates `CHANGELOG.md`, creates git tag
 2. `git push && git push --tags`
-3. Tag push triggers `.github/workflows/release.yml` → creates GitHub Release
-4. GitHub Release triggers `.github/workflows/python-publish.yml` → publishes to PyPI
+3. Tag push triggers `.github/workflows/release.yml` → creates the GitHub Release
+4. The same workflow first checks that the tag matches `__version__` (`.github/scripts/check_release_version.py`), then builds the distributions and publishes them to PyPI (trusted publishing)
