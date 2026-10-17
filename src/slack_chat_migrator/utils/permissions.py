@@ -42,7 +42,9 @@ class PermissionValidator:
     starting the actual migration process.
     """
 
-    def __init__(self, migrator: PermissionCheckContext | Any) -> None:
+    def __init__(
+        self, migrator: PermissionCheckContext | Any, scopes: list[str] | None = None
+    ) -> None:
         """
         Initialize the permission validator.
 
@@ -50,8 +52,11 @@ class PermissionValidator:
             migrator: Any object exposing ``.chat``, ``.drive``, and
                 ``.workspace_admin`` attributes — typically a
                 ``SlackToChatMigrator`` or ``PermissionCheckContext``.
+            scopes: The OAuth scopes the run requests, listed in the error
+                report (default ``REQUIRED_SCOPES``).
         """
         self.migrator = migrator
+        self.scopes = list(scopes) if scopes is not None else list(REQUIRED_SCOPES)
         self.permission_errors: list[str] = []
         self.test_resources: dict[str, Any] = {}
 
@@ -362,7 +367,7 @@ class PermissionValidator:
             log_with_context(
                 logging.ERROR, "Required scopes for domain-wide delegation:"
             )
-            for scope in REQUIRED_SCOPES:
+            for scope in self.scopes:
                 log_with_context(logging.ERROR, f"  • {scope}")
 
             log_with_context(logging.ERROR, "")
@@ -409,6 +414,7 @@ def check_permissions_standalone(
     workspace_admin: str,
     max_retries: int = 3,
     retry_delay: float = 2,
+    scopes: list[str] | None = None,
 ) -> bool:
     """
     Run permission checks without creating a full SlackToChatMigrator.
@@ -425,6 +431,8 @@ def check_permissions_standalone(
         workspace_admin: Email of workspace admin to impersonate.
         max_retries: Maximum API retry attempts (default 3).
         retry_delay: Delay in seconds between retries (default 2).
+        scopes: OAuth scopes the Chat client requests (default
+            ``REQUIRED_SCOPES``; see ``scopes_for``).
 
     Returns:
         True if all permissions are valid.
@@ -441,6 +449,7 @@ def check_permissions_standalone(
         "v1",
         max_retries=max_retries,
         retry_delay=retry_delay,
+        scopes=scopes,
     )
     drive = get_gcp_service(
         creds_path,
@@ -457,5 +466,5 @@ def check_permissions_standalone(
         workspace_admin=workspace_admin,
     )
 
-    validator = PermissionValidator(ctx)
+    validator = PermissionValidator(ctx, scopes=scopes)
     return validator.validate_all_permissions()

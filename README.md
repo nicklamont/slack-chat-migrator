@@ -260,7 +260,7 @@ Generate a `config.yaml` file interactively by analysing your Slack export. Walk
 
 ##### `validate`
 
-Dry-run validation of export data, user mappings, and channels. Equivalent to `migrate --dry_run` but expressed as an explicit command. Credentials are optional — you can run a full validation with only `--export_path`. When `--creds_path` is provided, permission checks are also performed. It exits with status 1 when it finds unmapped users or channels with errors.
+Dry-run validation of export data, user mappings, and channels. Equivalent to `migrate --dry_run` but expressed as an explicit command. Credentials are optional — you can run a full validation with only `--export_path`, and the permission check is then reported as skipped. When `--creds_path` and `--workspace_admin` are provided, the data validation still runs as a dry run, but the permission checks run against the real Google Chat and Drive APIs with your key and domain-wide delegation: an unreadable key file, a missing scope or broken delegation fails the command. The check creates and then deletes a test space and a small test file in the admin's Drive. It exits with status 1 when it finds unmapped users or channels with errors, or when a permission check fails.
 
 | Option | Required | Description |
 |--------|----------|-------------|

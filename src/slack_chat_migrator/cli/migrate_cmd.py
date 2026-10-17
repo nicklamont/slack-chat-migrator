@@ -42,12 +42,16 @@ from slack_chat_migrator.exceptions import (
     ConfirmationRequiredError,
     PermissionCheckError,
 )
+from slack_chat_migrator.utils.api import scopes_for
 from slack_chat_migrator.utils.logging import (
     create_output_directory,
     log_with_context,
     setup_logger,
 )
-from slack_chat_migrator.utils.permissions import validate_permissions
+from slack_chat_migrator.utils.permissions import (
+    check_permissions_standalone,
+    validate_permissions,
+)
 
 if TYPE_CHECKING:
     from slack_chat_migrator.services.spaces.space_creator import (
@@ -539,33 +543,13 @@ class MigrationOrchestrator:
         if not self.args.skip_permission_check:
             has_creds = bool(self.args.creds_path and self.args.workspace_admin)
             if has_creds:
-                log_with_context(
-                    logging.INFO, "Checking permissions before proceeding..."
-                )
-                try:
-                    with _quiet_console():
-                        validate_permissions(self.migrator)
-                    log_with_context(logging.INFO, "Permission checks passed!")
-                    _print_preflight_status("Permissions verified")
-
-                    # Now that permissions are validated, initialize drive structures
-                    if (
-                        hasattr(self.migrator, "file_handler")
-                        and self.migrator.file_handler
-                    ):
-                        with _quiet_console():
-                            self.migrator.file_handler.ensure_drive_initialized()
-                        log_with_context(
-                            logging.INFO, "Drive structures initialized successfully"
-                        )
-                        _print_preflight_status("Drive initialized")
-
-                except Exception as e:
-                    raise PermissionCheckError(
-                        f"Permission checks failed: {e}. "
-                        "Fix the issues or run with --skip_permission_check if you're sure."
-                    ) from e
+                self._run_permission_checks()
             else:
+                log_with_context(
+                    logging.INFO,
+                    "Permission checks skipped: no credentials (pass --creds_path"
+                    " and --workspace_admin to check them).",
+                )
                 _print_preflight_status(
                     "Permissions", status="skip", detail="no credentials"
                 )
@@ -576,13 +560,57 @@ class MigrationOrchestrator:
             )
             _print_preflight_status("Permissions", status="skip", detail="skipped")
             # Still initialize drive structures even if permission checks are skipped
-            if hasattr(self.migrator, "file_handler") and self.migrator.file_handler:
-                with _quiet_console():
-                    self.migrator.file_handler.ensure_drive_initialized()
-                log_with_context(
-                    logging.INFO, "Drive structures initialized successfully"
-                )
-                _print_preflight_status("Drive initialized")
+            self._initialize_drive()
+
+    def _run_permission_checks(self) -> None:
+        """Test the permissions the migration needs against the real APIs.
+
+        Data validation in a dry run (``validate``, ``migrate --dry_run``)
+        uses no-op services, but the permission checks always build real
+        Chat and Drive clients from ``--creds_path``, so an invalid key,
+        missing scopes or broken delegation fail here.
+
+        Raises:
+            PermissionCheckError: If any check fails (including an unusable
+                credentials file).
+        """
+        log_with_context(
+            logging.INFO, "Checking permissions against the Google APIs..."
+        )
+        try:
+            with _quiet_console():
+                if self.args.dry_run:
+                    cfg = self.load_config()
+                    check_permissions_standalone(
+                        creds_path=self.args.creds_path,
+                        workspace_admin=self.args.workspace_admin,
+                        max_retries=cfg.max_retries,
+                        retry_delay=cfg.retry_delay,
+                        scopes=scopes_for(cfg),
+                    )
+                else:
+                    validate_permissions(self.migrator)
+        except Exception as e:
+            raise PermissionCheckError(
+                f"Permission checks failed: {e}. "
+                "Fix the issues or run with --skip_permission_check if you're sure."
+            ) from e
+        log_with_context(logging.INFO, "Permission checks passed!")
+        _print_preflight_status("Permissions verified")
+
+        # Now that permissions are validated, initialize drive structures
+        # (live runs only; a dry run's migrator has no real services).
+        if not self.args.dry_run:
+            self._initialize_drive()
+
+    def _initialize_drive(self) -> None:
+        """Initialize the shared drive and folders, if the file handler exists."""
+        file_handler = getattr(self.migrator, "file_handler", None)
+        if file_handler:
+            with _quiet_console():
+                file_handler.ensure_drive_initialized()
+            log_with_context(logging.INFO, "Drive structures initialized successfully")
+            _print_preflight_status("Drive initialized")
 
     def check_unmapped_users(self, migrator_instance: SlackToChatMigrator) -> bool:
         """Check for unmapped users and return True if any found.
