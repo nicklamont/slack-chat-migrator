@@ -130,9 +130,13 @@ def migrate(
         yes: Answer yes to confirmation prompts.
     """
     if complete:
-        exit_code = _run_complete_mode(
-            creds_path, workspace_admin, config, verbose, debug_api, yes
-        )
+        try:
+            exit_code = _run_complete_mode(
+                creds_path, workspace_admin, config, verbose, debug_api, yes
+            )
+        except KeyboardInterrupt:
+            click.echo("\nInterrupted.", err=True)
+            exit_code = EXIT_INTERRUPTED
         if exit_code:
             sys.exit(exit_code)
         return
@@ -256,7 +260,7 @@ def _run_complete_mode(
         cfg = load_config(Path(config), required=config_was_given())
     except Exception as e:
         handle_exception(e)
-        return 1
+        return EXIT_FAILURE
 
     is_tty = sys.stdout.isatty()
     if is_tty:
@@ -283,7 +287,7 @@ def _run_complete_mode(
             )
         except Exception as e:
             handle_exception(e)
-            return 1
+            return EXIT_FAILURE
 
     return report_import_completion(result)
 
@@ -333,7 +337,7 @@ def report_import_completion(result: ImportCompletionResult) -> int:
     """
     if result.cancelled:
         click.echo("Import completion cancelled; no spaces were changed.")
-        return 1
+        return EXIT_FAILURE
 
     lines: list[str] = []
     if not result.candidates and not result.errors:
@@ -354,7 +358,7 @@ def report_import_completion(result: ImportCompletionResult) -> int:
         click.echo(line)
     level = logging.INFO if result.ok else logging.ERROR
     log_with_context(level, " ".join(line.strip() for line in lines))
-    return 0 if result.ok else 1
+    return EXIT_OK if result.ok else EXIT_FAILURE
 
 
 def _warn_import_mode_deadline() -> None:
@@ -1055,7 +1059,7 @@ class MigrationOrchestrator:
                             logging.WARNING,
                             "The migration did not finish, so import mode was not"
                             f" completed on the {len(m.state.spaces.created_spaces)}"
-                            " space(s) this run created. Finish them with"
+                            " space(s) this run worked on. Finish them with"
                             " 'migrate --resume' or 'migrate --complete' within"
                             " 90 days.",
                         )

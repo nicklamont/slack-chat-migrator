@@ -156,6 +156,13 @@ class TestMigrateComplete:
         assert result.exit_code == 2
         assert "Missing option '--export_path'" in result.output
 
+    def test_ctrl_c_exits_130(self) -> None:
+        fake = FakeChat([dict(s) for s in SPACES])
+        fake.list_spaces = MagicMock(side_effect=KeyboardInterrupt)  # type: ignore[method-assign]
+        result = _run_complete(fake, [*COMPLETE_ARGS, "--yes"])
+        assert result.exit_code == 130
+        assert fake.completed == []
+
     def test_nothing_to_do_exits_zero(self) -> None:
         fake = FakeChat([SPACES[2], SPACES[3]])
         result = _run_complete(fake, COMPLETE_ARGS)
