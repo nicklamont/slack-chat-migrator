@@ -58,7 +58,7 @@ from slack_chat_migrator.services.files.temp_files import (
     remove_temp_file,
     sweep_stale_temp_dirs,
 )
-from slack_chat_migrator.types import UploadResult
+from slack_chat_migrator.types import FileUploadStats, UploadResult
 from slack_chat_migrator.utils.domains import (
     internal_domains,
     is_external_email,
@@ -1800,8 +1800,8 @@ class FileHandler:
         """Get detailed file upload statistics.
 
         Returns:
-            Dictionary containing file upload statistics including counts
-            by upload method, external user files, and ownership transfers.
+            The counters described by
+            :class:`~slack_chat_migrator.types.FileUploadStats`.
             ``success_rate`` is the share of uploads that succeeded, out of
             those that succeeded or failed; unavailable and skipped files
             don't lower it.
@@ -1810,7 +1810,7 @@ class FileHandler:
             self.file_stats["direct_uploads"]
         )
         failed = int(self.file_stats["failed_uploads"])
-        return {
+        stats: FileUploadStats = {
             "total_files_processed": self.file_stats["total_files"],
             "successful_uploads": successful,
             "failed_uploads": failed,
@@ -1838,6 +1838,7 @@ class FileHandler:
             "files_by_channel": dict(self.file_stats["files_by_channel"]),
             "success_rate": successful / max(1, successful + failed) * 100,
         }
+        return dict(stats)
 
     def _transfer_file_ownership(self, file_id: str, new_owner_email: str) -> bool:
         """Transfer ownership of a file to a new owner.

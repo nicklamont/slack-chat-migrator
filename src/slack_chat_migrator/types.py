@@ -130,15 +130,41 @@ class UserWithoutEmail(TypedDict):
 
 
 class FileUploadStats(TypedDict):
-    """File upload statistics returned by FileHandler."""
+    """File upload statistics returned by ``FileHandler.get_file_statistics``.
+
+    They appear as ``file_upload_details`` in the migration report.
+    """
 
     total_files_processed: int
     successful_uploads: int
     failed_uploads: int
+    unavailable_files: int
+    skipped_files: int
     drive_uploads: int
     direct_uploads: int
     external_user_files: int
     ownership_transferred: int
+    ownership_transfer_failed: int
+    #: Poster writer grants that failed (flagged for the end-of-run sweep).
+    poster_grant_failures: int
+    #: Sweep results: flagged grants/transfers that now worked or still fail.
+    pending_retried: int
+    pending_retry_failed: int
+    #: Pending flags that couldn't be stored on their Drive file.
+    pending_flag_failures: int
+    #: Drive folders whose file listing failed at least once.
+    folder_listing_failures: int
+    external_folder_grant_failures: int
+    #: Channel-folder syncs that failed, and their failed grants/removals.
+    folder_sync_failures: int
+    folder_grant_failures: int
+    folder_removal_failures: int
+    #: Files not uploaded: private folder not limited-access / no folder.
+    restricted_folder_failures: int
+    channel_folder_failures: int
+    #: Downloads refused with 401/403 or a sign-in page.
+    download_auth_failures: int
+    files_by_channel: dict[str, int]
     success_rate: float
 
 

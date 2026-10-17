@@ -52,13 +52,17 @@ class FolderLookup:
     error: str | None = None
     restriction_failed: bool = False
 
+    def __post_init__(self) -> None:
+        """Reject a folder with an error, and a restriction failure without one."""
+        if self.folder_id is not None and self.error is not None:
+            raise ValueError("a FolderLookup with a folder has no error")
+        if self.restriction_failed and not self.error:
+            raise ValueError("a failed restriction needs an error")
+
 
 @dataclass(frozen=True)
 class FolderSyncResult:
-    """Outcome of syncing a channel folder's members.
-
-    True in a boolean context when :attr:`ok`, so callers that treated the
-    old ``bool`` return as success keep working.
+    """Outcome of syncing a channel folder's members (check :attr:`ok`).
 
     Attributes:
         folder_id: The channel folder; None when there is none (no files were
@@ -94,10 +98,6 @@ class FolderSyncResult:
             or self.failed_grants
             or self.failed_removals
         )
-
-    def __bool__(self) -> bool:
-        """Same as :attr:`ok`."""
-        return self.ok
 
     def describe(self) -> str:
         """One-line summary of what went wrong (empty when :attr:`ok`)."""
@@ -299,13 +299,6 @@ class FolderManager:
             if not page_token:
                 return folders
 
-    def create_regular_drive_folder(self, folder_name: str) -> str | None:
-        """Find or create a regular (My Drive) folder for attachments.
-
-        Same as :meth:`find_or_create_root_folder`, returning only the ID.
-        """
-        return self.find_or_create_root_folder(folder_name).folder_id
-
     def find_or_create_root_folder(self, folder_name: str) -> FolderLookup:
         """Find or create a regular Drive folder, used when there is no shared drive.
 
@@ -405,26 +398,6 @@ class FolderManager:
                 restricted=bool(items[0].get("inheritedPermissionsDisabled")),
             )
         return found
-
-    def get_or_create_channel_folder(
-        self,
-        channel: str,
-        parent_folder_id: str,
-        shared_drive_id: str | None = None,
-        *,
-        restricted: bool = False,
-    ) -> str | None:
-        """Get or create a channel-specific folder.
-
-        Same as :meth:`find_or_create_channel_folder`, returning only the
-        folder ID.
-
-        Returns:
-            The folder ID if successful, None otherwise
-        """
-        return self.find_or_create_channel_folder(
-            channel, parent_folder_id, shared_drive_id, restricted=restricted
-        ).folder_id
 
     def find_or_create_channel_folder(
         self,
@@ -692,7 +665,7 @@ class FolderManager:
             shared_drive_id: ID of the shared drive (if applicable)
 
         Returns:
-            What changed and what failed.  True in a boolean context if
+            What changed and what failed; :attr:`FolderSyncResult.ok` if
             every change succeeded, except grants to external members.
         """
         supports_all_drives = bool(shared_drive_id)

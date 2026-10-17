@@ -1267,14 +1267,14 @@ class TestLimitedAccessFolders:
         result = upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
         folder_id = fake.files_db[result.drive_id]["parents"][0]
 
-        ok = handler.folder_manager.set_channel_folder_permissions(
+        sync = handler.folder_manager.set_channel_folder_permissions(
             folder_id,
             "hr",
             ["alice@example.com", "ext@other.org"],
             handler.shared_drive_id,
         )
 
-        assert ok  # truthy: external failures don't fail the sync
+        assert sync.ok  # external failures don't fail the sync
         stats = handler.get_file_statistics()
         assert stats["external_folder_grant_failures"] == 1
         assert stats["folder_sync_failures"] == 0
@@ -1289,7 +1289,7 @@ class TestLimitedAccessFolders:
             "hr", ["alice@example.com", "bob@example.com"]
         )
 
-        assert not result
+        assert not result.ok
         assert result.failed_grants == ("bob@example.com",)
         stats = handler.get_file_statistics()
         assert stats["folder_sync_failures"] == 1

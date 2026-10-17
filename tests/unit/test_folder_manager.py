@@ -29,12 +29,27 @@ def _make_drive_service():
 
 
 # -----------------------------------------------------------
-# get_or_create_channel_folder
+# find_or_create_channel_folder
 # -----------------------------------------------------------
 
 
-class TestGetOrCreateChannelFolder:
-    """Tests for get_or_create_channel_folder."""
+class TestFolderLookupInvariants:
+    def test_a_folder_has_no_error(self):
+        with pytest.raises(ValueError, match="no error"):
+            FolderLookup("F", "boom")
+
+    def test_a_failed_restriction_needs_an_error(self):
+        with pytest.raises(ValueError, match="needs an error"):
+            FolderLookup(None, restriction_failed=True)
+
+    def test_valid_states(self):
+        assert FolderLookup("F").folder_id == "F"
+        assert FolderLookup(None).error is None  # looked up, no folder
+        assert FolderLookup(None, "x", restriction_failed=True).restriction_failed
+
+
+class TestFindOrCreateChannelFolder:
+    """Tests for find_or_create_channel_folder."""
 
     def test_dry_run_delegates_to_drive_service(self):
         """Dry run no longer short-circuits — DI stubs handle API calls."""
@@ -43,7 +58,7 @@ class TestGetOrCreateChannelFolder:
         svc.create_file.return_value = {"id": "stub-chan-id"}
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result == "stub-chan-id"
         svc.list_files.assert_called_once()
@@ -57,7 +72,7 @@ class TestGetOrCreateChannelFolder:
         svc.create_file.return_value = {"id": "chan_folder_id"}
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result == "chan_folder_id"
         assert fm.folder_cache[("parent123", "general")] == "chan_folder_id"
@@ -69,9 +84,9 @@ class TestGetOrCreateChannelFolder:
         svc.create_file.return_value = {"id": "shared_chan_id"}
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder(
+        result = fm.find_or_create_channel_folder(
             "general", "parent123", shared_drive_id="drive456"
-        )
+        ).folder_id
 
         assert result == "shared_chan_id"
         create_kwargs = svc.create_file.call_args[1]
@@ -85,7 +100,7 @@ class TestGetOrCreateChannelFolder:
         }
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result == "existing_chan"
         svc.create_file.assert_not_called()
@@ -98,7 +113,7 @@ class TestGetOrCreateChannelFolder:
         fm = FolderManager(svc)
         fm.folder_cache[("parent123", "general")] = "cached_id"
 
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result == "cached_id"
         svc.get_file.assert_not_called()
@@ -110,7 +125,7 @@ class TestGetOrCreateChannelFolder:
         svc.list_files.side_effect = _make_http_error(403)
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result is None
 
@@ -121,18 +136,18 @@ class TestGetOrCreateChannelFolder:
         svc.create_file.return_value = {}
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result is None
 
 
 # -----------------------------------------------------------
-# create_regular_drive_folder
+# find_or_create_root_folder
 # -----------------------------------------------------------
 
 
 class TestCreateRegularDriveFolder:
-    """Tests for create_regular_drive_folder."""
+    """Tests for find_or_create_root_folder."""
 
     def test_dry_run_delegates_to_drive_service(self):
         """Dry run no longer short-circuits — DI stubs handle API calls."""
@@ -141,7 +156,7 @@ class TestCreateRegularDriveFolder:
         svc.create_file.return_value = {"id": "stub-regular-id"}
 
         fm = FolderManager(svc)
-        result = fm.create_regular_drive_folder("attachments")
+        result = fm.find_or_create_root_folder("attachments").folder_id
 
         assert result == "stub-regular-id"
         svc.list_files.assert_called_once()
@@ -153,7 +168,7 @@ class TestCreateRegularDriveFolder:
         svc.create_file.return_value = {"id": "regular_id"}
 
         fm = FolderManager(svc)
-        result = fm.create_regular_drive_folder("attachments")
+        result = fm.find_or_create_root_folder("attachments").folder_id
 
         assert result == "regular_id"
         body = svc.create_file.call_args[1]["body"]
@@ -169,7 +184,7 @@ class TestCreateRegularDriveFolder:
         }
 
         fm = FolderManager(svc)
-        result = fm.create_regular_drive_folder("attachments")
+        result = fm.find_or_create_root_folder("attachments").folder_id
 
         assert result == "existing_reg"
         svc.create_file.assert_not_called()
@@ -179,7 +194,7 @@ class TestCreateRegularDriveFolder:
         svc.list_files.side_effect = _make_http_error(500)
 
         fm = FolderManager(svc)
-        result = fm.create_regular_drive_folder("attachments")
+        result = fm.find_or_create_root_folder("attachments").folder_id
 
         assert result is None
 
@@ -413,7 +428,7 @@ class TestSetChannelFolderPermissions:
             "F", "general", ["a@example.com", "ext@other.org"]
         )
 
-        assert result  # still truthy, as the old bool return was
+        assert result.ok  # external failures don't fail the sync
         assert result.external_failures == ("ext@other.org",)
         assert result.granted == 1
         assert reported == [("general", result)]
@@ -430,7 +445,7 @@ class TestSetChannelFolderPermissions:
             "F", "general", ["a@example.com", "ext@other.org"]
         )
 
-        assert not result
+        assert not result.ok
         assert result.failed_grants == ("a@example.com",)
         assert result.external_failures == ()
         assert result.granted == 1
@@ -449,7 +464,7 @@ class TestSetChannelFolderPermissions:
 
         result = fm.set_channel_folder_permissions("F", "general", [])
 
-        assert not result
+        assert not result.ok
         assert result.failed_removals == ("g@x.com",)
         assert result.removed == 0
 
@@ -461,7 +476,7 @@ class TestSetChannelFolderPermissions:
             "F", "general", ["x@example.com", "y@other.org"]
         )
 
-        assert not result  # y@other.org counts as internal here
+        assert not result.ok  # y@other.org counts as internal here
         assert result.external_failures == ("x@example.com",)
         assert result.failed_grants == ("y@other.org",)
 
@@ -497,7 +512,7 @@ class TestSetChannelFolderPermissions:
             "folder123", "general", ["a@example.com", "b@example.com"]
         )
 
-        assert not result
+        assert not result.ok
         assert result.failed_grants == ("b@example.com",)
 
     @pytest.mark.parametrize(
@@ -511,7 +526,7 @@ class TestSetChannelFolderPermissions:
 
         result = fm.set_channel_folder_permissions("F", "general", ["a@example.com"])
 
-        assert not result
+        assert not result.ok
         assert result.listing_error
         assert result.granted == 1
         assert "former members kept" in result.describe()
@@ -590,7 +605,7 @@ class TestSyncChannelFolder:
 
         result = fm.sync_channel_folder("general", "ROOT", ["a@example.com"])
 
-        assert not result
+        assert not result.ok
         assert result.lookup_error
         assert reported == [result]
         svc.apply_permission_changes.assert_not_called()
@@ -616,7 +631,9 @@ class TestTrashedFolders:
         fake.add_folder("L", "general", "ROOT")
         fm = FolderManager(DriveAdapter(fake))
 
-        assert fm.get_or_create_channel_folder("general", "ROOT", "SD") == "L"
+        assert (
+            fm.find_or_create_channel_folder("general", "ROOT", "SD").folder_id == "L"
+        )
         fake.calls.clear()
         assert fm.get_channel_folder_id("general", "ROOT", "SD") == "L"
         assert fake.calls == []
@@ -678,10 +695,13 @@ class TestEnsureRestricted:
         assert lookup.restriction_failed is True
         assert "limited-access" in lookup.error
         assert (
-            fm.get_or_create_channel_folder("hr", "ROOT", "SD", restricted=True) is None
+            fm.find_or_create_channel_folder(
+                "hr", "ROOT", "SD", restricted=True
+            ).folder_id
+            is None
         )
         # Unrestricted callers still get the folder.
-        assert fm.get_or_create_channel_folder("hr", "ROOT", "SD") == "OPEN"
+        assert fm.find_or_create_channel_folder("hr", "ROOT", "SD").folder_id == "OPEN"
 
     def test_update_sets_flag_and_supports_all_drives(self):
         svc = MagicMock()
@@ -709,7 +729,7 @@ class TestEnsureRestricted:
     def test_unrestricted_request_leaves_folder_alone(self):
         fake = FakeDrive()
         fm = FolderManager(DriveAdapter(fake))
-        fm.get_or_create_channel_folder("general", "ROOT", "SD")
+        assert fm.find_or_create_channel_folder("general", "ROOT", "SD").folder_id
         assert fake.count("files.update") == 0
         body = next(kw["body"] for name, kw in fake.calls if name == "files.create")
         assert "inheritedPermissionsDisabled" not in body
