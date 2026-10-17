@@ -93,7 +93,8 @@ def scopes_for(config: MigrationConfig | None) -> list[str]:
 #: is a bounded LRU rather than one entry per user in the workspace.
 SERVICE_CACHE_MAX_ENTRIES = 256
 
-_ServiceKey = tuple[str, str, str, str, tuple[str, ...]]
+# (creds, user, api, version, scopes, max_retries, retry_delay)
+_ServiceKey = tuple[str, str, str, str, tuple[str, ...], int, float]
 
 # Cache for service instances: maps key → (service, created_at), LRU order
 _service_cache: OrderedDict[_ServiceKey, tuple[Any, float]] = OrderedDict()
@@ -758,8 +759,9 @@ def get_gcp_service(
 ) -> Any:
     """Get a Google API client service using service account impersonation.
 
-    Clients are cached per (credentials, user, API, scopes) in a bounded LRU
-    cache with a 45-minute TTL; :func:`clear_service_cache` empties it.  The
+    Clients are cached per (credentials, user, API, scopes, retry settings)
+    in a bounded LRU cache with a 45-minute TTL; :func:`clear_service_cache`
+    empties it.  The
     service-account key file is parsed once and each user's credentials are
     derived with ``with_subject``.
 
@@ -782,7 +784,18 @@ def get_gcp_service(
         ValueError: If the credentials file has an invalid format.
     """
     scope_key = tuple(scopes) if scopes is not None else tuple(REQUIRED_SCOPES)
-    cache_key: _ServiceKey = (creds_path, user_email, api, version, scope_key)
+    # Retry settings are part of the key so callers never silently get a
+    # client configured by someone else.  The channel isn't: it only tags log
+    # lines, and keying on it would build one client per user per channel.
+    cache_key: _ServiceKey = (
+        creds_path,
+        user_email,
+        api,
+        version,
+        scope_key,
+        max_retries,
+        float(retry_delay),
+    )
     with _service_cache_lock:
         if cache_key in _service_cache:
             cached_service, created_at = _service_cache[cache_key]

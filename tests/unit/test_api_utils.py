@@ -1157,6 +1157,8 @@ class TestServiceCacheTTL:
             "chat",
             "v1",
             tuple(REQUIRED_SCOPES),
+            3,  # default max_retries
+            1.0,  # default retry_delay
         )
         old_service, _ = _service_cache[cache_key]
         _service_cache[cache_key] = (old_service, 0.0)  # epoch = very old
@@ -1165,6 +1167,25 @@ class TestServiceCacheTTL:
         # build should have been called a second time due to TTL eviction
         assert mock_build.call_count == 2
         assert svc1 is not svc2
+
+    @patch("slack_chat_migrator.utils.api.build")
+    @patch(
+        "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
+    )
+    def test_retry_settings_are_part_of_the_cache_key(self, mock_creds, mock_build):
+        """Callers asking for different retry settings get their own client."""
+        mock_creds.return_value.with_subject.return_value = MagicMock()
+        mock_build.side_effect = lambda *a, **k: MagicMock()
+
+        svc1 = get_gcp_service("/path/creds.json", "u@example.com", "chat", "v1")
+        svc2 = get_gcp_service(
+            "/path/creds.json", "u@example.com", "chat", "v1", max_retries=7
+        )
+        svc3 = get_gcp_service("/path/creds.json", "u@example.com", "chat", "v1")
+
+        assert svc1 is not svc2
+        assert svc1 is svc3
+        assert svc2._max_retries == 7
 
     @patch("slack_chat_migrator.utils.api.build")
     @patch(
