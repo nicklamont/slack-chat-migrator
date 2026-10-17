@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from slack_chat_migrator.services.setup.setup_service import (
     SetupState,
     StepStatus,
@@ -390,7 +392,7 @@ class TestClipboard:
         run.assert_not_called()
 
 
-def _iam_with_key(key_id: str = "kid1") -> MagicMock:
+def _iam_with_key(key_id: str = "kid1", **fields: object) -> MagicMock:
     import base64
 
     service = MagicMock()
@@ -407,9 +409,39 @@ def _iam_with_key(key_id: str = "kid1") -> MagicMock:
         ).decode()
     }
     keys.list.return_value.execute.return_value = {
-        "keys": [{"name": f"projects/p/serviceAccounts/sa/keys/{key_id}"}]
+        "keys": [{"name": f"projects/p/serviceAccounts/sa/keys/{key_id}", **fields}]
     }
     return service
+
+
+def _iam_failing(error: Exception) -> MagicMock:
+    service = MagicMock()
+    keys = service.projects.return_value.serviceAccounts.return_value.keys.return_value
+    keys.list.return_value.execute.side_effect = error
+    return service
+
+
+def _http_error(status: int, reason: str = "denied") -> Exception:
+    from googleapiclient.errors import HttpError
+    from httplib2 import Response
+
+    body = json.dumps({"error": {"code": status, "message": reason}}).encode()
+    return HttpError(Response({"status": str(status)}), body)
+
+
+def _refresh_error() -> Exception:
+    from google.auth.exceptions import RefreshError
+
+    return RefreshError("invalid_grant")
+
+
+SA = "sa@p.iam.gserviceaccount.com"
+
+
+def _key_check(status: str, reason: str = ""):  # type: ignore[no-untyped-def]
+    from slack_chat_migrator.services.setup.service_account import KeyCheck, KeyStatus
+
+    return KeyCheck(KeyStatus[status], reason)
 
 
 class TestKeyFiles:
@@ -445,29 +477,123 @@ class TestKeyFiles:
         )
         keys.create.assert_not_called()
 
-    def test_existing_key_is_valid(self, tmp_path: Path) -> None:
+    @staticmethod
+    def _key_file(tmp_path: Path, email: str = SA, key_id: str = "kid1") -> Path:
+        key = tmp_path / "key.json"
+        key.write_text(json.dumps({"client_email": email, "private_key_id": key_id}))
+        return key
+
+    def _check(self, key: Path, service: MagicMock):  # type: ignore[no-untyped-def]
+        from datetime import datetime, timezone
+
         from slack_chat_migrator.services.setup import service_account as sa
 
-        key = tmp_path / "key.json"
-        key.write_text(
-            json.dumps(
-                {
-                    "client_email": "sa@p.iam.gserviceaccount.com",
-                    "private_key_id": "kid1",
-                }
-            )
+        now = datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)
+        with patch.object(sa, "_build_iam_service", return_value=service):
+            return sa.check_existing_key(None, SA, key, now=now)
+
+    def test_listed_key_is_active(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup.service_account import KeyStatus
+
+        check = self._check(self._key_file(tmp_path), _iam_with_key("kid1"))
+        assert check.status is KeyStatus.ACTIVE
+        assert check.active
+
+    @pytest.mark.parametrize(
+        ("listed", "reason"),
+        [
+            ({"key_id": "other"}, "deleted"),
+            ({"disabled": True}, "disabled"),
+            ({"validBeforeTime": "2026-01-01T00:00:00Z"}, "expired on 2026-01-01"),
+            (
+                {"validBeforeTime": "2026-10-17T11:59:59.123456789Z"},
+                "expired",
+            ),
+            ({"validAfterTime": "2027-01-01T00:00:00Z"}, "isn't valid until"),
+        ],
+    )
+    def test_unusable_key_is_inactive(
+        self, tmp_path: Path, listed: dict, reason: str
+    ) -> None:
+        from slack_chat_migrator.services.setup.service_account import KeyStatus
+
+        check = self._check(self._key_file(tmp_path), _iam_with_key(**listed))
+        assert check.status is KeyStatus.INACTIVE
+        assert reason in check.reason
+        assert not check.active
+
+    def test_key_that_expires_later_is_active(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup.service_account import KeyStatus
+
+        service = _iam_with_key(
+            disabled=False,
+            validAfterTime="2026-01-01T00:00:00Z",
+            validBeforeTime="2027-01-01T00:00:00Z",
         )
-        with patch.object(sa, "_build_iam_service", return_value=_iam_with_key("kid1")):
-            assert sa.existing_key_is_valid(None, "sa@p.iam.gserviceaccount.com", key)
-        with patch.object(
-            sa, "_build_iam_service", return_value=_iam_with_key("other")
-        ):
-            assert not sa.existing_key_is_valid(
-                None, "sa@p.iam.gserviceaccount.com", key
-            )
-        assert not sa.existing_key_is_valid(None, "someone@else.com", key)
-        (tmp_path / "bad.json").write_text("not json")
-        assert not sa.existing_key_is_valid(None, "x", tmp_path / "bad.json")
+        check = self._check(self._key_file(tmp_path), service)
+        assert check.status is KeyStatus.ACTIVE
+
+    def test_files_that_are_not_keys_of_the_account(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup.service_account import KeyStatus
+
+        service = _iam_with_key("kid1")
+        other = self._check(self._key_file(tmp_path, email="x@else.com"), service)
+        assert other.status is KeyStatus.NOT_A_KEY
+        assert "x@else.com" in other.reason
+        bad = tmp_path / "bad.json"
+        bad.write_text("not json")
+        assert self._check(bad, service).status is KeyStatus.NOT_A_KEY
+        bad.write_text(json.dumps({"client_email": SA}))
+        assert self._check(bad, service).status is KeyStatus.NOT_A_KEY
+
+    @pytest.mark.parametrize(
+        ("error", "text"),
+        [
+            (_http_error(403), "HTTP 403"),
+            (ConnectionResetError("reset"), "couldn't be reached"),
+            (_refresh_error(), "application-default login"),
+        ],
+    )
+    def test_failed_listing_is_unknown_not_inactive(
+        self, tmp_path: Path, error: Exception, text: str
+    ) -> None:
+        from slack_chat_migrator.services.setup.service_account import KeyStatus
+
+        check = self._check(self._key_file(tmp_path), _iam_failing(error))
+        assert check.status is KeyStatus.UNKNOWN
+        assert text in check.reason
+
+    def test_403_reason_points_at_iam_permission(self, tmp_path: Path) -> None:
+        check = self._check(self._key_file(tmp_path), _iam_failing(_http_error(403)))
+        assert "IAM API is enabled" in check.reason
+        assert "iam.serviceAccountKeys.list" in check.reason
+
+    def test_programming_errors_are_not_swallowed(self, tmp_path: Path) -> None:
+        with pytest.raises(TypeError):
+            self._check(self._key_file(tmp_path), _iam_failing(TypeError("bug")))
+
+    def test_is_key_active(self) -> None:
+        from datetime import datetime, timezone
+
+        from slack_chat_migrator.services.setup import service_account as sa
+
+        now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+        with patch.object(sa, "_build_iam_service", return_value=_iam_with_key()):
+            assert sa.is_key_active(None, SA, "kid1", now=now)
+            assert not sa.is_key_active(None, SA, "other", now=now)
+        disabled = _iam_with_key(disabled=True)
+        with patch.object(sa, "_build_iam_service", return_value=disabled):
+            assert not sa.is_key_active(None, SA, "kid1", now=now)
+
+    def test_is_key_active_raises_when_keys_cannot_be_listed(self) -> None:
+        from googleapiclient.errors import HttpError
+
+        from slack_chat_migrator.services.setup import service_account as sa
+
+        service = _iam_failing(_http_error(403))
+        with patch.object(sa, "_build_iam_service", return_value=service):
+            with pytest.raises(HttpError):
+                sa.is_key_active(None, SA, "kid1")
 
     def test_key_step_reuses_valid_key(self, tmp_path: Path) -> None:
         from slack_chat_migrator.cli.setup_cmd import _step_download_key
@@ -482,8 +608,8 @@ class TestKeyFiles:
                 "slack_chat_migrator.cli.setup_cmd.click.prompt", return_value=str(key)
             ),
             patch(
-                "slack_chat_migrator.services.setup.service_account.existing_key_is_valid",
-                return_value=True,
+                "slack_chat_migrator.services.setup.service_account.check_existing_key",
+                return_value=_key_check("ACTIVE"),
             ),
             patch(
                 "slack_chat_migrator.services.setup.service_account.download_key"
@@ -510,14 +636,72 @@ class TestKeyFiles:
                 "slack_chat_migrator.cli.setup_cmd.click.confirm", return_value=False
             ),
             patch(
-                "slack_chat_migrator.services.setup.service_account.existing_key_is_valid",
-                return_value=False,
+                "slack_chat_migrator.cli.setup_cmd.click.confirm", return_value=False
+            ) as confirm,
+            patch(
+                "slack_chat_migrator.services.setup.service_account.check_existing_key",
+                return_value=_key_check("INACTIVE", "it is disabled"),
             ),
             patch(
                 "slack_chat_migrator.services.setup.service_account.download_key"
             ) as download,
         ):
             state = _step_download_key(MagicMock(), state)
+        assert "it is disabled" in confirm.call_args.args[0]
         download.assert_not_called()
         assert state.step_status("key") == StepStatus.SKIPPED
         assert key.read_text() == "{}"
+
+    def _run_key_step(self, tmp_path: Path, check, confirm_answer: bool = False):  # type: ignore[no-untyped-def]
+        from slack_chat_migrator.cli.setup_cmd import _step_download_key
+
+        key = tmp_path / "key.json"
+        key.write_text("{}")
+        state = SetupState(project_id="p", service_account_email=SA)
+        with (
+            patch(
+                "slack_chat_migrator.cli.setup_cmd.click.prompt", return_value=str(key)
+            ),
+            patch(
+                "slack_chat_migrator.cli.setup_cmd.click.confirm",
+                return_value=confirm_answer,
+            ) as confirm,
+            patch(
+                "slack_chat_migrator.services.setup.service_account.check_existing_key",
+                return_value=check,
+            ),
+            patch(
+                "slack_chat_migrator.services.setup.service_account.download_key",
+                return_value=key,
+            ) as download,
+        ):
+            state = _step_download_key(MagicMock(), state)
+        return state, key, confirm, download
+
+    def test_key_step_never_overwrites_a_key_it_could_not_check(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        state, key, confirm, download = self._run_key_step(
+            tmp_path, _key_check("UNKNOWN", "listing the keys failed with HTTP 403.")
+        )
+        confirm.assert_not_called()
+        download.assert_not_called()
+        assert key.read_text() == "{}"
+        assert state.step_status("key") == StepStatus.SKIPPED
+        assert state.key_path == str(key)
+        out = capsys.readouterr().out
+        assert "Couldn't check" in out
+        assert "HTTP 403" in out
+        assert "isn't an active key" not in out
+
+    def test_key_step_names_another_accounts_key(self, tmp_path: Path) -> None:
+        state, _, confirm, download = self._run_key_step(
+            tmp_path,
+            _key_check("NOT_A_KEY", "it is a key of x@else.com"),
+            confirm_answer=True,
+        )
+        question = confirm.call_args.args[0]
+        assert "isn't a key for" in question
+        assert "x@else.com" in question
+        assert download.call_args.kwargs["overwrite"] is True
+        assert state.step_status("key") == StepStatus.COMPLETE

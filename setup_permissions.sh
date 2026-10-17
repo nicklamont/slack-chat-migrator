@@ -19,7 +19,8 @@
 # 2. Creates a service account (no project-level IAM roles are granted: the
 #    service account gets its access through domain-wide delegation)
 # 3. Downloads a service account key file for authentication, or checks that
-#    an existing key file belongs to the service account
+#    an existing key file belongs to the service account and that the key is
+#    still active (not deleted, disabled or expired)
 # 4. Provides instructions for setting up domain-wide delegation in Google Workspace
 #
 # The script stops with a non-zero exit status as soon as any step fails.
@@ -213,9 +214,10 @@ json_field() {
   { grep -o "\"$1\": *\"[^\"]*\"" "$2" || true; } | head -n 1 | sed 's/.*: *"\([^"]*\)"/\1/'
 }
 
-# Check that an existing key file belongs to the service account and is still active
+# Check that an existing key file belongs to the service account and that the
+# key is still usable: not deleted, not disabled and not expired.
 verify_existing_key() {
-  local key_email key_id active_keys
+  local key_email key_id keys line id disabled valid_before found now
   key_email=$(json_field client_email "${KEY_FILE}")
   if [ "${key_email}" != "${SERVICE_ACCOUNT_EMAIL}" ]; then
     fail "Key file '${KEY_FILE}' belongs to '${key_email:-unknown}', not ${SERVICE_ACCOUNT_EMAIL}. Use --key-file to choose another path, or move the old file away."
@@ -225,14 +227,33 @@ verify_existing_key() {
   if [ -z "${key_id}" ]; then
     fail "Key file '${KEY_FILE}' is not a service account key (no private_key_id)."
   fi
-  active_keys=$(gcloud iam service-accounts keys list \
+  # A failure here says nothing about the key itself, so the file is kept.
+  keys=$(gcloud iam service-accounts keys list \
     --iam-account="${SERVICE_ACCOUNT_EMAIL}" \
     --project "${PROJECT_ID}" \
     --managed-by=user \
-    --format="value(name)") \
-    || fail "Failed to list the keys of ${SERVICE_ACCOUNT_EMAIL}"
-  if ! grep -q "${key_id}" <<< "${active_keys}"; then
-    fail "Key file '${KEY_FILE}' (key ${key_id}) is not an active key of ${SERVICE_ACCOUNT_EMAIL}; it was probably deleted. Remove the file and run this script again to create a new key."
+    --format="csv[no-heading](name.basename(),disabled,validBeforeTime)") \
+    || fail "Couldn't list the keys of ${SERVICE_ACCOUNT_EMAIL} (see the gcloud error above), so '${KEY_FILE}' couldn't be checked. The file was left unchanged; fix the problem (is the IAM API enabled, and may you list service account keys?) and run this script again."
+
+  found=""
+  while IFS=, read -r id disabled valid_before; do
+    if [ "${id}" = "${key_id}" ]; then
+      found=1
+      break
+    fi
+  done <<< "${keys}"
+  if [ -z "${found}" ]; then
+    fail "Key file '${KEY_FILE}' holds key ${key_id}, which no longer exists for ${SERVICE_ACCOUNT_EMAIL} (it was deleted). Remove the file and run this script again to create a new key."
+  fi
+  case "${disabled}" in
+    [Tt]rue)
+      fail "Key file '${KEY_FILE}' holds key ${key_id} of ${SERVICE_ACCOUNT_EMAIL}, which is disabled. Enable the key again, or remove the file and run this script again to create a new key."
+      ;;
+  esac
+  # ISO 8601 UTC timestamps compare correctly as strings.
+  now=$(date -u +%Y-%m-%dT%H:%M:%S)
+  if [ -n "${valid_before}" ] && [[ "${valid_before:0:19}" < "${now}" ]]; then
+    fail "Key file '${KEY_FILE}' holds key ${key_id} of ${SERVICE_ACCOUNT_EMAIL}, which expired on ${valid_before}. Remove the file and run this script again to create a new key."
   fi
 }
 
@@ -250,7 +271,7 @@ create_service_account_key() {
     echo "   ✅ Key file created and downloaded successfully"
   else
     verify_existing_key
-    echo "   ✅ Key file '${KEY_FILE}' already exists and belongs to ${SERVICE_ACCOUNT_EMAIL} (using existing key)"
+    echo "   ✅ Key file '${KEY_FILE}' holds an active key of ${SERVICE_ACCOUNT_EMAIL} (using existing key)"
   fi
   # Secure the key file permissions
   chmod 600 "${KEY_FILE}"

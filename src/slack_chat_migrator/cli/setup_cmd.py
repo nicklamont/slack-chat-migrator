@@ -405,8 +405,9 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
     import os
 
     from slack_chat_migrator.services.setup.service_account import (
+        KeyStatus,
+        check_existing_key,
         download_key,
-        existing_key_is_valid,
     )
     from slack_chat_migrator.services.setup.setup_service import StepStatus
 
@@ -426,8 +427,9 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
     overwrite = False
     if key_path.exists():
         # Don't mint a new key (at most 10 per service account) when the
-        # file already holds an active key for this account.
-        if existing_key_is_valid(credentials, state.service_account_email, key_path):
+        # file already holds a usable key for this account.
+        check = check_existing_key(credentials, state.service_account_email, key_path)
+        if check.status is KeyStatus.ACTIVE:
             try:
                 os.chmod(key_path, 0o600)
             except OSError:
@@ -439,11 +441,33 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
             )
             state.mark_step("key", StepStatus.COMPLETE)
             return state
-        if not click.confirm(
-            f"{key_path} exists but isn't an active key for"
-            f" {state.service_account_email}. Overwrite it with a new key?",
-            default=False,
-        ):
+        if check.status is KeyStatus.UNKNOWN:
+            # The key may well work: never offer to replace it on a failed
+            # check, which would leave the old key active and untracked.
+            console.print(
+                f"[yellow]Couldn't check whether {key_path} is still an active"
+                f" key for {state.service_account_email}: {check.reason}[/yellow]"
+            )
+            console.print(
+                "[dim]Kept the existing file unchanged; the next steps use it"
+                " as is. Re-run setup once the problem is fixed to check it"
+                " again, or choose another path to create a new key.[/dim]"
+            )
+            state.key_path = str(key_path)
+            state.mark_step("key", StepStatus.SKIPPED)
+            return state
+        if check.status is KeyStatus.INACTIVE:
+            question = (
+                f"{key_path} holds a key for {state.service_account_email} that"
+                f" can't be used ({check.reason}). Overwrite it with a new key?"
+            )
+        else:
+            question = (
+                f"{key_path} exists but isn't a key for"
+                f" {state.service_account_email} ({check.reason})."
+                " Overwrite it with a new key?"
+            )
+        if not click.confirm(question, default=False):
             console.print(
                 "[dim]Kept the existing file. Re-run setup and choose another"
                 " path to create a key.[/dim]"

@@ -20,6 +20,9 @@ KEY = {
     "private_key_id": "abc123keyid",
 }
 
+#: ``keys list`` output for the key in KEY: enabled, never expires.
+ACTIVE_KEY = "abc123keyid,,9999-12-31T23:59:59Z"
+
 pytestmark = pytest.mark.skipif(
     os.name == "nt" or shutil.which("bash") is None, reason="needs bash"
 )
@@ -39,7 +42,8 @@ if [ "$1 $2 $3 $4" = "iam service-accounts keys create" ]; then
   printf '%s' "$KEY_JSON" > "$5"
 fi
 if [ "$1 $2 $3 $4" = "iam service-accounts keys list" ]; then
-  echo "projects/demo-proj/serviceAccounts/x/keys/${ACTIVE_KEY_ID:-abc123keyid}"
+  # csv[no-heading](name.basename(),disabled,validBeforeTime)
+  printf '%s\n' "$KEY_LIST"
 fi
 exit 0
 """
@@ -49,7 +53,7 @@ def _bin_dir(tmp_path: Path, with_gcloud: bool = True) -> Path:
     """A PATH directory with only the tools the script needs (+ the stub)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    for tool in ("bash", "grep", "sed", "head", "basename", "chmod", "cat"):
+    for tool in ("bash", "grep", "sed", "head", "basename", "chmod", "cat", "date"):
         target = shutil.which(tool)
         assert target, tool
         link = bin_dir / tool
@@ -67,7 +71,7 @@ def _run(
     *args: str,
     with_gcloud: bool = True,
     fail_on: str = "",
-    active_key_id: str = "abc123keyid",
+    key_list: str = ACTIVE_KEY,
 ) -> subprocess.CompletedProcess[str]:
     env = {
         "PATH": str(_bin_dir(tmp_path, with_gcloud)),
@@ -75,7 +79,7 @@ def _run(
         "GCLOUD_LOG": str(tmp_path / "gcloud.log"),
         "FAIL_ON": fail_on,
         "KEY_JSON": json.dumps(KEY),
-        "ACTIVE_KEY_ID": active_key_id,
+        "KEY_LIST": key_list,
     }
     return subprocess.run(  # noqa: S603
         [str(SCRIPT), *args],
@@ -144,11 +148,44 @@ class TestSetupPermissionsScript:
         assert result.returncode != 0
         assert "belongs to" in result.stderr
 
-    def test_reused_deleted_key_is_rejected(self, tmp_path: Path) -> None:
-        (tmp_path / "slack-chat-migrator-sa-key.json").write_text(json.dumps(KEY))
-        result = _run(tmp_path, active_key_id="somethingelse")
+    @pytest.mark.parametrize(
+        ("key_list", "message"),
+        [
+            ("somethingelse,,9999-12-31T23:59:59Z", "it was deleted"),
+            ("", "it was deleted"),
+            ("abc123keyid,True,9999-12-31T23:59:59Z", "which is disabled"),
+            ("abc123keyid,,2020-01-01T00:00:00Z", "expired on 2020-01-01"),
+        ],
+    )
+    def test_reused_unusable_key_is_rejected(
+        self, tmp_path: Path, key_list: str, message: str
+    ) -> None:
+        key = tmp_path / "slack-chat-migrator-sa-key.json"
+        key.write_text(json.dumps(KEY))
+        result = _run(tmp_path, key_list=key_list)
         assert result.returncode != 0
-        assert "not an active key" in result.stderr
+        assert message in result.stderr
+        assert "keys create" not in _calls(tmp_path)
+        assert json.loads(key.read_text()) == KEY
+
+    def test_key_that_cannot_be_checked_is_kept(self, tmp_path: Path) -> None:
+        key = tmp_path / "slack-chat-migrator-sa-key.json"
+        key.write_text(json.dumps(KEY))
+        result = _run(tmp_path, fail_on="keys_list")
+        assert result.returncode != 0
+        assert "couldn't be checked" in result.stderr
+        assert "left unchanged" in result.stderr
+        assert "keys create" not in _calls(tmp_path)
+        assert json.loads(key.read_text()) == KEY
+
+    def test_disabled_false_and_future_expiry_is_active(self, tmp_path: Path) -> None:
+        (tmp_path / "slack-chat-migrator-sa-key.json").write_text(json.dumps(KEY))
+        result = _run(
+            tmp_path,
+            key_list="other,,9999-12-31T23:59:59Z\nabc123keyid,False,2999-01-01T00:00:00Z",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "holds an active key" in result.stdout
 
     def test_reused_valid_key_is_kept_and_made_private(self, tmp_path: Path) -> None:
         key = tmp_path / "slack-chat-migrator-sa-key.json"
