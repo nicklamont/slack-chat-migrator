@@ -290,10 +290,6 @@ class TestInitConfig:
         assert m.config.abort_on_error is False
         assert m.config.max_retries == 3
 
-    def test_progress_file_path(self, tmp_path):
-        m = _make_migrator(tmp_path)
-        assert m.progress_file == tmp_path / ".migration_progress.json"
-
 
 class TestInitUnmappedUserTracker:
     """Tests that unmapped user tracking is initialized."""

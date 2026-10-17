@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import datetime
 import logging
-import time
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
@@ -21,7 +19,6 @@ from slack_chat_migrator.services.messages.reaction_processor import (
 )
 from slack_chat_migrator.services.spaces.discovery import should_process_message
 from slack_chat_migrator.types import FailedMessage, MessageResult, SendResult
-from slack_chat_migrator.utils.api import slack_ts_to_rfc3339
 from slack_chat_migrator.utils.formatting import parse_slack_blocks
 from slack_chat_migrator.utils.logging import (
     log_with_context,
@@ -689,90 +686,3 @@ def track_message_stats(
         )
         state.progress.channel_stats[channel]["file_count"] += file_count
         state.progress.migration_summary["files_created"] += file_count
-
-
-def send_intro(
-    ctx: MigrationContext,
-    state: MigrationState,
-    chat: ChatAdapter,
-    space: str,
-    channel: str,
-) -> None:
-    """Send an intro message with channel metadata.
-
-    Args:
-        ctx: Immutable migration context.
-        state: Mutable migration state.
-        chat: Google Chat API service (admin).
-        space: Google Chat space resource name to send into.
-        channel: Slack channel name for metadata lookup.
-    """
-    # Check if we're in update mode - if so, don't send intro message again
-    is_update_mode = ctx.update_mode
-    if is_update_mode:
-        log_with_context(
-            logging.INFO,
-            f"[UPDATE MODE] Skipping intro message for channel {channel}",
-            channel=channel,
-        )
-        return
-
-    # Get channel metadata
-    meta = ctx.channels_meta.get(channel, {})
-
-    # Format the intro message
-    intro_text = f"🔄 *Migrated from Slack #{channel}*\n\n"
-
-    # Add channel purpose and topic if available
-    purpose = meta.get("purpose", {}).get("value", "")
-    topic = meta.get("topic", {}).get("value", "")
-
-    if purpose:
-        intro_text += f"*Purpose:* {purpose}\n\n"
-    if topic:
-        intro_text += f"*Topic:* {topic}\n\n"
-
-    # Add channel creation date if available
-    created_ts = meta.get("created")
-    if created_ts:
-        created_date = datetime.datetime.fromtimestamp(created_ts).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-        intro_text += f"*Created:* {created_date}\n\n"
-
-    # Add migration info
-    intro_text += (
-        f"*Migration Date:* {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-    )
-
-    # Log the action
-    log_with_context(
-        logging.INFO,
-        f"{ctx.log_prefix}Sending intro message to space {space} for channel {channel}",
-        channel=channel,
-    )
-
-    # Create the message
-    try:
-        message_body = {
-            "text": intro_text,
-            "createTime": slack_ts_to_rfc3339(f"{int(time.time())}.000000"),
-            # Explicitly set the sender as the workspace admin
-            "sender": {"type": "HUMAN", "name": f"users/{ctx.workspace_admin}"},
-        }
-
-        # Send the message
-        chat.create_message(parent=space, body=message_body)
-        # Increment the counter
-        state.progress.migration_summary["messages_created"] += 1
-
-        log_with_context(
-            logging.INFO, f"Sent intro message to space {space}", channel=channel
-        )
-    except HttpError as e:
-        log_with_context(
-            logging.WARNING,
-            f"Failed to send intro message to space {space}: {e}",
-            channel=channel,
-            error=str(e),
-        )

@@ -4,14 +4,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from googleapiclient.errors import HttpError
-from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.core.context import MigrationContext
 from slack_chat_migrator.core.state import MigrationState, _default_migration_summary
 from slack_chat_migrator.services.messages.message_sender import (
     _resolve_chat_service,
-    send_intro,
     send_message,
     track_message_stats,
 )
@@ -871,75 +869,6 @@ _DEFAULT_INTRO_META = {
         "created": 1600000000,
     }
 }
-
-
-class TestSendIntro:
-    """Tests for send_intro()."""
-
-    def _setup(self, dry_run=False, update_mode=False, channels_meta=None):
-        ctx = _make_ctx(
-            dry_run=dry_run,
-            update_mode=update_mode,
-            channels_meta=channels_meta
-            if channels_meta is not None
-            else _DEFAULT_INTRO_META,
-        )
-        state = _make_state()
-        chat = MagicMock()
-        return ctx, state, chat
-
-    @patch("slack_chat_migrator.services.messages.message_sender.time")
-    def test_sends_intro_message(self, mock_time):
-        """send_intro creates a message via the API."""
-        mock_time.time.return_value = 1700000000
-        ctx, state, chat = self._setup()
-
-        send_intro(ctx, state, chat, "spaces/SPACE1", "general")
-
-        chat.create_message.assert_called_once()
-        assert state.progress.migration_summary["messages_created"] == 1
-
-    @patch("slack_chat_migrator.services.messages.message_sender.time")
-    def test_dry_run_sends_via_noop_service(self, mock_time):
-        """In dry run, intro message is sent (handled by DryRunChatService)."""
-        mock_time.time.return_value = 1700000000
-        ctx, state, chat = self._setup(dry_run=True)
-
-        send_intro(ctx, state, chat, "spaces/SPACE1", "general")
-
-        assert state.progress.migration_summary["messages_created"] == 1
-        chat.create_message.assert_called_once()
-
-    def test_update_mode_skips_intro(self):
-        """In update mode, intro messages are not resent."""
-        ctx, state, chat = self._setup(update_mode=True)
-
-        send_intro(ctx, state, chat, "spaces/SPACE1", "general")
-
-        chat.create_message.assert_not_called()
-        assert state.progress.migration_summary["messages_created"] == 0
-
-    @patch("slack_chat_migrator.services.messages.message_sender.time")
-    def test_api_error_is_caught(self, mock_time):
-        """API errors during intro send are caught and do not raise."""
-        mock_time.time.return_value = 1700000000
-        ctx, state, chat = self._setup()
-        chat.create_message.side_effect = HttpError(
-            Response({"status": "500"}), b"API Error"
-        )
-
-        # Should not raise
-        send_intro(ctx, state, chat, "spaces/SPACE1", "general")
-
-    @patch("slack_chat_migrator.services.messages.message_sender.time")
-    def test_missing_channel_metadata(self, mock_time):
-        """Intro works when channel has no metadata."""
-        mock_time.time.return_value = 1700000000
-        ctx, state, chat = self._setup(channels_meta={})
-
-        send_intro(ctx, state, chat, "spaces/SPACE1", "general")
-
-        chat.create_message.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

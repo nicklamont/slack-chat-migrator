@@ -106,10 +106,6 @@ class TestMigrationContextProperties:
         ctx = _make_ctx(update_mode=True)
         assert ctx.import_mode is False
 
-    def test_progress_file(self):
-        ctx = _make_ctx(export_root=Path("/data/export"))
-        assert ctx.progress_file == Path("/data/export/.migration_progress.json")
-
     def test_log_prefix_no_flags(self):
         ctx = _make_ctx(dry_run=False, update_mode=False)
         assert ctx.log_prefix == ""
@@ -174,4 +170,3 @@ class TestMigrationContextIntegrationWithMigrator:
         # Derived properties work
         assert m.ctx.import_mode is True
         assert m.ctx.log_prefix == "[DRY RUN] "
-        assert m.ctx.progress_file == tmp_path / ".migration_progress.json"

@@ -150,7 +150,6 @@ class SlackToChatMigrator:
         self.users_without_email: list[
             dict[str, Any]
         ] = []  # List of users without email mappings
-        self.progress_file = self.export_root / ".migration_progress.json"
 
         # Validate workspace admin email format (skip when None in dry-run)
         if self.workspace_admin is not None:
