@@ -103,8 +103,8 @@ _HTML_EXTENSIONS = (".html", ".htm", ".xhtml")
 class DownloadResult:
     """Result of :func:`download_file`.
 
-    An ``OK`` result always has ``path`` and ``md5``; that is checked when
-    the result is built.
+    ``path`` and ``md5`` are set exactly for an ``OK`` result; that is
+    checked when the result is built.
 
     Attributes:
         status: What happened (see :class:`DownloadStatus`).
@@ -117,6 +117,8 @@ class DownloadResult:
         url: The link to keep for files that are not downloaded (external
             files, Google links), else the URL that was fetched.
         http_status: Final HTTP status, when a response was received.
+        refused_host: For ``disallowed_host``, the host that was refused
+            (the export link's, or a redirect's).
     """
 
     status: DownloadStatus
@@ -127,11 +129,12 @@ class DownloadResult:
     reason: str | None = None
     url: str | None = None
     http_status: int | None = None
+    refused_host: str | None = None
 
     def __post_init__(self) -> None:
-        """Check that a successful download names its file and hash."""
-        if self.status is DownloadStatus.OK and (self.path is None or not self.md5):
-            raise ValueError("an OK DownloadResult needs path and md5")
+        """Check that exactly a successful download names its file and hash."""
+        if (self.status is DownloadStatus.OK) != bool(self.path and self.md5):
+            raise ValueError("path and md5 are set exactly for an OK DownloadResult")
 
     @property
     def ok(self) -> bool:
@@ -375,20 +378,20 @@ def _get_following_redirects(
     session: requests.Session,
     url: str,
     slack_token: str,
-) -> tuple[requests.Response | None, str | None]:
+) -> tuple[requests.Response | None, str | None, str | None]:
     """GET *url*, following up to :data:`DOWNLOAD_MAX_REDIRECTS` redirects.
 
     Every hop is re-validated with :func:`is_allowed_file_url` before it is
     requested, so a redirect can't lead off Slack's file hosts.
 
     Returns:
-        ``(response, None)`` on a non-redirect response, or
-        ``(None, reason)`` when a hop is refused.
+        ``(response, None, None)`` on a non-redirect response, or
+        ``(None, reason, refused_url)`` when a hop is refused.
     """
     current = url
     for _hop in range(DOWNLOAD_MAX_REDIRECTS + 1):
         if not is_allowed_file_url(current):
-            return None, REASON_DISALLOWED_HOST
+            return None, REASON_DISALLOWED_HOST, current
         headers = {"Authorization": f"Bearer {slack_token}"} if slack_token else {}
         response = session.get(
             current,
@@ -398,11 +401,11 @@ def _get_following_redirects(
             timeout=(DOWNLOAD_CONNECT_TIMEOUT_SECONDS, DOWNLOAD_READ_TIMEOUT_SECONDS),
         )
         if not response.is_redirect:
-            return response, None
+            return response, None, None
         location = response.headers.get("Location", "")
         response.close()
         current = urljoin(current, location)
-    return None, REASON_TOO_MANY_REDIRECTS
+    return None, REASON_TOO_MANY_REDIRECTS, current
 
 
 def _stream_to_file(
@@ -529,7 +532,9 @@ def download_file(
     )
 
     try:
-        response, refusal = _get_following_redirects(session, target, slack_token)
+        response, refusal, refused_url = _get_following_redirects(
+            session, target, slack_token
+        )
     except requests.RequestException as e:
         status_code = e.response.status_code if e.response is not None else None
         log_with_context(
@@ -549,11 +554,21 @@ def download_file(
     if response is None:
         log_with_context(
             logging.WARNING,
-            f"Refused to download file {name}: {refusal} ({redact_url(target)})",
+            f"Refused to download file {name}: {refusal}"
+            f" ({redact_url(refused_url or target)})",
             channel=channel,
             file_id=file_id,
         )
-        return DownloadResult(DownloadStatus.FAILED, reason=refusal, url=target)
+        return DownloadResult(
+            DownloadStatus.FAILED,
+            reason=refusal,
+            url=target,
+            refused_host=(
+                (urlparse(refused_url).hostname or refused_url)
+                if refusal == REASON_DISALLOWED_HOST and refused_url
+                else None
+            ),
+        )
 
     with response:
         if response.status_code != HTTP_OK:

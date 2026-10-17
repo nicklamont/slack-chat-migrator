@@ -444,6 +444,37 @@ class TestHostAllowList:
     def test_slack_hosts_allowed(self, url):
         assert is_allowed_file_url(url)
 
+    def test_refused_host_is_named(self, dest):
+        session = FakeSession(
+            {
+                SLACK_URL: make_response(
+                    status=302, headers={"Location": "https://cdn.example.org/x"}
+                )
+            }
+        )
+
+        result = download_file(png_file(), str(dest), session=session)
+
+        assert result.reason == fd.REASON_DISALLOWED_HOST
+        assert result.refused_host == "cdn.example.org"
+        assert result.url == SLACK_URL
+
+    def test_redirect_loop_is_a_failure(self, dest):
+        """Too many redirects is FAILED, not "unavailable" (#96)."""
+        session = FakeSession(
+            {
+                SLACK_URL: lambda: make_response(
+                    status=302, headers={"Location": SLACK_URL}
+                )
+            }
+        )
+
+        result = download_file(png_file(), str(dest), session=session)
+
+        assert result.status is DownloadStatus.FAILED
+        assert result.reason == fd.REASON_TOO_MANY_REDIRECTS
+        assert len(session.calls) == fd.DOWNLOAD_MAX_REDIRECTS + 1
+
     def test_redirect_within_slack_is_followed_with_token(self, dest):
         hop = "https://files-origin.slack.com/files-pri/T1-F1/photo.png"
         session = FakeSession(
@@ -757,13 +788,19 @@ def test_network_error_logs_do_not_leak_tokens(dest, caplog):
 
 
 class TestDownloadResultInvariant:
-    """An OK result always carries its file and hash (TD6)."""
+    """Exactly an OK result carries its file and hash (#96)."""
 
     def test_ok_needs_path_and_md5(self):
         with pytest.raises(ValueError, match="path and md5"):
             fd.DownloadResult(DownloadStatus.OK)
         with pytest.raises(ValueError, match="path and md5"):
             fd.DownloadResult(DownloadStatus.OK, path="/tmp/x")
+        with pytest.raises(ValueError, match="path and md5"):
+            fd.DownloadResult(DownloadStatus.OK, path="", md5="m")
+
+    def test_only_ok_has_a_file(self):
+        with pytest.raises(ValueError, match="path and md5"):
+            fd.DownloadResult(DownloadStatus.FAILED, path="/tmp/x", md5="m")
 
     def test_is_frozen(self):
         import dataclasses

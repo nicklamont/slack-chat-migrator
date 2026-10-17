@@ -18,6 +18,7 @@ from slack_chat_migrator.constants import (
     DIRECT_UPLOAD_MAX_BYTES,
     GOOGLE_DOCS_MIME_TYPE,
     GOOGLE_SHEETS_MIME_TYPE,
+    SLACK_FILE_HOST_SUFFIXES,
 )
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.core.state import MigrationState
@@ -40,6 +41,7 @@ from slack_chat_migrator.services.drive.pending import UNKNOWN_TARGET
 from slack_chat_migrator.services.drive_adapter import DRIVE_CALL_ERRORS
 from slack_chat_migrator.services.files.file_download import (
     AUTH_FAILURE_REASONS,
+    REASON_DISALLOWED_HOST,
     REASON_EXTERNAL,
     DownloadResult,
     DownloadStatus,
@@ -265,6 +267,8 @@ class FileHandler:
         # Conversation privacy, for limited-access folders
         self.channels_meta: Mapping[str, Any] = channels_meta or {}
         self._conversation_types: dict[str, ConversationType] = {}
+        # Hosts whose downloads were refused (each is explained once).
+        self._refused_hosts: set[str] = set()
 
         # Initialize file upload statistics
         self.file_stats: dict[str, Any] = {
@@ -984,7 +988,25 @@ class FileHandler:
         )
         if download.reason in AUTH_FAILURE_REASONS:
             self._note_auth_failure()
+        elif download.reason == REASON_DISALLOWED_HOST:
+            self._note_disallowed_host(download.refused_host or "unknown host")
         return UploadResult(error=f"Download failed: {download.reason}", name=name)
+
+    def _note_disallowed_host(self, host: str) -> None:
+        """Say once per host why its downloads are refused and what to do."""
+        if host in self._refused_hosts:
+            return
+        self._refused_hosts.add(host)
+        allowed = ", ".join(SLACK_FILE_HOST_SUFFIXES)
+        log_with_context(
+            logging.ERROR,
+            f"Refused to download attachments from {host}: only HTTPS links on"
+            f" Slack's file hosts ({allowed} and their subdomains) are"
+            " downloaded, so a token is never sent anywhere else. These files"
+            f" are counted as failed. If {host} is a real Slack file host for"
+            " your workspace (for example on GovSlack), report it so it can be"
+            " added.",
+        )
 
     def _note_auth_failure(self) -> None:
         """Count a refused download and say how to fix it (first, then every 100)."""

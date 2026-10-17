@@ -1878,7 +1878,31 @@ def test_unavailable_slack_download_url_is_not_kept():
 
 
 class TestRefusedDownloads:
-    """401/403 and sign-in pages are failures, with a slack_token hint (SF4)."""
+    """401/403 and sign-in pages are failures, with a slack_token hint (#96)."""
+
+    def test_disallowed_host_is_explained_once_per_host(self, caplog):
+        handler = self._handler()
+        hosts = iter(["cdn.example.org", "cdn.example.org", "files.other.net"])
+        handler._download_file = MagicMock(
+            side_effect=lambda *a, **k: DownloadResult(
+                DownloadStatus.FAILED,
+                reason="disallowed_host",
+                refused_host=next(hosts),
+            )
+        )
+
+        for i in range(3):
+            handler.upload_attachment({"id": f"F{i}", "name": "a.png"}, "general")
+
+        hints = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == "ERROR"
+            and "Refused to download attachments" in r.getMessage()
+        ]
+        assert len(hints) == 2
+        assert "cdn.example.org" in hints[0] and "slack.com" in hints[0]
+        assert handler.get_file_statistics()["failed_uploads"] == 3
 
     def _handler(self, token=""):
         config = MigrationConfig(
