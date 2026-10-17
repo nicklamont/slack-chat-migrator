@@ -284,18 +284,64 @@ class TestDriveOperations:
         assert len(validator.permission_errors) == 1
         assert "Drive operations failed" in validator.permission_errors[0]
 
-    def test_permission_creation_fails(self):
-        """Permission creation failure adds to permission_errors."""
+    def test_sharing_policy_failure_is_only_a_warning(self):
+        """A sharing-policy 403 doesn't block the migration (issue #120)."""
         ctx = _make_context()
         validator = PermissionValidator(ctx)
 
         ctx.drive.create_file.return_value = {"id": "file123"}
-        ctx.drive.create_permission.side_effect = _http_error(403, "Forbidden")
+        ctx.drive.create_permission.side_effect = _http_error(
+            403, "Forbidden", b'{"error": {"message": "Sharing is restricted"}}'
+        )
+
+        with patch("slack_chat_migrator.utils.permissions.log_with_context") as log:
+            validator._test_drive_operations()
+
+        assert validator.permission_errors == []
+        warnings = [c.args[1] for c in log.call_args_list if c.args[0] == 30]
+        assert any("doesn't block the migration" in w for w in warnings)
+
+    def test_sharing_scope_failure_is_an_error(self):
+        """Missing Drive scope while sharing is still an error."""
+        ctx = _make_context()
+        validator = PermissionValidator(ctx)
+
+        ctx.drive.create_file.return_value = {"id": "file123"}
+        ctx.drive.create_permission.side_effect = _http_error(
+            403,
+            "Forbidden",
+            b'{"error": {"message": "Request had insufficient authentication scopes."}}',
+        )
 
         validator._test_drive_operations()
 
         assert len(validator.permission_errors) == 1
         assert "Drive operations failed" in validator.permission_errors[0]
+
+    def test_never_creates_an_anyone_permission(self):
+        """The sharing test uses a domain permission, never type 'anyone'."""
+        ctx = _make_context(admin="admin@corp.example")
+        validator = PermissionValidator(ctx)
+        ctx.drive.create_file.return_value = {"id": "file123"}
+
+        validator._test_drive_operations()
+
+        body = ctx.drive.create_permission.call_args.kwargs["body"]
+        assert body["type"] == "domain"
+        assert body["domain"] == "corp.example"
+        assert body["allowFileDiscovery"] is False
+        for call in ctx.drive.create_permission.call_args_list:
+            assert call.kwargs["body"]["type"] != "anyone"
+
+    def test_full_check_never_shares_with_anyone(self):
+        ctx = _make_context()
+        _setup_space_and_member(ctx.chat)
+        ctx.drive.create_file.return_value = {"id": "f1"}
+        PermissionValidator(ctx).validate_all_permissions()
+        types = [
+            c.kwargs["body"]["type"] for c in ctx.drive.create_permission.call_args_list
+        ]
+        assert "anyone" not in types
 
 
 # -------------------------------------------------------------------
@@ -320,16 +366,42 @@ class TestCleanup:
         ctx.chat.delete_space.assert_called_once()
         ctx.drive.delete_file.assert_called_once()
 
-    def test_handles_import_mode_deletion_errors(self):
-        """Import mode deletion error logged gracefully."""
+    def test_failed_space_delete_warns_with_space_name(self):
+        """A test space that can't be deleted is reported at WARNING by name."""
         ctx = _make_context()
         validator = PermissionValidator(ctx)
         validator.test_resources = {"space": "spaces/test123"}
 
-        ctx.chat.delete_space.side_effect = Exception("import mode: cannot delete")
+        ctx.chat.delete_space.side_effect = _http_error(
+            403, "Forbidden", b"Permission denied: import mode"
+        )
 
-        # Should not raise
+        with patch("slack_chat_migrator.utils.permissions.log_with_context") as log:
+            # Should not raise
+            validator._cleanup_test_resources()
+
+        warnings = [c.args[1] for c in log.call_args_list if c.args[0] == 30]
+        assert any("spaces/test123" in w and "permission test" in w for w in warnings)
+        # Its import is never completed
+        ctx.chat.complete_import.assert_not_called()
+
+    def test_space_delete_attempted_when_file_delete_raises_anything(self):
+        """A non-HTTP error deleting the file doesn't skip the space."""
+        ctx = _make_context()
+        validator = PermissionValidator(ctx)
+        validator.test_resources = {"drive_file": "f1", "space": "spaces/t"}
+        ctx.drive.delete_file.side_effect = ConnectionResetError("reset")
+
         validator._cleanup_test_resources()
+
+        ctx.chat.delete_space.assert_called_once_with(name="spaces/t")
+
+    def test_test_space_name_is_not_a_migration_space(self):
+        """--complete only touches 'Slack #...' spaces; the test space isn't one."""
+        from slack_chat_migrator.constants import SPACE_NAME_PREFIX
+        from slack_chat_migrator.utils.permissions import TEST_SPACE_DISPLAY_NAME
+
+        assert not TEST_SPACE_DISPLAY_NAME.startswith(SPACE_NAME_PREFIX)
 
     def test_noop_when_no_resources(self):
         """No-op when no resources to clean up."""
