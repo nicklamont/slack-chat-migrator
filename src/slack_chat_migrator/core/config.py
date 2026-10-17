@@ -12,7 +12,7 @@ import datetime
 import difflib
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
@@ -174,14 +174,20 @@ class MigrationConfig:
     def __post_init__(self) -> None:
         """Validate and normalise the values after initialization.
 
-        Checks every field's type (so direct construction fails like
+        Normalises ``custom_emoji_map`` keys (see :func:`_normalize_emoji_map`),
+        checks every field's type (so direct construction fails like
         ``from_dict`` does), coerces ``import_completion_strategy`` to its
-        enum, checks the ranges, and normalises ``custom_emoji_map`` keys
-        (see :func:`_normalize_emoji_map`).
+        enum, and checks the ranges and allowed values.
 
         Raises:
-            ConfigError: If a value has the wrong type or is out of range.
+            ConfigError: If a value has the wrong type, is out of range or
+                isn't one of the allowed values (``space_manager``,
+                ``conversation_types``, ``import_completion_strategy``), or a
+                ``custom_emoji_map`` key is invalid or repeated or its value
+                is empty.
         """
+        if isinstance(self.custom_emoji_map, Mapping):
+            self.custom_emoji_map = _normalize_emoji_map(self.custom_emoji_map)
         _check_field_types(self)
         self.import_completion_strategy = _parse_completion_strategy(
             self.import_completion_strategy
@@ -218,7 +224,6 @@ class MigrationConfig:
             )
         if self.retry_delay < 0:
             raise ConfigError(f"retry_delay must be >= 0, got {self.retry_delay}")
-        self.custom_emoji_map = _normalize_emoji_map(self.custom_emoji_map)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> MigrationConfig:
@@ -449,7 +454,16 @@ def _get_list(
 
 
 def _get_mapping(data: Mapping[str, Any], key: str) -> dict[str, str]:
-    """Return a string-to-string mapping option with keys coerced to ``str``."""
+    """Return a string-to-string mapping option.
+
+    Keys must be names: strings, or integers as their digits (see
+    :func:`_mapping_key`).  Scalar values are coerced to strings; an empty
+    value means an empty mapping.
+
+    Raises:
+        ConfigError: If the value isn't a mapping, a value isn't a scalar,
+            a key isn't a name, or two keys give the same name.
+    """
     value = data.get(key)
     if value is None:
         return {}
@@ -471,8 +485,12 @@ def _get_mapping(data: Mapping[str, Any], key: str) -> dict[str, str]:
     return result
 
 
-#: What each annotated field type must hold, for direct construction.
-_FIELD_TYPE_CHECKS: dict[str, tuple[str, Any]] = {
+#: The check for each field annotation, keyed by the annotation's source
+#: text (this module uses postponed annotations, so ``Field.type`` is that
+#: text): what the value must be, and a predicate.  A field whose annotation
+#: is missing here, and isn't in :data:`_TYPE_CHECK_EXEMPT`, is a
+#: programming error that :func:`_check_field_types` reports.
+_FIELD_TYPE_CHECKS: dict[str, tuple[str, Callable[[Any], bool]]] = {
     "bool": ("true or false", lambda v: isinstance(v, bool)),
     "int": (
         "a whole number",
@@ -488,9 +506,10 @@ _FIELD_TYPE_CHECKS: dict[str, tuple[str, Any]] = {
         lambda v: isinstance(v, list) and all(isinstance(i, str) for i in v),
     ),
     "dict[str, str]": (
-        "a mapping of strings",
+        "a mapping of strings to strings",
         lambda v: (
-            isinstance(v, Mapping) and all(isinstance(i, str) for i in v.values())
+            isinstance(v, Mapping)
+            and all(isinstance(k, str) and isinstance(i, str) for k, i in v.items())
         ),
     ),
     "SharedDriveConfig": (
@@ -499,20 +518,33 @@ _FIELD_TYPE_CHECKS: dict[str, tuple[str, Any]] = {
     ),
 }
 
+#: Fields that are coerced rather than type-checked.
+_TYPE_CHECK_EXEMPT = frozenset({"import_completion_strategy"})
+
 
 def _check_field_types(config: Any) -> None:
     """Check each dataclass field of *config* against its annotation.
 
-    Fields whose annotation isn't in :data:`_FIELD_TYPE_CHECKS` (such as the
-    completion-strategy enum, which is coerced instead) are skipped.
+    The check is looked up in :data:`_FIELD_TYPE_CHECKS` by the annotation's
+    text; fields in :data:`_TYPE_CHECK_EXEMPT` (the completion-strategy
+    enum, which is coerced instead) are skipped.
 
     Raises:
         ConfigError: If a field holds the wrong type.
+        TypeError: If a field's annotation has no check and isn't exempt
+            (a new field needs an entry in ``_FIELD_TYPE_CHECKS``).
     """
     for f in fields(config):
+        if f.name in _TYPE_CHECK_EXEMPT:
+            continue
         check = _FIELD_TYPE_CHECKS.get(str(f.type))
+        if check is None:
+            raise TypeError(
+                f"No type check for {type(config).__name__}.{f.name}"
+                f" (annotated {f.type!r}); add one to _FIELD_TYPE_CHECKS"
+            )
         value = getattr(config, f.name)
-        if check is not None and not check[1](value):
+        if not check[1](value):
             raise ConfigError(f"{f.name} must be {check[0]}, got {_describe(value)}")
 
 
@@ -591,7 +623,8 @@ def _normalize_emoji_map(mapping: Mapping[Any, str]) -> dict[str, str]:
     Raises:
         ConfigError: If a key isn't a name (a YAML boolean or date), is
             empty after stripping, or two keys name the same emoji (also
-            when they differ only in case or colons).
+            when they differ only in case or colons), or a value is an
+            empty string (it would silently map nothing).
     """
     result: dict[str, str] = {}
     for raw_key, value in mapping.items():
@@ -599,6 +632,11 @@ def _normalize_emoji_map(mapping: Mapping[Any, str]) -> dict[str, str]:
         name = key.strip().strip(":").strip().lower()
         if not name:
             raise ConfigError(f"custom_emoji_map key {raw_key!r} is not an emoji name")
+        if isinstance(value, str) and not value.strip():
+            raise ConfigError(
+                f"custom_emoji_map entry {name!r} has an empty value; give a"
+                " Unicode emoji or an emoji name such as ':tada:'"
+            )
         if name in result:
             raise ConfigError(
                 f"custom_emoji_map lists the emoji {name!r} more than once"

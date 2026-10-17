@@ -222,8 +222,18 @@ class TestMigrationConfigValidation:
             {"retry_delay": "2"},
             {"ignore_bots": "false"},
             {"conversation_types": "dm"},
+            # A bare string is iterable: only the list check catches it.
+            {"exclude_channels": "general"},
             {"exclude_channels": [1]},
+            {"email_domain_override": 5},
+            {"max_retries": True},
+            {"retry_delay": False},
+            {"ignore_bots": 1},
+            {"ignore_bots": 1.0},
             {"user_mapping_overrides": {"U1": 5}},
+            {"user_mapping_overrides": {1: "a@example.com"}},
+            {"custom_emoji_map": {"tada": 5}},
+            {"custom_emoji_map": {"tada": "  "}},
             {"shared_drive": {"name": "x"}},
         ],
     )
@@ -231,6 +241,38 @@ class TestMigrationConfigValidation:
         """Library callers get the same exception type as from_dict raises."""
         with pytest.raises(ConfigError):
             MigrationConfig(**kwargs)
+
+    def test_every_field_is_type_checked_or_exempt(self):
+        """A new field with an unlisted annotation must not go unchecked."""
+        from dataclasses import fields
+
+        from slack_chat_migrator.core.config import (
+            _FIELD_TYPE_CHECKS,
+            _TYPE_CHECK_EXEMPT,
+        )
+
+        unchecked = {
+            f.name
+            for f in fields(MigrationConfig)
+            if str(f.type) not in _FIELD_TYPE_CHECKS
+        }
+        assert unchecked == set(_TYPE_CHECK_EXEMPT) == {"import_completion_strategy"}
+
+    def test_unhandled_annotation_is_a_programming_error(self):
+        from dataclasses import dataclass
+
+        from slack_chat_migrator.core.config import _check_field_types
+
+        @dataclass
+        class Odd:
+            maybe: "int | None" = None
+
+        with pytest.raises(TypeError, match="add one to _FIELD_TYPE_CHECKS"):
+            _check_field_types(Odd())
+
+    def test_custom_emoji_map_empty_value_from_yaml(self, tmp_path):
+        with pytest.raises(ConfigError, match="'tada' has an empty value"):
+            _load(tmp_path, "custom_emoji_map:\n  tada: ''\n")
 
     def test_completion_strategy_strings_are_coerced(self):
         config = MigrationConfig(import_completion_strategy="force_complete")
