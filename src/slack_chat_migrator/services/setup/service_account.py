@@ -255,7 +255,8 @@ def _assess_key(key: Mapping[str, Any] | None, now: datetime | None = None) -> K
         expired; ``UNKNOWN`` when its expiry time can't be parsed.
 
     Raises:
-        TypeError: If *now* is a naive datetime (a programming error).
+        TypeError: If *now* is a naive datetime (a programming error) and
+            the key has a ``validBeforeTime`` to compare it with.
     """
     if key is None:
         return KeyCheck(KeyStatus.INACTIVE, "it was deleted")
@@ -326,7 +327,8 @@ def _describe_list_error(error: BaseException, service_account_email: str) -> st
         else:
             hint = ""
         return (
-            f"listing the keys failed with HTTP {status}"
+            "listing the keys failed with "
+            + (f"HTTP {status}" if status is not None else "an HTTP error")
             + (f" ({detail})" if detail else "")
             + "."
             + hint
@@ -356,9 +358,12 @@ def check_existing_key(
     is ``UNREADABLE``, and a key that can't be checked (the keys can't be
     listed, or its expiry can't be parsed) is ``UNKNOWN``; neither is ever
     reported as an inactive key, so a working key file isn't overwritten
-    because of a permission or network problem.  Only a file google-auth
-    can load is ``ACTIVE``: an active key in a file with a UTF-8 byte order
-    mark is ``HAS_BOM``.
+    because of a permission or network problem.  The file is read as
+    google-auth reads it (UTF-8 JSON, no byte order mark), so a file it
+    can't decode is never ``ACTIVE``: an active key in a file with a UTF-8
+    byte order mark is ``HAS_BOM``, and UTF-16 is ``NOT_A_KEY``.  Only the
+    ``client_email`` and ``private_key_id`` fields are checked, not
+    ``private_key`` or ``client_id``.
 
     Args:
         credentials: Google OAuth2 credentials.
@@ -563,8 +568,9 @@ class KeySetupInterrupted(_PicklableError, KeyboardInterrupt):
 
     It is still a :class:`KeyboardInterrupt`, so the run stops as for any
     Ctrl-C; its message says what the interruption left behind: a key that
-    may still be active in IAM (and how to find and delete it), or an
-    earlier key file that was emptied for the new key.
+    may still be active in IAM (and how to find and delete it), an earlier
+    key file that was emptied for the new key, or that the new key was
+    deleted again, so no key is left in IAM.
 
     Attributes:
         key_name: The new key's IAM resource name, or "" when it isn't
@@ -816,8 +822,12 @@ def download_key(
             whether IAM may have created the key anyway.
         KeyNotSavedError: If the new key couldn't be written; it says
             whether the key was deleted again or must be deleted by hand.
-        KeySetupInterrupted: On Ctrl-C while a key may be left in IAM; it
-            names the key (when known) and how to delete it.
+        KeySetupInterrupted: On Ctrl-C while the key was being created,
+            saved or deleted again.  Its message says what is left: a key
+            that may still be active in IAM (named when known, with how to
+            delete it), an earlier key file emptied for the new key, or no
+            key at all; ``deleted`` is True when the new key is gone from
+            IAM.
     """
     existed = output_path.exists()
     if existed and not overwrite:

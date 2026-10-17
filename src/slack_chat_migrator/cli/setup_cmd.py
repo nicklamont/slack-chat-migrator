@@ -711,7 +711,8 @@ def _read_client_id(key_path: str) -> str:
     """Read the client_id (OAuth2 client ID) from a service account key file.
 
     The file is read the way google-auth reads it (strict UTF-8 JSON), so a
-    file the migration couldn't load fails here too.
+    file google-auth can't decode (one with a byte order mark, UTF-16, or
+    invalid JSON) fails here too.
 
     Raises:
         ValueError: If the file can't be read or parsed, or has no

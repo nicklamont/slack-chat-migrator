@@ -1592,6 +1592,27 @@ class TestKeyCheck:
         with pytest.raises(TypeError, match="timezone-aware"):
             _assess_key(key, datetime(2026, 1, 1))
 
+    def test_naive_now_is_only_compared_with_an_expiry(self) -> None:
+        from datetime import datetime
+
+        from slack_chat_migrator.services.setup.service_account import (
+            KeyStatus,
+            _assess_key,
+        )
+
+        assert _assess_key({}, datetime(2026, 1, 1)).status is KeyStatus.ACTIVE
+
+    def test_list_error_without_a_status_says_http_error(self) -> None:
+        from googleapiclient.errors import BatchError
+
+        from slack_chat_migrator.services.setup.service_account import (
+            _describe_list_error,
+        )
+
+        message = _describe_list_error(BatchError("Invalid value"), SA)
+        assert message.startswith("listing the keys failed with an HTTP error")
+        assert "None" not in message
+
     @pytest.mark.parametrize("reason", ["   ", 123])
     def test_reason_must_be_real_text(self, reason: Any) -> None:
         from slack_chat_migrator.services.setup.service_account import (
