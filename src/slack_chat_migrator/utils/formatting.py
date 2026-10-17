@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -40,135 +40,302 @@ from slack_chat_migrator.utils.emoji import (
 from slack_chat_migrator.utils.logging import log_with_context
 
 
-def _render_emoji_element(element: dict) -> str:
+@dataclass
+class _RenderContext:
+    """State for rendering one Slack message's blocks as mrkdwn.
+
+    Attributes:
+        labels: Labels harvested from the message's mrkdwn ``text`` for
+            tokens that rich text carries only as IDs, keyed like the token
+            (``"#C0123"`` -> ``"general"``, ``"!subteam^S0123"`` -> ``"@eng"``).
+        custom_emoji_map: ``config.custom_emoji_map``.
+        unknown_types: Block and element types that couldn't be rendered;
+            any entry makes :func:`parse_slack_blocks` fall back to ``text``.
+    """
+
+    labels: dict[str, str] = field(default_factory=dict)
+    custom_emoji_map: Mapping[str, object] | None = None
+    unknown_types: list[str] = field(default_factory=list)
+
+
+# Labelled channel and user group tokens in a message's mrkdwn ``text``.
+_LABELLED_TOKEN_RE = re.compile(r"<(#[A-Z0-9]+|!subteam\^[A-Z0-9]+)\|([^<>|]+)>")
+
+# Rich-text elements that link to a Slack object and carry ``text``/``url``.
+_LINK_LIKE_ELEMENTS = frozenset(
+    {
+        "attachment_mention",
+        "canvas",
+        "citation",
+        "file",
+        "list_record",
+        "message_mention",
+        "work_object_mention",
+        "workflow_mention",
+    }
+)
+
+# Blocks that carry no message text (buttons, images, inputs, files).
+_NON_TEXT_BLOCKS = frozenset({"actions", "call", "file", "image", "input"})
+
+_STYLE_KEYS = ("bold", "italic", "strike", "code")
+
+# A rich-text ``style`` object, e.g. ``{"bold": True, "code": True}``.
+_Style = Mapping[str, object]
+
+
+def _harvest_labels(text: str) -> dict[str, str]:
+    """Collect channel and user group labels from mrkdwn text.
+
+    Rich-text ``channel`` and ``usergroup`` elements carry only IDs, while
+    the message's ``text`` usually spells them out (``<#C0123|general>``,
+    ``<!subteam^S0123|@eng>``).
+
+    Args:
+        text: The message's mrkdwn ``text`` field.
+
+    Returns:
+        Token key (``"#C0123"``, ``"!subteam^S0123"``) -> escaped label.
+    """
+    return {m.group(1): m.group(2) for m in _LABELLED_TOKEN_RE.finditer(text)}
+
+
+def _apply_styles(text: str, style: Mapping[str, object] | None) -> str:
+    """Wrap mrkdwn *text* in style markers.
+
+    ``code`` wins: the text is wrapped in backticks and other styles are
+    skipped, since Chat doesn't format inside code.  ``underline`` and
+    ``highlight`` have no Chat equivalent and leave the text plain.
+
+    Args:
+        text: The mrkdwn text to style.
+        style: A rich-text style object, e.g. ``{"bold": True}``.
+
+    Returns:
+        The styled text.
+    """
+    if not style:
+        return text
+    if style.get("code"):
+        return f"`{text}`"
+    # Apply styles in the correct order: bold -> italic -> strikethrough
+    result = text
+    if style.get("bold"):
+        result = f"*{result}*"
+    if style.get("italic"):
+        result = f"_{result}_"
+    if style.get("strike"):
+        result = f"~{result}~"
+    return result
+
+
+def _style_text(text: str, style: Mapping[str, object] | None) -> str:
+    """Apply styles to each line of *text*, keeping surrounding whitespace.
+
+    Style markers must hug the text (``*bold*``, not ``* bold *``) and can't
+    span lines, so they wrap the non-blank part of every line.
+    """
+    if not style or not any(style.get(key) for key in _STYLE_KEYS):
+        return text
+    lines = []
+    for line in text.split("\n"):
+        core = line.strip()
+        if not core:
+            lines.append(line)
+            continue
+        leading = line[: len(line) - len(line.lstrip())]
+        trailing = line[len(line.rstrip()) :]
+        lines.append(f"{leading}{_apply_styles(core, style)}{trailing}")
+    return "\n".join(lines)
+
+
+def _render_emoji_element(element: dict, rctx: _RenderContext | None = None) -> str:
     """Render a rich-text ``emoji`` element as Unicode.
 
-    Uses the element's ``unicode`` field (``"1f44d"``, ``"1f44d-1f3fd"``)
-    when present, else resolves the name.  Custom or unknown emoji are kept
-    as ``:name:``.
+    ``custom_emoji_map`` entries win; otherwise the element's ``unicode``
+    field (``"1f44d"``, ``"1f44d-1f3fd"``) is used when present, else the
+    name is resolved.  Custom or unknown emoji are kept as ``:name:``.
 
     Args:
         element: A rich-text element of type ``emoji``.
+        rctx: The render context (for ``custom_emoji_map``).
 
     Returns:
         The emoji, ``:name:`` for custom emoji, or ``""`` without a name.
     """
     name = str(element.get("name") or "")
+    if not name:
+        return emoji_from_codepoints(element.get("unicode")) or ""
+    base, tone = split_skin_tone(name)
+    custom_map = rctx.custom_emoji_map if rctx else None
+    if custom_map and (name in custom_map or base in custom_map):
+        resolved = slack_emoji_to_unicode(name, custom_map)
+        return resolved or f":{chat_custom_emoji_name(name, custom_map)}:"
     unicode_emoji = emoji_from_codepoints(element.get("unicode"))
     if unicode_emoji:
-        _, tone = split_skin_tone(name)
         return apply_skin_tone(unicode_emoji, tone) if tone else unicode_emoji
-    resolved = slack_emoji_to_unicode(name)
-    if resolved:
-        return resolved
-    return f":{name}:" if name else ""
+    return slack_emoji_to_unicode(name) or f":{name}:"
 
 
-def _parse_rich_text_elements(elements: list[dict]) -> str:
-    """
-    Helper function to parse a list of rich text elements from Slack's block kit format.
+def _render_text_element(element: dict, style: _Style, rctx: _RenderContext) -> str:
+    """Render a ``text`` element; its text is literal, so it is escaped."""
+    return _style_text(_escape_mrkdwn(str(element.get("text") or "")), style)
 
-    This function processes different types of rich text elements (text, links, emojis, user mentions)
-    and applies appropriate styling (bold, italic, strikethrough) based on the element's style
-    attributes.
 
-    Args:
-        elements: A list of dictionaries representing rich text elements from Slack's block kit
+def _render_link_element(element: dict, style: _Style, rctx: _RenderContext) -> str:
+    """Render a ``link`` element as ``<url|text>``."""
+    url = _escape_mrkdwn(str(element.get("url") or ""))
+    text = _escape_mrkdwn(str(element.get("text") or "")) or url
+    return _apply_styles(f"<{url}|{text}>", style) if url else text
+
+
+def _render_user_element(element: dict, style: _Style, rctx: _RenderContext) -> str:
+    """Render a ``user`` (or ``canvas_user_mention``) element as ``<@U...>``."""
+    user_id = str(element.get("user_id") or "")
+    return _apply_styles(f"<@{user_id}>", style) if user_id else ""
+
+
+def _render_usergroup_element(
+    element: dict, style: _Style, rctx: _RenderContext
+) -> str:
+    """Render a ``usergroup`` element as ``<!subteam^S...|@handle>``."""
+    group_id = str(element.get("usergroup_id") or "")
+    if not group_id:
+        return ""
+    label = rctx.labels.get(f"!subteam^{group_id}")
+    token = f"<!subteam^{group_id}|{label}>" if label else f"<!subteam^{group_id}>"
+    return _apply_styles(token, style)
+
+
+def _render_channel_element(element: dict, style: _Style, rctx: _RenderContext) -> str:
+    """Render a ``channel`` element as ``<#C...|name>``."""
+    channel_id = str(element.get("channel_id") or "")
+    if not channel_id:
+        return ""
+    label = rctx.labels.get(f"#{channel_id}")
+    token = f"<#{channel_id}|{label}>" if label else f"<#{channel_id}>"
+    return _apply_styles(token, style)
+
+
+def _render_broadcast_element(
+    element: dict, style: _Style, rctx: _RenderContext
+) -> str:
+    """Render a ``broadcast`` element (``@here``...) as ``<!here>``."""
+    return _apply_styles(f"<!{element.get('range') or 'channel'}>", style)
+
+
+def _render_date_element(element: dict, style: _Style, rctx: _RenderContext) -> str:
+    """Render a ``date`` element as its fallback text (or a UTC date)."""
+    fallback = element.get("fallback")
+    if fallback:
+        return _style_text(_escape_mrkdwn(str(fallback)), style)
+    return _style_text(format_epoch_utc(element.get("timestamp")) or "", style)
+
+
+def _render_value_element(element: dict, style: _Style, rctx: _RenderContext) -> str:
+    """Render a ``team``, ``color`` or ``tag`` element as its plain value."""
+    keys = _VALUE_ELEMENT_KEYS[str(element.get("type"))]
+    value = next((element[k] for k in keys if element.get(k)), "")
+    return _style_text(_escape_mrkdwn(str(value)), style)
+
+
+def _render_link_like_element(
+    element: dict, style: _Style, rctx: _RenderContext
+) -> str | None:
+    """Render an element that links to a Slack object (canvas, file...).
 
     Returns:
-        A string with the processed rich text content including all formatting
+        ``<url|text>``, ``<url>`` or the text, or ``None`` when the element
+        has neither ``url`` nor ``text``.
     """
-
-    def _apply_styles(text: str, style: dict) -> str:
-        """
-        Applies markdown styling to a string based on a style object.
-
-        Takes a style dictionary containing boolean flags for different styling options
-        (bold, italic, strikethrough) and applies the appropriate markdown formatting
-        to the text.
-
-        Args:
-            text: The text content to style
-            style: A dictionary with style flags (e.g., {'bold': True, 'italic': True})
-
-        Returns:
-            The text with markdown styling applied
-        """
-        if not style:
-            return text
-
-        # Apply styles in the correct order: bold -> italic -> strikethrough
-        # This ensures proper nesting of markdown markers
-        result = text
-
-        if style.get("bold"):
-            result = f"*{result}*"
-        if style.get("italic"):
-            result = f"_{result}_"
-        if style.get("strike"):
-            result = f"~{result}~"
-
-        return result
-
-    output_parts: list[str] = []
-    for el in elements:
-        el_type = el.get("type")
-        style = el.get("style", {})
-
-        if el_type == "text":
-            # Rich-text text is literal; escape it so it stays text in mrkdwn.
-            text_content = _escape_mrkdwn(el.get("text", ""))
-
-            # Handle the simple cases first
-            if not text_content:
-                output_parts.append(text_content)
-            elif not style:
-                # No styling to apply - preserve text exactly
-                output_parts.append(text_content)
-            elif not text_content.strip():
-                # Text is all whitespace - preserve exactly (no styling possible)
-                output_parts.append(text_content)
-            else:
-                # We have both content and styling - apply styles while preserving whitespace
-                # Find the span of actual content (first to last non-whitespace character)
-                first_char = next(
-                    i for i, c in enumerate(text_content) if not c.isspace()
-                )
-                last_char = next(
-                    i for i, c in enumerate(reversed(text_content)) if not c.isspace()
-                )
-                last_char = len(text_content) - 1 - last_char
-
-                leading_whitespace = text_content[:first_char]
-                content = text_content[first_char : last_char + 1]
-                trailing_whitespace = text_content[last_char + 1 :]
-
-                styled_content = _apply_styles(content, style)
-                output_parts.append(
-                    f"{leading_whitespace}{styled_content}{trailing_whitespace}"
-                )
-
-        elif el_type == "link":
-            url = _escape_mrkdwn(el.get("url", ""))
-            text = _escape_mrkdwn(el.get("text", "")) or url
-            # Create the base link markdown
-            link_markdown = f"<{url}|{text}>"
-            # Apply styles to the entire link
-            output_parts.append(_apply_styles(link_markdown, style))
-
-        elif el_type == "emoji":
-            output_parts.append(_render_emoji_element(el))
-
-        elif el_type == "user":
-            user_mention = f"<@{el.get('user_id', '')}>"
-            # Apply styles to the user mention if any are specified
-            # Note that Google Chat does not support bold or italic for user mentions
-            output_parts.append(_apply_styles(user_mention, style))
-
-    return "".join(output_parts)
+    url = _escape_mrkdwn(str(element.get("url") or ""))
+    text = _escape_mrkdwn(str(element.get("text") or element.get("label") or ""))
+    if url:
+        return _apply_styles(f"<{url}|{text}>" if text else f"<{url}>", style)
+    if text:
+        return _style_text(text, style)
+    return None
 
 
-def _extract_forwarded_messages(message: dict) -> list[str]:
+# Element type -> the key(s) holding its plain value, first non-empty wins.
+_VALUE_ELEMENT_KEYS = {
+    "team": ("name", "team_id"),
+    "color": ("value",),
+    "tag": ("text",),
+}
+
+# Element renderers; ``None`` from a renderer means "nothing to render".
+_ELEMENT_RENDERERS: dict[str, Callable[[dict, _Style, _RenderContext], str | None]] = {
+    "text": _render_text_element,
+    "link": _render_link_element,
+    "emoji": lambda element, style, rctx: _render_emoji_element(element, rctx),
+    "user": _render_user_element,
+    "canvas_user_mention": _render_user_element,
+    "usergroup": _render_usergroup_element,
+    "channel": _render_channel_element,
+    "broadcast": _render_broadcast_element,
+    "date": _render_date_element,
+    **dict.fromkeys(_VALUE_ELEMENT_KEYS, _render_value_element),
+    **dict.fromkeys(_LINK_LIKE_ELEMENTS, _render_link_like_element),
+}
+
+
+def _render_element(element: dict, rctx: _RenderContext, in_code: bool) -> str:
+    """Render one rich-text element (text, link, mention...) as mrkdwn.
+
+    Unknown element types render their ``text``/``fallback``, if any, and
+    are recorded in ``rctx.unknown_types``.
+
+    Args:
+        element: The rich-text element.
+        rctx: The render context.
+        in_code: True inside a preformatted block, where styles are dropped.
+
+    Returns:
+        The mrkdwn for the element.
+    """
+    el_type = str(element.get("type"))
+    style: _Style = {} if in_code else (element.get("style") or {})
+    renderer = _ELEMENT_RENDERERS.get(el_type)
+    rendered = renderer(element, style, rctx) if renderer else None
+    if rendered is not None:
+        return rendered
+
+    rctx.unknown_types.append(f"element:{el_type}")
+    salvage = element.get("text") or element.get("fallback") or ""
+    return _escape_mrkdwn(salvage) if isinstance(salvage, str) else ""
+
+
+def _parse_rich_text_elements(
+    elements: list[dict],
+    rctx: _RenderContext | None = None,
+    in_code: bool = False,
+) -> str:
+    """Render a list of rich-text elements from Slack's Block Kit as mrkdwn.
+
+    Handles text (bold, italic, strike and code styles), links, emoji, user,
+    channel and user group mentions, broadcasts (``@here``), dates, teams,
+    colors, tags and the elements that link to Slack objects (canvases,
+    files, messages...).  Unknown types render their ``text``/``fallback``
+    and are recorded in ``rctx.unknown_types``.
+
+    Args:
+        elements: The rich-text elements.
+        rctx: The render context; a fresh one is used when omitted.
+        in_code: True inside a preformatted block (styles are dropped).
+
+    Returns:
+        The mrkdwn for the elements.
+    """
+    rctx = rctx or _RenderContext()
+    return "".join(
+        _render_element(el, rctx, in_code) for el in elements if isinstance(el, dict)
+    )
+
+
+def _extract_forwarded_messages(
+    message: dict, custom_emoji_map: Mapping[str, object] | None = None
+) -> list[str]:
     """Extract forwarded/shared message content from Slack attachments.
 
     Processes attachments that represent forwarded messages, extracting
@@ -177,6 +344,7 @@ def _extract_forwarded_messages(message: dict) -> list[str]:
 
     Args:
         message: A Slack message dict with an optional 'attachments' field.
+        custom_emoji_map: ``config.custom_emoji_map``, for nested blocks.
 
     Returns:
         List of formatted forwarded message strings.
@@ -208,7 +376,9 @@ def _extract_forwarded_messages(message: dict) -> list[str]:
         if "message_blocks" in attachment:
             for msg_block in attachment.get("message_blocks", []):
                 if "message" in msg_block and "blocks" in msg_block["message"]:
-                    forwarded_text = parse_slack_blocks(msg_block["message"])
+                    forwarded_text = parse_slack_blocks(
+                        msg_block["message"], custom_emoji_map
+                    )
                     break
 
         if not forwarded_text:
@@ -238,19 +408,23 @@ def _convert_bullets_to_gchat(text: str) -> str:
 
     for line in lines:
         stripped = line.strip()
-        if re.match(r"^\s+•", line):
+        if re.match(r"^\s+\N{BULLET}", line):
             indent_level = len(line) - len(line.lstrip())
-            content = stripped[1:].strip() if stripped.startswith("•") else stripped
+            content = (
+                stripped[1:].strip() if stripped.startswith("\N{BULLET}") else stripped
+            )
             if indent_level <= 4:
                 improved_lines.append(f"* {content}")
             elif indent_level <= 8:
                 indent_spaces = " " * (4 + 5)
-                improved_lines.append(f"{indent_spaces}◦ {content}")
+                improved_lines.append(f"{indent_spaces}\N{WHITE BULLET} {content}")
             else:
                 level = 2 if indent_level <= 12 else 3
                 indent_spaces = " " * (4 + (5 * level))
-                improved_lines.append(f"{indent_spaces}▪ {content}")
-        elif stripped.startswith("•"):
+                improved_lines.append(
+                    f"{indent_spaces}\N{BLACK SMALL SQUARE} {content}"
+                )
+        elif stripped.startswith("\N{BULLET}"):
             content = stripped[1:].strip() if len(stripped) > 1 else ""
             improved_lines.append(f"* {content}")
         else:
@@ -276,162 +450,314 @@ def _combine_with_forwarded(main_text: str, forwarded_texts: list[str]) -> str:
     return main_text
 
 
-def _parse_rich_text_block(block: dict) -> str:
-    """Parse a single rich_text block into formatted text.
+def _rich_text_list_prefix(style: str, indent: int, number: int) -> str:
+    """Return the line prefix for a list item at nesting level *indent*."""
+    if style == "ordered":
+        marker = f"{number}."
+    elif indent == 0:
+        marker = "*"
+    elif indent == 1:
+        marker = "\N{WHITE BULLET}"
+    else:
+        marker = "\N{BLACK SMALL SQUARE}"
+    if indent == 0:
+        return f"{marker} "
+    return " " * (4 + 5 * indent) + f"{marker} "
 
-    Handles rich_text_section, rich_text_list, rich_text_quote,
-    and rich_text_preformatted element types.
+
+def _parse_rich_text_list(
+    element: dict,
+    list_items: list[str],
+    rctx: _RenderContext | None = None,
+    counters: dict[int, int] | None = None,
+) -> None:
+    """Render a ``rich_text_list`` element and append its lines.
+
+    Slack writes a nested list as consecutive ``rich_text_list`` elements
+    with increasing ``indent``.  Ordered lists start at ``offset + 1``; when
+    ``offset`` is missing they continue the numbering of the previous list
+    at the same level, so numbering survives an interleaved sub-list.
+
+    Args:
+        element: A Slack rich_text_list element dict.
+        list_items: Accumulator list to append formatted lines to.
+        rctx: The render context.
+        counters: Next number per nesting level, shared by consecutive lists.
+    """
+    rctx = rctx or _RenderContext()
+    counters = {} if counters is None else counters
+    list_style = str(element.get("style") or "bullet")
+    try:
+        indent = max(0, int(element.get("indent") or 0))
+    except (TypeError, ValueError):
+        indent = 0
+
+    # A shallower item ends the deeper lists below it.
+    for level in [level for level in counters if level > indent]:
+        del counters[level]
+
+    number = counters.get(indent, 1)
+    if "offset" in element:
+        try:
+            number = int(element["offset"]) + 1
+        except (TypeError, ValueError):
+            pass
+
+    for item in element.get("elements", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "rich_text_section":
+            rctx.unknown_types.append(f"list_item:{item.get('type')}")
+        item_text = _parse_rich_text_elements(item.get("elements", []), rctx)
+        prefix = _rich_text_list_prefix(list_style, indent, number)
+        list_items.append(prefix + item_text.strip("\n"))
+        number += 1
+
+    if list_style == "ordered":
+        counters[indent] = number
+    else:
+        counters.pop(indent, None)
+
+
+def _render_rich_text_quote(element: dict, rctx: _RenderContext) -> str:
+    """Render a ``rich_text_quote`` element (italic paragraphs)."""
+    quote_content = _parse_rich_text_elements(element.get("elements", []), rctx)
+    paragraphs = quote_content.strip().split("\n\n")
+    return "\n\n".join(f"_{p.strip()}_" for p in paragraphs if p.strip())
+
+
+def _parse_rich_text_block(block: dict, rctx: _RenderContext | None = None) -> str:
+    """Render a ``rich_text`` block as mrkdwn.
+
+    Handles rich_text_section, rich_text_list, rich_text_quote and
+    rich_text_preformatted elements; other element types are recorded in
+    ``rctx.unknown_types``.
 
     Args:
         block: A Slack rich_text block dict with an 'elements' field.
+        rctx: The render context; a fresh one is used when omitted.
 
     Returns:
         Formatted text string from the rich text block.
     """
+    rctx = rctx or _RenderContext()
     rich_text_parts: list[str] = []
     list_items: list[str] = []
+    counters: dict[int, int] = {}
+
+    def flush_list() -> None:
+        if list_items:
+            rich_text_parts.append("\n".join(list_items))
+            list_items.clear()
+        counters.clear()
 
     for element in block.get("elements", []):
+        if not isinstance(element, dict):
+            continue
         element_type = element.get("type")
+        if element_type == "rich_text_list":
+            _parse_rich_text_list(element, list_items, rctx, counters)
+            continue
+        flush_list()
 
         if element_type == "rich_text_section":
-            if list_items:
-                rich_text_parts.append("\n".join(list_items))
-                list_items = []
-            content = _parse_rich_text_elements(element.get("elements", []))
+            content = _parse_rich_text_elements(element.get("elements", []), rctx)
             cleaned = content.rstrip("\n")
             if cleaned.strip():
                 rich_text_parts.append(cleaned)
-
-        elif element_type == "rich_text_list":
-            _parse_rich_text_list(element, list_items)
-
         elif element_type == "rich_text_quote":
-            if list_items:
-                rich_text_parts.append("\n".join(list_items))
-                list_items = []
-            quote_content = _parse_rich_text_elements(element.get("elements", []))
-            paragraphs = quote_content.strip().split("\n\n")
-            italicized = [f"_{p.strip()}_" for p in paragraphs if p.strip()]
-            rich_text_parts.append("\n\n".join(italicized))
-
+            rich_text_parts.append(_render_rich_text_quote(element, rctx))
         elif element_type == "rich_text_preformatted":
-            if list_items:
-                rich_text_parts.append("\n".join(list_items))
-                list_items = []
-            code_text = _parse_rich_text_elements(element.get("elements", []))
-            rich_text_parts.append(f"```\n{code_text}\n```")
+            # Chat markup has no language fences, so ``language`` is dropped.
+            code_text = _parse_rich_text_elements(
+                element.get("elements", []), rctx, in_code=True
+            ).strip("\n")
+            if code_text.strip():
+                rich_text_parts.append(f"```\n{code_text}\n```")
+        else:
+            rctx.unknown_types.append(f"rich_text:{element_type}")
+            nested = element.get("elements")
+            if isinstance(nested, list):
+                rich_text_parts.append(_parse_rich_text_elements(nested, rctx))
 
-    if list_items:
-        rich_text_parts.append("\n".join(list_items))
-
+    flush_list()
     return "\n\n".join(part for part in rich_text_parts if part.strip())
 
 
-def _parse_rich_text_list(element: dict, list_items: list[str]) -> None:
-    """Parse a rich_text_list element and append items to list_items.
+def _text_object(obj: object) -> str:
+    """Return the text of a Block Kit text object (mrkdwn or plain_text)."""
+    if isinstance(obj, dict):
+        text = obj.get("text")
+        if isinstance(text, str):
+            return text
+    return ""
+
+
+# Standard Markdown (Slack ``markdown`` blocks) to mrkdwn.
+_MD_CODE_RE = re.compile(r"```[^\n`]*\n?[\s\S]*?```|`[^`\n]+`")
+_MD_FENCE_LANGUAGE_RE = re.compile(r"\A```[^\n`]*\n")
+_MD_IMAGE_OR_LINK_RE = re.compile(r"!?\[([^\]\n]*)\]\(([^()\s]+)\)")
+_MD_BOLD_ITALIC_RE = re.compile(r"\*\*\*(?!\s)(.+?)(?<!\s)\*\*\*")
+_MD_ITALIC_STAR_RE = re.compile(r"(?<![*\w])\*(?![\s*])([^*\n]+?)(?<![\s*])\*(?![*\w])")
+_MD_BOLD_RE = re.compile(r"(\*\*|__)(?!\s)(.+?)(?<!\s)\1")
+_MD_STRIKE_RE = re.compile(r"~~(?!\s)(.+?)(?<!\s)~~")
+_MD_HEADING_RE = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$", re.MULTILINE)
+
+
+def _markdown_prose_to_mrkdwn(text: str) -> str:
+    """Convert standard Markdown prose (no code) to escaped mrkdwn."""
+    text = _escape_mrkdwn(text)
+    text = _MD_IMAGE_OR_LINK_RE.sub(
+        lambda m: f"<{m.group(2)}|{m.group(1)}>" if m.group(1) else f"<{m.group(2)}>",
+        text,
+    )
+    text = _MD_BOLD_ITALIC_RE.sub(r"*_\1_*", text)
+    # Single-star italics first, so the bold conversions below aren't re-read.
+    text = _MD_ITALIC_STAR_RE.sub(r"_\1_", text)
+    text = _MD_BOLD_RE.sub(r"*\2*", text)
+    text = _MD_STRIKE_RE.sub(r"~\1~", text)
+    return _MD_HEADING_RE.sub(r"*\1*", text)
+
+
+def _markdown_to_mrkdwn(markdown: str) -> str:
+    """Convert a Slack ``markdown`` block (standard Markdown) to mrkdwn.
+
+    Converts links, images, headings, bold, italic and strikethrough; keeps
+    code as is (dropping fence languages) and lists, quotes and tables as
+    written, since Chat reads ``*``/``-`` bullets and ``>`` quotes too.
 
     Args:
-        element: A Slack rich_text_list element dict.
-        list_items: Accumulator list to append formatted items to.
+        markdown: The block's Markdown text.
+
+    Returns:
+        Escaped mrkdwn.
     """
-    list_style = element.get("style", "bullet")
-    indent_level = element.get("indent", 0)
-    prefix = "*"  # Defensive default; overwritten for bullet lists below
+    out: list[str] = []
+    last = 0
+    for code in _MD_CODE_RE.finditer(markdown):
+        out.append(_markdown_prose_to_mrkdwn(markdown[last : code.start()]))
+        out.append(_MD_FENCE_LANGUAGE_RE.sub("```\n", _escape_mrkdwn(code.group(0))))
+        last = code.end()
+    out.append(_markdown_prose_to_mrkdwn(markdown[last:]))
+    return "".join(out)
 
-    if list_style == "bullet":
-        if indent_level == 0:
-            prefix = "*"
-        elif indent_level == 1:
-            prefix = "◦"
-        else:
-            prefix = "▪"
 
-    for i, item in enumerate(element.get("elements", [])):
-        item_text = _parse_rich_text_elements(item.get("elements", []))
-        if list_style == "bullet":
-            if indent_level == 0:
-                list_items.append(f"* {item_text}")
+def _render_table(block: dict, rctx: _RenderContext) -> str:
+    """Render a ``table`` block as pipe-separated rows."""
+    lines = []
+    for row in block.get("rows") or []:
+        if not isinstance(row, list):
+            continue
+        cells = []
+        for cell in row:
+            if not isinstance(cell, dict):
+                cells.append("")
+                continue
+            cell_type = cell.get("type")
+            if cell_type == "rich_text":
+                text = _parse_rich_text_block(cell, rctx)
+            elif cell_type in ("raw_text", "raw_number"):
+                value = cell.get("text", cell.get("value", ""))
+                text = _escape_mrkdwn(str(value))
             else:
-                indent_spaces = " " * (4 + (5 * indent_level))
-                list_items.append(f"{indent_spaces}{prefix} {item_text}")
-        else:
-            if indent_level == 0:
-                list_items.append(f"{i + 1}. {item_text}")
-            else:
-                indent_spaces = " " * (4 + (5 * indent_level))
-                list_items.append(f"{indent_spaces}{i + 1}. {item_text}")
+                rctx.unknown_types.append(f"table_cell:{cell_type}")
+                text = _escape_mrkdwn(str(cell.get("text") or ""))
+            cells.append(" ".join(text.split()))
+        lines.append(" | ".join(cells))
+    return "\n".join(lines)
 
 
-def _parse_single_block(block: dict, texts: list[str]) -> None:
-    """Parse a single Slack block and append its text content.
+def _render_block(block: dict, rctx: _RenderContext) -> str:
+    """Render one Block Kit block as mrkdwn.
 
     Args:
-        block: A single Slack block dict.
-        texts: Accumulator list to append extracted text to.
+        block: A Slack block dict.
+        rctx: The render context; unknown block types are recorded in it.
+
+    Returns:
+        The block's text, or ``""`` for blocks without text.
     """
     block_type = block.get("type")
 
+    if block_type == "rich_text":
+        return _parse_rich_text_block(block, rctx)
     if block_type == "section":
-        if text_obj := block.get("text"):
-            texts.append(text_obj.get("text", ""))
-        for field in block.get("fields", []):
-            if field and isinstance(field, dict):
-                texts.append(field.get("text", ""))
-
-    elif block_type == "rich_text":
-        rich_text = _parse_rich_text_block(block)
-        if rich_text:
-            texts.append(rich_text)
-
-    elif block_type == "header":
-        if text_obj := block.get("text"):
-            texts.append(f"*{text_obj.get('text', '')}*")
-
-    elif block_type == "context":
-        context_texts = [
+        texts = [_text_object(block.get("text"))]
+        texts.extend(_text_object(f) for f in block.get("fields") or [])
+        return "\n\n".join(t for t in texts if t.strip())
+    if block_type == "header":
+        header = _text_object(block.get("text")).strip()
+        return f"*{header}*" if header else ""
+    if block_type == "context":
+        return " ".join(
             el.get("text", "")
             for el in block.get("elements", [])
-            if el.get("type") in ("mrkdwn", "plain_text")
-        ]
-        if context_texts:
-            texts.append(" ".join(context_texts))
+            if isinstance(el, dict) and el.get("type") in ("mrkdwn", "plain_text")
+        )
+    if block_type == "divider":
+        return "---"
+    if block_type == "markdown":
+        return _markdown_to_mrkdwn(str(block.get("text") or ""))
+    if block_type == "table":
+        return _render_table(block, rctx)
+    if block_type == "video":
+        title = _escape_mrkdwn(_text_object(block.get("title")))
+        url = _escape_mrkdwn(
+            str(block.get("title_url") or block.get("video_url") or "")
+        )
+        if url:
+            return f"<{url}|{title}>" if title else f"<{url}>"
+        return title
+    if block_type in _NON_TEXT_BLOCKS:
+        return ""
 
-    elif block_type == "divider":
-        texts.append("---")
+    rctx.unknown_types.append(f"block:{block_type}")
+    return _text_object(block.get("text"))
 
 
-def parse_slack_blocks(message: dict) -> str:
-    """Parse Slack block kit format from a message to extract rich text content.
+def parse_slack_blocks(
+    message: dict, custom_emoji_map: Mapping[str, object] | None = None
+) -> str:
+    """Render a Slack message as mrkdwn, from its blocks or its ``text``.
 
-    Handles section, rich_text, header, context, and divider block types.
-    Also checks for forwarded/shared message content in the attachments array.
+    Renders section, rich_text, header, context, divider, markdown and table
+    blocks (and video titles), plus forwarded/shared message content from
+    the attachments.  Falls back to the mrkdwn ``text`` field when there are
+    no blocks, when the blocks render nothing, or when any block or element
+    type is unknown (so no words are silently dropped).
 
     Args:
         message: A Slack message dict with 'blocks' and/or 'text' fields.
+        custom_emoji_map: ``config.custom_emoji_map``, for emoji elements.
 
     Returns:
-        Formatted text content from the message blocks, or the raw text field
-        if no blocks are present or no content could be extracted.
+        Escaped mrkdwn for :func:`convert_formatting`.
     """
-    forwarded_texts = _extract_forwarded_messages(message)
+    forwarded_texts = _extract_forwarded_messages(message, custom_emoji_map)
+    text_field = str(message.get("text") or "")
 
-    if "blocks" not in message or not message["blocks"]:
-        return _combine_with_forwarded(message.get("text", ""), forwarded_texts)
+    blocks = message.get("blocks")
+    if not blocks or not isinstance(blocks, list):
+        return _combine_with_forwarded(text_field, forwarded_texts)
 
-    texts: list[str] = []
-    for block in message.get("blocks", []):
-        _parse_single_block(block, texts)
+    rctx = _RenderContext(
+        labels=_harvest_labels(text_field), custom_emoji_map=custom_emoji_map
+    )
+    rendered = [_render_block(b, rctx) for b in blocks if isinstance(b, dict)]
+    result = "\n\n".join(t.strip("\n") for t in rendered if t and t.strip())
 
-    result = "\n\n".join(text.strip() for text in texts if text and text.strip())
+    if rctx.unknown_types and text_field.strip():
+        log_with_context(
+            logging.DEBUG,
+            "Unsupported Slack block/element types"
+            f" {sorted(set(rctx.unknown_types))}; using the message text",
+            message_ts=message.get("ts"),
+        )
+        result = text_field
+    elif not result:
+        result = text_field
 
-    if not result:
-        return _combine_with_forwarded(str(message.get("text", "")), forwarded_texts)
-
-    if forwarded_texts:
-        result = result + "\n\n" + "\n\n".join(forwarded_texts)
-
-    return result
+    return _combine_with_forwarded(result, forwarded_texts)
 
 
 # --- mrkdwn to Google Chat conversion -------------------------------------

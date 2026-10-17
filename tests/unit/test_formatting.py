@@ -980,15 +980,36 @@ class TestParseRichTextElementsEdgeCases:
         result = _parse_rich_text_elements(elements)
         assert result == "*<@U12345>*"
 
-    def test_unknown_element_type_ignored(self):
-        """Unknown element types should be silently skipped."""
+    def test_unknown_element_type_falls_back_to_message_text(self):
+        """Unknown element types make the message fall back to its text."""
+        message = {
+            "text": "before <#C0123|general> after",
+            "blocks": [
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [
+                                {"type": "text", "text": "before "},
+                                {"type": "unknown_type", "data": "irrelevant"},
+                                {"type": "text", "text": " after"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        assert parse_slack_blocks(message) == "before <#C0123|general> after"
+
+    def test_unknown_element_type_salvages_its_text(self):
+        """Without a text fallback, an unknown element's own text is kept."""
         elements = [
-            {"type": "text", "text": "before"},
-            {"type": "unknown_type", "data": "irrelevant"},
-            {"type": "text", "text": "after"},
+            {"type": "text", "text": "before "},
+            {"type": "future_mention", "text": "thing"},
+            {"type": "text", "text": " after"},
         ]
-        result = _parse_rich_text_elements(elements)
-        assert result == "beforeafter"
+        assert _parse_rich_text_elements(elements) == "before thing after"
 
     def test_text_with_all_three_styles(self):
         """Bold + italic + strikethrough combined."""
@@ -1447,3 +1468,424 @@ class TestRichTextEmojiElements:
             "text": "nice:tada:",
         }
         assert convert_formatting(parse_slack_blocks(message), {}) == f"nice{TADA}"
+
+
+# --- rich text element and block types ---
+
+
+def _rich(*elements, text=""):
+    """A message with one rich_text block holding *elements*."""
+    return {
+        "type": "message",
+        "text": text,
+        "blocks": [{"type": "rich_text", "elements": list(elements)}],
+    }
+
+
+def _section(*elements):
+    return {"type": "rich_text_section", "elements": list(elements)}
+
+
+def _render(message, user_map=None, channels=None, **kwargs):
+    """parse_slack_blocks() followed by convert_formatting()."""
+    return convert_formatting(
+        parse_slack_blocks(message, **kwargs),
+        user_map or {},
+        channel_id_to_name=channels,
+    )
+
+
+class TestRichTextElementTypes:
+    """Every rich-text element type renders non-empty text."""
+
+    def test_broadcast_and_channel(self):
+        """The audit repro: "<!here> deploy blocked by <#C1>" kept its words."""
+        message = _rich(
+            _section(
+                {"type": "broadcast", "range": "here"},
+                {"type": "text", "text": " deploy blocked by "},
+                {"type": "channel", "channel_id": "C0123"},
+            ),
+            text="<!here> deploy blocked by <#C0123|>",
+        )
+        result = _render(message, channels={"C0123": "infra"})
+        assert result == "<users/all> deploy blocked by #infra"
+
+    @pytest.mark.parametrize("broadcast", ["here", "channel", "everyone"])
+    def test_broadcast_ranges(self, broadcast):
+        message = _rich(_section({"type": "broadcast", "range": broadcast}))
+        assert _render(message) == "<users/all>"
+
+    def test_channel_label_harvested_from_text(self):
+        message = _rich(
+            _section({"type": "channel", "channel_id": "C0999"}),
+            text="<#C0999|shared-channel>",
+        )
+        assert _render(message) == "#shared-channel"
+
+    def test_usergroup_handle_harvested_from_text(self):
+        message = _rich(
+            _section(
+                {"type": "text", "text": "ping "},
+                {"type": "usergroup", "usergroup_id": "S0123"},
+            ),
+            text="ping <!subteam^S0123|@eng>",
+        )
+        assert _render(message) == "ping @eng"
+
+    def test_usergroup_without_handle_uses_id(self):
+        message = _rich(_section({"type": "usergroup", "usergroup_id": "S0123"}))
+        assert _render(message) == "@S0123"
+
+    def test_date_uses_fallback(self):
+        message = _rich(
+            _section(
+                {"type": "text", "text": "due "},
+                {
+                    "type": "date",
+                    "timestamp": 1700000000,
+                    "format": "{date_short}",
+                    "fallback": "Nov 14",
+                },
+            )
+        )
+        assert _render(message) == "due Nov 14"
+
+    def test_date_without_fallback_is_utc(self):
+        message = _rich(
+            _section({"type": "date", "timestamp": 1700000000, "format": "{date}"})
+        )
+        assert _render(message) == "2023-11-14 22:13 UTC"
+
+    @pytest.mark.parametrize(
+        ("element", "expected"),
+        [
+            ({"type": "team", "team_id": "T0123"}, "T0123"),
+            ({"type": "team", "team_id": "T0123", "name": "Acme"}, "Acme"),
+            ({"type": "color", "value": "#FF0000"}, "#FF0000"),
+            ({"type": "tag", "text": "urgent"}, "urgent"),
+            (
+                {
+                    "type": "canvas",
+                    "file_id": "F1",
+                    "url": "https://x/c",
+                    "text": "Plan",
+                },
+                "<https://x/c|Plan>",
+            ),
+            ({"type": "file", "file_id": "F2", "text": "report.pdf"}, "report.pdf"),
+            (
+                {
+                    "type": "message_mention",
+                    "channel_id": "C1",
+                    "message_ts": "1.2",
+                    "url": "https://x/archives/C1/p12",
+                },
+                "https://x/archives/C1/p12",
+            ),
+            (
+                {
+                    "type": "workflow_mention",
+                    "workflow_id": "Wf1",
+                    "function_trigger_id": "Ft1",
+                    "text": "Deploy",
+                },
+                "Deploy",
+            ),
+            (
+                {
+                    "type": "citation",
+                    "url": "https://docs.example",
+                    "text": "[1]",
+                    "index": 1,
+                    "details": {},
+                },
+                "<https://docs.example|[1]>",
+            ),
+        ],
+    )
+    def test_value_and_link_like_elements(self, element, expected):
+        assert _render(_rich(_section(element), text="fallback")) == expected
+
+    def test_canvas_user_mention_is_a_mention(self):
+        message = _rich(_section({"type": "canvas_user_mention", "user_id": "U1"}))
+        assert _render(message, user_map={"U1": "a@example.com"}) == (
+            "<users/a@example.com>"
+        )
+
+    def test_mixed_message_keeps_every_word(self):
+        message = _rich(
+            _section(
+                {"type": "user", "user_id": "U1"},
+                {"type": "text", "text": " and "},
+                {"type": "usergroup", "usergroup_id": "S1"},
+                {"type": "text", "text": ": "},
+                {"type": "broadcast", "range": "channel"},
+                {"type": "text", "text": " meet in "},
+                {"type": "channel", "channel_id": "C1"},
+                {"type": "text", "text": " on "},
+                {"type": "date", "timestamp": 1, "fallback": "Monday"},
+            ),
+            text="<@U1> and <!subteam^S1|@ops>: <!channel> meet in <#C1|war-room>",
+        )
+        assert _render(message, user_map={"U1": "a@example.com"}) == (
+            "<users/a@example.com> and @ops: <users/all> meet in #war-room on Monday"
+        )
+
+
+class TestRichTextStyles:
+    """Code style and per-line styling."""
+
+    def test_inline_code_gets_backticks(self):
+        message = _rich(
+            _section(
+                {"type": "text", "text": "run "},
+                {"type": "text", "text": "npm install *", "style": {"code": True}},
+            )
+        )
+        assert _render(message) == "run `npm install *`"
+
+    def test_code_wins_over_other_styles(self):
+        elements = [
+            {"type": "text", "text": "x", "style": {"bold": True, "code": True}}
+        ]
+        assert _parse_rich_text_elements(elements) == "`x`"
+
+    def test_code_style_protects_emoji_and_entities(self):
+        message = _rich(
+            _section({"type": "text", "text": "a<b :ok:", "style": {"code": True}})
+        )
+        assert _render(message) == "`a<b :ok:`"
+
+    def test_underline_and_highlight_stay_plain(self):
+        elements = [
+            {"type": "text", "text": "u", "style": {"underline": True}},
+            {"type": "text", "text": "h", "style": {"highlight": True}},
+        ]
+        assert _parse_rich_text_elements(elements) == "uh"
+
+    def test_styles_wrap_each_line(self):
+        elements = [{"type": "text", "text": "one\ntwo ", "style": {"bold": True}}]
+        assert _parse_rich_text_elements(elements) == "*one*\n*two* "
+
+    def test_code_styled_link_is_plain_in_code(self):
+        message = _rich(
+            _section(
+                {
+                    "type": "link",
+                    "url": "https://x.example",
+                    "text": "x",
+                    "style": {"code": True},
+                }
+            )
+        )
+        assert _render(message) == "`x`"
+
+    def test_preformatted_drops_styles_and_language(self):
+        message = _rich(
+            {
+                "type": "rich_text_preformatted",
+                "language": "python",
+                "elements": [
+                    {"type": "text", "text": "x = 1\n", "style": {"bold": True}}
+                ],
+            }
+        )
+        assert _render(message) == "```\nx = 1\n```"
+
+
+class TestOrderedListNumbering:
+    """Ordered lists honour offset and keep numbering across sub-lists."""
+
+    @staticmethod
+    def _list(style, indent, *items, offset=None):
+        element = {
+            "type": "rich_text_list",
+            "style": style,
+            "indent": indent,
+            "elements": [_section({"type": "text", "text": t}) for t in items],
+        }
+        if offset is not None:
+            element["offset"] = offset
+        return element
+
+    def _lines(self, *lists):
+        return parse_slack_blocks(_rich(*lists)).split("\n")
+
+    def test_offset_continues_after_nested_bullets(self):
+        lines = self._lines(
+            self._list("ordered", 0, "one", "two"),
+            self._list("bullet", 1, "sub"),
+            self._list("ordered", 0, "three", offset=2),
+        )
+        assert lines[0] == "1. one"
+        assert lines[1] == "2. two"
+        assert lines[2].strip().endswith("sub")
+        assert lines[3] == "3. three"
+
+    def test_numbering_continues_without_offset(self):
+        lines = self._lines(
+            self._list("ordered", 0, "one"),
+            self._list("ordered", 1, "a", "b"),
+            self._list("ordered", 0, "two"),
+            self._list("ordered", 1, "c"),
+        )
+        assert [line.strip() for line in lines] == [
+            "1. one",
+            "1. a",
+            "2. b",
+            "2. two",
+            "1. c",
+        ]
+
+    def test_offset_starts_numbering(self):
+        lines = self._lines(self._list("ordered", 0, "five", "six", offset=4))
+        assert lines == ["5. five", "6. six"]
+
+    def test_numbering_restarts_after_a_paragraph(self):
+        message = _rich(
+            self._list("ordered", 0, "one"),
+            _section({"type": "text", "text": "break"}),
+            self._list("ordered", 0, "again"),
+        )
+        assert parse_slack_blocks(message) == "1. one\n\nbreak\n\n1. again"
+
+
+class TestBlockTypes:
+    """markdown, table, video and non-text blocks."""
+
+    def test_markdown_block(self):
+        message = {
+            "text": "x",
+            "blocks": [
+                {
+                    "type": "markdown",
+                    "text": "# Release\n**bold** and *italic* ~~old~~ "
+                    "[docs](https://x.example/?a=1&b=2) a < b",
+                }
+            ],
+        }
+        assert _render(message) == (
+            "*Release*\n*bold* and _italic_ ~old~ "
+            "<https://x.example/?a=1&b=2|docs> a < b"
+        )
+
+    def test_markdown_code_is_kept_without_language(self):
+        message = {
+            "text": "x",
+            "blocks": [
+                {
+                    "type": "markdown",
+                    "text": "see `**not bold**`\n```python\nprint(1 < 2)\n```",
+                }
+            ],
+        }
+        assert _render(message) == ("see `**not bold**`\n```\nprint(1 < 2)\n```")
+
+    def test_markdown_block_alongside_rich_text(self):
+        """Both blocks render (markdown used to be dropped)."""
+        message = {
+            "text": "x",
+            "blocks": [
+                {"type": "markdown", "text": "**bold md**"},
+                {
+                    "type": "rich_text",
+                    "elements": [_section({"type": "text", "text": "tail"})],
+                },
+            ],
+        }
+        assert _render(message) == "*bold md*\n\ntail"
+
+    def test_table_block(self):
+        message = {
+            "text": "a | b",
+            "blocks": [
+                {
+                    "type": "table",
+                    "rows": [
+                        [
+                            {"type": "raw_text", "text": "Name"},
+                            {"type": "raw_text", "text": "Count"},
+                        ],
+                        [
+                            {
+                                "type": "rich_text",
+                                "elements": [
+                                    _section(
+                                        {
+                                            "type": "link",
+                                            "url": "https://x.example",
+                                            "text": "x",
+                                        }
+                                    )
+                                ],
+                            },
+                            {"type": "raw_number", "text": "42"},
+                        ],
+                    ],
+                }
+            ],
+        }
+        assert _render(message) == "Name | Count\n<https://x.example|x> | 42"
+
+    def test_video_block(self):
+        message = {
+            "text": "",
+            "blocks": [
+                {
+                    "type": "video",
+                    "title": {"type": "plain_text", "text": "Demo"},
+                    "title_url": "https://v.example/1",
+                    "video_url": "https://v.example/embed/1",
+                }
+            ],
+        }
+        assert _render(message) == "<https://v.example/1|Demo>"
+
+    def test_non_text_blocks_do_not_trigger_fallback(self):
+        message = {
+            "text": "fallback",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "body"}},
+                {"type": "actions", "elements": []},
+                {"type": "image", "image_url": "https://x/i.png", "alt_text": "i"},
+            ],
+        }
+        assert parse_slack_blocks(message) == "body"
+
+    def test_unknown_block_type_falls_back_to_text(self):
+        message = {
+            "text": "the *full* text",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "part"}},
+                {"type": "fancy_new_block", "data": {}},
+            ],
+        }
+        assert parse_slack_blocks(message) == "the *full* text"
+
+    def test_unknown_rich_text_element_falls_back_to_text(self):
+        message = _rich(
+            {"type": "rich_text_carousel", "elements": []}, text="the real text"
+        )
+        assert parse_slack_blocks(message) == "the real text"
+
+    def test_unknown_types_without_text_keep_rendered_content(self):
+        message = {
+            "text": "",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "part"}},
+                {"type": "fancy_new_block"},
+            ],
+        }
+        assert parse_slack_blocks(message) == "part"
+
+    def test_custom_emoji_map_applies_to_emoji_elements(self):
+        message = _rich(
+            _section(
+                {"type": "emoji", "name": "tada", "unicode": "1f389"},
+                {"type": "emoji", "name": "partyparrot"},
+            )
+        )
+        mapping = {"tada": ":confetti_ball:", "partyparrot": ":party-blob:"}
+        result = parse_slack_blocks(message, custom_emoji_map=mapping)
+        assert result == "\U0001f38a:party-blob:"

@@ -69,7 +69,7 @@ def build_message_payload(
         A tuple of ``(payload, user_email, is_thread_reply, message_reply_option)``.
     """
     # Extract text from Slack blocks (rich formatting) or fallback to plain text
-    text = parse_slack_blocks(message)
+    text = parse_slack_blocks(message, custom_emoji_map=ctx.config.custom_emoji_map)
 
     # Set current message context for enhanced user tracking
     state.context.current_message_ts = ts
