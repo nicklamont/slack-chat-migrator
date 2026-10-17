@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Callable
 from typing import Any
 
 from googleapiclient.errors import HttpError
@@ -95,6 +96,8 @@ class FakeDrive:
         self.fail_restriction = fail_restriction
         # Method name ("files.list", ...) -> error every call raises while set.
         self.failing: dict[str, BaseException] = {}
+        # files.list query -> error to raise, or None to answer it.
+        self.fail_query: Callable[[str], BaseException | None] | None = None
 
     # -- helpers ------------------------------------------------------------
 
@@ -145,6 +148,13 @@ def _matches(record: dict[str, Any], q: str) -> bool:
             return False
     if re.search(r"trashed ?= ?false", q) and record.get("trashed"):
         return False
+    m = re.search(
+        r"appProperties has \{ key='([^']+)' and value='((?:[^'\\]|\\.)*)' \}", q
+    )
+    if m:
+        props = record.get("appProperties") or {}
+        if props.get(m.group(1)) != m.group(2).replace("\\'", "'"):
+            return False
     return True
 
 
@@ -167,6 +177,9 @@ class _Files:
 
         def run():
             q = kw.get("q", "")
+            error = self.d.fail_query(q) if self.d.fail_query else None
+            if error is not None:
+                raise error
             matched = [dict(f) for f in self.d.files_db.values() if _matches(f, q)]
             page, token = _page(matched, kw, 100, self.d.file_page_cap)
             out: dict[str, Any] = {"files": page}

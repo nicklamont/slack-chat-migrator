@@ -1195,6 +1195,28 @@ class TestCanvasConversion:
         assert again.drive_id == first.drive_id
         assert doc_downloads.calls == []
 
+    def test_rerun_finds_the_canvas_when_its_folder_cannot_be_listed(
+        self, tmp_path, doc_downloads
+    ):
+        """SF9: a failed listing is counted and retried; dedup still works."""
+        fake = FakeDrive()
+        first = post_document(make_handler(fake, tmp_path), CANVAS)
+        folder = fake.files_db[first.drive_id]["parents"][0]
+        listing = f"'{folder}' in parents and trashed=false"
+        fake.fail_query = lambda q: http_error(500) if q == listing else None
+
+        fake.calls.clear()
+        rerun = make_handler(fake, tmp_path)
+        doc_downloads.calls.clear()
+        again = post_document(rerun, CANVAS)
+        post_document(rerun, SLACK_LIST)
+
+        assert again.drive_id == first.drive_id  # no second Google Doc
+        assert doc_downloads.calls == [SLACK_LIST["id"]]
+        listings = [kw for name, kw in fake.calls if kw.get("q") == listing]
+        assert len(listings) == 2  # tried again with the next upload
+        assert rerun.get_file_statistics()["folder_listing_failures"] == 2
+
     def test_plain_csv_attachment_is_not_converted(self, tmp_path, downloads):
         fake = FakeDrive()
         handler = make_handler(fake, tmp_path)

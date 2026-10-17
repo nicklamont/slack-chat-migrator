@@ -906,17 +906,21 @@ class TestPreCacheRootFolder:
         handler._pre_cache_root_folder()
         handler.folder_manager.remember_folder.assert_not_called()
 
-    def test_root_cache_http_error_continues(self):
-        """HttpError when caching root folder does not fail the process."""
+    def test_failed_root_listing_still_learns_channel_folders(self):
+        """The uploader handles a failed listing; folders are still learned."""
         handler = _make_handler()
         handler._root_folder_id = "root123"
         handler._shared_drive_id = None
-        handler.drive_uploader.pre_cache_folder_file_hashes.side_effect = HttpError(
-            Response({"status": "500"}), b"error"
-        )
+        handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
+        handler.folder_manager.list_child_folders.return_value = [
+            {"id": "F", "name": "general"}
+        ]
 
-        # Should not raise
         handler._pre_cache_root_folder()
+
+        handler.folder_manager.remember_folder.assert_called_once_with(
+            "root123", "general", "F", restricted=False
+        )
 
 
 # ===========================================================================

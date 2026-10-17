@@ -8,6 +8,7 @@ import enum
 import hashlib
 import logging
 import mimetypes
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -133,7 +134,12 @@ def _fit_app_property(key: str, value: str) -> str:
 class DriveFileUploader:
     """Handles file uploads to Google Drive."""
 
-    def __init__(self, drive_service: DriveAdapter) -> None:
+    def __init__(
+        self,
+        drive_service: DriveAdapter,
+        *,
+        on_listing_failure: Callable[[str, BaseException], None] | None = None,
+    ) -> None:
         """Initialize the DriveFileUploader.
 
         It grants no access itself, so it doesn't need to know who is
@@ -141,8 +147,15 @@ class DriveFileUploader:
 
         Args:
             drive_service: DriveAdapter instance wrapping the Google Drive API
+            on_listing_failure: Called with the folder ID and the error each
+                time a folder's files can't be listed, so the caller can
+                count it.
         """
         self.drive_service = drive_service
+        self._on_listing_failure = on_listing_failure or (lambda _folder, _e: None)
+        # Folder ID -> failed listings; a folder that failed is listed again
+        # on its next upload.
+        self.listing_failures: dict[str, int] = {}
         # Every cache is scoped to a folder: content found in one channel's
         # folder is never linked from another channel.
         # (folder_id, md5) -> file
@@ -210,6 +223,12 @@ class DriveFileUploader:
         Indexes each file by MD5 and by the Slack file ID in its
         ``appProperties``, so later uploads into the folder need no search
         and re-runs can link files without downloading them again.
+
+        If the listing fails, the folder isn't marked as cached: the next
+        upload into it lists it again, and until then each file is looked up
+        with its own search (by Slack ID, then by MD5).  The failure is
+        logged (a warning the first time per folder) and reported to
+        *on_listing_failure*; it is never raised.
 
         Args:
             folder_id: ID of the folder to cache files from
@@ -294,31 +313,93 @@ class DriveFileUploader:
             )
             return files_cached
 
-        except HttpError as e:
+        except DRIVE_CALL_ERRORS as e:
+            failures = self.listing_failures.get(folder_id, 0) + 1
+            self.listing_failures[folder_id] = failures
             log_with_context(
-                logging.WARNING,
-                f"Failed to pre-cache file hashes from folder {folder_id}: {e}",
+                logging.WARNING if failures == 1 else logging.DEBUG,
+                f"Could not list the files of Drive folder {folder_id} ({e});"
+                " looking up each file on its own instead, and listing the"
+                " folder again with the next upload",
+                channel=self._get_current_channel(),
             )
+            self._on_listing_failure(folder_id, e)
             return 0
 
     def find_uploaded_slack_file(
-        self, folder_id: str, slack_file_id: str
+        self,
+        folder_id: str,
+        slack_file_id: str,
+        shared_drive_id: str | None = None,
     ) -> DriveUpload | None:
-        """Find a Slack file that an earlier run uploaded into *folder_id*.
+        """Find this Slack file's upload into *folder_id*.
 
-        Only the folder cache is consulted, so pre-cache the folder first.
+        The upload was made earlier in this run or by an earlier run, and is
+        tagged with the Slack file ID.  A pre-cached folder is answered from
+        the cache.  For a folder whose listing failed, Drive is searched for
+        the tag instead, so deduplication by Slack ID keeps working.
 
         Args:
             folder_id: Target folder.
             slack_file_id: Slack file ID.
+            shared_drive_id: ID of the shared drive (if applicable).
 
         Returns:
-            The existing upload (``source == SOURCE_SLACK_ID``), or None.
+            The existing upload (``source == SOURCE_SLACK_ID``), or None
+            (also when the search fails).
         """
         cached = self.slack_file_cache.get((folder_id, slack_file_id))
+        if cached is None and folder_id not in self.folders_pre_cached:
+            cached = self._search_slack_file(folder_id, slack_file_id, shared_drive_id)
         if cached is None:
             return None
         return DriveUpload(cached[0], cached[1], source=SOURCE_SLACK_ID)
+
+    def _search_slack_file(
+        self, folder_id: str, slack_file_id: str, shared_drive_id: str | None
+    ) -> _CachedFile | None:
+        """Search *folder_id* for a file tagged with *slack_file_id*."""
+        safe_id = escape_drive_query_value(slack_file_id)
+        safe_folder = escape_drive_query_value(folder_id)
+        query = (
+            f"appProperties has {{ key='{DRIVE_APP_PROPERTY_SLACK_FILE_ID}'"
+            f" and value='{safe_id}' }} and '{safe_folder}' in parents"
+            " and trashed=false"
+        )
+        search_kwargs: dict[str, Any] = {
+            "q": query,
+            "fields": "files(id, webViewLink, appProperties)",
+        }
+        if shared_drive_id:
+            search_kwargs.update(
+                {
+                    "corpora": "drive",
+                    "drive_id": shared_drive_id,
+                    "include_items_from_all_drives": True,
+                    "supports_all_drives": True,
+                }
+            )
+        try:
+            files = self.drive_service.list_files(**search_kwargs).get("files", [])
+        except DRIVE_CALL_ERRORS as e:
+            log_with_context(
+                logging.DEBUG,
+                f"Could not search folder {folder_id} for Slack file"
+                f" {slack_file_id}: {e}",
+                channel=self._get_current_channel(),
+            )
+            return None
+        found = next((f for f in files if f.get("id")), None)
+        if found is None:
+            return None
+        app_properties = found.get("appProperties") or {}
+        if app_properties.get(APP_PROPERTY_GRANT_PENDING):
+            self.grant_pending.add(found["id"])
+        if app_properties.get(APP_PROPERTY_OWNER_PENDING):
+            self.owner_pending.add(found["id"])
+        url = found.get("webViewLink")
+        self.remember_file(folder_id, found["id"], url, slack_file_id=slack_file_id)
+        return found["id"], url
 
     def _find_file_by_hash(
         self,
@@ -421,6 +502,7 @@ class DriveFileUploader:
         slack_file_id: str | None = None,
         channel: str | None = None,
         target_mime_type: str | None = None,
+        pre_cache: bool = True,
     ) -> DriveUpload | DriveUploadFailure:
         """Upload a file to Google Drive, or reuse an identical one.
 
@@ -446,6 +528,9 @@ class DriveFileUploader:
             target_mime_type: A Google Workspace type (e.g. a Google Doc) to
                 convert the upload into.  Converted files skip MD5 dedup,
                 since their content differs from the uploaded bytes.
+            pre_cache: List the folder into the caches first, unless it is
+                cached already.  Pass False when the caller has just done
+                so, so a folder whose listing failed isn't listed twice.
 
         Returns:
             The DriveUpload, or why there is none: an HttpError from Drive, a
@@ -467,12 +552,13 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            # Ensure the folder's files are pre-cached if we haven't done so already
-            if folder_id not in self.folders_pre_cached:
+            if pre_cache and folder_id not in self.folders_pre_cached:
                 self.pre_cache_folder_file_hashes(folder_id, shared_drive_id)
 
             if slack_file_id:
-                existing = self.find_uploaded_slack_file(folder_id, slack_file_id)
+                existing = self.find_uploaded_slack_file(
+                    folder_id, slack_file_id, shared_drive_id
+                )
                 if existing is not None:
                     return existing
 

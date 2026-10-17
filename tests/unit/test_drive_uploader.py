@@ -757,7 +757,66 @@ class TestSlackFileIndex:
         assert found == DriveUpload(
             "doc1", "https://doc", source=DriveUploadSource.SLACK_ID
         )
+        uploader.folders_pre_cached.add("other_folder")
         assert uploader.find_uploaded_slack_file("other_folder", "F1") is None
+
+    def test_folder_that_failed_to_list_is_searched_by_slack_id(self):
+        """SF9: a failed listing doesn't turn off deduplication by Slack ID."""
+        failures = []
+        uploader = DriveFileUploader(
+            MagicMock(), on_listing_failure=lambda f, e: failures.append(f)
+        )
+        uploader.drive_service.list_files.side_effect = [
+            _http_error(500),
+            {
+                "files": [
+                    {
+                        "id": "doc1",
+                        "webViewLink": "https://doc",
+                        "appProperties": {
+                            "slackFileId": "F'1",
+                            "slackGrantPending": "1",
+                        },
+                    }
+                ]
+            },
+        ]
+
+        assert uploader.pre_cache_folder_file_hashes("folder1", "SD") == 0
+        found = uploader.find_uploaded_slack_file("folder1", "F'1", "SD")
+
+        assert found == DriveUpload(
+            "doc1", "https://doc", source=DriveUploadSource.SLACK_ID
+        )
+        assert failures == ["folder1"]
+        assert "folder1" not in uploader.folders_pre_cached  # listed again later
+        search = uploader.drive_service.list_files.call_args.kwargs
+        assert search["q"] == (
+            "appProperties has { key='slackFileId' and value='F\\'1' }"
+            " and 'folder1' in parents and trashed=false"
+        )
+        assert search["drive_id"] == "SD"
+        assert uploader.grant_pending == {"doc1"}
+        # Remembered: no second search.
+        assert uploader.find_uploaded_slack_file("folder1", "F'1") == found
+        assert uploader.drive_service.list_files.call_count == 2
+
+    def test_failed_search_finds_nothing(self):
+        uploader = _make_uploader()
+        uploader.drive_service.list_files.side_effect = ConnectionResetError("x")
+
+        assert uploader.find_uploaded_slack_file("folder1", "F1") is None
+
+    def test_listing_failure_warns_once_per_folder(self, caplog):
+        uploader = _make_uploader()
+        uploader.drive_service.list_files.side_effect = TimeoutError("slow")
+
+        uploader.pre_cache_folder_file_hashes("folder1")
+        uploader.pre_cache_folder_file_hashes("folder1")
+
+        assert uploader.listing_failures == {"folder1": 2}
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_upload_is_tagged_and_remembered(self, mock_media_cls, tmp_path):

@@ -202,6 +202,7 @@ class FileHandler:
             "ownership_transferred": 0,
             "ownership_transfer_failed": 0,
             "poster_grant_failures": 0,
+            "folder_listing_failures": 0,
             "external_folder_grant_failures": 0,
             "folder_sync_failures": 0,
             "folder_grant_failures": 0,
@@ -226,7 +227,9 @@ class FileHandler:
             protected_emails=self._protected_emails,
             on_sync_result=self._count_folder_sync,
         )
-        self.drive_uploader = DriveFileUploader(drive_service)
+        self.drive_uploader = DriveFileUploader(
+            drive_service, on_listing_failure=self._count_listing_failure
+        )
         self.chat_uploader = ChatFileUploader(chat_service)
 
         # Initialize the root folder and shared drive
@@ -331,23 +334,13 @@ class FileHandler:
         if not self._root_folder_id:
             return
 
-        try:
-            log_with_context(
-                logging.DEBUG,
-                "Pre-caching file hashes from root folder to improve deduplication",
-            )
-
-            file_count = self.drive_uploader.pre_cache_folder_file_hashes(
-                self._root_folder_id, self._shared_drive_id
-            )
-            log_with_context(
-                logging.DEBUG, f"Pre-cached {file_count} files from root folder"
-            )
-        except HttpError as e:
-            log_with_context(
-                logging.WARNING,
-                f"Failed to pre-cache file hashes from root folder: {e}. Continuing without pre-cache.",
-            )
+        # A failed listing is logged, counted and retried there.
+        file_count = self.drive_uploader.pre_cache_folder_file_hashes(
+            self._root_folder_id, self._shared_drive_id
+        )
+        log_with_context(
+            logging.DEBUG, f"Pre-cached {file_count} files from root folder"
+        )
 
         try:
             folders = self.folder_manager.list_child_folders(
@@ -692,7 +685,9 @@ class FileHandler:
         file_id = file_obj.get("id")
         if not folder_id or not file_id:
             return None
-        existing = self.drive_uploader.find_uploaded_slack_file(folder_id, file_id)
+        existing = self.drive_uploader.find_uploaded_slack_file(
+            folder_id, file_id, self._shared_drive_id
+        )
         if existing is None:
             return None
         log_with_context(
@@ -1114,7 +1109,9 @@ class FileHandler:
 
         A private conversation whose folder can't be made limited-access
         gets no folder: its files are never stored in an open one, neither
-        its own folder nor the root.
+        its own folder nor the root.  The folder returned has been listed
+        into the dedup caches (or listing it failed, and is retried with the
+        next file), so the upload itself doesn't list it again.
         """
         lookup = FolderLookup(None)
 
@@ -1135,6 +1132,9 @@ class FileHandler:
                 return lookup
 
         if self._root_folder_id:
+            self.drive_uploader.pre_cache_folder_file_hashes(
+                self._root_folder_id, self._shared_drive_id
+            )
             return FolderLookup(self._root_folder_id)
 
         log_with_context(
@@ -1231,6 +1231,7 @@ class FileHandler:
             slack_file_id=None if file_id == "unknown" else file_id,
             channel=channel,
             target_mime_type=target_mime_type,
+            pre_cache=False,  # _choose_upload_folder listed the folder
         )
 
         if isinstance(upload, DriveUploadFailure):
@@ -1282,6 +1283,10 @@ class FileHandler:
         if self.user_resolver is not None:
             return bool(self.user_resolver.is_external_user(email))
         return is_external_email(email, self._internal_domains)
+
+    def _count_listing_failure(self, folder_id: str, error: BaseException) -> None:
+        """Count a Drive folder whose files couldn't be listed (retried)."""
+        self._increment_stat("folder_listing_failures")
 
     def _count_folder_sync(self, channel: str, result: FolderSyncResult) -> None:
         """Count what failed in a channel-folder permission sync."""
@@ -1557,6 +1562,7 @@ class FileHandler:
             "ownership_transferred": self.file_stats["ownership_transferred"],
             "ownership_transfer_failed": self.file_stats["ownership_transfer_failed"],
             "poster_grant_failures": self.file_stats["poster_grant_failures"],
+            "folder_listing_failures": self.file_stats["folder_listing_failures"],
             "external_folder_grant_failures": self.file_stats[
                 "external_folder_grant_failures"
             ],
