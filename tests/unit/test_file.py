@@ -86,6 +86,15 @@ def _failed_download(reason="network_error:ConnectionError"):
     return DownloadResult(DownloadStatus.FAILED, reason=reason)
 
 
+def _use_drive(handler, root="root_folder", shared_drive=None):
+    """Put *handler* in a set-up Drive state; the status is the only source."""
+    handler._drive_status = (
+        DriveStatus("shared_drive", shared_drive, f"shared drive {shared_drive}")
+        if shared_drive
+        else DriveStatus("folder", root, f"attachment folder {root}")
+    )
+
+
 def _make_handler(
     folder_id=None,
     dry_run=False,
@@ -271,8 +280,7 @@ class TestFolderIdProperty:
 
     def test_getter_triggers_init(self):
         handler = _make_handler()
-        handler._drive_initialized = True
-        handler._root_folder_id = "abc"
+        _use_drive(handler, root="abc")
         assert handler.folder_id == "abc"
 
     def test_setter(self):
@@ -292,7 +300,6 @@ class TestUploadStrategy:
     def _make_ready_handler(self, dry_run=False):
         """Create a handler with drive already initialized."""
         handler = _make_handler(folder_id="root_folder", dry_run=dry_run)
-        handler._drive_initialized = True
         return handler
 
     def test_cached_file_returns_immediately(self):
@@ -518,7 +525,6 @@ class TestUploadStrategy:
             user_resolver=ext_resolver,
             user_map={"UEXT": "ext@other.com"},
         )
-        handler._drive_initialized = True
         handler._download_file = MagicMock(return_value=_failed_download())
 
         file_obj = {"id": "F1", "name": "ext.txt", "user": "UEXT"}
@@ -673,7 +679,7 @@ class TestEnsureDriveInitialized:
 
     def test_skips_if_already_initialized(self):
         handler = _make_handler()
-        handler._drive_initialized = True
+        _use_drive(handler)
         handler._initialize_shared_drive_and_folder = MagicMock()
 
         handler.ensure_drive_initialized()
@@ -689,12 +695,10 @@ class TestEnsureDriveInitialized:
 
     def test_calls_init_when_needed(self):
         handler = _make_handler()
-        handler._drive_initialized = False
         handler._initialize_shared_drive_and_folder = MagicMock()
 
         handler.ensure_drive_initialized()
         handler._initialize_shared_drive_and_folder.assert_called_once()
-        assert handler._drive_initialized is True
 
 
 # ===========================================================================
@@ -836,12 +840,13 @@ class TestInitializeSharedDriveAndFolder:
         handler._initialize_shared_drive_and_folder()
 
         assert handler.drive_status == DriveStatus(
-            True, "shared_drive", "SD", "shared drive SD"
+            "shared_drive", "SD", "shared drive SD"
         )
+        assert handler.shared_drive_id == "SD"
 
 
 class TestDriveStatus:
-    """Drive readiness for the preflight (SF12)."""
+    """Drive readiness (#118)."""
 
     def test_not_ready_before_initialization(self):
         handler = _make_handler()
@@ -851,14 +856,30 @@ class TestDriveStatus:
     def test_given_folder_is_ready(self):
         handler = _make_handler(folder_id="ROOT")
         assert handler.drive_status == DriveStatus(
-            True, "folder", "ROOT", "attachment folder ROOT"
+            "folder", "ROOT", "attachment folder ROOT"
         )
+        assert handler.drive_ready
+        assert handler.shared_drive_id is None
 
-    def test_ready_needs_a_root_folder(self):
+    @pytest.mark.parametrize(
+        ("mode", "root"),
+        [
+            ("shared_drive", None),
+            ("my_drive", None),
+            ("folder", ""),
+            ("none", "F"),
+            ("not_initialized", "F"),
+        ],
+    )
+    def test_mode_and_root_folder_must_agree(self, mode, root):
         with pytest.raises(ValueError, match="root folder"):
-            DriveStatus(True, "shared_drive", None)
-        with pytest.raises(ValueError, match="root folder"):
-            DriveStatus(False, "none", "X")
+            DriveStatus(mode, root)
+
+    def test_ready_and_shared_drive_are_derived(self):
+        assert DriveStatus("shared_drive", "SD").ready
+        assert DriveStatus("shared_drive", "SD").shared_drive_id == "SD"
+        assert DriveStatus("my_drive", "F").shared_drive_id is None
+        assert not DriveStatus("none").ready
 
     def test_default_drive_name_when_nothing_configured(self):
         """When name and ID are both empty, use default 'Imported Slack Attachments'."""
@@ -887,7 +908,6 @@ class TestPreCacheRootFolder:
     def test_skips_when_no_root_folder(self):
         """Returns early when _root_folder_id is None."""
         handler = _make_handler()
-        handler._root_folder_id = None
         handler.drive_uploader.pre_cache_folder_file_hashes = MagicMock()
 
         handler._pre_cache_root_folder()
@@ -897,7 +917,7 @@ class TestPreCacheRootFolder:
     def test_dry_run_delegates_to_pre_cache(self):
         """Dry run no longer short-circuits — DI stubs handle pre-caching."""
         handler = _make_handler(dry_run=True)
-        handler._root_folder_id = "some_folder"
+        _use_drive(handler, root="some_folder")
         handler.drive_uploader.pre_cache_folder_file_hashes = MagicMock(return_value=0)
         handler.drive_service.list_files.return_value = {"files": []}
 
@@ -908,22 +928,20 @@ class TestPreCacheRootFolder:
     def test_caches_root_folder_files(self):
         """Caches files from root folder."""
         handler = _make_handler()
-        handler._root_folder_id = "root123"
-        handler._shared_drive_id = "drive123"
+        _use_drive(handler, shared_drive="drive123")
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 5
         handler.drive_service.list_files.return_value = {"files": []}
 
         handler._pre_cache_root_folder()
 
         handler.drive_uploader.pre_cache_folder_file_hashes.assert_called_once_with(
-            "root123", "drive123"
+            "drive123", "drive123"
         )
 
     def test_seeds_folder_cache_from_every_subfolder(self):
         """Channel folders are learned up front; their files are cached lazily."""
         handler = _make_handler()
-        handler._root_folder_id = "root123"
-        handler._shared_drive_id = "drive123"
+        _use_drive(handler, shared_drive="drive123")
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 3
         handler.folder_manager.list_child_folders.return_value = [
             {"id": "folder_a", "name": "general"},
@@ -933,24 +951,23 @@ class TestPreCacheRootFolder:
         handler._pre_cache_root_folder()
 
         handler.folder_manager.list_child_folders.assert_called_once_with(
-            "root123", "drive123"
+            "drive123", "drive123"
         )
         handler.folder_manager.remember_folder.assert_any_call(
-            "root123", "general", "folder_a", restricted=False
+            "drive123", "general", "folder_a", restricted=False
         )
         handler.folder_manager.remember_folder.assert_any_call(
-            "root123", "random", "folder_b", restricted=False
+            "drive123", "random", "folder_b", restricted=False
         )
         # Only the root folder's files are listed at start-up.
         handler.drive_uploader.pre_cache_folder_file_hashes.assert_called_once_with(
-            "root123", "drive123"
+            "drive123", "drive123"
         )
 
     def test_subfolder_listing_http_error_continues(self):
         """HttpError when listing subfolders does not fail the process."""
         handler = _make_handler()
-        handler._root_folder_id = "root123"
-        handler._shared_drive_id = "drive123"
+        _use_drive(handler, shared_drive="drive123")
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 5
         handler.folder_manager.list_child_folders.side_effect = HttpError(
             Response({"status": "500"}), b"error"
@@ -963,8 +980,7 @@ class TestPreCacheRootFolder:
     def test_failed_root_listing_still_learns_channel_folders(self):
         """The uploader handles a failed listing; folders are still learned."""
         handler = _make_handler()
-        handler._root_folder_id = "root123"
-        handler._shared_drive_id = None
+        _use_drive(handler, root="root123")
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.folder_manager.list_child_folders.return_value = [
             {"id": "F", "name": "general"}
@@ -987,7 +1003,6 @@ class TestUploadDirectToChat:
 
     def _make_ready_handler(self):
         handler = _make_handler(folder_id="root")
-        handler._drive_initialized = True
         return handler
 
     def test_successful_upload_with_default_service(self):
@@ -1114,15 +1129,12 @@ class TestUploadToDrive:
     """Tests for _upload_to_drive."""
 
     def _make_ready_handler(self, **kwargs):
-        handler = _make_handler(folder_id="root_folder", **kwargs)
-        handler._drive_initialized = True
-        handler._root_folder_id = "root_folder"
-        return handler
+        return _make_handler(folder_id="root_folder", **kwargs)
 
     def test_successful_upload_with_channel_folder(self):
         """Upload to drive with channel folder creation."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = "drive123"
+        _use_drive(handler, shared_drive="drive123")
         handler.folder_manager.get_or_create_channel_folder.return_value = (
             "channel_folder"
         )
@@ -1152,7 +1164,6 @@ class TestUploadToDrive:
 
     def test_failed_drive_upload_returns_its_cause(self):
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.folder_manager.get_or_create_channel_folder.return_value = (
             "channel_folder"
         )
@@ -1173,7 +1184,6 @@ class TestUploadToDrive:
     def test_upload_without_channel_uses_root_folder(self):
         """When no channel is provided, uses root folder."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1191,8 +1201,7 @@ class TestUploadToDrive:
     def test_no_folder_id_is_an_error(self):
         """No folder means a failed result that says so."""
         handler = self._make_ready_handler()
-        handler._root_folder_id = None
-        handler._shared_drive_id = None
+        handler.folder_id = None
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
         result = handler._upload_to_drive(file_obj, FAKE_PATH)
@@ -1206,7 +1215,6 @@ class TestUploadToDrive:
             user_map={"U123": "alice@example.com"},
             config=TRANSFER_CONFIG,
         )
-        handler._shared_drive_id = None
         handler.user_resolver.is_external_user.return_value = False
         handler.folder_manager.get_or_create_channel_folder.return_value = (
             "channel_folder"
@@ -1236,7 +1244,6 @@ class TestUploadToDrive:
             user_map={"U123": "alice@example.com"},
             config=TRANSFER_CONFIG,
         )
-        handler._shared_drive_id = None
         handler.user_resolver.is_external_user.return_value = False
         handler.folder_manager.get_or_create_channel_folder.return_value = (
             "channel_folder"
@@ -1269,7 +1276,6 @@ class TestUploadToDrive:
         handler = self._make_ready_handler(
             user_map={"UEXT": "ext@other.com"},
         )
-        handler._shared_drive_id = None
         handler.user_resolver.is_external_user.return_value = True
         handler.folder_manager.get_or_create_channel_folder.return_value = (
             "channel_folder"
@@ -1297,7 +1303,7 @@ class TestUploadToDrive:
         handler = self._make_ready_handler(
             user_map={"U123": "alice@example.com"},
         )
-        handler._shared_drive_id = "drive123"
+        _use_drive(handler, shared_drive="drive123")
         handler.user_resolver.is_external_user.return_value = False
         handler.folder_manager.get_or_create_channel_folder.return_value = (
             "channel_folder"
@@ -1323,7 +1329,6 @@ class TestUploadToDrive:
     def test_google_docs_url_sets_mime_type(self):
         """Google Docs URLs should set appropriate MIME types."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1344,7 +1349,6 @@ class TestUploadToDrive:
     def test_google_sheets_url_sets_mime_type(self):
         """Google Sheets URLs should set spreadsheet MIME type."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1365,7 +1369,6 @@ class TestUploadToDrive:
     def test_google_presentation_url_sets_mime_type(self):
         """Google Slides URLs should set presentation MIME type."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1386,7 +1389,6 @@ class TestUploadToDrive:
     def test_sheets_google_url_sets_mime_type(self):
         """sheets.google.com URL should set spreadsheet MIME type."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1407,7 +1409,6 @@ class TestUploadToDrive:
     def test_drive_google_url_guesses_mime_type(self):
         """drive.google.com URL with octet-stream guesses from filename."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1428,7 +1429,6 @@ class TestUploadToDrive:
     def test_drive_google_url_no_extension_defaults_to_document(self):
         """drive.google.com URL with no guessable MIME defaults to document."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1449,7 +1449,6 @@ class TestUploadToDrive:
     def test_null_mime_type_guessed(self):
         """Regular files with null MIME type should be guessed from name."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1469,7 +1468,6 @@ class TestUploadToDrive:
     def test_empty_mime_type_guessed(self):
         """Regular files with empty MIME type should be guessed from name."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1488,7 +1486,6 @@ class TestUploadToDrive:
 
     def test_http_error_returns_an_error_result(self):
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.folder_manager.get_or_create_channel_folder.side_effect = HttpError(
             Response({"status": "500"}), b"error"
         )
@@ -1504,7 +1501,6 @@ class TestUploadToDrive:
     def test_channel_folder_already_processed(self):
         """Second upload to same channel folder uses cache."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.folder_manager.get_or_create_channel_folder.return_value = (
             "channel_folder"
         )
@@ -1524,7 +1520,6 @@ class TestUploadToDrive:
     def test_no_public_url_generates_default_link(self):
         """When drive_uploader returns None for public_url, generates a default link."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id"
         )
@@ -1542,7 +1537,7 @@ class TestUploadToDrive:
         handler = self._make_ready_handler(
             user_map={"U123": "alice@example.com"},
         )
-        handler._shared_drive_id = "drive123"
+        _use_drive(handler, shared_drive="drive123")
         handler.folder_manager.get_or_create_channel_folder.return_value = (
             "channel_folder"
         )
@@ -1567,7 +1562,6 @@ class TestUploadToDrive:
     def test_no_user_email_logs_warning(self):
         """When no user email is available, no ownership transfer happens."""
         handler = self._make_ready_handler(user_map={})
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1597,7 +1591,6 @@ class TestEnsureDriveInitializedDetailed:
     def test_initializes_and_sets_flag(self):
         """Full initialization path sets _drive_initialized to True."""
         handler = _make_handler()
-        handler._drive_initialized = False
         handler.shared_drive_manager.get_or_create_shared_drive.return_value = (
             "new_drive"
         )
@@ -1612,7 +1605,6 @@ class TestEnsureDriveInitializedDetailed:
     def test_second_call_is_noop(self):
         """Calling ensure_drive_initialized twice should only init once."""
         handler = _make_handler()
-        handler._drive_initialized = False
         handler.shared_drive_manager.get_or_create_shared_drive.return_value = (
             "new_drive"
         )
@@ -1746,7 +1738,6 @@ class TestTempFileLifecycle:
 
     def _handler(self):
         handler = _make_handler(folder_id="root")
-        handler._drive_initialized = True
         return handler
 
     def test_temp_file_removed_after_drive_upload(self):

@@ -90,9 +90,7 @@ def make_handler(
         handler.ensure_drive_initialized()
     else:
         fake.add_folder("ROOT", "Imported Slack Attachments", "root")
-        handler._shared_drive_id = None
-        handler._root_folder_id = "ROOT"
-        handler._drive_initialized = True
+        handler.folder_id = "ROOT"  # a regular Drive folder, no shared drive
     return handler
 
 

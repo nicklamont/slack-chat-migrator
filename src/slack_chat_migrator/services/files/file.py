@@ -86,32 +86,47 @@ SKIP_REASON_GOOGLE_DOCS_LINK = "google_docs_link"
 #: How attachments are stored; see :class:`DriveStatus`.
 DriveMode = Literal["not_initialized", "folder", "shared_drive", "my_drive", "none"]
 
+#: Modes without an attachment root folder.
+_NO_ROOT_MODES: frozenset[DriveMode] = frozenset({"not_initialized", "none"})
+
 
 @dataclass(frozen=True)
 class DriveStatus:
     """Where attachments go on Drive, or why they can't go anywhere.
 
     Attributes:
-        ready: There is an attachment root folder, so uploads can be tried.
         mode: ``shared_drive`` (the shared drive's root), ``my_drive`` (a
-            regular Drive folder, because no shared drive could be used),
-            ``folder`` (a root folder given to FileHandler),
-            ``not_initialized`` (before :meth:`FileHandler.ensure_drive_initialized`)
-            or ``none`` (neither a shared drive nor a folder could be set up).
-        root_folder_id: The attachment root; set exactly when *ready*.
-        detail: One line for the preflight: what is used, and why a
+            regular Drive folder, because the account can't use or create
+            shared drives), ``folder`` (a root folder given to FileHandler),
+            ``not_initialized`` (before Drive is set up) or ``none`` (Drive
+            couldn't be set up).
+        root_folder_id: The attachment root; set exactly for the modes that
+            have one (``shared_drive``, ``my_drive``, ``folder``).
+        detail: One line describing the setup: what is used, and why a
             fallback was needed or what failed.
     """
 
-    ready: bool
     mode: DriveMode
     root_folder_id: str | None = None
     detail: str = ""
 
     def __post_init__(self) -> None:
-        """Reject a ready status without a root folder, and the reverse."""
-        if self.ready != bool(self.root_folder_id):
-            raise ValueError("a DriveStatus is ready exactly when it has a root folder")
+        """Reject a root folder for a mode without one, and the reverse."""
+        if (self.mode in _NO_ROOT_MODES) != (not self.root_folder_id):
+            raise ValueError(
+                f"a DriveStatus in mode {self.mode!r} must"
+                f"{' not' if self.mode in _NO_ROOT_MODES else ''} have a root folder"
+            )
+
+    @property
+    def ready(self) -> bool:
+        """There is an attachment root folder, so uploads can be tried."""
+        return bool(self.root_folder_id)
+
+    @property
+    def shared_drive_id(self) -> str | None:
+        """The shared drive (its root is the attachment root), if one is used."""
+        return self.root_folder_id if self.mode == "shared_drive" else None
 
 
 @dataclass(frozen=True)
@@ -264,19 +279,29 @@ class FileHandler:
         )
         self.chat_uploader = ChatFileUploader(chat_service)
 
-        # Initialize the root folder and shared drive
-        self._shared_drive_id: str | None = None
-        self._root_folder_id: str | None = None
-        self._drive_initialized = False
+        # Where attachments go: the one source of truth for the root folder,
+        # the shared drive and whether Drive was set up.  Drive is set up on
+        # first use (after the permission checks), not here.
         self._drive_status = DriveStatus(
-            False, "not_initialized", detail="Drive is not initialized yet"
+            "not_initialized", detail="Drive is not initialized yet"
         )
-
-        # Don't initialize drive structures during construction - defer until needed
-        # This avoids expensive operations before permission validation
         if folder_id:
             self.folder_id = folder_id
-            self._drive_initialized = True
+
+    @property
+    def _root_folder_id(self) -> str | None:
+        """The attachment root folder (from :attr:`drive_status`)."""
+        return self._drive_status.root_folder_id
+
+    @property
+    def _shared_drive_id(self) -> str | None:
+        """The shared drive in use (from :attr:`drive_status`)."""
+        return self._drive_status.shared_drive_id
+
+    @property
+    def _drive_initialized(self) -> bool:
+        """Whether Drive has been set up (from :attr:`drive_status`)."""
+        return self._drive_status.mode != "not_initialized"
 
     def ensure_drive_initialized(self) -> None:
         """Ensure drive structures are initialized. Call this after permission validation."""
@@ -287,7 +312,6 @@ class FileHandler:
                 channel=self._get_current_channel(),
             )
             self._initialize_shared_drive_and_folder()
-            self._drive_initialized = True
 
     @property
     def folder_id(self) -> str | None:
@@ -307,11 +331,10 @@ class FileHandler:
         Args:
             value: The Drive folder ID to set, or None to clear.
         """
-        self._root_folder_id = value
         self._drive_status = (
-            DriveStatus(True, "folder", value, f"attachment folder {value}")
+            DriveStatus("folder", value, f"attachment folder {value}")
             if value
-            else DriveStatus(False, "none", detail="no attachment folder is set")
+            else DriveStatus("none", detail="no attachment folder is set")
         )
 
     @property
@@ -352,26 +375,20 @@ class FileHandler:
         try:
             # SharedDriveManager handles: validate configured ID → find by
             # name → create new drive.  No need to duplicate that here.
-            self._shared_drive_id = (
-                self.shared_drive_manager.get_or_create_shared_drive()
-            )
+            shared_drive_id = self.shared_drive_manager.get_or_create_shared_drive()
             shared_error = self.shared_drive_manager.last_error
         except HttpError as e:
-            self._shared_drive_id = None
+            shared_drive_id = None
             shared_error = str(e)
             fallback_name = "Slack Attachments Fallback"
 
-        if self._shared_drive_id:
-            self._root_folder_id = self._shared_drive_id
+        if shared_drive_id:
             self._drive_status = DriveStatus(
-                True,
-                "shared_drive",
-                self._shared_drive_id,
-                f"shared drive {self._shared_drive_id}",
+                "shared_drive", shared_drive_id, f"shared drive {shared_drive_id}"
             )
             log_with_context(
                 logging.DEBUG,
-                f"Using shared drive root as attachment folder: {self._shared_drive_id}",
+                f"Using shared drive root as attachment folder: {shared_drive_id}",
             )
         else:
             why = f"shared drive unavailable: {shared_error or 'no drive returned'}"
@@ -381,19 +398,15 @@ class FileHandler:
                 f" regular Drive folder {fallback_name!r}",
             )
             lookup = self.folder_manager.find_or_create_root_folder(fallback_name)
-            self._root_folder_id = lookup.folder_id
             self._drive_status = (
                 DriveStatus(
-                    True,
                     "my_drive",
                     lookup.folder_id,
                     f"regular Drive folder {fallback_name!r} ({why})",
                 )
                 if lookup.folder_id
                 else DriveStatus(
-                    False,
-                    "none",
-                    detail=f"{why}; regular Drive folder: {lookup.error}",
+                    "none", detail=f"{why}; regular Drive folder: {lookup.error}"
                 )
             )
             if not lookup.folder_id:
