@@ -182,6 +182,7 @@ class FileHandler:
             "external_user_files": 0,
             "ownership_transferred": 0,
             "ownership_transfer_failed": 0,
+            "external_folder_grant_failures": 0,
             "files_by_channel": {},
         }
 
@@ -197,6 +198,7 @@ class FileHandler:
             workspace_domain,
             is_external=self._is_external_email,
             protected_emails=self._protected_emails,
+            on_external_grant_failure=self._count_external_folder_grant_failure,
         )
         self.drive_uploader = DriveFileUploader(drive_service, workspace_domain)
         self.chat_uploader = ChatFileUploader(chat_service)
@@ -1184,8 +1186,16 @@ class FileHandler:
         return bool(email) and not self._is_external_email(email or "")
 
     def _is_external_email(self, email: str) -> bool:
-        """True for an email outside the workspace (never granted Drive access)."""
+        """True for an email outside the workspace.
+
+        External users never get per-file grants; as channel members they
+        still get reader access to the channel folder.
+        """
         return bool(self.user_resolver.is_external_user(email))
+
+    def _count_external_folder_grant_failure(self, email: str) -> None:
+        """Count a channel-folder grant to an external member that failed."""
+        self._increment_stat("external_folder_grant_failures")
 
     def _protected_emails(self) -> list[str]:
         """Accounts whose channel-folder access a permission sync never removes."""
@@ -1203,9 +1213,10 @@ class FileHandler:
     ) -> None:
         """Grant the poster ``writer`` access and transfer ownership if allowed.
 
-        Everyone else gets access through the channel folder.  External users
-        never get a grant.  Ownership is transferred only for new uploads in
-        regular-Drive mode, so a reused file keeps its owner.
+        Everyone else, external members included, gets reader access through
+        the channel folder.  External users never get a per-file grant.
+        Ownership is transferred only for new uploads in regular-Drive mode,
+        so a reused file keeps its owner.
         """
         poster = sender_email if self._is_internal_email(sender_email) else None
         owner = (
@@ -1353,6 +1364,9 @@ class FileHandler:
             "external_user_files": self.file_stats["external_user_files"],
             "ownership_transferred": self.file_stats["ownership_transferred"],
             "ownership_transfer_failed": self.file_stats["ownership_transfer_failed"],
+            "external_folder_grant_failures": self.file_stats[
+                "external_folder_grant_failures"
+            ],
             "files_by_channel": dict(self.file_stats["files_by_channel"]),
             "success_rate": successful / max(1, successful + failed) * 100,
         }

@@ -644,6 +644,7 @@ class TestLimitedAccessFolders:
     def test_private_folder_is_shared_with_members_and_admin_only(
         self, tmp_path, downloads
     ):
+        """Members (external ones included) and the admin; nobody else."""
         fake = FakeDrive()
         handler = make_meta_handler(fake, tmp_path)
         handler.user_resolver.workspace_admin = "admin@example.com"
@@ -672,7 +673,25 @@ class TestLimitedAccessFolders:
         )
 
         members = sorted(p["emailAddress"] for p in fake.permissions_db[folder_id])
-        assert members == ["admin@example.com", "alice@example.com"]
+        assert members == ["admin@example.com", "alice@example.com", "ext@other.org"]
+        assert fake.files_db[folder_id]["inheritedPermissionsDisabled"] is True
+
+    def test_failed_external_folder_grants_are_counted(self, tmp_path, downloads):
+        fake = FakeDrive(reject_grants_to={"ext@other.org"})
+        handler = make_meta_handler(fake, tmp_path)
+        result = upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
+        folder_id = fake.files_db[result.drive_id]["parents"][0]
+
+        ok = handler.folder_manager.set_channel_folder_permissions(
+            folder_id,
+            "hr",
+            ["alice@example.com", "ext@other.org"],
+            handler.shared_drive_id,
+        )
+
+        assert ok is True
+        assert handler.get_file_statistics()["external_folder_grant_failures"] == 1
+        assert handler.get_file_statistics()["failed_uploads"] == 0
 
     def test_private_files_never_fall_back_to_the_root(self, tmp_path, downloads):
         fake = FakeDrive()

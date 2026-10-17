@@ -70,6 +70,7 @@ class FakeDrive:
         fail_conversion: bool = False,
         reject_inherited_flag_on_create: bool = False,
         honor_drive_query: bool = True,
+        reject_grants_to: set[str] | None = None,
     ):
         self.files_db: dict[str, dict[str, Any]] = {}
         self.permissions_db: dict[str, list[dict[str, Any]]] = {}
@@ -83,6 +84,8 @@ class FakeDrive:
         self.fail_conversion = fail_conversion
         self.reject_inherited_flag_on_create = reject_inherited_flag_on_create
         self.honor_drive_query = honor_drive_query
+        # Emails whose grants fail, as Drive does for a blocked domain.
+        self.reject_grants_to = set(reject_grants_to or ())
 
     # -- helpers ------------------------------------------------------------
 
@@ -259,6 +262,8 @@ class _Permissions:
                 raise http_error(400, "The provided role is not valid")
             if kw.get("transferOwnership") and self.d.fail_transfer:
                 raise http_error(403, "forbidden")
+            if body.get("emailAddress") in self.d.reject_grants_to:
+                raise http_error(400, "Sharing outside the domain is not allowed")
             perms = self.d.permissions_db.setdefault(kw["fileId"], [])
             perm = {
                 "id": f"perm{len(perms) + 1}-{kw['fileId']}",

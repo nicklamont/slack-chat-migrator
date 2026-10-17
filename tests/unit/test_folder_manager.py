@@ -334,7 +334,8 @@ class TestSetChannelFolderPermissions:
         assert {"p1", "p2", "p3", "p4", "p5"} <= remaining
         assert "p6" not in remaining
 
-    def test_external_users_get_no_folder_grant(self):
+    def test_external_members_get_reader_access(self):
+        """Slack Connect members keep folder access, as before the audit fixes."""
         fm, fake = self._fm()
         fake.permissions_db["F"] = [
             {
@@ -345,18 +346,72 @@ class TestSetChannelFolderPermissions:
             }
         ]
 
-        fm.set_channel_folder_permissions(
+        result = fm.set_channel_folder_permissions(
+            "F", "general", ["a@example.com", "ext@other.org", "new@partner.io"]
+        )
+
+        assert result is True
+        assert self._members(fake) == [
+            ("a@example.com", "reader"),
+            ("ext@other.org", "reader"),
+            ("new@partner.io", "reader"),
+        ]
+        assert fake.count("permissions.delete") == 0
+
+    def test_departed_external_member_is_removed(self):
+        fm, fake = self._fm()
+        fake.permissions_db["F"] = [
+            {
+                "id": "x",
+                "type": "user",
+                "role": "reader",
+                "emailAddress": "ext@other.org",
+            }
+        ]
+        fm.set_channel_folder_permissions("F", "general", ["a@example.com"])
+        assert self._members(fake) == [("a@example.com", "reader")]
+
+    def test_failed_external_grant_is_a_warning_not_a_failure(self, caplog):
+        failures = []
+        fm, fake = self._fm(on_external_grant_failure=failures.append)
+        fake.reject_grants_to = {"ext@other.org"}
+
+        result = fm.set_channel_folder_permissions(
             "F", "general", ["a@example.com", "ext@other.org"]
         )
 
+        assert result is True
+        assert failures == ["ext@other.org"]
         assert self._members(fake) == [("a@example.com", "reader")]
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("ext@other.org" in r.getMessage() for r in warnings)
+
+    def test_failed_internal_grant_still_fails_the_sync(self):
+        failures = []
+        fm, fake = self._fm(on_external_grant_failure=failures.append)
+        fake.reject_grants_to = {"a@example.com"}
+
+        result = fm.set_channel_folder_permissions(
+            "F", "general", ["a@example.com", "ext@other.org"]
+        )
+
+        assert result is False
+        assert failures == []
 
     def test_custom_external_predicate(self):
-        fm, fake = self._fm(is_external=lambda email: email.startswith("x"))
-        fm.set_channel_folder_permissions(
+        failures = []
+        fm, fake = self._fm(
+            is_external=lambda email: email.startswith("x"),
+            on_external_grant_failure=failures.append,
+        )
+        fake.reject_grants_to = {"x@example.com", "y@other.org"}
+
+        result = fm.set_channel_folder_permissions(
             "F", "general", ["x@example.com", "y@other.org"]
         )
-        assert self._members(fake) == [("y@other.org", "reader")]
+
+        assert result is False  # y@other.org counts as internal here
+        assert failures == ["x@example.com"]
 
     def test_existing_member_is_not_granted_again(self):
         fm, fake = self._fm()

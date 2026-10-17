@@ -152,6 +152,7 @@ class TestFileHandlerInit:
         assert stats["external_user_files"] == 0
         assert stats["ownership_transferred"] == 0
         assert stats["ownership_transfer_failed"] == 0
+        assert stats["external_folder_grant_failures"] == 0
         assert stats["files_by_channel"] == {}
 
     def test_explicit_deps_stored(self):
@@ -194,6 +195,7 @@ class TestGetFileStatistics:
         assert stats["external_user_files"] == 0
         assert stats["ownership_transferred"] == 0
         assert stats["ownership_transfer_failed"] == 0
+        assert stats["external_folder_grant_failures"] == 0
         assert stats["files_by_channel"] == {}
         assert stats["success_rate"] == 0.0
 

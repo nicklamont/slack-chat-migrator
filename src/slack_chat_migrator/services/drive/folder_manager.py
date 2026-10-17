@@ -37,22 +37,29 @@ class FolderManager:
         *,
         is_external: Callable[[str], bool] | None = None,
         protected_emails: Callable[[], Iterable[str]] | None = None,
+        on_external_grant_failure: Callable[[str], None] | None = None,
     ) -> None:
         """Initialize the FolderManager.
 
         Args:
             drive_service: DriveAdapter instance for Google Drive API calls
             workspace_domain: The workspace domain for permissions
-            is_external: Tells whether an email belongs to an external user,
-                who is never granted access.  Defaults to comparing the
-                email's domain with *workspace_domain*.
+            is_external: Tells whether an email belongs to a user outside the
+                workspace (e.g. a Slack Connect member).  Defaults to
+                comparing the email's domain with *workspace_domain*.
             protected_emails: Returns accounts whose folder access a
                 permission sync must never remove (the workspace admin).
+            on_external_grant_failure: Called with the email when granting
+                folder access to an external member fails, so the caller
+                can count it.
         """
         self.drive_service = drive_service
         self.workspace_domain = workspace_domain
         self._is_external = is_external or self._is_outside_workspace_domain
         self._protected_emails = protected_emails or (lambda: ())
+        self._on_external_grant_failure = on_external_grant_failure or (
+            lambda _email: None
+        )
         # (parent_folder_id, folder name) -> folder ID, shared by every lookup.
         # Folders are created or found once per run; the cache is trusted.
         self.folder_cache: dict[tuple[str, str], str] = {}
@@ -486,12 +493,18 @@ class FolderManager:
     ) -> bool:
         """Make the folder's member list match *user_emails*.
 
-        Members without access get ``reader``; direct user permissions of
-        people who are no longer members are removed.  Never removed: the
-        workspace admin (and other protected accounts), owners, organizers
-        and file organizers, inherited permissions, and non-user permissions.
-        External users are never granted access.  Files inside inherit the
-        folder's permissions, so only posters get per-file grants.
+        Every member with an email without access gets ``reader``, internal
+        and external (e.g. Slack Connect) members alike; direct user
+        permissions of people who are no longer members are removed.  Never
+        removed: the workspace admin (and other protected accounts), owners,
+        organizers and file organizers, inherited permissions, and non-user
+        permissions.  Files inside inherit the folder's permissions, so only
+        posters get per-file grants.
+
+        A grant to an external address can fail for reasons outside the
+        migration (domain sharing policy, no Google account).  Such failures
+        are logged as warnings, reported through *on_external_grant_failure*
+        and don't make the sync fail.
 
         Args:
             folder_id: ID of the channel folder
@@ -500,24 +513,16 @@ class FolderManager:
             shared_drive_id: ID of the shared drive (if applicable)
 
         Returns:
-            True if every change succeeded, False otherwise
+            True if every change succeeded, except grants to external
+            members; False otherwise
         """
         supports_all_drives = bool(shared_drive_id)
         protected = {email.lower() for email in self._protected_emails() if email}
 
         wanted: dict[str, str] = {}
         for email in user_emails:
-            if not email:
-                continue
-            if self._is_external(email):
-                log_with_context(
-                    logging.DEBUG,
-                    f"Not granting folder access to external user {email}",
-                    channel=channel,
-                    folder_id=folder_id,
-                )
-                continue
-            wanted.setdefault(email.lower(), email)
+            if email:
+                wanted.setdefault(email.lower(), email)
 
         try:
             existing = self.drive_service.list_permissions(
@@ -567,11 +572,25 @@ class FolderManager:
 
         errors = self.drive_service.apply_permission_changes(changes) if changes else []
         failed_count = 0
+        external_failed = 0
         for change, error in zip(changes, errors):
             if error is None:
                 continue
+            grantee = (change.body or {}).get("emailAddress")
+            if grantee and self._is_external(grantee):
+                # Outside our control (sharing policy, no Google account).
+                external_failed += 1
+                self._on_external_grant_failure(grantee)
+                log_with_context(
+                    logging.WARNING,
+                    f"Could not give external member {grantee} access to the"
+                    f" {channel} folder: {error}",
+                    channel=channel,
+                    folder_id=folder_id,
+                )
+                continue
             failed_count += 1
-            target = (change.body or {}).get("emailAddress") or change.permission_id
+            target = grantee or change.permission_id
             action = "remove" if change.permission_id else "grant"
             log_with_context(
                 logging.WARNING,
@@ -584,11 +603,12 @@ class FolderManager:
             logging.INFO,
             f"Synced channel folder permissions for {channel}:"
             f" {len(changes) - removals} added, {removals} removed,"
-            f" {failed_count} failed",
+            f" {failed_count} failed, {external_failed} external grants failed",
             channel=channel,
             folder_id=folder_id,
-            success_count=len(changes) - failed_count,
+            success_count=len(changes) - failed_count - external_failed,
             failed_count=failed_count,
+            external_failed_count=external_failed,
         )
 
         return failed_count == 0
