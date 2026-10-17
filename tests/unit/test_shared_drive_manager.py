@@ -370,3 +370,83 @@ class TestSharedDrivePaging:
         ).get_or_create_shared_drive()
         assert result.startswith("NEWDRIVE")
         assert fake.count("drives.create") == 1
+
+
+READ_ONLY = {"canAddChildren": False, "canManageMembers": False}
+CONTENT_MANAGER = {"canAddChildren": True, "canManageMembers": False}
+
+
+class TestDriveCapabilities:
+    """The admin must be able to add files to the drive used (SF-N7)."""
+
+    def _manager(self, fake, *, restrict=True, **drive_config):
+        from slack_chat_migrator.services.drive_adapter import DriveAdapter
+
+        return SharedDriveManager(
+            DriveAdapter(fake),
+            MigrationConfig(
+                shared_drive=SharedDriveConfig(**drive_config),
+                restrict_private_channel_folders=restrict,
+            ),
+        )
+
+    @pytest.mark.parametrize("configured", [True, False], ids=["by-id", "by-name"])
+    def test_read_only_drive_stops_the_run(self, configured):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive(
+            drives=[{"id": "SD1", "name": "Att", "capabilities": READ_ONLY}]
+        )
+        manager = self._manager(fake, name="Att", id="SD1" if configured else None)
+
+        with pytest.raises(APIError, match=r"can't add files to shared drive 'Att'"):
+            manager.get_or_create_shared_drive()
+
+        assert fake.count("drives.create") == 0
+
+    @pytest.mark.parametrize("configured", [True, False], ids=["by-id", "by-name"])
+    def test_capabilities_are_requested(self, configured):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive(drives=[{"id": "SD1", "name": "Att"}])
+        manager = self._manager(fake, name="Att", id="SD1" if configured else None)
+
+        assert manager.get_or_create_shared_drive() == "SD1"
+
+        method = "drives.get" if configured else "drives.list"
+        (kwargs,) = [kw for name, kw in fake.calls if name == method]
+        assert "capabilities(canAddChildren, canManageMembers)" in kwargs["fields"]
+
+    def test_content_manager_is_warned_about_limited_access(self, caplog):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive(
+            drives=[{"id": "SD1", "name": "Att", "capabilities": CONTENT_MANAGER}]
+        )
+
+        with caplog.at_level("WARNING"):
+            assert self._manager(fake, name="Att").get_or_create_shared_drive()
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "isn't a Manager of shared drive 'Att' (SD1)" in warnings[0]
+        assert "restrict_private_channel_folders: false" in warnings[0]
+
+    def test_no_warning_when_folders_are_not_restricted(self, caplog):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive(
+            drives=[{"id": "SD1", "name": "Att", "capabilities": CONTENT_MANAGER}]
+        )
+
+        with caplog.at_level("WARNING"):
+            manager = self._manager(fake, restrict=False, name="Att")
+            assert manager.get_or_create_shared_drive() == "SD1"
+
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    def test_missing_capabilities_are_not_a_refusal(self):
+        manager, drive_service = _make_manager(shared_drive_id="SD1")
+        drive_service.get_drive.return_value = {"id": "SD1", "name": "Att"}
+
+        assert manager.get_or_create_shared_drive() == "SD1"

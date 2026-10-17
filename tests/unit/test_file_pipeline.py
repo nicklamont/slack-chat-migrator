@@ -316,6 +316,26 @@ class TestDriveSetup:
         assert handler.drive_status.mode == "none"
         assert fake.count("files.create") == 0  # no My Drive folder made
 
+    def test_read_only_shared_drive_stops_the_run(self, tmp_path):
+        """A drive the admin can't add files to is not "ready" (SF-N7)."""
+        fake = FakeDrive(
+            drives=[
+                {
+                    "id": "SD1",
+                    "name": DRIVE_NAME,
+                    "capabilities": {"canAddChildren": False},
+                }
+            ]
+        )
+        handler = make_handler(fake, tmp_path, shared=False)
+        handler._drive_status = file_mod.DriveStatus("not_initialized")
+
+        with pytest.raises(APIError, match="can't add files to shared drive"):
+            handler.ensure_drive_initialized()
+
+        assert handler.drive_status.mode == "none"
+        assert fake.count("files.create") == 0  # no My Drive folder made
+
     def test_account_without_shared_drives_uses_my_drive(self, tmp_path):
         fake = FakeDrive()
         fake.failing["drives.create"] = http_error(403, "insufficient permissions")

@@ -567,16 +567,21 @@ class DriveAdapter:
 
     # -- Shared Drives --------------------------------------------------------
 
-    def get_drive(self, drive_id: str) -> dict[str, Any]:
+    def get_drive(self, drive_id: str, *, fields: str | None = None) -> dict[str, Any]:
         """Get shared drive metadata.
 
         Args:
             drive_id: Shared drive ID.
+            fields: Optional response field mask, e.g.
+                ``"id, name, capabilities(canAddChildren)"``.
 
         Returns:
             Drive resource dict.
         """
-        result: dict[str, Any] = self._svc.drives().get(driveId=drive_id).execute()
+        kwargs: dict[str, Any] = {"driveId": drive_id}
+        if fields is not None:
+            kwargs["fields"] = fields
+        result: dict[str, Any] = self._svc.drives().get(**kwargs).execute()
         return result
 
     def list_drives(

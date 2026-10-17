@@ -379,6 +379,18 @@ class _Permissions:
         return Req(run, "permissions.delete", kw, self.d)
 
 
+#: What a Manager may do; a drive record's own ``capabilities`` override it.
+MANAGER_CAPABILITIES = {"canAddChildren": True, "canManageMembers": True}
+
+
+def _with_capabilities(drive: dict[str, Any]) -> dict[str, Any]:
+    """A copy of *drive* as Drive returns it, with the admin's capabilities."""
+    return {
+        **drive,
+        "capabilities": {**MANAGER_CAPABILITIES, **drive.get("capabilities", {})},
+    }
+
+
 class _Drives:
     def __init__(self, d: FakeDrive):
         self.d = d
@@ -387,7 +399,7 @@ class _Drives:
         self.d.calls.append(("drives.list", kw))
 
         def run():
-            drives = list(self.d.drives_db)
+            drives = [_with_capabilities(d) for d in self.d.drives_db]
             m = re.search(r"name = '((?:[^'\\]|\\.)*)'", kw.get("q", ""))
             if m and self.d.honor_drive_query:
                 wanted = m.group(1).replace("\\'", "'").replace("\\\\", "\\")
@@ -406,7 +418,7 @@ class _Drives:
         def run():
             for drive in self.d.drives_db:
                 if drive["id"] == kw["driveId"]:
-                    return dict(drive)
+                    return _with_capabilities(drive)
             raise http_error(404, "Shared drive not found")
 
         return Req(run, "drives.get", kw, self.d)

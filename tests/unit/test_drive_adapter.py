@@ -176,6 +176,12 @@ class TestGetDrive:
         adapter.get_drive("0ABC")
         mock_service.drives().get.assert_called_once_with(driveId="0ABC")
 
+    def test_passes_the_field_mask(self, adapter, mock_service):
+        adapter.get_drive("0ABC", fields="id, capabilities(canAddChildren)")
+        mock_service.drives().get.assert_called_once_with(
+            driveId="0ABC", fields="id, capabilities(canAddChildren)"
+        )
+
 
 class TestListDrives:
     def test_calls_drives_list(self, adapter, mock_service):
