@@ -237,12 +237,13 @@ def _assess_key(key: Mapping[str, Any] | None, now: datetime | None = None) -> K
         return KeyCheck(KeyStatus.ACTIVE)
     try:
         expiry = _parse_key_time(str(raw_expiry))
-    except ValueError:
+        expired = expiry <= (now or datetime.now(timezone.utc))
+    except (ValueError, TypeError):  # TypeError: naive against aware time
         return KeyCheck(
             KeyStatus.UNKNOWN,
             f"its expiry time {raw_expiry!r} from IAM couldn't be parsed",
         )
-    if expiry <= (now or datetime.now(timezone.utc)):
+    if expired:
         return KeyCheck(KeyStatus.INACTIVE, f"it expired on {raw_expiry}")
     return KeyCheck(KeyStatus.ACTIVE)
 

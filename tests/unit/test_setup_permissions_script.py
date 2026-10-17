@@ -229,6 +229,12 @@ class TestSetupPermissionsScript:
         assert "keys create" not in _calls(tmp_path)
         assert json.loads(key.read_text()) == KEY
 
+    def test_key_without_expiry_is_active(self, tmp_path: Path) -> None:
+        (tmp_path / "slack-chat-migrator-sa-key.json").write_text(json.dumps(KEY))
+        result = _run(tmp_path, key_list="abc123keyid,,")
+        assert result.returncode == 0, result.stderr
+        assert "holds an active key" in result.stdout
+
     def test_unreadable_expiry_keeps_the_file(self, tmp_path: Path) -> None:
         key = tmp_path / "slack-chat-migrator-sa-key.json"
         key.write_text(json.dumps(KEY))

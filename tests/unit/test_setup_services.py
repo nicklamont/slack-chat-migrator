@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -451,6 +453,46 @@ NEW_KEY_NAME = "projects/p/serviceAccounts/sa/keys/new"
 SA = "sa@p.iam.gserviceaccount.com"
 
 
+class _CloseFails:
+    """A key file whose first close() fails, like a full disk at the flush."""
+
+    def __init__(self, f: Any, error: BaseException) -> None:
+        self._f = f
+        self._error: BaseException | None = error
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._f, name)
+
+    def close(self) -> None:
+        self._f.close()
+        if self._error is not None:
+            error, self._error = self._error, None
+            raise error
+
+
+@contextlib.contextmanager
+def _fail_on_close(error: BaseException) -> Iterator[None]:
+    """Make the next key file download_key opens fail when it is closed.
+
+    Only service_account's view of ``os`` is replaced, so nothing else in
+    the process is affected.
+    """
+    from slack_chat_migrator.services.setup import service_account as sa
+
+    real_os = sa.os
+
+    class _Os:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(real_os, name)
+
+        @staticmethod
+        def fdopen(fd: int, *args: Any, **kwargs: Any) -> Any:
+            return _CloseFails(real_os.fdopen(fd, *args, **kwargs), error)
+
+    with patch.object(sa, "os", _Os()):
+        yield
+
+
 def _key_check(status: str, reason: str = ""):  # type: ignore[no-untyped-def]
     from slack_chat_migrator.services.setup.service_account import KeyCheck, KeyStatus
 
@@ -490,6 +532,17 @@ class TestDownloadKey:
 
         key = self._download(_iam_with_key(), tmp_path / "key.json")
         assert stat.S_IMODE(key.stat().st_mode) == 0o600
+
+    def test_file_created_meanwhile_is_not_overwritten(self, tmp_path: Path) -> None:
+        """O_EXCL: a file that appears after the exists() check is kept."""
+        key = tmp_path / "key.json"
+        key.write_text("{}")
+        service = _iam_with_key()
+        with patch.object(Path, "exists", return_value=False):
+            with pytest.raises(FileExistsError):
+                self._download(service, key)
+        self._keys(service).create.assert_not_called()
+        assert key.read_text() == "{}"
 
     def test_refuses_to_overwrite_by_default(self, tmp_path: Path) -> None:
         key = tmp_path / "key.json"
@@ -616,8 +669,11 @@ class TestDownloadKey:
         service = _iam_with_key()
         self._keys(service).create.return_value.execute.side_effect = KeyboardInterrupt
         key = tmp_path / "key.json"
-        with pytest.raises(KeySetupInterrupted) as raised:
+        with pytest.raises(KeyboardInterrupt) as raised:
             self._download(service, key)
+        # Caught as KeyboardInterrupt so a regression fails this test
+        # instead of interrupting the whole pytest session.
+        assert isinstance(raised.value, KeySetupInterrupted)
         assert isinstance(raised.value, KeyboardInterrupt)
         assert "keys list" in str(raised.value)
         assert not key.exists()
@@ -635,13 +691,45 @@ class TestDownloadKey:
 
         service = _iam_with_key()
         key = tmp_path / "key.json"
-        with patch("json.dump", side_effect=OSError(28, "No space left on device")):
+        with _fail_on_close(OSError(28, "No space left on device")):
             with pytest.raises(KeyNotSavedError) as raised:
                 self._download(service, key)
         assert raised.value.deleted is True
         assert "deleted again" in str(raised.value)
+        assert "No space left on device" in str(raised.value)
         self._keys(service).delete.assert_called_once_with(name=NEW_KEY_NAME)
         assert not key.exists()
+
+    def test_bad_key_data_from_iam_is_deleted_again(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeyNotSavedError,
+        )
+
+        service = _iam_with_key()
+        self._keys(service).create.return_value.execute.return_value = {
+            "name": NEW_KEY_NAME,
+            "privateKeyData": "not base64 json",  # pragma: allowlist secret
+        }
+        key = tmp_path / "key.json"
+        with pytest.raises(KeyNotSavedError):
+            self._download(service, key)
+        self._keys(service).delete.assert_called_once_with(name=NEW_KEY_NAME)
+        assert not key.exists()
+
+    def test_missing_key_name_points_at_the_key_list(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeyNotSavedError,
+        )
+
+        service = _iam_with_key()
+        response = self._keys(service).create.return_value.execute.return_value
+        del response["name"]
+        with _fail_on_close(OSError(28, "No space left on device")):
+            with pytest.raises(KeyNotSavedError) as raised:
+                self._download(service, tmp_path / "key.json")
+        assert raised.value.deleted is False
+        self._keys(service).delete.assert_not_called()
+        assert f"keys list --iam-account={SA} --managed-by=user" in str(raised.value)
 
     def test_key_that_cannot_be_deleted_is_named(self, tmp_path: Path) -> None:
         from slack_chat_migrator.services.setup.service_account import (
@@ -650,7 +738,7 @@ class TestDownloadKey:
 
         service = _iam_with_key()
         self._keys(service).delete.return_value.execute.side_effect = _http_error(403)
-        with patch("json.dump", side_effect=OSError(28, "No space left on device")):
+        with _fail_on_close(OSError(28, "No space left on device")):
             with pytest.raises(KeyNotSavedError) as raised:
                 self._download(service, tmp_path / "key.json")
         assert raised.value.deleted is False
@@ -667,7 +755,7 @@ class TestDownloadKey:
 
         key = tmp_path / "key.json"
         key.write_text('{"old": true}')
-        with patch("json.dump", side_effect=OSError(28, "No space left on device")):
+        with _fail_on_close(OSError(28, "No space left on device")):
             with pytest.raises(KeyNotSavedError) as raised:
                 self._download(_iam_with_key(), key, overwrite=True)
         assert raised.value.deleted is True
@@ -683,9 +771,12 @@ class TestDownloadKey:
 
         service = _iam_with_key()
         self._keys(service).delete.return_value.execute.side_effect = _http_error(503)
-        with patch("json.dump", side_effect=KeyboardInterrupt):
-            with pytest.raises(KeySetupInterrupted) as raised:
+        with _fail_on_close(KeyboardInterrupt()):
+            with pytest.raises(KeyboardInterrupt) as raised:
                 self._download(service, tmp_path / "key.json")
+            # Caught as KeyboardInterrupt so a regression fails this test
+            # instead of interrupting the whole pytest session.
+            assert isinstance(raised.value, KeySetupInterrupted)
         assert isinstance(raised.value, KeyboardInterrupt)
         assert raised.value.key_name == NEW_KEY_NAME
         assert "keys delete new" in str(raised.value)
@@ -698,9 +789,12 @@ class TestDownloadKey:
 
         service = _iam_with_key()
         self._keys(service).delete.return_value.execute.side_effect = KeyboardInterrupt
-        with patch("json.dump", side_effect=OSError(28, "No space left on device")):
-            with pytest.raises(KeySetupInterrupted) as raised:
+        with _fail_on_close(OSError(28, "No space left on device")):
+            with pytest.raises(KeyboardInterrupt) as raised:
                 self._download(service, tmp_path / "key.json")
+            # Caught as KeyboardInterrupt so a regression fails this test
+            # instead of interrupting the whole pytest session.
+            assert isinstance(raised.value, KeySetupInterrupted)
         assert "deleting it was interrupted" in str(raised.value)
         assert f"keys delete new --iam-account={SA}" in str(raised.value)
 
@@ -713,9 +807,12 @@ class TestDownloadKey:
 
         key = tmp_path / "key.json"
         key.write_text("{}")
-        with patch("json.dump", side_effect=KeyboardInterrupt):
-            with pytest.raises(KeySetupInterrupted) as raised:
+        with _fail_on_close(KeyboardInterrupt()):
+            with pytest.raises(KeyboardInterrupt) as raised:
                 self._download(_iam_with_key(), key, overwrite=True)
+            # Caught as KeyboardInterrupt so a regression fails this test
+            # instead of interrupting the whole pytest session.
+            assert isinstance(raised.value, KeySetupInterrupted)
         assert "no key is left in IAM" in str(raised.value)
         assert "no longer holds its earlier content" in str(raised.value)
 
@@ -761,11 +858,19 @@ class TestDownloadKey:
     def test_ctrl_c_while_saving_deletes_the_key_and_stays_ctrl_c(
         self, tmp_path: Path
     ) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeySetupInterrupted,
+        )
+
         service = _iam_with_key()
-        with patch("json.dump", side_effect=KeyboardInterrupt):
-            with pytest.raises(KeyboardInterrupt):
-                self._download(service, tmp_path / "key.json")
+        key = tmp_path / "key.json"
+        with _fail_on_close(KeyboardInterrupt()):
+            with pytest.raises(KeyboardInterrupt) as raised:
+                self._download(service, key)
+        # Nothing is left behind, so it stays the plain interrupt.
+        assert not isinstance(raised.value, KeySetupInterrupted)
         self._keys(service).delete.assert_called_once_with(name=NEW_KEY_NAME)
+        assert not key.exists()
 
 
 class TestCheckExistingKey:
@@ -843,6 +948,20 @@ class TestCheckExistingKey:
         key = self._key_file(tmp_path)
         assert self._check(key, expired).status is KeyStatus.INACTIVE
         assert self._check(key, valid).status is KeyStatus.ACTIVE
+
+    @pytest.mark.parametrize(
+        ("expiry", "status"),
+        [("2026-10-17T11:59:58", "INACTIVE"), ("2026-10-17T12:00:02", "ACTIVE")],
+    )
+    def test_expiry_without_offset_counts_as_utc(
+        self, tmp_path: Path, expiry: str, status: str
+    ) -> None:
+        from slack_chat_migrator.services.setup.service_account import KeyStatus
+
+        check = self._check(
+            self._key_file(tmp_path), _iam_with_key(validBeforeTime=expiry)
+        )
+        assert check.status is KeyStatus[status]
 
     def test_lowercase_t_and_z_parse(self, tmp_path: Path) -> None:
         from slack_chat_migrator.services.setup.service_account import KeyStatus
