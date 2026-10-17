@@ -7,6 +7,11 @@ The adapter delegates to a pre-built (and retry-wrapped) Drive service
 object, so it does **not** add its own retry logic.  The one exception is
 :meth:`DriveAdapter.apply_permission_changes`, which re-sends some calls that
 failed inside a batch request; its docstring states the rule.
+
+Every other method raises what the service raises once its retries are
+spent: ``HttpError``, ``RefreshError`` (credentials that can't be refreshed)
+or a network error.  :data:`DRIVE_CALL_ERRORS` names them all, for callers
+that handle a failed call.
 """
 
 from __future__ import annotations

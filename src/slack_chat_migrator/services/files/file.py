@@ -522,12 +522,16 @@ class FileHandler:
         """Fetch one Slack file and upload it: the per-file unit of work.
 
         Downloads (streamed to a temp file), then uploads directly to Chat
-        or to Drive; the temp file is deleted before returning.  Upload
-        counters and :attr:`processed_files` are left to the caller.  Shared
-        caches are only changed through small helpers (``_mark_granted``,
-        ``_increment_stat``, ``DriveFileUploader.remember_file``,
-        ``FolderManager.remember_folder``), so a prefetch pool can call this
-        once locks are added there.
+        or to Drive; the temp file is deleted before returning.
+
+        The caller (:meth:`upload_attachment`) counts the outcome
+        (``total_files``, ``files_by_channel``, ``external_user_files``,
+        ``direct_uploads``, ``drive_uploads``, ``failed_uploads``,
+        ``unavailable_files``, ``skipped_files``) and records it in
+        :attr:`processed_files`.  What happens along the way is counted
+        here: ``ownership_transferred``, ``ownership_transfer_failed``,
+        ``poster_grant_failures``, ``restricted_folder_failures``,
+        ``download_auth_failures`` and ``folder_listing_failures``.
 
         Args:
             file_obj: The file object from Slack.
@@ -542,8 +546,9 @@ class FileHandler:
         file_id = file_obj.get("id") or "unknown"
         name = file_obj.get("name") or f"file_{file_id}"
 
-        # A Drive-bound file that an earlier run already uploaded into this
-        # channel's folder is linked again without downloading it.
+        # A Drive-bound file already uploaded into this channel's folder
+        # (earlier in this run or by an earlier run) is linked again without
+        # downloading it.
         folder_id: str | None = None
         if self._is_drive_bound(file_obj, space):
             lookup = self._choose_upload_folder(channel, file_id)
