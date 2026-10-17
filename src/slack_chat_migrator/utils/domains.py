@@ -1,7 +1,10 @@
 """Who counts as internal: users on the workspace's Google Workspace domains.
 
 The internal domains are the workspace admin's domain plus
-``config.workspace_domains``.  :meth:`UserResolver.is_external_user` uses
+``config.workspace_domains``.  Without the admin's domain (a dry run without
+``--workspace_admin``) none are known and nobody counts as external:
+``workspace_domains`` usually leaves out the primary domain, so using it
+alone would count the admin's own users as external.  :meth:`UserResolver.is_external_user` uses
 these helpers and makes the decision for the whole tool; FileHandler and
 FolderManager call them directly only when they have no resolver.
 """
@@ -28,13 +31,14 @@ def internal_domains(
         workspace_domains: Further internal domains (``config.workspace_domains``).
 
     Returns:
-        The non-empty normalised domains.
+        The non-empty normalised domains; none without *admin_domain* (see
+        the module docstring).
     """
-    domains = (
-        normalize_domain(admin_domain),
-        *map(normalize_domain, workspace_domains),
-    )
-    return frozenset(d for d in domains if d)
+    admin = normalize_domain(admin_domain)
+    if not admin:
+        return frozenset()
+    listed = (normalize_domain(d) for d in workspace_domains)
+    return frozenset({admin, *(d for d in listed if d)})
 
 
 def is_external_email(email: str | None, domains: frozenset[str]) -> bool:
