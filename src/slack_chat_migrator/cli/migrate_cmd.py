@@ -5,9 +5,10 @@ from __future__ import annotations
 import contextlib
 import logging
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 import click
 
@@ -16,9 +17,11 @@ from slack_chat_migrator.cli.common import (
     cli,
     common_options,
     config_was_given,
+    confirm_action,
     deprecated_option,
     handle_exception,
     show_security_warning,
+    yes_option,
 )
 from slack_chat_migrator.cli.report import (
     generate_report,
@@ -40,6 +43,11 @@ from slack_chat_migrator.utils.logging import (
 )
 from slack_chat_migrator.utils.permissions import validate_permissions
 
+if TYPE_CHECKING:
+    from slack_chat_migrator.services.spaces.space_creator import (
+        ImportCompletionResult,
+    )
+
 # Create logger instance
 logger = logging.getLogger("slack_chat_migrator")
 
@@ -53,8 +61,8 @@ logger = logging.getLogger("slack_chat_migrator")
 @common_options
 @click.option(
     "--export_path",
-    required=True,
-    help="Path to Slack export directory",
+    default=None,
+    help="Path to Slack export directory (required unless --complete)",
 )
 @click.option(
     "--dry_run",
@@ -73,7 +81,8 @@ logger = logging.getLogger("slack_chat_migrator")
     "--complete",
     is_flag=True,
     default=False,
-    help="Complete import mode on all spaces without migrating messages",
+    help="Complete import mode on this tool's spaces (named 'Slack #...') "
+    "without migrating messages. Lists them and asks first.",
 )
 @click.option(
     "--skip_permission_check",
@@ -81,9 +90,10 @@ logger = logging.getLogger("slack_chat_migrator")
     default=False,
     help="Skip permission checks (not recommended)",
 )
+@yes_option
 def migrate(
     creds_path: str | None,
-    export_path: str,
+    export_path: str | None,
     workspace_admin: str | None,
     config: str,
     verbose: bool,
@@ -92,6 +102,7 @@ def migrate(
     resume: bool,
     complete: bool,
     skip_permission_check: bool,
+    yes: bool,
 ) -> None:
     """Run the full Slack-to-Google-Chat migration.
 
@@ -104,12 +115,19 @@ def migrate(
         debug_api: Enable detailed API request/response logging.
         dry_run: Validation-only mode.
         resume: Resume a previous migration (reuse existing spaces).
-        complete: Complete import mode on all spaces without migrating.
+        complete: Complete import mode on this tool's spaces without migrating.
         skip_permission_check: Skip permission checks before migration.
+        yes: Answer yes to confirmation prompts.
     """
     if complete:
-        _run_complete_mode(creds_path, workspace_admin, config, verbose, debug_api)
+        exit_code = _run_complete_mode(
+            creds_path, workspace_admin, config, verbose, debug_api, yes
+        )
+        if exit_code:
+            sys.exit(exit_code)
         return
+    if not export_path:
+        raise click.MissingParameter(param_type="option", param_hint="'--export_path'")
 
     args = SimpleNamespace(
         creds_path=creds_path,
@@ -122,6 +140,7 @@ def migrate(
         dry_run=dry_run,
         update_mode=resume,
         skip_permission_check=skip_permission_check,
+        assume_yes=yes,
     )
 
     # Create output directory early so all operations are logged to file
@@ -159,11 +178,18 @@ def _run_complete_mode(
     config: str,
     verbose: bool,
     debug_api: bool,
-) -> None:
-    """Complete import mode on all spaces without migrating messages.
+    assume_yes: bool = False,
+) -> int:
+    """Complete import mode on this tool's spaces without migrating messages.
 
     This is equivalent to the standalone ``cleanup`` command but accessible
-    via ``migrate --complete``.
+    via ``migrate --complete``.  Only spaces named ``Slack #...`` are
+    considered; they are listed and the user confirms first (``--yes``
+    skips the prompt).
+
+    Returns:
+        The exit code: 0 if every listed space was completed (or none were
+        found), 1 if anything failed or the user cancelled.
     """
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
     from slack_chat_migrator.services.spaces.space_creator import (
@@ -184,41 +210,105 @@ def _run_complete_mode(
         cfg = load_config(Path(config), required=config_was_given())
     except Exception as e:
         handle_exception(e)
-        sys.exit(1)
+        return 1
 
     is_tty = sys.stdout.isatty()
-
     if is_tty:
         try:
             from slack_chat_migrator.cli.renderers import get_console
 
-            console = get_console()
-            console.print("\n[bold]Completing import mode on all spaces...[/bold]")
+            get_console().print("\n[bold]Finding spaces still in import mode...[/bold]")
         except Exception:
             is_tty = False
 
-    ctx = _quiet_console() if is_tty else contextlib.nullcontext()
-
-    with ctx:
-        log_with_context(logging.INFO, "Completing import mode on all spaces...")
-        chat = get_gcp_service(
-            creds_path,
-            workspace_admin,
-            "chat",
-            "v1",
-            max_retries=cfg.max_retries,
-            retry_delay=cfg.retry_delay,
-        )
+    with _quiet_console() if is_tty else contextlib.nullcontext():
+        log_with_context(logging.INFO, "Finding spaces still in import mode...")
         try:
-            cleanup_import_mode_spaces(ChatAdapter(chat))
+            chat = get_gcp_service(
+                creds_path,
+                workspace_admin,
+                "chat",
+                "v1",
+                max_retries=cfg.max_retries,
+                retry_delay=cfg.retry_delay,
+            )
+            result = cleanup_import_mode_spaces(
+                ChatAdapter(chat), confirm=completion_confirmer(assume_yes)
+            )
         except Exception as e:
             handle_exception(e)
-            sys.exit(1)
+            return 1
 
-    if is_tty:
-        console.print("[green]\u2713[/green] All spaces completed successfully.")
-    else:
-        log_with_context(logging.INFO, "All spaces completed successfully.")
+    return report_import_completion(result)
+
+
+def completion_confirmer(
+    assume_yes: bool,
+) -> Callable[[list[dict[str, Any]]], bool]:
+    """Build the callback that lists the spaces to complete and asks first.
+
+    Args:
+        assume_yes: True when ``--yes`` was given (no prompt).
+
+    Returns:
+        A callback for ``cleanup_import_mode_spaces(confirm=...)``.
+    """
+
+    def _confirm(spaces: list[dict[str, Any]]) -> bool:
+        lines = [
+            f"  {space.get('displayName', '?')}  ({space.get('name', '?')})"
+            for space in spaces
+        ]
+        message = (
+            f"{len(spaces)} space(s) are still in import mode:\n"
+            + "\n".join(lines)
+            + "\nCompleting import mode is irreversible: imported history can"
+            " no longer be added afterwards."
+        )
+        # Show the list even when INFO is hidden on the console.
+        click.echo(message)
+        log_with_context(logging.DEBUG, message)
+        return confirm_action(
+            f"Complete import mode on these {len(spaces)} space(s)?",
+            assume_yes=assume_yes,
+        )
+
+    return _confirm
+
+
+def report_import_completion(result: ImportCompletionResult) -> int:
+    """Print an accurate summary of an import-completion run.
+
+    Args:
+        result: The outcome from ``cleanup_import_mode_spaces``.
+
+    Returns:
+        The exit code: 0 when everything listed was completed, else 1.
+    """
+    if result.cancelled:
+        click.echo("Import completion cancelled; no spaces were changed.")
+        return 1
+
+    lines: list[str] = []
+    if not result.candidates and not result.errors:
+        lines.append(
+            "No spaces named 'Slack #...' are in import mode (only spaces the"
+            " workspace admin can see are listed)."
+        )
+    if result.completed:
+        lines.append(f"Completed import mode on {len(result.completed)} space(s).")
+    if result.failed:
+        lines.append(f"Failed to complete {len(result.failed)} space(s):")
+        lines.extend(f"  {name}: {error}" for name, error in result.failed.items())
+    if result.errors:
+        lines.append(f"{len(result.errors)} error(s) while finding spaces:")
+        lines.extend(f"  {error}" for error in result.errors)
+
+    for line in lines:
+        click.echo(line)
+    level = logging.INFO if result.ok else logging.ERROR
+    log_with_context(level, " ".join(line.strip() for line in lines))
+    return 0 if result.ok else 1
 
 
 def _warn_import_mode_deadline() -> None:
@@ -261,6 +351,10 @@ class MigrationOrchestrator:
         self.dry_run_migrator: SlackToChatMigrator | None = None
         self.output_dir: str | None = None
         self.config: MigrationConfig | None = None
+        # Set only when a live migrate() returned normally; gates the
+        # irreversible post-migration import completion in cleanup().
+        self.live_migration_finished = False
+        self.cleanup_result: ImportCompletionResult | None = None
 
     def load_config(self) -> MigrationConfig:
         """Load and validate the config file once for this run.
@@ -767,13 +861,20 @@ class MigrationOrchestrator:
                         raise RuntimeError("Migrator not initialized")
                     m = self.migrator
                     self._run_with_progress(m)
+                    self.live_migration_finished = True
                     self._print_summary(m)
                 else:
                     log_with_context(logging.INFO, "Migration cancelled by user.")
                     return
 
     def cleanup(self) -> None:
-        """Perform cleanup operations."""
+        """Perform cleanup operations.
+
+        Channel log handlers are always closed.  The irreversible
+        post-migration import completion runs only after a live migration
+        actually finished: never on cancel, Ctrl-C, an exception, or failed
+        validation or permission checks.
+        """
         if self.migrator:
             m = self.migrator
             # Suppress cleanup log lines on TTY (detail goes to log file)
@@ -794,10 +895,10 @@ class MigrationOrchestrator:
                             exc_info=True,
                         )
 
-                    # Only perform space cleanup if not in dry run mode
-                    if not self.args.dry_run:
+                    # Only complete imports after a finished live migration
+                    if self.live_migration_finished and not self.args.dry_run:
                         try:
-                            run_cleanup(
+                            self.cleanup_result = run_cleanup(
                                 m.ctx,
                                 m.state,
                                 m.chat,
@@ -814,6 +915,15 @@ class MigrationOrchestrator:
                                 logging.WARNING,
                                 "Some spaces may still be in import mode and require manual cleanup",
                             )
+                    elif not self.args.dry_run and m.state.spaces.created_spaces:
+                        log_with_context(
+                            logging.WARNING,
+                            "The migration did not finish, so import mode was not"
+                            f" completed on the {len(m.state.spaces.created_spaces)}"
+                            " space(s) this run created. Finish them with"
+                            " 'migrate --resume' or 'migrate --complete' within"
+                            " 90 days.",
+                        )
 
                     log_with_context(logging.INFO, "Cleanup completed successfully.")
                 except Exception as cleanup_e:

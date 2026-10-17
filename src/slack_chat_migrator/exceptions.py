@@ -33,5 +33,9 @@ class MigrationAbortedError(MigratorError):
     """Raised when the migration is aborted due to errors exceeding thresholds."""
 
 
+class ConfirmationRequiredError(MigratorError):
+    """Raised when a confirmation prompt is needed but stdin isn't interactive."""
+
+
 class SpacePermissionError(APIError):
     """Raised when space creation fails due to a 403 permission error."""

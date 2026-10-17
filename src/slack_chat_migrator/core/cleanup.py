@@ -3,6 +3,13 @@ Post-migration cleanup: complete import mode and add members back to spaces.
 
 Extracted from ``migrator.py`` to keep the orchestrator focused on control flow.
 Each function receives only the specific dependencies it needs.
+
+Completing import mode is irreversible, so :func:`run_cleanup` only touches
+spaces this run created (``state.spaces.created_spaces``), never spaces left
+in import mode on purpose (``state.errors.incomplete_import_spaces``, and
+channels with errors under ``skip_on_error``), and only spaces that are
+still in import mode.  The CLI calls it only after a live ``migrate()``
+finished.
 """
 
 from __future__ import annotations
@@ -20,10 +27,11 @@ from slack_chat_migrator.constants import (
     HTTP_RATE_LIMIT,
     HTTP_SERVER_ERROR_MIN,
     SPACE_NAME_PREFIX,
-    SPACES_PAGE_SIZE,
 )
+from slack_chat_migrator.core.config import ImportCompletionStrategy
 from slack_chat_migrator.services.export_inspector import list_channel_dirs
 from slack_chat_migrator.services.spaces.regular_membership import add_regular_members
+from slack_chat_migrator.services.spaces.space_creator import ImportCompletionResult
 from slack_chat_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
@@ -63,82 +71,36 @@ def cleanup_channel_handlers(state: MigrationState) -> None:
     state.spaces.channel_handlers.clear()
 
 
-def _list_spaces_in_import_mode(
-    chat: ChatAdapter,
-) -> list[tuple[str, dict]] | None:
-    """List all spaces and filter to those still in import mode.
+def _spaces_to_complete(
+    ctx: MigrationContext, state: MigrationState
+) -> list[tuple[str, str]]:
+    """Return ``(channel, space)`` pairs this run may still complete.
 
-    Returns a list of (space_name, space_info) tuples, or None if the
-    space listing itself failed (caller should abort cleanup).
+    Only spaces created (or reused) by this run are candidates.  Spaces the
+    run left in import mode on purpose are excluded: those recorded in
+    ``incomplete_import_spaces`` (skipped or failed completions) and, under
+    the ``skip_on_error`` strategy, those of channels that had errors.
+
+    Args:
+        ctx: Immutable migration context.
+        state: Mutable migration state.
+
+    Returns:
+        The candidate ``(channel, space_name)`` pairs.
     """
-    log_with_context(logging.DEBUG, "Listing all spaces to check for import mode...")
-
-    # Paginate through all spaces (the API returns at most SPACES_PAGE_SIZE
-    # per call and a nextPageToken when more pages are available).
-    all_spaces: list[dict] = []
-    page_token: str | None = None
-    try:
-        while True:
-            response = chat.list_spaces(
-                page_size=SPACES_PAGE_SIZE, page_token=page_token
-            )
-            all_spaces.extend(response.get("spaces", []))
-            page_token = response.get("nextPageToken")
-            if not page_token:
-                break
-    except HttpError as http_e:
-        log_with_context(
-            logging.ERROR,
-            f"HTTP error listing spaces during cleanup: {http_e}"
-            f" (Status: {http_e.resp.status})",
-            error_code=http_e.resp.status,
-        )
-        if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
-            log_with_context(
-                logging.WARNING,
-                "Server error listing spaces"
-                " - this might be a temporary issue, skipping cleanup",
-            )
-        return None
-    except (RefreshError, TransportError) as list_e:
-        log_with_context(
-            logging.ERROR,
-            f"Failed to list spaces during cleanup: {list_e}",
-        )
-        return None
-
-    import_mode_spaces: list[tuple[str, dict]] = []
-    for space in all_spaces:
-        space_name = space.get("name", "")
-        if not space_name:
+    left_open = {space for space, _channel in state.errors.incomplete_import_spaces}
+    errored = set(state.errors.channels_with_errors)
+    skip_errored = (
+        ctx.config.import_completion_strategy == ImportCompletionStrategy.SKIP_ON_ERROR
+    )
+    candidates: list[tuple[str, str]] = []
+    for channel, space in state.spaces.created_spaces.items():
+        if not space or space in left_open:
             continue
-
-        try:
-            space_info = chat.get_space(space_name)
-            if space_info.get("importMode"):
-                import_mode_spaces.append((space_name, space_info))
-        except HttpError as http_e:
-            log_with_context(
-                logging.WARNING,
-                f"HTTP error checking space status during cleanup: {http_e}"
-                f" (Status: {http_e.resp.status})",
-                space_name=space_name,
-                error_code=http_e.resp.status,
-            )
-            if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
-                log_with_context(
-                    logging.WARNING,
-                    "Server error checking space - this might be a temporary issue",
-                    space_name=space_name,
-                )
-        except (RefreshError, TransportError) as e:
-            log_with_context(
-                logging.WARNING,
-                f"Failed to get space info during cleanup: {e}",
-                space_name=space_name,
-            )
-
-    return import_mode_spaces
+        if skip_errored and channel in errored:
+            continue
+        candidates.append((channel, space))
+    return candidates
 
 
 def run_cleanup(
@@ -147,13 +109,14 @@ def run_cleanup(
     chat: ChatAdapter,
     user_resolver: UserResolver,
     file_handler: FileHandler | None,
-) -> None:
-    """Complete import mode on spaces and add regular members back.
+) -> ImportCompletionResult:
+    """Complete import mode on this run's spaces and add regular members back.
 
-    This is the instance-level cleanup that runs after a migration. It
-    inspects every space visible to the service account, finds those still
-    in import mode, completes the import, and then attempts to add regular
-    (non-historical) members.
+    This is the safety net that runs after a finished live migration.  For
+    each space this run created that is still in import mode (and wasn't
+    left in import mode on purpose), it completes the import, restores
+    external-user access and adds the regular (non-historical) members.
+    Spaces that aren't in ``created_spaces`` are never touched.
 
     Args:
         ctx: Immutable migration context (config, paths, flags).
@@ -161,25 +124,57 @@ def run_cleanup(
         chat: Google Chat API service.
         user_resolver: User identity resolver.
         file_handler: File handler for drive operations, or None.
+
+    Returns:
+        The completion outcome (``failed`` lists completeImport failures).
     """
     state.context.current_channel = None
+    result = ImportCompletionResult()
 
     if ctx.dry_run:
         log_with_context(logging.INFO, "[DRY RUN] Would perform post-migration cleanup")
-        return
+        return result
 
     log_with_context(logging.INFO, "Performing post-migration cleanup")
 
     try:
-        import_mode_spaces = _list_spaces_in_import_mode(chat)
-        if import_mode_spaces is None:
-            return
-
-        if import_mode_spaces:
-            _complete_import_mode_spaces(
-                ctx, state, chat, user_resolver, file_handler, import_mode_spaces
+        for channel, space_name in _spaces_to_complete(ctx, state):
+            try:
+                space_info = chat.get_space(space_name)
+            except (HttpError, RefreshError, TransportError) as e:
+                log_with_context(
+                    logging.WARNING,
+                    f"Could not check whether space {space_name} (#{channel}) is"
+                    f" still in import mode, leaving it unchanged: {e}",
+                    space_name=space_name,
+                )
+                result.errors.append(f"{space_name}: {e}")
+                continue
+            if not space_info.get("importMode"):
+                continue
+            result.candidates.append(space_info)
+            log_with_context(
+                logging.WARNING,
+                f"Space {space_name} for channel {channel} is still in import mode;"
+                " completing it now",
+                space_name=space_name,
             )
-        else:
+            completed = _complete_single_space(
+                ctx,
+                state,
+                chat,
+                user_resolver,
+                file_handler,
+                space_name,
+                space_info,
+                channel_name=channel,
+            )
+            if completed:
+                result.completed.append(space_name)
+            else:
+                result.failed[space_name] = "completeImport failed (see log)"
+
+        if not result.candidates:
             log_with_context(
                 logging.INFO, "No spaces found in import mode during cleanup."
             )
@@ -191,6 +186,7 @@ def run_cleanup(
             f" (Status: {http_e.resp.status})",
             error_code=http_e.resp.status,
         )
+        result.errors.append(str(http_e))
         if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
             log_with_context(
                 logging.WARNING,
@@ -217,80 +213,10 @@ def run_cleanup(
             logging.DEBUG,
             f"Cleanup exception traceback: {traceback.format_exc()}",
         )
+        result.errors.append(str(e))
 
     log_with_context(logging.INFO, "Cleanup completed")
-
-
-def _complete_import_mode_spaces(
-    ctx: MigrationContext,
-    state: MigrationState,
-    chat: ChatAdapter,
-    user_resolver: UserResolver,
-    file_handler: FileHandler | None,
-    import_mode_spaces: list[tuple[str, dict]],
-) -> None:
-    """Complete import mode for discovered spaces and add members.
-
-    Args:
-        ctx: Immutable migration context.
-        state: Mutable migration state.
-        chat: Google Chat API service.
-        user_resolver: User identity resolver.
-        file_handler: File handler for drive operations, or None.
-        import_mode_spaces: List of (space_name, space_info) tuples.
-    """
-    log_with_context(
-        logging.INFO,
-        f"Found {len(import_mode_spaces)} spaces still in import mode."
-        " Attempting to complete import.",
-    )
-
-    log_with_context(
-        logging.INFO,
-        f"Current channel_to_space mapping: {state.spaces.channel_to_space}",
-    )
-    log_with_context(
-        logging.INFO,
-        f"Current created_spaces mapping: {state.spaces.created_spaces}",
-    )
-
-    for space_name, space_info in import_mode_spaces:
-        log_with_context(
-            logging.WARNING,
-            f"Found space in import mode during cleanup: {space_name}",
-        )
-
-        try:
-            _complete_single_space(
-                ctx,
-                state,
-                chat,
-                user_resolver,
-                file_handler,
-                space_name,
-                space_info,
-            )
-        except HttpError as http_e:
-            log_with_context(
-                logging.ERROR,
-                f"HTTP error during cleanup for space {space_name}: {http_e}"
-                f" (Status: {http_e.resp.status})",
-                space_name=space_name,
-                error_code=http_e.resp.status,
-            )
-            if http_e.resp.status >= HTTP_SERVER_ERROR_MIN:
-                log_with_context(
-                    logging.WARNING,
-                    "Server error during cleanup - this might be a temporary issue",
-                    space_name=space_name,
-                )
-        except (RefreshError, TransportError) as e:
-            log_with_context(
-                logging.ERROR,
-                f"Failed to complete import mode for space"
-                f" {space_name} during cleanup: {e}",
-                space_name=space_name,
-            )
+    return result
 
 
 def _complete_single_space(
@@ -301,7 +227,8 @@ def _complete_single_space(
     file_handler: FileHandler | None,
     space_name: str,
     space_info: dict,
-) -> None:
+    channel_name: str | None = None,
+) -> bool:
     """Complete import mode for a single space, preserve settings, and add members.
 
     Args:
@@ -312,6 +239,11 @@ def _complete_single_space(
         file_handler: File handler for drive operations, or None.
         space_name: The Google Chat space resource name (e.g. ``spaces/AAAA``).
         space_info: The space metadata dict from the API.
+        channel_name: The Slack channel the space belongs to, if known;
+            otherwise it is resolved from the state and display name.
+
+    Returns:
+        True if ``completeImport`` succeeded, False if it failed.
     """
     external_users_allowed = space_info.get("externalUserAllowed", False)
 
@@ -354,14 +286,14 @@ def _complete_single_space(
                 "Server error completing import - this might be a temporary issue",
                 space_name=space_name,
             )
-        return
+        return False
     except (RefreshError, TransportError) as e:
         log_with_context(
             logging.ERROR,
             f"Failed to complete import: {e}",
             space_name=space_name,
         )
-        return
+        return False
 
     # --- Preserve external user access ------------------------------------
     if external_users_allowed:
@@ -397,7 +329,10 @@ def _complete_single_space(
             )
 
     # --- Resolve channel name and add members -----------------------------
-    channel_name = _resolve_channel_name(state, ctx.export_root, space_name, space_info)
+    if channel_name is None:
+        channel_name = _resolve_channel_name(
+            state, ctx.export_root, space_name, space_info
+        )
 
     if channel_name:
         log_with_context(
@@ -437,6 +372,7 @@ def _complete_single_space(
             " skipping adding members",
             space_name=space_name,
         )
+    return True
 
 
 def _resolve_channel_name(
@@ -448,8 +384,9 @@ def _resolve_channel_name(
     """Try to find the Slack channel name that corresponds to a space.
 
     First checks the ``channel_to_space`` mapping, then falls back to
-    matching the space display name against known channel names derived
-    from the export directory.
+    matching the space display name exactly against the names this tool
+    gives spaces (``"Slack #<channel>"`` or ``"Slack #<channel> (General)"``),
+    so ``Slack #eng-leadership`` never resolves to ``eng``.
 
     Args:
         state: Migration state with channel_to_space mapping.
@@ -480,7 +417,7 @@ def _resolve_channel_name(
     all_channel_names = [d.name for d in list_channel_dirs(export_root)]
     for ch in all_channel_names:
         ch_display = f"{SPACE_NAME_PREFIX}{ch}"
-        if ch_display in display_name:
+        if display_name in (ch_display, f"{ch_display} (General)"):
             log_with_context(
                 logging.INFO,
                 f"Found channel {ch} for space {space_name} using display name",

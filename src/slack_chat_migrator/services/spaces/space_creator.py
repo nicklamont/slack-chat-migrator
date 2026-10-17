@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from google.auth.exceptions import RefreshError, TransportError
@@ -260,11 +262,38 @@ def create_space(
     return space_name
 
 
-def _list_all_spaces(chat_service: ChatAdapter) -> list[dict[str, Any]]:
+@dataclass
+class ImportCompletionResult:
+    """Outcome of completing import mode on a set of spaces.
+
+    Attributes:
+        candidates: Spaces found in import mode (space resource dicts).
+        completed: Names of spaces whose import was completed.
+        failed: Space name -> error, for completions that failed.
+        errors: Other problems (listing or status-check failures).
+        cancelled: True if the user declined the confirmation.
+    """
+
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    completed: list[str] = field(default_factory=list)
+    failed: dict[str, str] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+    cancelled: bool = False
+
+    @property
+    def ok(self) -> bool:
+        """True when nothing failed and the run wasn't cancelled."""
+        return not self.failed and not self.errors and not self.cancelled
+
+
+def _list_all_spaces(
+    chat_service: ChatAdapter, errors: list[str] | None = None
+) -> list[dict[str, Any]]:
     """Paginate through ``spaces().list()`` and return every space.
 
     Args:
         chat_service: An authenticated Google Chat API service resource.
+        errors: If given, a listing failure is appended to it.
 
     Returns:
         List of space resource dicts.
@@ -281,98 +310,173 @@ def _list_all_spaces(chat_service: ChatAdapter) -> list[dict[str, Any]]:
             if not page_token:
                 break
         except HttpError as http_e:
-            log_with_context(
-                logging.ERROR,
+            message = (
                 f"HTTP error listing spaces during cleanup: {http_e} "
-                f"(Status: {http_e.resp.status})",
+                f"(Status: {http_e.resp.status})"
             )
+            log_with_context(logging.ERROR, message)
+            if errors is not None:
+                errors.append(message)
             break
         except (RefreshError, TransportError) as e:
             log_with_context(logging.ERROR, f"Failed to list spaces: {e}")
+            if errors is not None:
+                errors.append(f"Failed to list spaces: {e}")
             break
     return spaces
 
 
-def cleanup_import_mode_spaces(chat_service: ChatAdapter) -> None:
-    """Complete import mode on any spaces still stuck in import mode.
+def find_import_mode_spaces(chat_service: ChatAdapter) -> ImportCompletionResult:
+    """Find this tool's spaces that are still in import mode.
 
-    This is a standalone version of the cleanup logic that only requires a
-    Chat API service client — no export data or user mappings needed.
-    It finds all spaces in import mode and calls ``completeImport()`` on each.
+    Only spaces whose display name starts with :data:`SPACE_NAME_PREFIX`
+    (``"Slack #"``) are considered, so spaces created by other tools or the
+    permission check are never touched.
 
-    Member-adding is skipped because that requires export data.  Users can
-    run ``slack-chat-migrator migrate --resume`` afterwards to add members.
+    Note that ``spaces.list`` only returns spaces the impersonated admin is
+    a member of, and import-mode spaces have no members, so some may not be
+    visible.
 
     Args:
         chat_service: An authenticated Google Chat API service resource.
+
+    Returns:
+        A result whose ``candidates`` are the import-mode spaces found and
+        whose ``errors`` lists listing or lookup failures.
     """
-    log_with_context(logging.INFO, "Running standalone cleanup...")
-
-    spaces = _list_all_spaces(chat_service)
-    if not spaces:
-        log_with_context(logging.INFO, "No spaces found.")
-        return
-
-    import_mode_spaces = []
-    for space in spaces:
+    result = ImportCompletionResult()
+    for space in _list_all_spaces(chat_service, result.errors):
         space_name = space.get("name", "")
         if not space_name:
             continue
-        try:
-            space_info = chat_service.get_space(space_name)
-            if space_info.get("importMode"):
-                import_mode_spaces.append((space_name, space_info))
-        except (HttpError, RefreshError, TransportError) as e:
-            log_with_context(
-                logging.WARNING,
-                f"Failed to check space {space_name}: {e}",
-            )
+        listed_name = space.get("displayName", "") or ""
+        if "displayName" in space and not listed_name.startswith(SPACE_NAME_PREFIX):
+            continue
+        space_info = space
+        if "importMode" not in space or "displayName" not in space:
+            # The listing didn't include what we need; read the space.
+            try:
+                space_info = {**space, **chat_service.get_space(space_name)}
+            except (HttpError, RefreshError, TransportError) as e:
+                log_with_context(
+                    logging.WARNING,
+                    f"Failed to check space {space_name}: {e}",
+                )
+                result.errors.append(f"{space_name}: {e}")
+                continue
+        if not (space_info.get("displayName") or "").startswith(SPACE_NAME_PREFIX):
+            continue
+        if space_info.get("importMode"):
+            result.candidates.append(space_info)
+    return result
 
-    if not import_mode_spaces:
-        log_with_context(logging.INFO, "No spaces found in import mode during cleanup.")
-        return
 
-    log_with_context(
-        logging.INFO,
-        f"Found {len(import_mode_spaces)} space(s) still in import mode.",
-    )
+def complete_import_mode_spaces(
+    chat_service: ChatAdapter, result: ImportCompletionResult
+) -> ImportCompletionResult:
+    """Call ``completeImport`` on each of ``result.candidates``.
 
-    for space_name, space_info in import_mode_spaces:
+    Successes go to ``result.completed`` and failures (with the error) to
+    ``result.failed``; external-user access is restored where it was set.
+
+    Args:
+        chat_service: An authenticated Google Chat API service resource.
+        result: The result of :func:`find_import_mode_spaces`.
+
+    Returns:
+        The same *result*, updated.
+    """
+    for space_info in result.candidates:
+        space_name = space_info.get("name", "")
         try:
             chat_service.complete_import(space_name)
-            log_with_context(
-                logging.INFO,
-                f"Completed import mode for space: {space_name}",
-            )
-
-            # Preserve external user access if it was set
-            if space_info.get("externalUserAllowed"):
-                try:
-                    chat_service.patch_space(
-                        name=space_name,
-                        update_mask="externalUserAllowed",
-                        body={"externalUserAllowed": True},
-                    )
-                    log_with_context(
-                        logging.INFO,
-                        f"Preserved external user access for: {space_name}",
-                    )
-                except (HttpError, RefreshError, TransportError) as e:
-                    log_with_context(
-                        logging.WARNING,
-                        f"Failed to preserve external user access for "
-                        f"{space_name}: {e}",
-                    )
         except HttpError as http_e:
             log_with_context(
                 logging.ERROR,
                 f"HTTP error completing import for {space_name}: {http_e} "
                 f"(Status: {http_e.resp.status})",
             )
+            result.failed[space_name] = f"HTTP {http_e.resp.status}: {http_e}"
+            continue
         except (RefreshError, TransportError) as e:
             log_with_context(
                 logging.ERROR,
                 f"Failed to complete import for {space_name}: {e}",
             )
+            result.failed[space_name] = str(e)
+            continue
 
-    log_with_context(logging.INFO, "Standalone cleanup completed.")
+        result.completed.append(space_name)
+        log_with_context(
+            logging.INFO,
+            f"Completed import mode for space: {space_name}",
+        )
+
+        # Preserve external user access if it was set
+        if space_info.get("externalUserAllowed"):
+            try:
+                chat_service.patch_space(
+                    name=space_name,
+                    update_mask="externalUserAllowed",
+                    body={"externalUserAllowed": True},
+                )
+                log_with_context(
+                    logging.INFO,
+                    f"Preserved external user access for: {space_name}",
+                )
+            except (HttpError, RefreshError, TransportError) as e:
+                log_with_context(
+                    logging.WARNING,
+                    f"Failed to preserve external user access for {space_name}: {e}",
+                )
+    return result
+
+
+def cleanup_import_mode_spaces(
+    chat_service: ChatAdapter,
+    confirm: Callable[[list[dict[str, Any]]], bool] | None = None,
+) -> ImportCompletionResult:
+    """Complete import mode on this tool's spaces still stuck in import mode.
+
+    This is a standalone version of the cleanup logic that only requires a
+    Chat API service client — no export data or user mappings needed.
+    It finds the import-mode spaces named ``Slack #...`` and, once
+    *confirm* approves the list, calls ``completeImport()`` on each.
+
+    Member-adding is skipped because that requires export data.  Users can
+    run ``slack-chat-migrator migrate --resume`` afterwards to add members.
+
+    Args:
+        chat_service: An authenticated Google Chat API service resource.
+        confirm: Called with the candidate spaces before anything is
+            changed; returning False cancels.  None means no confirmation.
+
+    Returns:
+        The outcome, listing completed and failed spaces.
+    """
+    log_with_context(logging.INFO, "Running standalone cleanup...")
+
+    result = find_import_mode_spaces(chat_service)
+    if not result.candidates:
+        log_with_context(
+            logging.INFO,
+            f"No spaces named '{SPACE_NAME_PREFIX}...' found in import mode.",
+        )
+        return result
+
+    log_with_context(
+        logging.INFO,
+        f"Found {len(result.candidates)} space(s) still in import mode.",
+    )
+    if confirm is not None and not confirm(result.candidates):
+        result.cancelled = True
+        log_with_context(logging.INFO, "Import completion cancelled.")
+        return result
+
+    complete_import_mode_spaces(chat_service, result)
+    log_with_context(
+        logging.INFO,
+        f"Standalone cleanup completed: {len(result.completed)} completed,"
+        f" {len(result.failed)} failed.",
+    )
+    return result

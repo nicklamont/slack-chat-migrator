@@ -1220,16 +1220,20 @@ class TestListAllSpaces:
 class TestCleanupImportModeSpaces:
     """Tests for the cleanup_import_mode_spaces() standalone function."""
 
+    @staticmethod
+    def _space(name="spaces/abc", display="Slack #general", **extra):
+        return {"name": name, "displayName": display, **extra}
+
     @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_no_spaces_found(self, mock_list):
         mock_list.return_value = []
         chat_service = MagicMock()
-        # Should not raise
-        cleanup_import_mode_spaces(chat_service)
+        result = cleanup_import_mode_spaces(chat_service)
+        assert result.ok and result.candidates == []
 
     @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_no_spaces_in_import_mode(self, mock_list):
-        mock_list.return_value = [{"name": "spaces/abc"}]
+        mock_list.return_value = [self._space()]
         chat_service = MagicMock()
         # get_space() returns space NOT in import mode
         chat_service.get_space.return_value = {"importMode": False}
@@ -1238,18 +1242,69 @@ class TestCleanupImportModeSpaces:
 
     @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_completes_import_mode_spaces(self, mock_list):
-        mock_list.return_value = [{"name": "spaces/abc"}]
+        mock_list.return_value = [self._space()]
         chat_service = MagicMock()
         chat_service.get_space.return_value = {
             "importMode": True,
             "externalUserAllowed": False,
         }
-        cleanup_import_mode_spaces(chat_service)
+        result = cleanup_import_mode_spaces(chat_service)
         chat_service.complete_import.assert_called_once_with("spaces/abc")
+        assert result.completed == ["spaces/abc"]
+        assert result.ok
+
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
+    def test_only_this_tools_spaces_are_touched(self, mock_list):
+        """Spaces not named 'Slack #...' are never completed."""
+        mock_list.return_value = [
+            self._space("spaces/perm", "Permission Test Space", importMode=True),
+            self._space("spaces/other", "Team chat", importMode=True),
+            self._space("spaces/nameless", None, importMode=True),
+            self._space("spaces/mine", "Slack #eng", importMode=True),
+        ]
+        chat_service = MagicMock()
+        result = cleanup_import_mode_spaces(chat_service)
+        chat_service.complete_import.assert_called_once_with("spaces/mine")
+        chat_service.get_space.assert_not_called()  # importMode came with the list
+        assert result.completed == ["spaces/mine"]
+
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
+    def test_display_name_read_from_space_when_not_listed(self, mock_list):
+        mock_list.return_value = [{"name": "spaces/a"}, {"name": "spaces/b"}]
+        chat_service = MagicMock()
+        chat_service.get_space.side_effect = lambda name: {
+            "spaces/a": {"displayName": "Slack #a", "importMode": True},
+            "spaces/b": {"displayName": "Permission Test Space", "importMode": True},
+        }[name]
+        result = cleanup_import_mode_spaces(chat_service)
+        assert result.completed == ["spaces/a"]
+
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
+    def test_confirmation_sees_the_list_and_can_cancel(self, mock_list):
+        mock_list.return_value = [self._space(importMode=True)]
+        chat_service = MagicMock()
+        seen = []
+
+        def confirm(spaces):
+            seen.extend(spaces)
+            return False
+
+        result = cleanup_import_mode_spaces(chat_service, confirm=confirm)
+
+        assert [s["name"] for s in seen] == ["spaces/abc"]
+        assert result.cancelled and not result.ok
+        chat_service.complete_import.assert_not_called()
+
+    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
+    def test_no_confirmation_when_nothing_to_do(self, mock_list):
+        mock_list.return_value = [self._space(importMode=False)]
+        confirm = MagicMock()
+        cleanup_import_mode_spaces(MagicMock(), confirm=confirm)
+        confirm.assert_not_called()
 
     @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_preserves_external_user_access(self, mock_list):
-        mock_list.return_value = [{"name": "spaces/xyz"}]
+        mock_list.return_value = [self._space("spaces/xyz")]
         chat_service = MagicMock()
         chat_service.get_space.return_value = {
             "importMode": True,
@@ -1263,87 +1318,59 @@ class TestCleanupImportModeSpaces:
             body={"externalUserAllowed": True},
         )
 
+    @pytest.mark.parametrize("kind", ["http", "refresh", "transport"])
     @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
-    def test_handles_complete_import_http_error(self, mock_list):
+    def test_completion_failures_are_reported(self, mock_list, kind):
+        from google.auth.exceptions import RefreshError, TransportError
         from googleapiclient.errors import HttpError
 
-        mock_list.return_value = [{"name": "spaces/fail"}]
-        chat_service = MagicMock()
-        chat_service.get_space.return_value = {
-            "importMode": True,
-            "externalUserAllowed": False,
+        errors = {
+            "http": HttpError(resp=MagicMock(status=500), content=b"Server Error"),
+            "refresh": RefreshError("boom"),
+            "transport": TransportError("network timeout"),
         }
-        resp = MagicMock()
-        resp.status = 500
-        chat_service.complete_import.side_effect = HttpError(
-            resp=resp, content=b"Server Error"
+        mock_list.return_value = [
+            self._space("spaces/fail", importMode=True),
+            self._space("spaces/ok", "Slack #ok", importMode=True),
+        ]
+        chat_service = MagicMock()
+        chat_service.complete_import.side_effect = lambda name: (
+            (_ for _ in ()).throw(errors[kind]) if name == "spaces/fail" else {}
         )
-        # Should not raise
-        cleanup_import_mode_spaces(chat_service)
-
-    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
-    def test_handles_complete_import_refresh_error(self, mock_list):
-        mock_list.return_value = [{"name": "spaces/fail"}]
-        chat_service = MagicMock()
-        chat_service.get_space.return_value = {
-            "importMode": True,
-            "externalUserAllowed": False,
-        }
-        from google.auth.exceptions import RefreshError
-
-        chat_service.complete_import.side_effect = RefreshError("boom")
-        # Should not raise
-        cleanup_import_mode_spaces(chat_service)
-
-    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
-    def test_handles_complete_import_transport_error(self, mock_list):
-        mock_list.return_value = [{"name": "spaces/fail"}]
-        chat_service = MagicMock()
-        chat_service.get_space.return_value = {
-            "importMode": True,
-            "externalUserAllowed": False,
-        }
-        from google.auth.exceptions import TransportError
-
-        chat_service.complete_import.side_effect = TransportError("network timeout")
-        # Should not raise — TransportError is caught
-        cleanup_import_mode_spaces(chat_service)
+        result = cleanup_import_mode_spaces(chat_service)
+        assert list(result.failed) == ["spaces/fail"]
+        assert result.completed == ["spaces/ok"]
+        assert not result.ok
 
     @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_skips_spaces_with_empty_name(self, mock_list):
-        mock_list.return_value = [{"name": ""}, {"name": "spaces/ok"}]
+        mock_list.return_value = [self._space(""), self._space("spaces/ok")]
         chat_service = MagicMock()
         chat_service.get_space.return_value = {
+            "displayName": "Slack #ok",
             "importMode": True,
             "externalUserAllowed": False,
         }
         cleanup_import_mode_spaces(chat_service)
-        # Only the "spaces/ok" space should be checked
-        chat_service.get_space.assert_called()
+        chat_service.get_space.assert_called_once_with("spaces/ok")
 
+    @pytest.mark.parametrize("kind", ["refresh", "transport"])
     @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
-    def test_handles_get_exception(self, mock_list):
-        mock_list.return_value = [{"name": "spaces/err"}]
+    def test_handles_get_exception(self, mock_list, kind):
+        from google.auth.exceptions import RefreshError, TransportError
+
+        mock_list.return_value = [self._space("spaces/err")]
         chat_service = MagicMock()
-        from google.auth.exceptions import RefreshError
-
-        chat_service.get_space.side_effect = RefreshError("get failed")
-        # Should not raise
-        cleanup_import_mode_spaces(chat_service)
-
-    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
-    def test_handles_get_transport_error(self, mock_list):
-        mock_list.return_value = [{"name": "spaces/err"}]
-        chat_service = MagicMock()
-        from google.auth.exceptions import TransportError
-
-        chat_service.get_space.side_effect = TransportError("DNS timeout")
-        # Should not raise — TransportError is caught
-        cleanup_import_mode_spaces(chat_service)
+        chat_service.get_space.side_effect = (
+            RefreshError("get failed") if kind == "refresh" else TransportError("DNS")
+        )
+        result = cleanup_import_mode_spaces(chat_service)
+        chat_service.complete_import.assert_not_called()
+        assert result.errors and not result.ok
 
     @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
     def test_handles_patch_exception(self, mock_list):
-        mock_list.return_value = [{"name": "spaces/ok"}]
+        mock_list.return_value = [self._space("spaces/ok")]
         chat_service = MagicMock()
         chat_service.get_space.return_value = {
             "importMode": True,
@@ -1352,22 +1379,19 @@ class TestCleanupImportModeSpaces:
         from google.auth.exceptions import RefreshError
 
         chat_service.patch_space.side_effect = RefreshError("patch failed")
-        # Should not raise
-        cleanup_import_mode_spaces(chat_service)
+        # Should not raise; the completion itself succeeded
+        result = cleanup_import_mode_spaces(chat_service)
+        assert result.completed == ["spaces/ok"]
 
-    @patch("slack_chat_migrator.services.spaces.space_creator._list_all_spaces")
-    def test_handles_patch_transport_error(self, mock_list):
-        mock_list.return_value = [{"name": "spaces/ok"}]
+    def test_listing_failure_is_an_error(self):
+        from googleapiclient.errors import HttpError
+
         chat_service = MagicMock()
-        chat_service.get_space.return_value = {
-            "importMode": True,
-            "externalUserAllowed": True,
-        }
-        from google.auth.exceptions import TransportError
-
-        chat_service.patch_space.side_effect = TransportError("connection reset")
-        # Should not raise — TransportError is caught
-        cleanup_import_mode_spaces(chat_service)
+        chat_service.list_spaces.side_effect = HttpError(
+            resp=MagicMock(status=503), content=b"down"
+        )
+        result = cleanup_import_mode_spaces(chat_service)
+        assert result.errors and not result.ok
 
 
 # ---------------------------------------------------------------------------

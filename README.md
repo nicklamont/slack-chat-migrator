@@ -272,7 +272,8 @@ Run the full Slack-to-Google-Chat migration.
 | `--config` | No | Path to config YAML (default: config.yaml) |
 | `--dry_run` | No | Validation-only mode - performs comprehensive validation without making changes |
 | `--resume` | No | Resume an interrupted migration - finds existing spaces and imports only newer messages |
-| `--complete` | No | Complete import mode on all spaces without running a migration |
+| `--complete` | No | Complete import mode on this tool's spaces (display name `Slack #…`) that are still in import mode, without running a migration. `--export_path` isn't needed. The spaces are listed and you confirm first |
+| `--yes` or `-y` | No | Answer yes to confirmation prompts, for unattended runs (also `SLACK_CHAT_MIGRATOR_YES=1`) |
 | `--verbose` or `-v` | No | Enable verbose console logging (shows DEBUG level messages) |
 | `--debug_api` | No | Enable detailed API request/response logging (creates very large log files) |
 | `--skip_permission_check` | No | Skip permission checks (not recommended) |
@@ -295,7 +296,7 @@ Validate that the service account has all required API scopes.
 
 > **Deprecated:** Use `migrate --complete` instead.
 
-Complete import mode on spaces that are stuck.
+Complete import mode on this tool's spaces (named `Slack #…`) that are stuck in import mode. Same behaviour as `migrate --complete`.
 
 | Option | Required | Description |
 |--------|----------|-------------|
@@ -512,15 +513,15 @@ retry_delay: 2
 
 #### Cleanup Process
 
-After all channels are processed, a **cleanup process** runs to ensure all spaces are properly out of import mode. This cleanup:
+Each channel's space normally leaves import mode at the end of that channel (step 4 above). After a live migration **finishes**, a cleanup step acts as a safety net. It:
 
-1. Lists all spaces created by the migration tool
-2. Identifies any spaces still in "import mode" that weren't properly completed
-3. Completes the import mode for these spaces with retry logic
-4. Preserves external user access settings where applicable
-5. Adds regular members to these spaces
+1. Looks only at the spaces this run created. It never lists or touches other spaces: earlier runs' spaces, the permission-check test space, or spaces made by other tools.
+2. Skips spaces deliberately left in import mode: channels whose completion was skipped or failed, and, with `import_completion_strategy: skip_on_error`, channels that had errors.
+3. Completes import mode on the remaining spaces that are still in import mode, restores external user access where applicable, and adds the regular members.
 
-The cleanup process is important because spaces in import mode have limitations and will be automatically deleted after 90 days if not properly completed.
+Completing import mode is irreversible, so this step does **not** run when the migration didn't finish: if you answer "no" at a prompt, press Ctrl-C, hit an error, or the permission checks fail. Spaces left in import mode can be finished later with `migrate --resume` or `migrate --complete`. Do this within 90 days: Google deletes spaces that stay in import mode longer.
+
+`migrate --complete` (and the deprecated `cleanup`) only considers spaces whose display name starts with `Slack #`. It lists the spaces it found in import mode and asks before completing them (`--yes` skips the prompt; without a terminal and without `--yes` it exits with status 1). It then reports how many were completed and lists any that failed. The exit status is 1 if any failed. Note that the Chat API only lists spaces the workspace admin is a member of, and import-mode spaces have no members, so some may not be visible.
 
 #### Checkpoint and Resumption
 

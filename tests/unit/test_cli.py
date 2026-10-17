@@ -17,6 +17,7 @@ from slack_chat_migrator.exceptions import (
     PermissionCheckError,
 )
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
+from slack_chat_migrator.services.spaces.space_creator import ImportCompletionResult
 
 
 class TestCLIGroup:
@@ -250,6 +251,7 @@ class TestCleanupCommand:
         mock_config.return_value = MigrationConfig()
         mock_chat = MagicMock()
         mock_svc.return_value = mock_chat
+        mock_cleanup.return_value = ImportCompletionResult()
 
         runner = CliRunner()
         result = runner.invoke(
@@ -275,23 +277,35 @@ class TestCleanupCommand:
     def test_prompts_for_confirmation_without_yes(
         self, mock_config, mock_svc, mock_cleanup
     ):
-        """Without --yes, cleanup should prompt and abort on 'n'."""
+        """Without --yes, cleanup lists the spaces, prompts and cancels on 'n'."""
         mock_config.return_value = MigrationConfig()
+
+        def fake_cleanup(chat, confirm):
+            result = ImportCompletionResult(
+                candidates=[{"name": "spaces/a", "displayName": "Slack #a"}]
+            )
+            result.cancelled = not confirm(result.candidates)
+            return result
+
+        mock_cleanup.side_effect = fake_cleanup
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "cleanup",
-                "--creds_path",
-                "fake.json",
-                "--workspace_admin",
-                "a@b.com",
-            ],
-            input="n\n",
-        )
-        assert result.exit_code == 0
-        assert "Cleanup cancelled" in result.output
-        mock_cleanup.assert_not_called()
+        with patch(
+            "slack_chat_migrator.cli.common.stdin_is_interactive", return_value=True
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "cleanup",
+                    "--creds_path",
+                    "fake.json",
+                    "--workspace_admin",
+                    "a@b.com",
+                ],
+                input="n\n",
+            )
+        assert result.exit_code == 1
+        assert "Slack #a" in result.output
+        assert "cancelled" in result.output
 
 
 class TestBackwardsCompatibility:
@@ -633,7 +647,8 @@ class TestMigrateCompleteFlag:
         # Patch at source — these are deferred imports inside _run_complete_mode
         with (
             patch(
-                "slack_chat_migrator.services.spaces.space_creator.cleanup_import_mode_spaces"
+                "slack_chat_migrator.services.spaces.space_creator.cleanup_import_mode_spaces",
+                return_value=ImportCompletionResult(),
             ) as mock_cleanup,
             patch(
                 "slack_chat_migrator.utils.api.get_gcp_service",
@@ -685,6 +700,7 @@ class TestCleanupDeprecation:
         """cleanup command emits deprecation warning pointing to migrate --complete."""
         mock_config.return_value = MigrationConfig()
         mock_svc.return_value = MagicMock()
+        mock_cleanup.return_value = ImportCompletionResult()
 
         runner = CliRunner()
         result = runner.invoke(
