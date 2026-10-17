@@ -793,8 +793,7 @@ def get_gcp_service(
     # client configured by someone else.  The channel isn't: it only tags log
     # lines, and keying on it would build one client per user per channel.
     # So a cached client keeps tagging its log lines with the channel it was
-    # created for, which is stale once it is reused in another channel,
-    # until the channel context moves to a contextvar.
+    # created for, which is stale once it is reused in another channel.
     cache_key: _ServiceKey = (
         creds_path,
         user_email,

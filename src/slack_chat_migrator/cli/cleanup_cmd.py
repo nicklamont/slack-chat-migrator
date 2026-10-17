@@ -49,8 +49,11 @@ def cleanup(
     Lists this tool's spaces (named "Slack #...") that are still in import
     mode, asks for confirmation (skip with --yes), and calls completeImport()
     on each.  Does not add members — use ``migrate --resume`` for that.
-    Exits 1 if the config or the spaces can't be loaded, the user cancels,
-    or any space could not be completed, and 130 on Ctrl-C.
+    Exits 1 if the config, the credentials or the list of spaces can't be
+    loaded, if the user declines or presses Ctrl-C at the prompt, if a
+    confirmation is needed without a terminal (use --yes), or if any space
+    could not be completed.  Exits 130 on Ctrl-C while spaces are being
+    listed or completed.
 
     Args:
         creds_path: Path to service account credentials JSON.

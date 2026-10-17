@@ -25,8 +25,8 @@ slack_token: ""
 convert_canvases: true
 
 # Make the Drive folders of private channels, group DMs and DMs
-# limited-access folders that only the conversation's members can open
-# (shared drives only).
+# limited-access folders that only the conversation's members (plus shared
+# drive managers and the admin) can open (shared drives only).
 restrict_private_channel_folders: true
 
 # Optional: Channels to exclude from migration (by name)
