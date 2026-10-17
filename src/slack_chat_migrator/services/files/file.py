@@ -37,7 +37,7 @@ from slack_chat_migrator.services.drive.folder_manager import (
     FolderLookup,
     FolderSyncResult,
 )
-from slack_chat_migrator.services.drive.pending import UNKNOWN_TARGET
+from slack_chat_migrator.services.drive.pending import Target
 from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_CANDIDATES,
     DRIVE_CALL_ERRORS,
@@ -107,6 +107,10 @@ SKIP_REASON_GOOGLE_DOCS_LINK = "google_docs_link"
 #: :meth:`FileHandler._execute_drive_upload`, read by
 #: :func:`_conversion_failed`.
 META_CONVERSION_FAILED = "conversion_failed"
+
+
+def _normalize_email(email: str) -> str:
+    return email.strip().lower()
 
 
 def _conversion_failed(result: UploadResult) -> bool:
@@ -294,6 +298,12 @@ class FileHandler:
             "pending_retried": 0,
             "pending_retry_failed": 0,
             "pending_flag_failures": 0,
+            "pending_clear_failures": 0,
+            "pending_sweep_failures": 0,
+            "pending_skipped_unknown": 0,
+            "pending_skipped_unmapped": 0,
+            "pending_skipped_external": 0,
+            "pending_skipped_transfers_off": 0,
             "folder_listing_failures": 0,
             "external_folder_grant_failures": 0,
             "folder_sync_failures": 0,
@@ -1627,7 +1637,9 @@ class FileHandler:
                 or (
                     from_earlier_run
                     and pending_owner is not None
-                    and pending_owner.lower() == owner_email.lower()
+                    and pending_owner.is_for(
+                        self._slack_user_id(owner_email), owner_email
+                    )
                 )
             )
             else None
@@ -1711,7 +1723,11 @@ class FileHandler:
         else:
             self._increment_stat("poster_grant_failures")
         self.drive_uploader.pending.set_grant(
-            drive_file_id, poster, not granted, self._shared_drive_id
+            drive_file_id,
+            poster,
+            not granted,
+            self._shared_drive_id,
+            user_id=None if granted else self._slack_user_id(poster),
         )
 
     def _already_granted(self, drive_file_id: str, email: str) -> bool:
@@ -1767,7 +1783,10 @@ class FileHandler:
             error: Why the transfer failed, when known.
         """
         self.drive_uploader.pending.set_owner(
-            drive_file_id, new_owner_email, not transferred
+            drive_file_id,
+            new_owner_email,
+            not transferred,
+            user_id=None if transferred else self._slack_user_id(new_owner_email),
         )
         if transferred:
             # The owner needs no writer grant when the file is linked again.
@@ -1800,12 +1819,20 @@ class FileHandler:
         doesn't link files of already-sent messages again).  The flagged
         files are those this run flagged plus those whose appProperties
         flags an earlier run left: the whole shared drive is searched, or in
-        regular Drive the attachment root and its channel folders.  Each
-        poster grant is retried for internal posters; a transfer only while
-        ``transfer_file_ownership`` is still set.  A success clears the
-        flag; results are counted in ``pending_retried`` and
-        ``pending_retry_failed``.  A flag holding ``"-"`` (an email too long
-        to store) can't be retried and is logged.
+        regular Drive the attachment root and its channel folders.
+
+        Each recipient is looked up again by its stored Slack user ID in
+        today's user mapping (the stored email is used for flags without
+        one).  Only internal recipients are retried; transfers only while
+        ``transfer_file_ownership`` is still set and in regular Drive.  A
+        success clears the flag.  ``pending_retried`` and
+        ``pending_retry_failed`` count grant and transfer attempts;
+        ``pending_skipped_*`` count flags kept without an attempt (unknown
+        recipient, unmapped, external, transfers off).
+
+        Never raises a Drive error: a failed search is logged at ERROR and
+        counted in ``pending_sweep_failures``, and this run's own flags are
+        still retried.
         """
         root = self._root_folder_id
         if not root:
@@ -1817,30 +1844,48 @@ class FileHandler:
         except DRIVE_CALL_CANDIDATES as e:
             if not is_drive_call_error(e):
                 raise
+            self._increment_stat("pending_sweep_failures")
             log_with_context(
-                logging.WARNING,
-                f"Could not look for Drive files with pending grants ({e});"
-                " retrying only the ones this run flagged",
+                logging.ERROR,
+                f"Could not look for Drive files with pending grants or"
+                f" transfers ({e}); retrying only the ones this run already"
+                " knows about. The next run looks again.",
             )
+        skipped: dict[str, list[str]] = {
+            "unknown": [],
+            "unmapped": [],
+            "external": [],
+        }
         retried = failed = 0
         for drive_file_id, targets in list(pending.grants.items()):
-            for email in list(targets.values()):
-                if not self._can_retry(drive_file_id, email, "grant"):
+            for key, target in list(targets.items()):
+                email = self._sweep_recipient(drive_file_id, target, skipped)
+                if email is None:
                     continue
                 granted = self.drive_uploader.set_message_poster_permission(
                     drive_file_id, email, self._shared_drive_id
                 )
                 if granted:
                     self._mark_granted(drive_file_id, email)
-                    pending.set_grant(
-                        drive_file_id, email, False, self._shared_drive_id
-                    )
+                    pending.clear_grant(drive_file_id, key, self._shared_drive_id)
                     retried += 1
                 else:
                     failed += 1
-        transfers = self.config.transfer_file_ownership and not self._shared_drive_id
-        for drive_file_id, email in list(pending.owners.items()):
-            if not transfers or not self._can_retry(drive_file_id, email, "transfer"):
+        owners = list(pending.owners.items())
+        if owners and not (
+            self.config.transfer_file_ownership and not self._shared_drive_id
+        ):
+            self._increment_stat("pending_skipped_transfers_off", len(owners))
+            log_with_context(
+                logging.WARNING,
+                f"Not retrying {len(owners)} pending ownership transfer(s):"
+                " transfer_file_ownership is off or the files are on a shared"
+                " drive. Their flags are kept for a run with it on.",
+            )
+            owners = []
+        for drive_file_id, target in owners:
+            email = self._sweep_recipient(drive_file_id, target, skipped)
+            if email is None:
                 continue
             if self._transfer_file_ownership(drive_file_id, email):
                 self._mark_granted(drive_file_id, email)
@@ -1848,6 +1893,7 @@ class FileHandler:
                 retried += 1
             else:
                 failed += 1
+        self._report_sweep_skips(skipped)
         self._increment_stat("pending_retried", retried)
         self._increment_stat("pending_retry_failed", failed)
         if retried or failed:
@@ -1855,20 +1901,83 @@ class FileHandler:
                 logging.WARNING if failed else logging.INFO,
                 f"Retried {retried + failed} pending Drive grant(s) and"
                 f" transfer(s): {retried} succeeded, {failed} still failing"
-                " (retried again by the next run)",
+                " (their flags are kept, and the next run retries them)",
             )
 
-    def _can_retry(self, drive_file_id: str, email: str, what: str) -> bool:
-        """Whether a flagged grant or transfer to *email* can be retried."""
-        if email == UNKNOWN_TARGET:
+    def _sweep_recipient(
+        self, drive_file_id: str, target: Target, skipped: dict[str, list[str]]
+    ) -> str | None:
+        """Today's email for a flagged recipient, or None to keep the flag.
+
+        A Slack user ID is mapped again through today's user mapping.  An
+        unknown, unmapped or external recipient is recorded in *skipped*
+        (by kind) and counted in ``pending_skipped_<kind>``.
+        """
+        email = target.email
+        if target.user_id:
+            today = self.user_map.get(target.user_id)
+            if not today:
+                skipped["unmapped"].append(target.user_id)
+                self._increment_stat("pending_skipped_unmapped")
+                return None
+            if email and _normalize_email(today) != _normalize_email(email):
+                log_with_context(
+                    logging.INFO,
+                    f"Slack user {target.user_id} is now mapped to {today}, not"
+                    f" {email}; retrying the pending grant or transfer on Drive"
+                    f" file {drive_file_id} for {today}",
+                    drive_file_id=drive_file_id,
+                )
+            email = today
+        if not email:
+            skipped["unknown"].append(drive_file_id)
+            self._increment_stat("pending_skipped_unknown")
+            return None
+        if not self._is_internal_email(email):
+            skipped["external"].append(email)
+            self._increment_stat("pending_skipped_external")
+            return None
+        return email
+
+    @staticmethod
+    def _report_sweep_skips(skipped: dict[str, list[str]]) -> None:
+        """Log one warning per kind of flag the sweep kept without retrying."""
+        reasons = {
+            "unknown": (
+                "the recipient's email was too long to store with the flag (a"
+                " grant is still made if a later run links the file again for"
+                " the same poster)",
+                "Drive files",
+            ),
+            "unmapped": (
+                "their Slack user is no longer mapped to a Google account",
+                "Slack users",
+            ),
+            "external": ("their recipient is now outside the workspace", "emails"),
+        }
+        for kind, items in skipped.items():
+            if not items:
+                continue
+            reason, label = reasons[kind]
+            names = sorted(set(items))
+            shown = ", ".join(names[:10]) + (" ..." if len(names) > 10 else "")
             log_with_context(
                 logging.WARNING,
-                f"Can't retry a pending {what} on Drive file {drive_file_id}: the"
-                " recipient's email was too long to store with the flag",
-                drive_file_id=drive_file_id,
+                f"Kept {len(items)} pending Drive grant(s) or transfer(s)"
+                f" without retrying them: {reason} ({label}: {shown}).",
             )
-            return False
-        return self._is_internal_email(email)
+
+    def _slack_user_id(self, email: str | None) -> str | None:
+        """The Slack user mapped to *email* (the first by ID), if any."""
+        if not email:
+            return None
+        wanted = _normalize_email(email)
+        matches = sorted(
+            user_id
+            for user_id, mapped in self.user_map.items()
+            if isinstance(mapped, str) and _normalize_email(mapped) == wanted
+        )
+        return matches[0] if matches else None
 
     def _migration_folders(self) -> set[str]:
         """The attachment root and every channel folder in it (regular Drive).
@@ -1882,11 +1991,11 @@ class FileHandler:
         children = self.folder_manager.list_child_folders(root, self._shared_drive_id)
         return {root} | {folder["id"] for folder in children}
 
-    def _count_flag_write_failure(
-        self, drive_file_id: str, error: BaseException
-    ) -> None:
-        """Count a pending grant or transfer that couldn't be stored on its file."""
-        self._increment_stat("pending_flag_failures")
+    def _count_flag_write_failure(self, drive_file_id: str, clearing: bool) -> None:
+        """Count a pending flag that couldn't be stored on, or cleared from, a file."""
+        self._increment_stat(
+            "pending_clear_failures" if clearing else "pending_flag_failures"
+        )
 
     def get_file_statistics(self) -> dict[str, Any]:
         """Get detailed file upload statistics.
@@ -1917,6 +2026,14 @@ class FileHandler:
             "pending_retried": self.file_stats["pending_retried"],
             "pending_retry_failed": self.file_stats["pending_retry_failed"],
             "pending_flag_failures": self.file_stats["pending_flag_failures"],
+            "pending_clear_failures": self.file_stats["pending_clear_failures"],
+            "pending_sweep_failures": self.file_stats["pending_sweep_failures"],
+            "pending_skipped_unknown": self.file_stats["pending_skipped_unknown"],
+            "pending_skipped_unmapped": self.file_stats["pending_skipped_unmapped"],
+            "pending_skipped_external": self.file_stats["pending_skipped_external"],
+            "pending_skipped_transfers_off": self.file_stats[
+                "pending_skipped_transfers_off"
+            ],
             "folder_listing_failures": self.file_stats["folder_listing_failures"],
             "external_folder_grant_failures": self.file_stats[
                 "external_folder_grant_failures"

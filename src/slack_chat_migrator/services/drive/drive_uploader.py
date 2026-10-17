@@ -148,7 +148,7 @@ class DriveFileUploader:
         drive_service: DriveAdapter,
         *,
         on_listing_failure: Callable[[str, BaseException], None] | None = None,
-        on_flag_write_failure: Callable[[str, BaseException], None] | None = None,
+        on_flag_write_failure: Callable[[str, bool], None] | None = None,
     ) -> None:
         """Initialize the DriveFileUploader.
 
@@ -161,8 +161,9 @@ class DriveFileUploader:
             on_listing_failure: Called with the folder ID and the error the
                 first time a folder's files can't be listed, so the caller
                 can count folders, not attempts.
-            on_flag_write_failure: Called with the file ID and the error when
-                a pending grant or transfer can't be recorded on the file.
+            on_flag_write_failure: Called with the file ID and whether the
+                write was clearing a flag, when a pending grant or transfer
+                can't be recorded on (or cleared from) the file.
         """
         self.drive_service = drive_service
         self._on_listing_failure = on_listing_failure or (lambda _folder, _e: None)

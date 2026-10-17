@@ -15,6 +15,7 @@ from slack_chat_migrator.services.drive.drive_uploader import (
     DriveUploadFailure,
     DriveUploadSource,
 )
+from slack_chat_migrator.services.drive.pending import Target
 
 # -------------------------------------------------------------------
 # Helpers
@@ -527,9 +528,9 @@ PENDING_FLAGS = MappingProxyType(
     {
         "slackFileId": "F1",
         "slackGrantPending": "true",
-        "slackGrant.0123abcd": "bob@example.com",
+        "slackGrant.0123abcd": "UB bob@example.com",
         "slackOwnerPending": "true",
-        "slackOwner": "alice@example.com",
+        "slackOwner": "UA alice@example.com",
     }
 )
 
@@ -551,9 +552,9 @@ class TestPendingFlagsAreRead:
         uploader.pre_cache_folder_file_hashes("folder1")
 
         assert uploader.pending.grants == {
-            "a": {"slackGrant.0123abcd": "bob@example.com"}
+            "a": {"slackGrant.0123abcd": Target("UB", "bob@example.com")}
         }
-        assert uploader.pending.owners == {"a": "alice@example.com"}
+        assert uploader.pending.owners == {"a": Target("UA", "alice@example.com")}
 
     def test_hash_search_reads_the_flags(self):
         uploader = _make_uploader()
@@ -563,7 +564,7 @@ class TestPendingFlagsAreRead:
 
         uploader._find_file_by_hash("m", "a.txt", "folder1")
 
-        assert uploader.pending.owner("a") == "alice@example.com"
+        assert uploader.pending.owner("a") == Target("UA", "alice@example.com")
 
 
 class TestInit:
@@ -815,7 +816,7 @@ class TestSlackFileIndex:
         )
         assert search["drive_id"] == "SD"
         assert uploader.pending.grants == {
-            "doc1": {"slackGrant.0123abcd": "bob@example.com"}
+            "doc1": {"slackGrant.0123abcd": Target(email="bob@example.com")}
         }
         # Remembered: no second search.
         assert uploader.find_uploaded_slack_file("folder1", "F'1") == found

@@ -152,6 +152,19 @@ class FileUploadStats(TypedDict):
     pending_retry_failed: int
     #: Pending flags that couldn't be stored on their Drive file.
     pending_flag_failures: int
+    #: Flags of successful retries that couldn't be cleared (made again
+    #: by the next run's sweep).
+    pending_clear_failures: int
+    #: Sweeps whose search for flagged files failed.
+    pending_sweep_failures: int
+    #: Flags kept without a retry because the recipient wasn't stored.
+    pending_skipped_unknown: int
+    #: Flags kept because the Slack user is no longer mapped.
+    pending_skipped_unmapped: int
+    #: Flags kept because the recipient is now external.
+    pending_skipped_external: int
+    #: Pending transfers kept because transfers are off (or on a shared drive).
+    pending_skipped_transfers_off: int
     #: Drive folders whose file listing failed at least once.
     folder_listing_failures: int
     external_folder_grant_failures: int

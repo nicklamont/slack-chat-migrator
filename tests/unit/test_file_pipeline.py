@@ -18,6 +18,7 @@ from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.exceptions import APIError
 from slack_chat_migrator.services.drive.folder_manager import FolderLookup
+from slack_chat_migrator.services.drive.pending import FIXED_APP_PROPERTIES, grant_key
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
 from slack_chat_migrator.services.files import file as file_mod
 from slack_chat_migrator.services.files.file_download import (
@@ -951,7 +952,9 @@ class TestPendingSweep:
             kw for kw in fake.permission_calls() if kw.get("transferOwnership")
         ]
         assert len(transfers) == 1
-        assert run2.get_file_statistics()["pending_retried"] == 0
+        stats = run2.get_file_statistics()
+        assert stats["pending_retried"] == 0
+        assert stats["pending_skipped_transfers_off"] == 1
 
     def test_still_failing_retry_is_counted_and_kept(self, tmp_path, downloads):
         fake = FakeDrive(reject_grants_to={"alice@example.com"})
@@ -984,6 +987,7 @@ class TestPendingSweep:
 
         assert fake.permission_calls() == []
         assert any("too long" in r.getMessage() for r in caplog.records)
+        assert run2.get_file_statistics()["pending_skipped_unknown"] == 1
 
     def test_failed_search_still_retries_this_runs_flags(self, tmp_path, downloads):
         fake = FakeDrive()
@@ -1046,6 +1050,172 @@ class TestPendingSweep:
         clears = [kw for name, kw in fake.calls if name == "files.update"]
         assert clears and all(kw["supportsAllDrives"] is True for kw in clears)
         assert handler.get_file_statistics()["pending_retried"] == 1
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ConnectionResetError("reset"),
+            TimeoutError("slow"),
+            OSError(errno.ENETUNREACH, "Network is unreachable"),
+            RefreshError("revoked"),
+            http_error(500),
+        ],
+        ids=["reset", "timeout", "unreachable", "refresh", "500"],
+    )
+    @pytest.mark.parametrize("shared", [True, False], ids=["shared", "my_drive"])
+    def test_failed_search_never_escapes(
+        self, tmp_path, downloads, caplog, error, shared
+    ):
+        """The sweep runs after every channel migrated: it must not fail the run."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=shared)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+        # Fails the flag search and, in regular Drive, the folder listing.
+        fake.fail_query = lambda q: (
+            error if ("Pending" in q or "mimeType" in q) else None
+        )
+
+        handler.retry_pending_permissions()  # must not raise
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 1
+        assert stats["pending_sweep_failures"] == 1
+        errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert any("the ones this run already knows about" in m for m in errors)
+
+    def test_flag_stores_the_slack_user_id(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props[grant_key("alice@example.com")] == "UA alice@example.com"
+        # The upload's own tags plus the marker and grant fit Drive's budget.
+        tags = [k for k in props if not k.startswith(("slackGrant", "slackOwner"))]
+        assert len(tags) == FIXED_APP_PROPERTIES - 3
+
+    def test_recipient_is_mapped_again_by_slack_user_id(
+        self, tmp_path, downloads, caplog
+    ):
+        """A later run grants today's address for the user, and says so."""
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(run1, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+
+        run2 = make_handler(fake, tmp_path)
+        run2.user_map["UA"] = "alice.new@example.com"
+        fake.calls.clear()
+        with caplog.at_level("INFO"):
+            run2.retry_pending_permissions()
+
+        (grant,) = fake.permission_calls()
+        assert grant["body"]["emailAddress"] == "alice.new@example.com"
+        assert run2.get_file_statistics()["pending_retried"] == 1
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert not any(key.startswith("slackGrant") for key in props)
+        assert any(
+            "UA is now mapped to alice.new@example.com" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_unmapped_recipient_is_kept_and_counted(self, tmp_path, downloads, caplog):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(run1, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+
+        run2 = make_handler(fake, tmp_path)
+        del run2.user_map["UA"]
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        assert fake.permission_calls() == []
+        assert run2.get_file_statistics()["pending_skipped_unmapped"] == 1
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackGrantPending"] == "true"
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("no longer mapped" in m and "UA" in m for m in warnings)
+
+    def test_recipient_that_is_now_external_is_never_retried(
+        self, tmp_path, downloads, caplog
+    ):
+        """A flag an earlier run left, whose domains differed (TA S17)."""
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        result = upload(run1, downloads, "c", "F1", "UA", b"body")
+        fake.files_db[result.drive_id]["appProperties"].update(
+            {"slackGrantPending": "true", grant_key("ext@other.org"): "ext@other.org"}
+        )
+
+        run2 = make_handler(fake, tmp_path)
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        assert fake.permission_calls() == []
+        assert run2.get_file_statistics()["pending_skipped_external"] == 1
+        assert any(
+            "outside the workspace" in r.getMessage()
+            and "ext@other.org" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_grant_whose_flag_could_not_be_stored_is_still_retried(
+        self, tmp_path, downloads
+    ):
+        """README: "that run's sweep still retries it" (TA P18)."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        fake.failing["files.update"] = ConnectionResetError("reset")
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+        del fake.failing["files.update"]
+
+        handler.retry_pending_permissions()
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_flag_failures"] == 1
+        assert stats["pending_retried"] == 1
+
+    def test_flag_that_could_not_be_cleared_is_counted_apart(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+        fake.failing["files.update"] = ConnectionResetError("reset")
+
+        handler.retry_pending_permissions()
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 1
+        assert stats["pending_clear_failures"] == 1
+        assert stats["pending_flag_failures"] == 0
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackGrantPending"] == "true"  # the next run grants again
+
+    def test_transfer_owner_is_mapped_again_by_slack_user_id(self, tmp_path, downloads):
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(run1, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        run2.user_map["UA"] = "alice.new@example.com"
+        run2.retry_pending_permissions()
+
+        (retry,) = [
+            kw for kw in fake.permission_calls()[1:] if kw.get("transferOwnership")
+        ]
+        assert retry["body"]["emailAddress"] == "alice.new@example.com"
+        assert run2.get_file_statistics()["pending_retried"] == 1
 
     def test_nothing_to_do_without_drive(self, tmp_path):
         handler = make_handler(FakeDrive(), tmp_path)
