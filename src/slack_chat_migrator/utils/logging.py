@@ -31,9 +31,14 @@ PRIVATE_FILE_MODE = 0o600
 
 _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*", re.IGNORECASE)
 # Secrets in URL query strings.  Slack export file URLs carry the file
-# token as ``?t=xoxe-...``.
+# token as ``?t=xoxe-...``.  The value stops at ``]``, so the ``[...]``
+# marker that _unformattable_message appends isn't swallowed, and an
+# already redacted value is skipped: every record is sanitised several
+# times (once per handler's filter, then by the formatter), and each pass
+# would otherwise add another ``]``.
 _QUERY_SECRET_RE = re.compile(
-    r"([?&](?:t|token|access_token|key)=)[^&\s#'\"\]]+", re.IGNORECASE
+    r"([?&](?:t|token|access_token|key)=)(?!\[REDACTED\])[^&\s#'\"\]]+",
+    re.IGNORECASE,
 )
 _KEY_VALUE_SECRET_RE = re.compile(
     r"\b(token|access_token|key)=[A-Za-z0-9\-._~+/]+=*", re.IGNORECASE

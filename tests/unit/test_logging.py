@@ -964,6 +964,77 @@ class TestSlackTokenRedaction:
         text = "Processing channel xoxo-party and taxonomy=fine"
         assert sanitize_for_log(text) == text
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            SLACK_FILE_URL,
+            "https://x.slack.com/f?a=1&t=abc.def-123&b=2",
+            "GET /api?token=abc&access_token=def&key=ghi#frag",
+            "[?t=xoxe-1-abc] and [&key=K]",
+            "Authorization: Bearer ya29.abc-DEF_ghi==",
+            "token=abc123 key=xyz access_token=q",
+            "xoxb-12345-67890-AbCdEf and xapp-1-A0-123-abc",  # pragma: allowlist secret
+            "refresh xoxe.xoxp-1-Mi0yLTE2 done",  # pragma: allowlist secret
+            "already ?t=[REDACTED] and Bearer [REDACTED] and xoxb-[REDACTED]",
+        ],
+    )
+    def test_sanitizing_twice_changes_nothing(self, text):
+        """Each record is sanitised once per handler and again when formatted."""
+        once = sanitize_for_log(text)
+        assert sanitize_for_log(once) == once
+        assert sanitize_for_log(sanitize_for_log(once)) == once
+        # Redaction adds exactly one "]" per new marker and drops none.
+        assert once.count("]") - once.count("[REDACTED]") == text.count(
+            "]"
+        ) - text.count("[REDACTED]")
+
+    def test_exact_lines_through_every_handler(self, tmp_path):
+        """One channel ERROR record reaches the console, migration.log and the
+        channel log: three filters and three formatter passes."""
+        import io
+        import re
+
+        setup_logger(output_dir=str(tmp_path))
+        stream = io.StringIO()
+        logging.getLogger("slack_chat_migrator").handlers[0].setStream(stream)
+        channel_handler = setup_channel_logger(str(tmp_path), "general")
+        log_with_context(
+            logging.ERROR,
+            "Download failed for https://files.slack.com/f/x.png?t=xoxe-1-A2b"
+            " (https://slack.com/api/x?token=S3&page=2, Bearer ya29.Q)",
+            channel="general",
+        )
+        logging.getLogger("slack_chat_migrator").warning(
+            "fetch %s?key=%s", "https://files.slack.com/f/y.png", "K9", "extra"
+        )
+        channel_handler.close()
+        expected = (
+            "Download failed for https://files.slack.com/f/x.png?t=[REDACTED]"
+            " (https://slack.com/api/x?token=[REDACTED]&page=2, Bearer [REDACTED])"
+        )
+        prefix = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - ERROR - "
+        outputs = {
+            "console": stream.getvalue(),
+            "main": (tmp_path / "migration.log").read_text(),
+            "channel": (
+                tmp_path / "channel_logs" / "general_migration.log"
+            ).read_text(),
+        }
+        for name, text in outputs.items():
+            lines = [ln for ln in text.splitlines() if "Download failed" in ln]
+            assert len(lines) == 1, name
+            assert re.fullmatch(prefix + re.escape(expected), lines[0]), (
+                name,
+                lines[0],
+            )
+        for name in ("console", "main"):
+            [line] = [ln for ln in outputs[name].splitlines() if "fetch https://" in ln]
+            message = line.split(" - WARNING - ", 1)[1]
+            assert message.startswith(
+                "fetch https://files.slack.com/f/y.png?key=[REDACTED] [TypeError at "
+            ), (name, message)
+            assert message.endswith("; unused arguments: extra]"), (name, message)
+
     def test_filter_redacts_message_args_and_extras(self):
         record = logging.LogRecord(
             "slack_chat_migrator",
