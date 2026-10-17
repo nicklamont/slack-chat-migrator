@@ -521,6 +521,24 @@ class TestSetChannelFolderPermissions:
         assert create["sendNotificationEmail"] is False
 
 
+class TestDefaultExternalCheck:
+    """Without is_external, the admin's domain and workspace_domains are internal."""
+
+    def test_secondary_domain_grant_failure_fails_the_sync(self):
+        fake = FakeDrive(reject_grants_to={"c@corp.example.net", "x@other.org"})
+        fake.add_folder("F", "general", "ROOT")
+        fm = FolderManager(
+            DriveAdapter(fake), "Example.com", workspace_domains=["@CORP.example.net "]
+        )
+
+        result = fm.set_channel_folder_permissions(
+            "F", "general", ["c@corp.example.net", "x@other.org"]
+        )
+
+        assert result.failed_grants == ("c@corp.example.net",)
+        assert result.external_failures == ("x@other.org",)
+
+
 class TestSyncChannelFolder:
     """Lookup and sync in one call, with failures reported (SF5)."""
 

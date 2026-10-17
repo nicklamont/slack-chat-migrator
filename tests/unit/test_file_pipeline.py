@@ -242,6 +242,76 @@ class TestGrants:
         assert not any(kw.get("transferOwnership") for kw in calls)
 
 
+class TestWorkspaceDomains:
+    """Users on any internal domain count as internal (Refs #89)."""
+
+    CORP = "carol@corp.example.net"
+
+    def _handler(self, fake, tmp_path, *, resolver=None, domains=()):
+        config = MigrationConfig(
+            shared_drive=SharedDriveConfig(name=DRIVE_NAME),
+            workspace_domains=list(domains),
+        )
+        handler = make_handler(fake, tmp_path, config=config)
+        handler.user_resolver = resolver
+        return handler
+
+    @staticmethod
+    def _post(handler, downloads, sender):
+        downloads.content["F1"] = b"x"
+        handler.state.context.current_channel = "c"
+        return handler.upload_attachment(
+            {
+                "id": "F1",
+                "name": "a.pdf",
+                "user": "UC",
+                "url_private": "https://files.slack.com/files-pri/T-F1/a.pdf",
+            },
+            "c",
+            "spaces/S",
+            None,
+            sender,
+        )
+
+    @staticmethod
+    def _grants(fake):
+        return [
+            (kw["body"]["emailAddress"], kw["body"]["role"])
+            for kw in fake.permission_calls()
+        ]
+
+    def test_secondary_domain_poster_gets_writer_grant(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = self._handler(fake, tmp_path, domains=[" Corp.Example.NET "])
+
+        result = self._post(handler, downloads, self.CORP)
+
+        assert result.success
+        assert self._grants(fake) == [(self.CORP, "writer")]
+
+    def test_unlisted_domain_poster_gets_no_grant(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = self._handler(fake, tmp_path, domains=["corp.example.net"])
+
+        assert self._post(handler, downloads, "ext@other.org").success
+
+        assert self._grants(fake) == []
+
+    def test_the_resolver_decides_when_there_is_one(self, tmp_path, downloads):
+        """The resolver's answer wins, so the whole tool agrees on who is internal."""
+        fake = FakeDrive()
+        resolver = MagicMock()
+        resolver.workspace_admin = "admin@example.com"
+        resolver.is_external_user = lambda email: (
+            not email.endswith(("@example.com", "@corp.example.net"))
+        )
+        handler = self._handler(fake, tmp_path, resolver=resolver)  # no domains
+
+        assert self._post(handler, downloads, self.CORP).success
+
+        assert self._grants(fake) == [(self.CORP, "writer")]
+
+
 class TestOwnershipTransfer:
     """Transfers are opt-in and never disable Drive's notification (CR1)."""
 

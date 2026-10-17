@@ -18,6 +18,10 @@ from slack_chat_migrator.constants import (
     DRIVE_ROLE_READER,
     HTTP_BAD_REQUEST,
 )
+from slack_chat_migrator.services.drive.domains import (
+    internal_domains,
+    is_external_email,
+)
 from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_ERRORS,
     PermissionChange,
@@ -119,6 +123,7 @@ class FolderManager:
         drive_service: DriveAdapter,
         workspace_domain: str | None = None,
         *,
+        workspace_domains: Iterable[str] = (),
         is_external: Callable[[str], bool] | None = None,
         protected_emails: Callable[[], Iterable[str]] | None = None,
         on_sync_result: Callable[[str, FolderSyncResult], None] | None = None,
@@ -127,10 +132,14 @@ class FolderManager:
 
         Args:
             drive_service: DriveAdapter instance for Google Drive API calls
-            workspace_domain: The workspace domain for permissions
+            workspace_domain: The workspace admin's domain.
+            workspace_domains: Further internal domains
+                (``config.workspace_domains``).
             is_external: Tells whether an email belongs to a user outside the
-                workspace (e.g. a Slack Connect member).  Defaults to
-                comparing the email's domain with *workspace_domain*.
+                workspace (e.g. a Slack Connect member); pass
+                ``UserResolver.is_external_user``.  Defaults to checking the
+                email's domain against *workspace_domain* and
+                *workspace_domains*, as the resolver does.
             protected_emails: Returns accounts whose folder access a
                 permission sync must never remove (the workspace admin).
             on_sync_result: Called with the channel and the result of every
@@ -139,7 +148,8 @@ class FolderManager:
         """
         self.drive_service = drive_service
         self.workspace_domain = workspace_domain
-        self._is_external = is_external or self._is_outside_workspace_domain
+        self._internal_domains = internal_domains(workspace_domain, workspace_domains)
+        self._is_external = is_external or self._is_outside_workspace_domains
         self._protected_emails = protected_emails or (lambda: ())
         self._on_sync_result = on_sync_result or (lambda _channel, _result: None)
         # (parent_folder_id, folder name) -> folder ID, shared by every lookup.
@@ -150,11 +160,9 @@ class FolderManager:
         self.restricted_folders: set[str] = set()
         self.restriction_failures: dict[str, int] = {}
 
-    def _is_outside_workspace_domain(self, email: str) -> bool:
-        """Default external check: the email's domain isn't the workspace's."""
-        if not self.workspace_domain:
-            return False
-        return email.rsplit("@", 1)[-1].lower() != self.workspace_domain.lower()
+    def _is_outside_workspace_domains(self, email: str) -> bool:
+        """Default external check: the email is on no internal domain."""
+        return is_external_email(email, self._internal_domains)
 
     def remember_folder(
         self,

@@ -27,6 +27,10 @@ from slack_chat_migrator.services.drive import (
     FolderManager,
     SharedDriveManager,
 )
+from slack_chat_migrator.services.drive.domains import (
+    internal_domains,
+    is_external_email,
+)
 from slack_chat_migrator.services.drive.drive_uploader import SOURCE_SLACK_ID
 from slack_chat_migrator.services.drive.folder_manager import (
     FolderLookup,
@@ -144,9 +148,12 @@ class FileHandler:
             chat_service: The Chat API service instance
             folder_id: The ID of the root folder in Drive to store files (can be None for auto-creation)
             config: Migration configuration
-            workspace_domain: Workspace domain for permission checks
+            workspace_domain: The workspace admin's domain.  With
+                ``config.workspace_domains`` it makes up the internal domains
+                when there is no *user_resolver*.
             user_map: Slack user ID to Google email mapping
-            user_resolver: User resolver for external user detection
+            user_resolver: Decides who is external
+                (``is_external_user``); may be None.
             state: Mutable migration state
             dry_run: Whether to run in dry run mode
             channels_meta: Channel name -> ``channels.json`` record.  A
@@ -160,6 +167,9 @@ class FileHandler:
         self.chat_service = chat_service
         self.config = config
         self.workspace_domain = workspace_domain
+        self._internal_domains = internal_domains(
+            workspace_domain, config.workspace_domains
+        )
         self.user_map = user_map
         self.user_resolver = user_resolver
         self.state = state
@@ -207,11 +217,12 @@ class FileHandler:
         self.folder_manager = FolderManager(
             drive_service,
             workspace_domain,
+            workspace_domains=config.workspace_domains,
             is_external=self._is_external_email,
             protected_emails=self._protected_emails,
             on_sync_result=self._count_folder_sync,
         )
-        self.drive_uploader = DriveFileUploader(drive_service, workspace_domain)
+        self.drive_uploader = DriveFileUploader(drive_service)
         self.chat_uploader = ChatFileUploader(chat_service)
 
         # Initialize the root folder and shared drive
@@ -625,7 +636,7 @@ class FileHandler:
         username = file_obj.get("user", None)
         if username:
             user_email = self.user_map.get(username)
-            if user_email and self.user_resolver.is_external_user(user_email):
+            if user_email and self._is_external_email(user_email):
                 self._increment_stat("external_user_files")
 
     @staticmethod
@@ -1247,10 +1258,15 @@ class FileHandler:
     def _is_external_email(self, email: str) -> bool:
         """True for an email outside the workspace.
 
-        External users never get per-file grants; as channel members they
-        still get reader access to the channel folder.
+        Every internal/external decision in the files code comes here.  The
+        user resolver decides (the admin's domain plus
+        ``config.workspace_domains``); without one, the same domains are
+        checked here.  External users never get per-file grants; as channel
+        members they still get reader access to the channel folder.
         """
-        return bool(self.user_resolver.is_external_user(email))
+        if self.user_resolver is not None:
+            return bool(self.user_resolver.is_external_user(email))
+        return is_external_email(email, self._internal_domains)
 
     def _count_folder_sync(self, channel: str, result: FolderSyncResult) -> None:
         """Count what failed in a channel-folder permission sync."""

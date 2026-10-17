@@ -17,15 +17,9 @@ from slack_chat_migrator.services.drive.drive_uploader import (
 # -------------------------------------------------------------------
 
 
-def _make_uploader(
-    workspace_domain="example.com",
-):
+def _make_uploader():
     """Build a DriveFileUploader with a mocked drive service."""
-    drive_service = MagicMock()
-    return DriveFileUploader(
-        drive_service=drive_service,
-        workspace_domain=workspace_domain,
-    )
+    return DriveFileUploader(drive_service=MagicMock())
 
 
 def _http_error(status=404, reason="Not Found"):
@@ -456,9 +450,8 @@ class TestInit:
 
     def test_default_state(self):
         """Initializes with expected default attributes."""
-        uploader = _make_uploader(workspace_domain="test.com")
+        uploader = _make_uploader()
 
-        assert uploader.workspace_domain == "test.com"
         assert uploader.file_hash_cache == {}
         assert uploader.folders_pre_cached == set()
         assert uploader.current_channel is None

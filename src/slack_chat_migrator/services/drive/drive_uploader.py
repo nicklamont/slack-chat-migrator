@@ -77,19 +77,16 @@ def _fit_app_property(key: str, value: str) -> str:
 class DriveFileUploader:
     """Handles file uploads to Google Drive."""
 
-    def __init__(
-        self,
-        drive_service: DriveAdapter,
-        workspace_domain: str | None = None,
-    ) -> None:
+    def __init__(self, drive_service: DriveAdapter) -> None:
         """Initialize the DriveFileUploader.
+
+        It grants no access itself, so it doesn't need to know who is
+        internal; FileHandler decides that.
 
         Args:
             drive_service: DriveAdapter instance wrapping the Google Drive API
-            workspace_domain: The workspace domain for permissions
         """
         self.drive_service = drive_service
-        self.workspace_domain = workspace_domain
         # Every cache is scoped to a folder: content found in one channel's
         # folder is never linked from another channel.
         # (folder_id, md5) -> file
