@@ -18,12 +18,14 @@ from slack_chat_migrator.cli.common import (
     EXIT_OK,
     YES_ENVVAR,
     InterruptHandler,
+    PromptCancelled,
     cli,
     common_options,
     config_was_given,
     confirm_action,
     deprecated_option,
     handle_exception,
+    report_prompt_cancel,
     show_security_warning,
     stdin_is_interactive,
     yes_option,
@@ -134,6 +136,9 @@ def migrate(
             exit_code = _run_complete_mode(
                 creds_path, workspace_admin, config, verbose, debug_api, yes
             )
+        except PromptCancelled:
+            report_prompt_cancel("No spaces were changed.")
+            exit_code = EXIT_INTERRUPTED
         except KeyboardInterrupt:
             click.echo("\nInterrupted.", err=True)
             exit_code = EXIT_INTERRUPTED
@@ -182,9 +187,9 @@ def migrate(
 def run_orchestrator(orchestrator: MigrationOrchestrator, export_path: str) -> int:
     """Run prerequisites, the migration and cleanup, and return the exit code.
 
-    Exit codes: 0 success with no errors; 1 failed, aborted, cancelled or
-    completed with errors; 130 interrupted (Ctrl-C).  Click usage errors
-    propagate (exit 2).
+    Exit codes: 0 success with no errors; 1 failed, aborted, a confirmation
+    declined, or completed with errors; 130 interrupted (Ctrl-C, or Ctrl-C
+    or Ctrl-D at a prompt).  Click usage errors propagate (exit 2).
 
     Args:
         orchestrator: The configured orchestrator.
@@ -200,6 +205,14 @@ def run_orchestrator(orchestrator: MigrationOrchestrator, export_path: str) -> i
                 orchestrator.validate_prerequisites()
                 exit_code = orchestrator.run_migration()
             except click.ClickException:
+                raise
+            except PromptCancelled:
+                # Every prompt comes before anything is migrated or validated.
+                report_prompt_cancel(
+                    "Nothing was validated."
+                    if orchestrator.args.dry_run
+                    else "Nothing was migrated."
+                )
                 raise
             except Exception as e:
                 handle_exception(e)
@@ -239,7 +252,8 @@ def _run_complete_mode(
 
     Returns:
         The exit code: 0 if every listed space was completed (or none were
-        found), 1 if anything failed or the user cancelled.
+        found), 1 if anything failed or the user declined.  Ctrl-C or end
+        of input at the prompt raises :class:`PromptCancelled` (exit 130).
     """
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
     from slack_chat_migrator.services.spaces.space_creator import (
@@ -958,9 +972,10 @@ class MigrationOrchestrator:
         """Execute the main migration logic.
 
         Returns:
-            The exit code: 0 when the run succeeded with no errors; 1 when it
-            was cancelled, completed with errors, or (validation) found
-            unmapped users.
+            The exit code: 0 when the run succeeded with no errors; 1 when a
+            confirmation was declined, it completed with errors, or
+            (validation) it found unmapped users.  Ctrl-C or end of input at
+            a prompt raises :class:`PromptCancelled` (exit 130).
         """
         if self.args.dry_run:
             # Explicit dry run mode

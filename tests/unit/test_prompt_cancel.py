@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -75,6 +76,34 @@ class TestCtrlCAtAPrompt:
         assert "Cancelled." in result.output
         assert "Aborted!" not in result.output
         assert not (tmp_path / "out.yaml").exists()
+
+    @pytest.mark.parametrize("stdin", ["", _CtrlCInput()], ids=["eof", "ctrl-c"])
+    def test_validate_init_offer(self, tmp_path: Path, stdin: Any) -> None:
+        """validate's "Run init now?" (missing config) goes through the group."""
+        with (
+            patch(
+                "slack_chat_migrator.cli.validate_cmd.stdin_is_interactive",
+                return_value=True,
+            ),
+            patch("slack_chat_migrator.cli.common.log_with_context") as log,
+        ):
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "validate",
+                    "--export_path",
+                    str(tmp_path),
+                    "--config",
+                    str(tmp_path / "missing.yaml"),
+                ],
+                input=stdin,
+            )
+        assert result.exit_code == EXIT_INTERRUPTED, result.output
+        assert "Run init now?" in result.output
+        assert "\nCancelled.\n" in result.output
+        log.assert_called_once_with(
+            logging.WARNING, "Cancelled at a prompt (Ctrl-C or end of input)."
+        )
 
     def test_ctrl_c_outside_a_prompt(self) -> None:
         with patch(

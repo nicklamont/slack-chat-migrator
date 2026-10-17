@@ -7,6 +7,7 @@ Google APIs: they stop at a prompt, or the final migration step is stubbed.
 from __future__ import annotations
 
 import contextlib
+import io
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,13 @@ from tests.integration.conftest import (
 )
 
 pytestmark = pytest.mark.integration
+
+
+class _CtrlCInput(io.BytesIO):
+    """stdin on which the user presses Ctrl-C at the first prompt."""
+
+    def readline(self, *args: Any) -> bytes:
+        raise KeyboardInterrupt
 
 
 @contextlib.contextmanager
@@ -84,7 +92,7 @@ def _live(
     tmp_path: Path,
     export: Path,
     *extra: str,
-    stdin: str = "",
+    stdin: str | io.BytesIO = "",
     interactive: bool = True,
     config_text: str = "exclude_channels: []\n",
 ) -> Result:
@@ -135,7 +143,10 @@ def _dry_run(tmp_path: Path, export: Path, config_text: str, **kwargs: Any) -> R
 
 
 class TestLivePrompts:
-    """Declining a prompt, or having no one to answer it, exits 1."""
+    """Declining a prompt, or having no one to answer it, exits 1.
+
+    Cancelling one (Ctrl-C or end of input) exits 130.
+    """
 
     def test_decline_unmapped_prompt_exits_1(self, tmp_path: Path) -> None:
         result = _live(tmp_path, _export(tmp_path, unmapped=True), stdin="n\n")
@@ -147,11 +158,28 @@ class TestLivePrompts:
         assert result.exit_code == 1, result.output
         assert "Migration cancelled" in result.output
 
-    def test_eof_at_prompt_exits_130(self, tmp_path: Path) -> None:
-        """End of input (Ctrl-D) at a prompt is a cancel, like Ctrl-C."""
-        result = _live(tmp_path, _export(tmp_path), stdin="")
+    @pytest.mark.parametrize(
+        "unmapped", [False, True], ids=["final-confirmation", "unmapped-users"]
+    )
+    @pytest.mark.parametrize("stdin", ["", "ctrl-c"], ids=["eof", "ctrl-c"])
+    def test_cancel_at_prompt_exits_130_and_says_so(
+        self, tmp_path: Path, stdin: str, unmapped: bool
+    ) -> None:
+        """Ctrl-C or end of input (Ctrl-D) at a prompt cancels: exit 130."""
+        result = _live(
+            tmp_path,
+            _export(tmp_path, unmapped=unmapped),
+            stdin=_CtrlCInput() if stdin == "ctrl-c" else stdin,
+        )
         assert result.exit_code == 130, result.output
+        # Said on the console, and logged as a warning
+        assert "\nCancelled. Nothing was migrated.\n" in result.output
+        assert (
+            "Cancelled at a prompt (Ctrl-C or end of input). Nothing was migrated."
+            in result.output
+        )
         assert "Migration cancelled" not in result.output
+        assert "Migration interrupted" not in result.output
 
     def test_no_tty_without_yes_exits_1_before_doing_anything(
         self, tmp_path: Path

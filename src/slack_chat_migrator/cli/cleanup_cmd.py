@@ -9,11 +9,14 @@ import click
 
 from slack_chat_migrator.cli.common import (
     EXIT_FAILURE,
+    EXIT_INTERRUPTED,
+    PromptCancelled,
     cli,
     common_options,
     config_was_given,
     deprecated_command,
     handle_exception,
+    report_prompt_cancel,
     yes_option,
 )
 from slack_chat_migrator.cli.migrate_cmd import (
@@ -82,7 +85,10 @@ def cleanup(
         result = cleanup_import_mode_spaces(
             ChatAdapter(chat), confirm=completion_confirmer(yes)
         )
-    except Exception as e:  # Ctrl-C is left to the CLI group (exit 130)
+    except PromptCancelled:
+        report_prompt_cancel("No spaces were changed.")
+        raise click.exceptions.Exit(EXIT_INTERRUPTED) from None
+    except Exception as e:  # other Ctrl-C is left to the CLI group (exit 130)
         handle_exception(e)
         sys.exit(EXIT_FAILURE)
 

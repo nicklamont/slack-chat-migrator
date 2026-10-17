@@ -757,6 +757,35 @@ class TestInterruptHandler:
             with InterruptHandler(export_path="fake"):
                 raise KeyboardInterrupt()
 
+    def test_keyboard_interrupt_subclass_shows_the_resume_panel(self):
+        """A KeyboardInterrupt subclass is an interrupt too (issubclass)."""
+        from slack_chat_migrator.cli.common import InterruptHandler
+
+        class Stop(KeyboardInterrupt):
+            pass
+
+        with patch.object(InterruptHandler, "_print_interrupt_summary") as panel:
+            with pytest.raises(KeyboardInterrupt) as raised:
+                with InterruptHandler(export_path="fake"):
+                    raise Stop()
+        assert isinstance(raised.value, Stop)
+        panel.assert_called_once()
+
+    def test_prompt_cancel_shows_no_resume_panel(self):
+        """A cancel at a prompt isn't an interrupted migration."""
+        from slack_chat_migrator.cli.common import InterruptHandler, PromptCancelled
+
+        renderer = MagicMock()
+        with patch.object(InterruptHandler, "_print_interrupt_summary") as panel:
+            # Caught as KeyboardInterrupt so a regression fails this test
+            # instead of interrupting the pytest session.
+            with pytest.raises(KeyboardInterrupt) as raised:
+                with InterruptHandler(export_path="fake", renderer=renderer):
+                    raise PromptCancelled()
+        assert isinstance(raised.value, PromptCancelled)
+        panel.assert_not_called()
+        renderer.stop.assert_not_called()
+
 
 class TestDeprecatedOption:
     """Tests for the deprecated_option helper.

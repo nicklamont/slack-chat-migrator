@@ -249,9 +249,11 @@ slack-chat-migrator cleanup           # Complete import mode (deprecated — use
 | Exit code | Meaning |
 |-----------|---------|
 | `0` | Success with no errors |
-| `1` | Failed, aborted (`abort_on_error`), answered "no" at a prompt, or completed with errors: a channel had errors, a space was left in import mode, an import completion failed, or `validate`/`--dry_run` found unmapped users |
+| `1` | Failed, aborted (`abort_on_error`), declined a confirmation (the `migrate`/`validate` prompts, `migrate --complete`, `cleanup`, `validate`'s "Run init now?", `init`'s "Continue anyway?" about export structure issues), or completed with errors: a channel had errors, a space was left in import mode, an import completion failed, or `validate`/`--dry_run` found unmapped users |
 | `2` | Usage error (missing or invalid options) |
-| `130` | Interrupted with Ctrl-C, including at a prompt, or end of input (Ctrl-D) at a prompt |
+| `130` | Interrupted with Ctrl-C, or cancelled at a prompt with Ctrl-C or end of input (Ctrl-D): the command prints and logs "Cancelled." |
+
+Declining `init`'s "Overwrite?" or `setup`'s "Continue anyway?" (no quota project) just stops the command, with status 0.
 
 A live `migrate` asks for confirmation before it starts. To run it unattended (cron, CI, `nohup`), pass `--yes` (or set `SLACK_CHAT_MIGRATOR_YES=1`), which answers yes to every prompt, including "proceed despite unmapped users". Without a terminal and without `--yes`, a live run exits with status 1 before doing anything, instead of silently doing nothing. Dry runs and `validate` never need `--yes`.
 

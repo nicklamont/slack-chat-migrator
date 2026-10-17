@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -12,8 +14,13 @@ from click.testing import CliRunner
 from googleapiclient.errors import HttpError
 
 from slack_chat_migrator.cli.commands import cli
-from slack_chat_migrator.cli.common import confirm_action
-from slack_chat_migrator.cli.migrate_cmd import MigrationOrchestrator
+from slack_chat_migrator.cli.common import (
+    EXIT_INTERRUPTED,
+    InterruptHandler,
+    PromptCancelled,
+    confirm_action,
+)
+from slack_chat_migrator.cli.migrate_cmd import MigrationOrchestrator, run_orchestrator
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.exceptions import (
     ConfirmationRequiredError,
@@ -75,8 +82,23 @@ COMPLETE_ARGS = [
 ]
 
 
+class _CtrlCInput(io.BytesIO):
+    """stdin on which the user presses Ctrl-C at the first prompt."""
+
+    def readline(self, *args: Any) -> bytes:
+        raise KeyboardInterrupt
+
+
+#: What a cancel at the --complete or cleanup prompt says on the console,
+#: and in the log.
+COMPLETION_CANCELLED = (
+    "\nCancelled. No spaces were changed.\n",
+    "Cancelled at a prompt (Ctrl-C or end of input). No spaces were changed.",
+)
+
+
 def _run_complete(
-    fake: FakeChat, args: list[str], *, interactive: bool = False, stdin: str = ""
+    fake: FakeChat, args: list[str], *, interactive: bool = False, stdin: Any = ""
 ) -> Any:
     with (
         patch("slack_chat_migrator.utils.api.get_gcp_service", return_value=object()),
@@ -163,6 +185,21 @@ class TestMigrateComplete:
         assert result.exit_code == 130
         assert fake.completed == []
 
+    @pytest.mark.parametrize("stdin", ["", "ctrl-c"], ids=["eof", "ctrl-c"])
+    def test_cancel_at_prompt_exits_130_and_changes_nothing(self, stdin: str) -> None:
+        fake = FakeChat([dict(s) for s in SPACES])
+        result = _run_complete(
+            fake,
+            COMPLETE_ARGS,
+            interactive=True,
+            stdin=_CtrlCInput() if stdin == "ctrl-c" else stdin,
+        )
+        assert result.exit_code == 130, result.output
+        for said in COMPLETION_CANCELLED:
+            assert said in result.output
+        assert "Interrupted." not in result.output
+        assert fake.completed == []
+
     def test_nothing_to_do_exits_zero(self) -> None:
         fake = FakeChat([SPACES[2], SPACES[3]])
         result = _run_complete(fake, COMPLETE_ARGS)
@@ -177,27 +214,52 @@ class TestMigrateComplete:
 
     def test_deprecated_cleanup_uses_same_flow(self) -> None:
         fake = FakeChat([dict(s) for s in SPACES])
-        with (
-            patch(
-                "slack_chat_migrator.cli.cleanup_cmd.get_gcp_service",
-                return_value=object(),
-            ),
-            patch("slack_chat_migrator.cli.cleanup_cmd.ChatAdapter", lambda raw: fake),
-            patch(INTERACTIVE, return_value=False),
-        ):
-            result = CliRunner().invoke(
-                cli,
-                [
-                    "cleanup",
-                    "--creds_path",
-                    "f.json",
-                    "--workspace_admin",
-                    "a@b.com",
-                    "-y",
-                ],
-            )
+        result = _run_cleanup(fake, ["-y"])
         assert result.exit_code == 0, result.output
         assert sorted(fake.completed) == ["spaces/eng", "spaces/run"]
+
+    @pytest.mark.parametrize("stdin", ["", "ctrl-c"], ids=["eof", "ctrl-c"])
+    def test_cancel_at_cleanup_prompt_exits_130_and_changes_nothing(
+        self, stdin: str
+    ) -> None:
+        fake = FakeChat([dict(s) for s in SPACES])
+        result = _run_cleanup(
+            fake,
+            [],
+            interactive=True,
+            stdin=_CtrlCInput() if stdin == "ctrl-c" else stdin,
+        )
+        assert result.exit_code == 130, result.output
+        for said in COMPLETION_CANCELLED:
+            assert said in result.output
+        assert "Interrupted." not in result.output
+        assert fake.completed == []
+
+
+def _run_cleanup(
+    fake: FakeChat, extra: list[str], *, interactive: bool = False, stdin: Any = ""
+) -> Any:
+    """Run the deprecated ``cleanup`` command against *fake*."""
+    with (
+        patch(
+            "slack_chat_migrator.cli.cleanup_cmd.get_gcp_service",
+            return_value=object(),
+        ),
+        patch("slack_chat_migrator.cli.cleanup_cmd.ChatAdapter", lambda raw: fake),
+        patch(INTERACTIVE, return_value=interactive),
+    ):
+        return CliRunner().invoke(
+            cli,
+            [
+                "cleanup",
+                "--creds_path",
+                "f.json",
+                "--workspace_admin",
+                "a@b.com",
+                *extra,
+            ],
+            input=stdin,
+        )
 
 
 class TestConfirmAction:
@@ -216,8 +278,6 @@ class TestConfirmAction:
     def test_ctrl_c_or_eof_at_prompt_cancels(self) -> None:
         """Ctrl-C/Ctrl-D at the prompt stops the command (exit 130), not "no"."""
         import click
-
-        from slack_chat_migrator.cli.common import PromptCancelled
 
         with (
             patch(INTERACTIVE, return_value=True),
@@ -281,6 +341,41 @@ class TestCleanupGating:
         orch.live_migration_finished = True
         orch.cleanup()
         mock_run.assert_not_called()
+
+
+class TestRunOrchestratorPromptCancel:
+    """Ctrl-C or end of input at a migrate/validate prompt says so, exit 130."""
+
+    @pytest.mark.parametrize(
+        ("dry_run", "unchanged"),
+        [(False, "Nothing was migrated."), (True, "Nothing was validated.")],
+        ids=["migrate", "validate"],
+    )
+    def test_reports_cancel_and_exits_130(
+        self, dry_run: bool, unchanged: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        orch = _orchestrator(dry_run=dry_run)
+        with (
+            patch.object(orch, "validate_prerequisites"),
+            patch.object(orch, "run_migration", side_effect=PromptCancelled()),
+            patch.object(orch, "cleanup") as cleanup,
+            patch("slack_chat_migrator.cli.migrate_cmd.show_security_warning"),
+            patch.object(InterruptHandler, "_print_interrupt_summary") as panel,
+            patch("slack_chat_migrator.cli.common.log_with_context") as log,
+        ):
+            try:
+                exit_code = run_orchestrator(orch, "exp")
+            except KeyboardInterrupt:  # fail the test, not the pytest session
+                pytest.fail("PromptCancelled escaped run_orchestrator")
+        assert exit_code == EXIT_INTERRUPTED
+        assert f"\nCancelled. {unchanged}\n" in capsys.readouterr().err
+        log.assert_called_once_with(
+            logging.WARNING,
+            f"Cancelled at a prompt (Ctrl-C or end of input). {unchanged}",
+        )
+        # Cleanup still runs; a cancel isn't an interrupted migration
+        cleanup.assert_called_once()
+        panel.assert_not_called()
 
 
 def _live_cli(tmp_path: Any, stdin: str = "", extra: list[str] | None = None) -> Any:

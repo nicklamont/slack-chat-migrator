@@ -33,9 +33,9 @@ logger = logging.getLogger("slack_chat_migrator")
 
 #: The run succeeded with no errors.
 EXIT_OK = 0
-#: The run failed, was aborted, declined at a prompt, or completed with
-#: errors (channels with errors, incomplete imports, failed completions,
-#: unmapped users in validation).
+#: The run failed, was aborted, a ``migrate``/``cleanup`` confirmation was
+#: declined, or it completed with errors (channels with errors, incomplete
+#: imports, failed completions, unmapped users in validation).
 EXIT_FAILURE = 1
 #: Click usage errors (missing or invalid options) exit with 2.
 EXIT_USAGE = 2
@@ -48,11 +48,29 @@ class PromptCancelled(KeyboardInterrupt):
     """Ctrl-C or end of input (Ctrl-D) at a prompt.
 
     It is a :class:`KeyboardInterrupt`, so every command stops as it does
-    for Ctrl-C, and the CLI group exits with :data:`EXIT_INTERRUPTED`.
+    for Ctrl-C and exits with :data:`EXIT_INTERRUPTED`.  Whoever handles it
+    calls :func:`report_prompt_cancel` (``migrate`` and ``cleanup`` do, to
+    say what was left unchanged; the CLI group does for every other
+    command), so the console and the log say why the run ended.
     """
 
     def __init__(self, message: str = "Cancelled.") -> None:
         super().__init__(message)
+
+
+def report_prompt_cancel(unchanged: str = "") -> None:
+    """Say that the run was cancelled at a prompt, on stderr and in the log.
+
+    Args:
+        unchanged: What the cancel left untouched, as a sentence (for
+            example "Nothing was migrated."); empty to say nothing more.
+    """
+    click.echo("\nCancelled." + (f" {unchanged}" if unchanged else ""), err=True)
+    log_with_context(
+        logging.WARNING,
+        "Cancelled at a prompt (Ctrl-C or end of input)."
+        + (f" {unchanged}" if unchanged else ""),
+    )
 
 
 def _is_prompt_cancel(error: click.Abort) -> bool:
@@ -112,19 +130,24 @@ class DefaultGroup(click.Group):
         Click turns Ctrl-C (and end of input) at a prompt into
         ``click.Abort``, and Ctrl-C elsewhere into the same "Aborted!" with
         exit 1.  Handling both here gives every command one behaviour: a
-        short line on stderr and exit :data:`EXIT_INTERRUPTED`.  An Abort
-        raised on purpose (a declined ``abort=True`` prompt) is left alone.
+        short line on stderr (and, for a prompt, in the log) and exit
+        :data:`EXIT_INTERRUPTED`.  Commands that catch Ctrl-C themselves
+        (``migrate``, ``cleanup``) report it the same way and exit 130 too.
+        An Abort raised on purpose (a declined ``abort=True`` prompt) is
+        left alone.
         """
         try:
             return super().invoke(ctx)
         except click.Abort as e:
             if not _is_prompt_cancel(e):
                 raise
-            click.echo("\nCancelled.", err=True)
+            report_prompt_cancel()
             raise click.exceptions.Exit(EXIT_INTERRUPTED) from None
-        except KeyboardInterrupt as e:
-            cancelled = isinstance(e, PromptCancelled)
-            click.echo("\nCancelled." if cancelled else "\nInterrupted.", err=True)
+        except PromptCancelled:
+            report_prompt_cancel()
+            raise click.exceptions.Exit(EXIT_INTERRUPTED) from None
+        except KeyboardInterrupt:
+            click.echo("\nInterrupted.", err=True)
             raise click.exceptions.Exit(EXIT_INTERRUPTED) from None
 
 
@@ -276,7 +299,11 @@ class InterruptHandler:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        if exc_type is not KeyboardInterrupt:
+        # A cancel at a prompt isn't an interrupted migration: no resume
+        # panel (whoever catches it reports it with report_prompt_cancel).
+        if exc_type is None or not issubclass(exc_type, KeyboardInterrupt):
+            return
+        if issubclass(exc_type, PromptCancelled):
             return
 
         # Stop the live renderer so its output doesn't conflict
