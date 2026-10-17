@@ -980,35 +980,89 @@ class TestSlackTokenRedaction:
         assert "xoxe-1234567890" not in record.error_details
 
     @staticmethod
-    def _record(msg, args):
+    def _record(msg, args, lineno=1):
         return logging.LogRecord(
-            "slack_chat_migrator", logging.WARNING, __file__, 1, msg, args, None
+            "slack_chat_migrator", logging.WARNING, __file__, lineno, msg, args, None
         )
 
-    def test_filter_fails_closed_when_args_do_not_match_format(self):
-        record = self._record("download failed for %s", (XOXE_URL, "extra"))
+    def _filtered(self, msg, args, lineno=1):
+        record = self._record(msg, args, lineno)
         assert RedactingFilter().filter(record) is True
-        message = record.getMessage()
         assert record.args is None
-        assert XOXE_TAIL not in message
-        assert "download failed for %s" in message
-        assert "didn't match the format" in message
-        assert "extra" in message
+        return record.getMessage()
 
-    def test_filter_fails_closed_for_mapping_args(self):
-        record = self._record("%(url)s %(missing)s", ({"url": XOXE_URL},))
-        RedactingFilter().filter(record)
-        assert XOXE_TAIL not in record.getMessage()
-        assert "url=" in record.getMessage()
+    def test_filter_fails_closed_when_args_do_not_match_format(self):
+        message = self._filtered("download failed for %s", (XOXE_URL, "extra"), 42)
+        assert XOXE_TAIL not in message
+        assert "download failed for https://files.slack.com/" in message
+        assert "?t=[REDACTED] [" in message  # the marker's bracket survives
+        assert f"[TypeError at {__file__}:42: not all arguments converted" in message
+        assert message.endswith("; unused arguments: extra]")
+
+    @pytest.mark.parametrize(
+        ("msg", "args", "secret", "kept"),
+        [
+            (
+                "Authorization: Bearer %s",
+                ("ya29.SECRETBEARER", "extra"),
+                "SECRETBEARER",
+                "Authorization: Bearer [REDACTED]",
+            ),
+            (
+                "refreshing token=%s for %s",
+                ("SECRETTOKEN",),
+                "SECRETTOKEN",
+                "refreshing token=[REDACTED] for %s",
+            ),
+            (
+                "fetch %s?key=%s",
+                ("https://x.example/api", "SECRETKEY", 3),
+                "SECRETKEY",
+                "fetch https://x.example/api?key=[REDACTED]",
+            ),
+            (
+                "file %s?t=%s",
+                ("https://files.slack.com/f", "abc.def", "x"),
+                "abc.def",
+                "?t=[REDACTED]",
+            ),
+            (
+                "Bearer %(token)s for %(user)s",
+                ({"token": "ya29.SECRETMAP"},),
+                "SECRETMAP",
+                "Bearer [REDACTED] for %(user)s",
+            ),
+        ],
+    )
+    def test_prefix_secrets_are_redacted_after_substitution(
+        self, msg, args, secret, kept
+    ):
+        """Bearer/token=/key=/?t= are only recognisable next to their value."""
+        message = self._filtered(msg, args)
+        assert secret not in message
+        assert kept in message
+
+    def test_mapping_marker_names_the_error_and_unused_keys(self):
+        message = self._filtered(
+            "%(url)s %(missing)s", ({"url": XOXE_URL, "spare": "x"},), 7
+        )
+        assert XOXE_TAIL not in message
+        assert message.startswith("https://files.slack.com/")
+        assert f"[KeyError at {__file__}:7: 'missing'; unused arguments: spare=x]" in (
+            message
+        )
+
+    def test_percent_escapes_and_missing_args(self):
+        message = self._filtered("100%% of %s and %d", ("files",))
+        assert message.startswith("100% of files and %d [TypeError at ")
+        assert "unused arguments" not in message
 
     def test_filter_survives_unprintable_args(self):
         class Unprintable:
             def __str__(self):
                 raise RuntimeError("no")
 
-        record = self._record("%d %s", (Unprintable(), XOXE_URL))
-        RedactingFilter().filter(record)
-        message = record.getMessage()
+        message = self._filtered("%d %s", (Unprintable(), XOXE_URL))
         assert "<unprintable Unprintable>" in message
         assert XOXE_TAIL not in message
 

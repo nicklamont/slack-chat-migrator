@@ -33,7 +33,7 @@ _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*", re.IGNORECASE)
 # Secrets in URL query strings.  Slack export file URLs carry the file
 # token as ``?t=xoxe-...``.
 _QUERY_SECRET_RE = re.compile(
-    r"([?&](?:t|token|access_token|key)=)[^&\s#'\"]+", re.IGNORECASE
+    r"([?&](?:t|token|access_token|key)=)[^&\s#'\"\]]+", re.IGNORECASE
 )
 _KEY_VALUE_SECRET_RE = re.compile(
     r"\b(token|access_token|key)=[A-Za-z0-9\-._~+/]+=*", re.IGNORECASE
@@ -77,24 +77,71 @@ def _safe_str(value: Any) -> str:
         return f"<unprintable {type(value).__name__}>"
 
 
-def _unformattable_message(record: logging.LogRecord) -> str:
+#: One ``%`` placeholder: optional ``(key)``, flags, width, precision, length
+#: modifier and conversion (``%%`` included).
+_PLACEHOLDER_RE = re.compile(
+    r"%(?:\(([^)]*)\))?[#0 +\-]*(?:\*|\d+)?(?:\.(?:\*|\d+))?[hlL]?"
+    r"[diouxXeEfFgGcrsa%]"
+)
+
+
+def _unformattable_message(record: logging.LogRecord, error: Exception) -> str:
     """Build a redacted message for a record whose args don't fit its format.
 
     Logging would otherwise print the raw ``msg`` and ``args`` (secrets
-    included) to stderr when the formatter fails on the same mismatch.
+    included) to stderr when the formatter fails on the same mismatch.  The
+    args are put into the format one placeholder at a time, whatever their
+    types, *before* sanitising, so a secret that is only recognisable next
+    to its prefix (``Bearer %s``, ``token=%s``, ``?t=%s``) is still redacted.
+    Arguments without a placeholder, the exception and the call site go in
+    a trailing marker.
+
+    Args:
+        record: The record whose ``getMessage()`` failed.
+        error: The exception it raised.
+
+    Returns:
+        The sanitised message.
     """
     args = record.args
+    used: set[Any] = set()
+
     if isinstance(args, Mapping):
-        parts = [f"{_safe_str(k)}={_safe_str(v)}" for k, v in args.items()]
-    elif isinstance(args, tuple):
-        parts = [_safe_str(arg) for arg in args]
+        mapping = args
+
+        def substitute(match: re.Match[str]) -> str:
+            if match.group(0) == "%%":
+                return "%"
+            key = match.group(1)
+            if key is not None and key in mapping:
+                used.add(key)
+                return _safe_str(mapping[key])
+            return match.group(0)
+
+        text = _PLACEHOLDER_RE.sub(substitute, _safe_str(record.msg))
+        leftover = [
+            f"{_safe_str(k)}={_safe_str(v)}"
+            for k, v in mapping.items()
+            if k not in used
+        ]
     else:
-        parts = [_safe_str(args)]
-    text = (
-        f"{_safe_str(record.msg)} [log arguments didn't match the format:"
-        f" {', '.join(sanitize_for_log(part) for part in parts)}]"
-    )
-    return sanitize_for_log(text)
+        pending = list(args) if isinstance(args, tuple) else [args]
+
+        def substitute(match: re.Match[str]) -> str:
+            if match.group(0) == "%%":
+                return "%"
+            return _safe_str(pending.pop(0)) if pending else match.group(0)
+
+        text = _PLACEHOLDER_RE.sub(substitute, _safe_str(record.msg))
+        leftover = [_safe_str(arg) for arg in pending]
+
+    marker = f"{type(error).__name__} at {record.pathname}:{record.lineno}"
+    detail = _safe_str(error)
+    if detail:
+        marker += f": {detail}"
+    if leftover:
+        marker += "; unused arguments: " + ", ".join(leftover)
+    return sanitize_for_log(f"{text} [{marker}]")
 
 
 class RedactingFilter(logging.Filter):
@@ -106,8 +153,9 @@ class RedactingFilter(logging.Filter):
     which also redacts tracebacks and the final formatted line, no handler
     writes Slack file tokens or bearer tokens.  A record whose arguments
     don't match its format string fails closed: its message is replaced by
-    a redacted rendering of the format string and arguments, so logging's
-    error handler never prints the raw arguments.
+    a redacted rendering of the format string with the arguments filled in,
+    plus the error and the call site, so logging's error handler never
+    prints the raw arguments.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -121,8 +169,8 @@ class RedactingFilter(logging.Filter):
         """
         try:
             message = record.getMessage()
-        except Exception:
-            record.msg = _unformattable_message(record)
+        except Exception as e:
+            record.msg = _unformattable_message(record, e)
             record.args = None
         else:
             sanitized = sanitize_for_log(message)
