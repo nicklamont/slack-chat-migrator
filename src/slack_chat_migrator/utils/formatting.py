@@ -953,10 +953,13 @@ _URL_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*:")
 # Slack user / channel / user group IDs (``U0123``, ``W0123``, ``C0123``...).
 _SLACK_ID_RE = re.compile(r"[A-Z][A-Z0-9]+")
 
-# A literal "<" followed by a letter could open Chat markup (``<users/...>``,
-# ``<https://...|...>``, ``<customEmojis/...>``).  A zero-width space keeps
-# it text.
-_CHAT_MARKUP_START_RE = re.compile(r"<(?=[A-Za-z])")
+# A literal "<" that Chat would parse as markup: a mention (``<users/...>``),
+# a custom emoji (``<customEmojis/...>``), a link (``<scheme:...>``) or the
+# ``<target|label>`` link shape.  A zero-width space after it keeps it text;
+# any other "<" (``<b>``, ``a <c``) is left alone.
+_CHAT_MARKUP_START_RE = re.compile(
+    r"<(?=users/|customEmojis/|[A-Za-z][A-Za-z0-9+.\-]*:|[^\s<>|]+\|[^<>]*>)"
+)
 _ZERO_WIDTH_SPACE = "\N{ZERO WIDTH SPACE}"
 
 # Characters that start a code span or a token in mrkdwn.
@@ -1068,9 +1071,9 @@ def _render_prose(text: str, ctx: _ConversionContext) -> str:
     """Render escaped literal mrkdwn prose as Chat text.
 
     Entities are decoded and emoji shortcodes replaced.  A decoded ``<`` that
-    could open Chat markup is defused, so text a user typed as
+    Chat would read as markup is defused, so text a user typed as
     ``&lt;https://a|b&gt;`` or ``&lt;users/x&gt;`` stays text instead of
-    becoming a link or a mention.
+    becoming a link or a mention; ``<b>`` or ``a <c`` stay unchanged.
 
     Args:
         text: Escaped literal text (no ``<...>`` tokens or code).

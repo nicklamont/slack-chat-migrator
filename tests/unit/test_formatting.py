@@ -1267,6 +1267,49 @@ class TestEscapedTextStaysLiteral:
         assert "<users/all>" not in result
         assert result.replace(ZWSP, "") == "<users/all> ping"
 
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("&lt;users/all&gt;", "<users/all>"),
+            ("&lt;customEmojis/abc-123&gt;", "<customEmojis/abc-123>"),
+            ("&lt;mailto:a@example.com&gt;", "<mailto:a@example.com>"),
+            ("&lt;foo|bar&gt;", "<foo|bar>"),
+        ],
+    )
+    def test_chat_markup_shapes_get_a_zero_width_space(self, text, expected):
+        result = convert_formatting(text, {})
+        assert result == expected.replace("<", "<" + ZWSP, 1)
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("&lt;b&gt;", "<b>"),
+            ("a &lt;c", "a <c"),
+            ("&lt;b&gt;bold&lt;/b&gt; and x &lt;y &gt; z", "<b>bold</b> and x <y > z"),
+        ],
+    )
+    def test_other_angle_brackets_are_untouched(self, text, expected):
+        result = convert_formatting(text, {})
+        assert result == expected
+        assert ZWSP not in result
+
+    def test_rich_text_angle_brackets_are_untouched(self):
+        message = {
+            "text": "&lt;b&gt; and a &lt;c",
+            "blocks": [
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [{"type": "text", "text": "<b> and a <c"}],
+                        }
+                    ],
+                }
+            ],
+        }
+        assert convert_formatting(parse_slack_blocks(message), {}) == "<b> and a <c"
+
     def test_entities_are_decoded_once(self):
         assert convert_formatting("&amp;lt;b&amp;gt; &amp;amp;", {}) == (
             "&lt;b&gt; &amp;"
