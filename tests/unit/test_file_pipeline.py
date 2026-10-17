@@ -424,6 +424,24 @@ class TestOwnershipTransfer:
         assert handler.get_file_statistics()["ownership_transferred"] == 1
 
 
+class TestUploadErrorsAreCounted:
+    """Every upload error comes back as a counted failure (#118)."""
+
+    def test_refresh_error_during_upload_is_counted(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        assert upload(handler, downloads, "c", "F1", "UA", b"one").success
+        fake.failing["files.create"] = RefreshError("invalid_grant: not authorized")
+
+        result = upload(handler, downloads, "c", "F2", "UA", b"two")
+
+        assert not result.success
+        assert "RefreshError" in (result.error or "")
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 1
+        assert stats["success_rate"] == 50.0
+
+
 class TestGrantFailures:
     """A failed grant never fails the upload, and is retried on reuse (SF7)."""
 
@@ -1248,6 +1266,46 @@ class TestCanvasConversion:
         listings = [kw for name, kw in fake.calls if kw.get("q") == listing]
         assert len(listings) == 2  # tried again with the next upload
         assert rerun.get_file_statistics()["folder_listing_failures"] == 2
+
+    def test_failed_search_makes_no_second_canvas(self, tmp_path, doc_downloads):
+        """Listing and per-file search both fail: fail the file, no new copy."""
+        fake = FakeDrive()
+        first = post_document(make_handler(fake, tmp_path), CANVAS)
+        docs_before = len(fake.files_db)
+        folder = fake.files_db[first.drive_id]["parents"][0]
+        listing = f"'{folder}' in parents and trashed=false"
+
+        def fail_file_lookups(q):
+            looks_up_files = q == listing or q.startswith("appProperties")
+            return http_error(500) if looks_up_files else None
+
+        fake.fail_query = fail_file_lookups
+
+        rerun = make_handler(fake, tmp_path)
+        result = post_document(rerun, CANVAS)
+
+        assert not result.success
+        assert "earlier upload" in (result.error or "")
+        assert len(fake.files_db) == docs_before
+        assert rerun.get_file_statistics()["failed_uploads"] == 1
+
+    def test_failed_listing_means_one_search_per_file(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F0", "UA", b"zero")  # makes the folder
+        folder = next(iter(handler.drive_uploader.folders_pre_cached - {"SD1"}))
+        handler.drive_uploader.folders_pre_cached.discard(folder)
+        listing = f"'{folder}' in parents and trashed=false"
+        fake.fail_query = lambda q: http_error(500) if q == listing else None
+        fake.calls.clear()
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"one")
+
+        assert result.success
+        searches = [
+            kw for name, kw in fake.calls if kw.get("q", "").startswith("appProperties")
+        ]
+        assert len(searches) == 1
 
     def test_plain_csv_attachment_is_not_converted(self, tmp_path, downloads):
         fake = FakeDrive()

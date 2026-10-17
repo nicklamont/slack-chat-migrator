@@ -75,6 +75,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("slack_chat_migrator")
 
+#: Errors that fail one file without stopping the run: any Drive call error,
+#: a download error, or an OSError on the temp file.
+_FILE_ERRORS: tuple[type[BaseException], ...] = (
+    requests.RequestException,
+    OSError,
+    *DRIVE_CALL_ERRORS,
+)
+
 
 #: ``UploadResult.skip_reason`` for files that don't exist any more or aren't
 #: in Slack (deleted, hidden, external, ...).  The detailed reason is in
@@ -543,7 +551,7 @@ class FileHandler:
             self._record_result(cache_key, result)
             return result
 
-        except (HttpError, requests.RequestException, OSError) as e:
+        except _FILE_ERRORS as e:
             self._increment_stat("failed_uploads")
             log_with_context(
                 logging.ERROR,
@@ -808,16 +816,25 @@ class FileHandler:
     ) -> UploadResult | None:
         """Return this Slack file's Drive upload into *folder_id*, if any.
 
-        The upload was made earlier in this run (for another message) or by
-        an earlier run.  Missing grants are made again, as for any reused
-        file.
+        The upload was made earlier in this run (for another space) or by an
+        earlier run.  Missing grants are made again, as for any reused file.
+        If Drive can't be searched, the file fails (a re-run retries it)
+        rather than being uploaded a second time.
         """
         file_id = file_obj.get("id")
         if not folder_id or not file_id:
             return None
-        existing = self.drive_uploader.find_uploaded_slack_file(
-            folder_id, file_id, self._shared_drive_id
-        )
+        try:
+            existing = self.drive_uploader.find_uploaded_slack_file(
+                folder_id, file_id, self._shared_drive_id
+            )
+        except DRIVE_CALL_ERRORS as e:
+            # Not knowing whether it's there, don't make a second copy.
+            return UploadResult(
+                error="Could not check Drive for an earlier upload of this file:"
+                f" {type(e).__name__}: {e}",
+                name=name,
+            )
         if existing is None:
             return None
         log_with_context(
@@ -1222,7 +1239,7 @@ class FileHandler:
                 target_mime_type=target_mime_type,
             )
 
-        except (HttpError, OSError) as e:
+        except _FILE_ERRORS as e:
             return UploadResult(
                 error=f"Drive upload failed: {type(e).__name__}: {e}", name=name
             )
