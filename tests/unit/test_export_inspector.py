@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from slack_chat_migrator.services.export_inspector import ExportInspector
+from slack_chat_migrator.services.export_inspector import (
+    ExportInspector,
+    list_channel_dirs,
+)
 
 
 def _write_json(path: Path, data: object) -> None:
@@ -192,3 +195,29 @@ class TestStructureIssues:
         inspector = ExportInspector(tmp_path)
         counts = inspector.get_message_counts()
         assert counts["broken"] == 0
+
+
+class TestListChannelDirs:
+    """Channel directories are filtered and returned in a stable order."""
+
+    def test_sorted_by_name(self, tmp_path: Path) -> None:
+        for name in ["random", "general", "alpha"]:
+            (tmp_path / name).mkdir()
+        assert [d.name for d in list_channel_dirs(tmp_path)] == [
+            "alpha",
+            "general",
+            "random",
+        ]
+
+    def test_skips_non_channel_dirs(self, tmp_path: Path) -> None:
+        for name in ["general", ".git", "__MACOSX", "FC:F05UA7XQXHS"]:
+            (tmp_path / name).mkdir()
+        (tmp_path / "users.json").write_text("[]")
+        assert [d.name for d in list_channel_dirs(tmp_path)] == ["general"]
+
+    def test_excludes_output_dir_inside_export(self, tmp_path: Path) -> None:
+        (tmp_path / "general").mkdir()
+        run_dir = tmp_path / "migration_logs" / "run_20261017_120000"
+        run_dir.mkdir(parents=True)
+        dirs = list_channel_dirs(tmp_path, exclude=[str(run_dir), None])
+        assert [d.name for d in dirs] == ["general"]

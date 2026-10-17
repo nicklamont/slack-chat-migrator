@@ -35,6 +35,7 @@ from slack_chat_migrator.services.chat.dry_run_service import DryRunChatService
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
 from slack_chat_migrator.services.drive.dry_run_service import DryRunDriveService
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
+from slack_chat_migrator.services.export_inspector import list_channel_dirs
 from slack_chat_migrator.services.files.file import FileHandler
 from slack_chat_migrator.services.messages.message_attachments import (
     MessageAttachmentProcessor,
@@ -320,7 +321,7 @@ class SlackToChatMigrator:
             )
 
         # Check that at least one channel directory exists
-        channel_dirs = [d for d in self.export_root.iterdir() if d.is_dir()]
+        channel_dirs = list_channel_dirs(self.export_root)
         if not channel_dirs:
             raise ValueError(f"No channel directories found in {self.export_root}")
 
@@ -359,7 +360,7 @@ class SlackToChatMigrator:
 
     def _get_all_channel_names(self) -> list[str]:
         """Get a list of all channel names from the export directory."""
-        return [d.name for d in self.export_root.iterdir() if d.is_dir()]
+        return [d.name for d in list_channel_dirs(self.export_root)]
 
     def _emit_phase(self, phase: str) -> None:
         """Emit a phase-change event if a progress tracker is active."""
@@ -460,8 +461,11 @@ class SlackToChatMigrator:
                         "[UPDATE MODE] No existing spaces found via API. Will create new spaces.",
                     )
 
-            # Get all channel directories
-            all_channel_dirs = [d for d in self.export_root.iterdir() if d.is_dir()]
+            # Get all channel directories in a deterministic order, never
+            # treating our own output directory as a channel.
+            all_channel_dirs = list_channel_dirs(
+                self.export_root, exclude=[self.state.context.output_dir]
+            )
             log_with_context(
                 logging.INFO,
                 f"Found {len(all_channel_dirs)} channel directories in export",

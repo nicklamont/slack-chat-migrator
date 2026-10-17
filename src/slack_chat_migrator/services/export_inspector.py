@@ -7,12 +7,56 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from slack_chat_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger(__name__)
+
+
+# Directory-name prefixes that never correspond to a Slack conversation:
+# hidden/OS metadata folders (``.git``, ``__MACOSX``) and the ``FC:<id>``
+# folders Slack uses for canvas comments.
+_NON_CHANNEL_DIR_PREFIXES = (".", "__", "FC:")
+
+
+def list_channel_dirs(
+    export_root: Path, exclude: Iterable[Path | str | None] = ()
+) -> list[Path]:
+    """Return the export's conversation directories in a stable order.
+
+    Directories are sorted by name so that processing order (and therefore
+    ``abort_on_error``, checkpoints and logs) does not depend on the
+    filesystem's directory-listing order.  Hidden folders, ``__MACOSX`` and
+    canvas-comment folders are skipped, as is any directory in *exclude*
+    (e.g. the migration output directory when the tool runs from inside the
+    export).
+
+    Args:
+        export_root: Root of the extracted Slack export.
+        exclude: Paths that must never be treated as channels.
+
+    Returns:
+        Sorted list of channel directory paths.
+    """
+    excluded = [Path(p).resolve() for p in exclude if p]
+
+    def _is_excluded(d: Path) -> bool:
+        resolved = d.resolve()
+        # Skip the excluded path itself and any directory containing it
+        # (e.g. ``migration_logs/`` when output goes to
+        # ``migration_logs/run_<timestamp>``).
+        return any(e == resolved or resolved in e.parents for e in excluded)
+
+    return sorted(
+        d
+        for d in export_root.iterdir()
+        if d.is_dir()
+        and not d.name.startswith(_NON_CHANNEL_DIR_PREFIXES)
+        and not _is_excluded(d)
+    )
 
 
 class ExportInspector:
@@ -65,14 +109,9 @@ class ExportInspector:
     def get_channel_dirs(self) -> list[Path]:
         """Return sorted list of channel subdirectories.
 
-        Filters out hidden directories (starting with ``.``) and common
-        non-channel directories like ``__MACOSX``.
+        See :func:`list_channel_dirs` for the filtering rules.
         """
-        return sorted(
-            d
-            for d in self.export_path.iterdir()
-            if d.is_dir() and not d.name.startswith((".", "__"))
-        )
+        return list_channel_dirs(self.export_path)
 
     def get_channel_count(self) -> int:
         """Number of channel subdirectories in the export."""

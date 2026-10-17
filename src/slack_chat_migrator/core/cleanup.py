@@ -22,6 +22,7 @@ from slack_chat_migrator.constants import (
     SPACE_NAME_PREFIX,
     SPACES_PAGE_SIZE,
 )
+from slack_chat_migrator.services.export_inspector import list_channel_dirs
 from slack_chat_migrator.services.spaces.regular_membership import add_regular_members
 from slack_chat_migrator.utils.logging import log_with_context
 
@@ -476,7 +477,7 @@ def _resolve_channel_name(
         f"Attempting to extract channel name from display name: {display_name}",
     )
 
-    all_channel_names = [d.name for d in export_root.iterdir() if d.is_dir()]
+    all_channel_names = [d.name for d in list_channel_dirs(export_root)]
     for ch in all_channel_names:
         ch_display = f"{SPACE_NAME_PREFIX}{ch}"
         if ch_display in display_name:
