@@ -10,6 +10,7 @@ from slack_chat_migrator.constants import DRIVE_UPLOAD_CHUNK_BYTES
 from slack_chat_migrator.services.drive.drive_uploader import (
     DriveFileUploader,
     DriveUpload,
+    DriveUploadSource,
 )
 
 # -------------------------------------------------------------------
@@ -344,7 +345,8 @@ class TestUploadFileToDrive:
 
         upload = uploader.upload_file_to_drive(str(test_file), "upload.txt", "folder1")
 
-        assert upload == DriveUpload("new_file_id", "https://new_link", reused=False)
+        assert upload == DriveUpload("new_file_id", "https://new_link")
+        assert not upload.reused
         uploader.drive_service.create_permission.assert_not_called()
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
@@ -386,7 +388,7 @@ class TestUploadFileToDrive:
         upload = uploader.upload_file_to_drive(str(test_file), "dup.txt", "folder1")
 
         assert upload == DriveUpload(
-            "existing_id", "https://existing_link", reused=True, source="hash"
+            "existing_id", "https://existing_link", source=DriveUploadSource.HASH
         )
         # create should NOT have been called
         uploader.drive_service.create_file.assert_not_called()
@@ -651,7 +653,7 @@ class TestSlackFileIndex:
         assert uploader.pre_cache_folder_file_hashes("folder1") == 1
         found = uploader.find_uploaded_slack_file("folder1", "F1")
         assert found == DriveUpload(
-            "doc1", "https://doc", reused=True, source="slack_id"
+            "doc1", "https://doc", source=DriveUploadSource.SLACK_ID
         )
         assert uploader.find_uploaded_slack_file("other_folder", "F1") is None
 

@@ -689,7 +689,7 @@ class FileHandler:
             drive_id=existing.file_id,
             name=name,
             mime_type=file_obj.get("mimetype"),
-            metadata={"reused": True, "source": existing.source},
+            metadata={"reused": True, "source": existing.source.value},
         )
 
     def _record_result(self, key: tuple[str, str, str], result: UploadResult) -> None:
@@ -1246,7 +1246,7 @@ class FileHandler:
             mime_type=target_mime_type or mime_type,
             metadata={
                 "reused": upload.reused,
-                "source": upload.source,
+                "source": upload.source.value,
                 **({"converted_to": target_mime_type} if target_mime_type else {}),
             },
         )

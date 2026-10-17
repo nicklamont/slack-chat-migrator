@@ -4,6 +4,7 @@ Google Drive file upload functionality.
 
 from __future__ import annotations
 
+import enum
 import hashlib
 import logging
 import mimetypes
@@ -36,29 +37,43 @@ from slack_chat_migrator.utils.logging import (
 logger = logging.getLogger("slack_chat_migrator")
 
 
-#: Where a DriveUpload came from.
-SOURCE_NEW = "new"  # uploaded now
-SOURCE_HASH = "hash"  # identical content already in the folder
-SOURCE_SLACK_ID = "slack_id"  # this Slack file, uploaded by an earlier run
+class DriveUploadSource(str, enum.Enum):
+    """Where a :class:`DriveUpload` came from."""
+
+    NEW = "new"  # uploaded now
+    HASH = "hash"  # identical content already in the folder
+    #: This Slack file, tagged with its Slack ID: uploaded earlier in this
+    #: run (for another message) or by an earlier run.
+    SLACK_ID = "slack_id"
 
 
-@dataclass
+SOURCE_NEW = DriveUploadSource.NEW
+SOURCE_HASH = DriveUploadSource.HASH
+SOURCE_SLACK_ID = DriveUploadSource.SLACK_ID
+
+
+@dataclass(frozen=True)
 class DriveUpload:
     """A Drive file holding an attachment.
 
     Attributes:
         file_id: Drive file ID.
         url: ``webViewLink`` of the file, if known.
-        reused: True when an existing Drive file was linked instead of
-            uploading a new one.  Ownership is never transferred for
-            reused files.
-        source: One of ``SOURCE_NEW``, ``SOURCE_HASH`` or ``SOURCE_SLACK_ID``.
+        source: Whether the file was uploaded now or an existing one is
+            linked, and how it was found.
     """
 
     file_id: str
     url: str | None = None
-    reused: bool = False
-    source: str = SOURCE_NEW
+    source: DriveUploadSource = DriveUploadSource.NEW
+
+    @property
+    def reused(self) -> bool:
+        """True when an existing Drive file is linked instead of a new upload.
+
+        Ownership is never transferred for reused files.
+        """
+        return self.source is not DriveUploadSource.NEW
 
 
 #: Cached Drive file: (file_id, webViewLink).
@@ -252,7 +267,7 @@ class DriveFileUploader:
         cached = self.slack_file_cache.get((folder_id, slack_file_id))
         if cached is None:
             return None
-        return DriveUpload(cached[0], cached[1], reused=True, source=SOURCE_SLACK_ID)
+        return DriveUpload(cached[0], cached[1], source=SOURCE_SLACK_ID)
 
     def _find_file_by_hash(
         self,
@@ -359,7 +374,7 @@ class DriveFileUploader:
         """Upload a file to Google Drive, or reuse an identical one.
 
         If a file with the same MD5 hash already exists in the folder, that
-        file is returned (``reused=True``) instead of uploading a duplicate.
+        file is returned (``source=HASH``) instead of uploading a duplicate.
         New files are sent in a resumable session, in
         :data:`DRIVE_UPLOAD_CHUNK_BYTES` chunks, so memory use doesn't grow
         with the file size.  No permissions are set here; access comes from
@@ -422,9 +437,7 @@ class DriveFileUploader:
                     f"Reusing existing file with same hash: {filename} (ID: {existing_file_id})",
                     channel=self._get_current_channel(),
                 )
-                return DriveUpload(
-                    existing_file_id, existing_url, reused=True, source=SOURCE_HASH
-                )
+                return DriveUpload(existing_file_id, existing_url, source=SOURCE_HASH)
 
             # File doesn't exist yet, proceed with upload
             log_with_context(
