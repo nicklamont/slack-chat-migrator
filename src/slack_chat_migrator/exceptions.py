@@ -5,8 +5,12 @@ class MigratorError(Exception):
     """Base exception for all migration-related errors."""
 
 
-class ConfigError(MigratorError):
-    """Raised when configuration is invalid or missing."""
+class ConfigError(MigratorError, ValueError):
+    """Raised when configuration is invalid or missing.
+
+    Also a ``ValueError``, so callers that validated config values by catching
+    ``ValueError`` keep working.
+    """
 
 
 class ExportError(MigratorError):

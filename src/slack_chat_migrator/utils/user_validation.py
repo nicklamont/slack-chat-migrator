@@ -11,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from slack_chat_migrator.core.config import MigrationConfig
+from slack_chat_migrator.core.config import MigrationConfig, normalize_channel_name
 from slack_chat_migrator.utils.logging import log_with_context
 
 
@@ -401,15 +401,16 @@ def scan_channel_members_for_unmapped_users(
         channels_to_check = []
 
         # Determine which channels to check based on include/exclude settings
+        # (names are normalized the same way as should_process_channel()).
         if config.include_channels:
             # Only check included channels
-            include_set = set(config.include_channels)
+            include_set = {normalize_channel_name(ch) for ch in config.include_channels}
             channels_to_check = [
                 ch for ch in channels_data if ch.get("name") in include_set
             ]
         else:
             # Check all channels except excluded ones
-            exclude_set = set(config.exclude_channels)
+            exclude_set = {normalize_channel_name(ch) for ch in config.exclude_channels}
             channels_to_check = [
                 ch for ch in channels_data if ch.get("name") not in exclude_set
             ]

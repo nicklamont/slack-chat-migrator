@@ -102,6 +102,8 @@ def validate(
         export_path=export_path,
         workspace_admin=workspace_admin,
         config=config,
+        # The config file was checked (or created via init) above.
+        config_required=True,
         verbose=verbose,
         debug_api=debug_api,
         dry_run=True,  # always dry run

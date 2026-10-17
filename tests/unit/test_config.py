@@ -1,5 +1,6 @@
 """Unit tests for the config module."""
 
+import logging
 import tempfile
 from pathlib import Path
 
@@ -9,10 +10,11 @@ import yaml
 from slack_chat_migrator.core.config import (
     ImportCompletionStrategy,
     MigrationConfig,
-    create_default_config,
     load_config,
+    load_space_mapping,
     should_process_channel,
 )
+from slack_chat_migrator.exceptions import ConfigError
 
 
 def test_load_config_with_empty_file():
@@ -114,36 +116,6 @@ def test_should_process_channel():
     assert should_process_channel("channel4", config) is False  # Not in include list
 
 
-def test_create_default_config(tmp_path):
-    """Test creating a default config file."""
-    config_path = tmp_path / "config.yaml"
-    result = create_default_config(config_path)
-
-    assert result is True
-    assert config_path.exists()
-
-    # Verify the file is valid YAML with expected keys
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    assert "exclude_channels" in config
-    assert "user_mapping_overrides" in config
-    assert "max_retries" in config
-
-
-def test_create_default_config_no_overwrite(tmp_path):
-    """Test that create_default_config won't overwrite an existing file."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("existing: true\n")
-
-    result = create_default_config(config_path)
-
-    assert result is False
-    # Verify original content is preserved
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    assert config == {"existing": True}
-
-
 def test_should_process_channel_empty_lists():
     """Test should_process_channel with empty include/exclude lists."""
     config = MigrationConfig()
@@ -178,15 +150,12 @@ def test_load_config_nonexistent_path():
 
 
 def test_load_config_invalid_yaml(tmp_path):
-    """Test loading config from a file with invalid YAML."""
+    """Invalid YAML is an error, never a silent fallback to defaults."""
     bad_file = tmp_path / "bad.yaml"
     bad_file.write_text("{{invalid yaml: [")
 
-    config = load_config(bad_file)
-
-    # Should fall back to defaults
-    assert config.max_retries == 3
-    assert config.exclude_channels == []
+    with pytest.raises(ConfigError, match="not valid YAML"):
+        load_config(bad_file)
 
 
 # ---------------------------------------------------------------------------
@@ -278,3 +247,247 @@ class TestNewConfigOptions:
     def test_invalid_values_rejected(self, data):
         with pytest.raises(ValueError):
             MigrationConfig.from_dict(data)
+
+
+# ---------------------------------------------------------------------------
+# Loading and validation (issue #87)
+# ---------------------------------------------------------------------------
+
+
+def _load(tmp_path, text):
+    path = tmp_path / "config.yaml"
+    path.write_text(text)
+    return load_config(path)
+
+
+class TestLoadConfigFailures:
+    """Bad or missing config files fail loudly instead of using defaults."""
+
+    def test_unclosed_list_is_an_error(self, tmp_path):
+        with pytest.raises(ConfigError, match="not valid YAML"):
+            _load(
+                tmp_path,
+                "exclude_channels: [general\nuser_mapping_overrides: {U002: b@x.com}\n",
+            )
+
+    def test_missing_required_file_is_an_error(self, tmp_path):
+        with pytest.raises(ConfigError, match="Config file not found"):
+            load_config(tmp_path / "missing.yaml", required=True)
+
+    def test_missing_optional_file_warns_and_uses_defaults(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="slack_chat_migrator"):
+            config = load_config(tmp_path / "config.yaml", required=False)
+        assert config == MigrationConfig()
+        assert "not found, using default settings" in caplog.text
+
+    @pytest.mark.parametrize("text", ["- general\n- random\n", "just a string\n"])
+    def test_top_level_must_be_a_mapping(self, tmp_path, text):
+        with pytest.raises(ConfigError, match="mapping"):
+            _load(tmp_path, text)
+
+    def test_unreadable_file_is_an_error(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_bytes(b"\xff\xfe\x00 not utf-8")
+        with pytest.raises(ConfigError, match="Could not read"):
+            load_config(path)
+
+    def test_error_names_the_file(self, tmp_path):
+        with pytest.raises(ConfigError, match=r"config\.yaml.*ignore_bots"):
+            _load(tmp_path, "ignore_bots: 'false'\n")
+
+    def test_config_error_is_a_value_error(self):
+        """Callers that caught ValueError for bad config keep working."""
+        assert issubclass(ConfigError, ValueError)
+
+
+class TestListOptions:
+    """include/exclude/announcement channel lists and other list options."""
+
+    def test_single_string_becomes_a_list(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="slack_chat_migrator"):
+            config = _load(tmp_path, "include_channels: general\n")
+        assert config.include_channels == ["general"]
+        assert should_process_channel("general", config) is True
+        assert should_process_channel("g", config) is False
+        assert "should be a list" in caplog.text
+
+    def test_string_exclude_excludes_the_channel(self, tmp_path):
+        config = _load(tmp_path, "exclude_channels: random\n")
+        assert should_process_channel("random", config) is False
+        assert should_process_channel("general", config) is True
+
+    def test_numeric_channel_names_are_strings(self, tmp_path):
+        config = _load(tmp_path, "include_channels: [2024, general]\n")
+        assert config.include_channels == ["2024", "general"]
+        assert should_process_channel("2024", config) is True
+
+    def test_null_list_is_empty(self, tmp_path):
+        config = _load(tmp_path, "include_channels:\n  # - general\n")
+        assert config.include_channels == []
+        assert should_process_channel("anything", config) is True
+
+    def test_hash_prefix_and_whitespace_are_stripped(self, tmp_path):
+        config = _load(
+            tmp_path,
+            "exclude_channels: ['#random', ' #ops ']\nannouncement_channels: '#news'\n",
+        )
+        assert config.exclude_channels == ["random", "ops"]
+        assert config.announcement_channels == ["news"]
+
+    def test_null_items_are_skipped(self, tmp_path):
+        config = _load(tmp_path, "exclude_channels:\n  - random\n  -\n")
+        assert config.exclude_channels == ["random"]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "include_channels: {general: true}\n",
+            "include_channels: 5\n",
+            "include_channels: [[general]]\n",
+            "workspace_domains: true\n",
+        ],
+    )
+    def test_wrong_types_rejected(self, tmp_path, text):
+        with pytest.raises(ConfigError):
+            _load(tmp_path, text)
+
+    def test_conversation_types_null_means_all(self, tmp_path):
+        config = _load(tmp_path, "conversation_types:\n")
+        assert config.conversation_types == ["public", "private", "mpim", "dm"]
+
+    def test_conversation_types_string(self, tmp_path):
+        config = _load(tmp_path, "conversation_types: public\n")
+        assert config.conversation_types == ["public"]
+
+
+class TestScalarOptions:
+    """Booleans, integers, numbers and strings are type-checked."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "ignore_bots: 'false'\n",
+            "abort_on_error: 'yes'\n",
+            "migrate_pins: 1\n",
+            "use_chat_custom_emoji:\n",
+        ],
+    )
+    def test_booleans_must_be_real_booleans(self, tmp_path, text):
+        with pytest.raises(ConfigError, match="must be true or false"):
+            _load(tmp_path, text)
+
+    def test_yaml_booleans_accepted(self, tmp_path):
+        config = _load(tmp_path, "ignore_bots: yes\nmigrate_pins: false\n")
+        assert config.ignore_bots is True
+        assert config.migrate_pins is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "max_retries: '3'\n",
+            "max_retries:\n",
+            "max_retries: ~\n",
+            "max_failure_percentage: 10.5\n",
+            "file_workers: true\n",
+        ],
+    )
+    def test_integers_must_be_integers(self, tmp_path, text):
+        with pytest.raises(ConfigError, match="must be a whole number"):
+            _load(tmp_path, text)
+
+    def test_retry_delay_accepts_floats(self, tmp_path):
+        assert _load(tmp_path, "retry_delay: 1.5\n").retry_delay == 1.5
+
+    def test_retry_delay_rejects_strings(self, tmp_path):
+        with pytest.raises(ConfigError, match="must be a number"):
+            _load(tmp_path, "retry_delay: '2'\n")
+
+    def test_strings_reject_other_types(self, tmp_path):
+        with pytest.raises(ConfigError, match="must be a string"):
+            _load(tmp_path, "email_domain_override: [example.com]\n")
+
+    def test_empty_string_option_uses_default(self, tmp_path):
+        config = _load(tmp_path, "email_domain_override:\nspace_manager:\n")
+        assert config.email_domain_override == ""
+        assert config.space_manager == "admin"
+
+    def test_range_errors_are_config_errors(self, tmp_path):
+        with pytest.raises(ConfigError, match="max_retries must be >= 0"):
+            _load(tmp_path, "max_retries: -1\n")
+
+
+class TestMappingOptions:
+    """Mapping options, shared_drive and space_mapping."""
+
+    def test_user_mapping_overrides_null_is_empty(self, tmp_path):
+        assert _load(tmp_path, "user_mapping_overrides:\n").user_mapping_overrides == {}
+
+    def test_user_mapping_overrides_must_be_a_mapping(self, tmp_path):
+        with pytest.raises(ConfigError, match="must be a mapping"):
+            _load(tmp_path, "user_mapping_overrides: [U1]\n")
+
+    def test_user_mapping_override_values_must_be_strings(self, tmp_path):
+        with pytest.raises(ConfigError, match="U1"):
+            _load(tmp_path, "user_mapping_overrides: {U1: [a@b.com]}\n")
+
+    def test_custom_emoji_map_keys_coerced(self, tmp_path):
+        config = _load(tmp_path, "custom_emoji_map: {100: ':hundred:'}\n")
+        assert config.custom_emoji_map == {"100": ":hundred:"}
+
+    def test_shared_drive_must_be_a_mapping(self, tmp_path):
+        with pytest.raises(ConfigError, match="shared_drive"):
+            _load(tmp_path, "shared_drive: My Drive\n")
+
+    def test_shared_drive_values(self, tmp_path):
+        config = _load(tmp_path, "shared_drive: {name: Files, id: 0AB}\n")
+        assert config.shared_drive.name == "Files"
+        assert config.shared_drive.id == "0AB"
+
+    def test_shared_drive_null_name_uses_default(self, tmp_path):
+        config = _load(tmp_path, "shared_drive:\n  name:\n")
+        assert config.shared_drive.name == "Imported Slack Attachments"
+        assert config.shared_drive.id is None
+
+    def test_space_mapping_must_be_a_mapping(self, tmp_path):
+        with pytest.raises(ConfigError, match="space_mapping"):
+            _load(tmp_path, "space_mapping: [general]\n")
+
+    def test_space_mapping_keys_are_strings(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("space_mapping:\n  123: spaces/X\n  '#general': AAA\n")
+        load_config(path)  # valid
+        assert load_space_mapping(path) == {"123": "spaces/X", "general": "AAA"}
+
+
+class TestUnknownKeys:
+    """Misspelled options fail; other unknown keys are reported."""
+
+    @pytest.mark.parametrize(
+        ("text", "suggestion"),
+        [
+            ("include_channel: [general]\n", "include_channels"),
+            ("max_retry: 5\n", "max_retries"),
+            ("ignore_bot: true\n", "ignore_bots"),
+        ],
+    )
+    def test_typo_is_an_error_with_suggestion(self, tmp_path, text, suggestion):
+        with pytest.raises(ConfigError, match=f"did you mean '{suggestion}'"):
+            _load(tmp_path, text)
+
+    def test_unrelated_unknown_key_warns(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="slack_chat_migrator"):
+            config = _load(tmp_path, "attachments_folder: Slack\nmax_retries: 4\n")
+        assert config.max_retries == 4
+        assert "Ignoring unknown config option(s): attachments_folder" in caplog.text
+
+    def test_space_mapping_is_known(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="slack_chat_migrator"):
+            _load(tmp_path, "space_mapping: {general: AAA}\n")
+        assert "unknown" not in caplog.text.lower()
+
+    def test_example_config_is_valid(self):
+        example = Path(__file__).resolve().parents[2] / "config.yaml.example"
+        config = load_config(example, required=True)
+        assert (
+            config.import_completion_strategy is ImportCompletionStrategy.SKIP_ON_ERROR
+        )

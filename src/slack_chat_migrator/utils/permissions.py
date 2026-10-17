@@ -408,7 +408,7 @@ def check_permissions_standalone(
     creds_path: str,
     workspace_admin: str,
     max_retries: int = 3,
-    retry_delay: int = 2,
+    retry_delay: float = 2,
 ) -> bool:
     """
     Run permission checks without creating a full SlackToChatMigrator.

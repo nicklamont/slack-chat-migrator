@@ -181,6 +181,17 @@ max_retries: 3
 retry_delay: 2
 ```
 
+#### Config Validation
+
+The config file is validated before anything is migrated, so a typo can't silently change what gets imported:
+
+- If you pass `--config` and the file doesn't exist, the command fails. Without `--config`, a missing `config.yaml` means "use the defaults" (all channels, no user overrides), and a warning says so.
+- A file that isn't valid YAML, or whose top level isn't a mapping, is an error.
+- Values are type-checked. Booleans must be YAML `true`/`false` (not the string `"false"`), counts must be whole numbers, and `retry_delay` must be a number. List options such as `include_channels` also accept a single name (`include_channels: general` means `[general]`, with a warning) or an empty value. Channel names may be numeric and may start with `#`.
+- An unknown option that looks like a misspelling of a real one (for example `include_channel` or `max_retry`) is an error with a "did you mean" hint. Other unknown options are ignored with a warning.
+
+Config errors exit with status 1 and name the offending option.
+
 #### Space Mapping
 
 When using `--resume` to resume a migration, the tool discovers existing spaces by name. If multiple Google Chat spaces have the same name (e.g., multiple "Slack #general" spaces from previous attempts), you need to specify which space to use for each channel:

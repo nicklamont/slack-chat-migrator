@@ -285,6 +285,26 @@ class InterruptHandler:
 # ---------------------------------------------------------------------------
 
 
+def config_was_given() -> bool:
+    """Return True when the user passed ``--config`` explicitly.
+
+    An explicitly named config file must exist; the default ``config.yaml``
+    may be missing (the defaults are then used, with a warning).
+
+    Returns:
+        True if ``--config`` came from the command line or environment.
+    """
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return False
+    source = ctx.get_parameter_source("config")
+    return source not in (
+        None,
+        click.core.ParameterSource.DEFAULT,
+        click.core.ParameterSource.DEFAULT_MAP,
+    )
+
+
 def common_options(f: Callable[..., None]) -> Callable[..., None]:
     """Decorator that adds options shared across multiple subcommands.
 

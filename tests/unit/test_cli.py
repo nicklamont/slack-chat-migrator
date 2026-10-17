@@ -829,7 +829,7 @@ class TestQuietConsole:
     """Tests for _quiet_console context manager."""
 
     def test_suppresses_console_handler(self):
-        """_quiet_console raises console handler level to ERROR."""
+        """_quiet_console hides INFO/DEBUG but keeps warnings visible."""
         from slack_chat_migrator.cli.migrate_cmd import _quiet_console
 
         handler = logging.StreamHandler()
@@ -842,11 +842,46 @@ class TestQuietConsole:
         root.addHandler(handler)
         try:
             with _quiet_console():
-                assert handler.level == logging.ERROR
+                assert handler.level == logging.WARNING
             assert handler.level == logging.DEBUG
         finally:
             root.removeHandler(handler)
             test_logger.removeHandler(handler)
+
+    def test_warnings_still_reach_console(self):
+        """A WARNING logged inside _quiet_console is still emitted."""
+        import io
+
+        from slack_chat_migrator.cli.migrate_cmd import _quiet_console
+        from slack_chat_migrator.utils.logging import log_with_context
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setLevel(logging.INFO)
+        pkg = logging.getLogger("slack_chat_migrator")
+        pkg.addHandler(handler)
+        try:
+            with _quiet_console():
+                log_with_context(logging.INFO, "info noise")
+                log_with_context(logging.WARNING, "config warning")
+        finally:
+            pkg.removeHandler(handler)
+        assert "config warning" in stream.getvalue()
+        assert "info noise" not in stream.getvalue()
+
+    def test_does_not_lower_a_higher_level(self):
+        """A handler already above WARNING is left alone."""
+        from slack_chat_migrator.cli.migrate_cmd import _quiet_console
+
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.ERROR)
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            with _quiet_console():
+                assert handler.level == logging.ERROR
+        finally:
+            root.removeHandler(handler)
 
     def test_restores_level_on_exception(self):
         """_quiet_console restores level even if body raises."""

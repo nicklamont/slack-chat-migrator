@@ -17,6 +17,7 @@ from slack_chat_migrator.cli.common import (
     InterruptHandler,
     cli,
     common_options,
+    config_was_given,
     deprecated_option,
     handle_exception,
     show_security_warning,
@@ -27,6 +28,7 @@ from slack_chat_migrator.cli.report import (
     print_rich_summary,
 )
 from slack_chat_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
+from slack_chat_migrator.core.config import MigrationConfig, load_config
 from slack_chat_migrator.core.migrator import SlackToChatMigrator
 from slack_chat_migrator.core.progress import ProgressTracker
 from slack_chat_migrator.exceptions import (
@@ -112,6 +114,7 @@ def migrate(
         export_path=export_path,
         workspace_admin=workspace_admin,
         config=config,
+        config_required=config_was_given(),
         verbose=verbose,
         debug_api=debug_api,
         dry_run=dry_run,
@@ -160,7 +163,6 @@ def _run_complete_mode(
     This is equivalent to the standalone ``cleanup`` command but accessible
     via ``migrate --complete``.
     """
-    from slack_chat_migrator.core.config import load_config
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
     from slack_chat_migrator.services.spaces.space_creator import (
         cleanup_import_mode_spaces,
@@ -173,6 +175,14 @@ def _run_complete_mode(
         raise click.UsageError("--creds_path is required for --complete")
     if not workspace_admin:
         raise click.UsageError("--workspace_admin is required for --complete")
+
+    # Load (and validate) the config before any API call, outside the quiet
+    # console so its warnings are visible.
+    try:
+        cfg = load_config(Path(config), required=config_was_given())
+    except Exception as e:
+        handle_exception(e)
+        sys.exit(1)
 
     is_tty = sys.stdout.isatty()
 
@@ -189,7 +199,6 @@ def _run_complete_mode(
 
     with ctx:
         log_with_context(logging.INFO, "Completing import mode on all spaces...")
-        cfg = load_config(Path(config))
         chat = get_gcp_service(
             creds_path,
             workspace_admin,
@@ -249,6 +258,26 @@ class MigrationOrchestrator:
         self.migrator: SlackToChatMigrator | None = None
         self.dry_run_migrator: SlackToChatMigrator | None = None
         self.output_dir: str | None = None
+        self.config: MigrationConfig | None = None
+
+    def load_config(self) -> MigrationConfig:
+        """Load and validate the config file once for this run.
+
+        A ``--config`` path given explicitly must exist; the default
+        ``config.yaml`` may be missing (defaults are used, with a warning).
+
+        Returns:
+            The validated MigrationConfig.
+
+        Raises:
+            ConfigError: If the config is required but missing, or invalid.
+        """
+        if self.config is None:
+            self.config = load_config(
+                Path(self.args.config),
+                required=bool(getattr(self.args, "config_required", False)),
+            )
+        return self.config
 
     def create_migrator(self, force_dry_run: bool = False) -> SlackToChatMigrator:
         """Create a migrator instance with the given parameters.
@@ -268,6 +297,7 @@ class MigrationOrchestrator:
             verbose=self.args.verbose,
             update_mode=self.args.update_mode,
             debug_api=self.args.debug_api,
+            config=self.load_config(),
         )
 
         # Set output directory if we have one
@@ -276,8 +306,14 @@ class MigrationOrchestrator:
 
         return migrator
 
-    def validate_prerequisites(self) -> None:
-        """Validate all prerequisites before migration."""
+    def _check_credential_args(self) -> None:
+        """Check the credential options needed for this run.
+
+        Raises:
+            click.UsageError: If a live run lacks ``--creds_path`` or
+                ``--workspace_admin``.
+            ConfigError: If a given credentials file doesn't exist.
+        """
         # In dry-run mode, credentials and workspace_admin are optional
         if not self.args.dry_run:
             if not self.args.creds_path:
@@ -286,21 +322,29 @@ class MigrationOrchestrator:
                 raise click.UsageError(
                     "--workspace_admin is required for live migration"
                 )
-            # Check credentials file exists
-            creds_path = Path(self.args.creds_path)
-            if not creds_path.exists():
-                raise ConfigError(
-                    f"Credentials file not found: {self.args.creds_path}. "
-                    "Make sure your service account JSON key file exists and has the correct path."
-                )
-        elif self.args.creds_path:
-            # Dry-run with creds provided — still validate the file exists
-            creds_path = Path(self.args.creds_path)
-            if not creds_path.exists():
-                raise ConfigError(
-                    f"Credentials file not found: {self.args.creds_path}. "
-                    "Make sure your service account JSON key file exists and has the correct path."
-                )
+        # Check the credentials file exists (dry runs too, when one is given)
+        if self.args.creds_path and not Path(self.args.creds_path).exists():
+            raise ConfigError(
+                f"Credentials file not found: {self.args.creds_path}. "
+                "Make sure your service account JSON key file exists and has the correct path."
+            )
+
+    def _load_and_report_config(self) -> None:
+        """Load the config (warnings visible) and show its status."""
+        self.load_config()
+        config_path = Path(self.args.config)
+        if config_path.exists():
+            _print_preflight_status("Config loaded", detail=str(config_path))
+        else:
+            _print_preflight_status(
+                "Config not found, using defaults",
+                status="warn",
+                detail=str(config_path),
+            )
+
+    def validate_prerequisites(self) -> None:
+        """Validate all prerequisites before migration."""
+        self._check_credential_args()
 
         is_tty = sys.stdout.isatty()
         if is_tty:
@@ -309,7 +353,10 @@ class MigrationOrchestrator:
             console = get_console()
             console.print("\n[bold]Preflight Checks[/bold]")
 
-        # Initialize main migrator (suppressing per-user warnings on console)
+        # Load and validate the config before anything else
+        self._load_and_report_config()
+
+        # Initialize main migrator (INFO noise hidden; warnings still shown)
         with _quiet_console():
             self.migrator = self.create_migrator()
 
@@ -790,23 +837,21 @@ class MigrationOrchestrator:
 
 @contextlib.contextmanager
 def _quiet_console() -> Iterator[None]:
-    """Suppress INFO/WARNING from console output (still goes to log file)."""
-    root = logging.getLogger()
+    """Suppress INFO/DEBUG noise on the console (it still goes to the log file).
+
+    Warnings and errors stay visible, so problems such as an ignored config
+    option are never hidden.
+    """
     restored: list[tuple[logging.Handler, int]] = []
-    for handler in root.handlers:
-        if isinstance(handler, logging.StreamHandler) and not isinstance(
-            handler, logging.FileHandler
-        ):
-            restored.append((handler, handler.level))
-            handler.setLevel(logging.ERROR)
-    # Also check the package logger
-    pkg = logging.getLogger("slack_chat_migrator")
-    for handler in pkg.handlers:
-        if isinstance(handler, logging.StreamHandler) and not isinstance(
-            handler, logging.FileHandler
-        ):
-            restored.append((handler, handler.level))
-            handler.setLevel(logging.ERROR)
+    for lgr in (logging.getLogger(), logging.getLogger("slack_chat_migrator")):
+        for handler in lgr.handlers:
+            if (
+                isinstance(handler, logging.StreamHandler)
+                and not isinstance(handler, logging.FileHandler)
+                and handler.level < logging.WARNING
+            ):
+                restored.append((handler, handler.level))
+                handler.setLevel(logging.WARNING)
     try:
         yield
     finally:
@@ -848,7 +893,10 @@ def _print_config_panel(args: SimpleNamespace, output_dir: str) -> None:
     table.add_column("Value")
 
     table.add_row("Export", str(args.export_path))
-    table.add_row("Config", str(config_path))
+    config_label = str(config_path)
+    if not config_path.exists():
+        config_label += " [yellow](not found, using defaults)[/yellow]"
+    table.add_row("Config", config_label)
     table.add_row("Admin", str(args.workspace_admin or "(none)"))
     mode = "Dry Run" if args.dry_run else "Live Migration"
     if getattr(args, "update_mode", False):

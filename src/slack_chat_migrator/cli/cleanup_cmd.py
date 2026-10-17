@@ -10,6 +10,7 @@ import click
 from slack_chat_migrator.cli.common import (
     cli,
     common_options,
+    config_was_given,
     deprecated_command,
     handle_exception,
 )
@@ -64,17 +65,16 @@ def cleanup(
             click.echo("Cleanup cancelled.")
             sys.exit(0)
 
-    cfg = load_config(Path(config))
-    chat = get_gcp_service(
-        creds_path,
-        workspace_admin,
-        "chat",
-        "v1",
-        max_retries=cfg.max_retries,
-        retry_delay=cfg.retry_delay,
-    )
-
     try:
+        cfg = load_config(Path(config), required=config_was_given())
+        chat = get_gcp_service(
+            creds_path,
+            workspace_admin,
+            "chat",
+            "v1",
+            max_retries=cfg.max_retries,
+            retry_delay=cfg.retry_delay,
+        )
         cleanup_import_mode_spaces(ChatAdapter(chat))
     except Exception as e:
         handle_exception(e)

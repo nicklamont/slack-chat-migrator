@@ -23,7 +23,11 @@ from slack_chat_migrator.core.checkpoint import (
     save_checkpoint,
 )
 from slack_chat_migrator.core.cleanup import cleanup_channel_handlers
-from slack_chat_migrator.core.config import load_config, load_space_mapping
+from slack_chat_migrator.core.config import (
+    MigrationConfig,
+    load_config,
+    load_space_mapping,
+)
 from slack_chat_migrator.core.context import MigrationContext
 from slack_chat_migrator.core.migration_logging import (
     log_migration_failure,
@@ -70,11 +74,16 @@ class SlackToChatMigrator:
         update_mode: bool = False,
         debug_api: bool = False,
         message_error_schedule: dict[int, int] | None = None,
+        config: MigrationConfig | None = None,
     ):
         """Initialize the migrator with the required parameters.
 
         ``message_error_schedule`` is test-only: maps 1-based message
         ordinal to HTTP status code for error injection in dry-run mode.
+
+        ``config`` is an already-loaded configuration (the CLI loads and
+        validates it once, up front); when omitted it is loaded from
+        ``config_path``.
 
         In dry-run mode, ``creds_path`` and ``workspace_admin`` may be
         ``None`` — no real API calls are made.
@@ -127,7 +136,7 @@ class SlackToChatMigrator:
         self._validate_export_format()
 
         # Load config using the shared load_config function
-        self.config = load_config(self.config_path)
+        self.config = config if config is not None else load_config(self.config_path)
 
         # Load space_mapping overrides from config YAML into state
         self.state.spaces.space_mapping = load_space_mapping(self.config_path)
