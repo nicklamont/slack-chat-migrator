@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from google.auth.exceptions import RefreshError
+from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
@@ -293,6 +295,22 @@ class TestDriveSetup:
         handler._drive_status = file_mod.DriveStatus("not_initialized")
 
         with pytest.raises(APIError, match=DRIVE_NAME):
+            handler.ensure_drive_initialized()
+
+        assert handler.drive_status.mode == "none"
+        assert fake.count("files.create") == 0  # no My Drive folder made
+
+    def test_daily_limit_stops_the_run_without_my_drive(self, tmp_path):
+        """dailyLimitExceeded is a project quota, not "no shared drives"."""
+        fake = FakeDrive()
+        fake.failing["drives.create"] = HttpError(
+            Response({"status": "403"}),
+            b'{"error": {"errors": [{"reason": "dailyLimitExceeded"}]}}',
+        )
+        handler = make_handler(fake, tmp_path, shared=False)
+        handler._drive_status = file_mod.DriveStatus("not_initialized")
+
+        with pytest.raises(APIError, match=r"quota reached \(dailyLimitExceeded\)"):
             handler.ensure_drive_initialized()
 
         assert handler.drive_status.mode == "none"

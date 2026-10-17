@@ -22,7 +22,11 @@ from slack_chat_migrator.services.drive_adapter import (
     http_status,
     is_drive_call_error,
 )
-from slack_chat_migrator.utils.api import escape_drive_query_value, is_rate_limit_error
+from slack_chat_migrator.utils.api import (
+    escape_drive_query_value,
+    http_error_reasons,
+    is_rate_limit_error,
+)
 from slack_chat_migrator.utils.logging import (
     log_with_context,
 )
@@ -31,20 +35,57 @@ if TYPE_CHECKING:
     from slack_chat_migrator.services.drive_adapter import DriveAdapter
 
 
+#: 403 reasons that mean the project or storage hit a quota.  They say
+#: nothing about shared drives and stop the run with a quota message.
+QUOTA_REASONS = frozenset(
+    {
+        "dailyLimitExceeded",
+        "quotaExceeded",
+        "storageQuotaExceeded",
+        "teamDriveFileLimitExceeded",
+    }
+)
+
+
+def quota_reason(error: BaseException) -> str | None:
+    """The quota reason of *error* (see :data:`QUOTA_REASONS`), if any."""
+    if not isinstance(error, HttpError):
+        return None
+    reasons = sorted(http_error_reasons(error) & QUOTA_REASONS)
+    return reasons[0] if reasons else None
+
+
 def shared_drives_unavailable(error: BaseException) -> bool:
     """Whether *error* says this account can't use or create shared drives.
 
-    Only a definitive refusal counts: a 403 that isn't a rate limit, or a
-    404.  Network errors, credentials that can't be refreshed, 5xx and
-    other statuses say nothing about shared drives, so they never justify
-    storing attachments somewhere else.
+    Only a definitive refusal counts: a 403 without a rate-limit or quota
+    reason (:data:`QUOTA_REASONS`), or a 404.  Network errors, credentials
+    that can't be refreshed, rate limits, quotas, 5xx and other statuses say
+    nothing about shared drives, so they never justify storing attachments
+    somewhere else.
     """
-    if not isinstance(error, HttpError) or is_rate_limit_error(error):
+    if (
+        not isinstance(error, HttpError)
+        or is_rate_limit_error(error)
+        or quota_reason(error)
+    ):
         return False
     return http_status(error) in (
         HTTP_FORBIDDEN,
         HTTP_NOT_FOUND,
     )
+
+
+def _api_error(action: str, error: BaseException) -> APIError:
+    """The APIError for a failed *action*, naming a quota when that's the cause."""
+    reason = quota_reason(error)
+    if reason:
+        return APIError(
+            f"Drive quota reached ({reason}) while trying to {action}: {error}."
+            " Wait for the quota to reset, or raise it (Google Cloud console"
+            " quotas, or Drive storage), then run again."
+        )
+    return APIError(f"Could not {action}: {error}")
 
 
 class SharedDriveManager:
@@ -76,12 +117,13 @@ class SharedDriveManager:
 
         Raises:
             ConfigError: If ``shared_drive.id`` is configured and Drive
-                refuses to open it.  A new drive is never created in its
-                place.
-            APIError: If Drive couldn't be asked: a network error,
-                credentials that can't be refreshed, or an HTTP error that
-                doesn't mean shared drives are unavailable.  The caller must
-                not fall back to another location for these.
+                answers 404, or 403 without a rate-limit or quota reason:
+                the ID is wrong or the admin isn't a member.  A new drive is
+                never created in its place.
+            APIError: For any other failure: a network error, credentials
+                that can't be refreshed, a rate limit or quota (named in the
+                message), a 5xx, or another HTTP error.  The caller must not
+                fall back to another location for these.
         """
         self.last_error = None
         # Get shared drive configuration
@@ -96,20 +138,22 @@ class SharedDriveManager:
         if shared_drive_id:
             try:
                 drive_info = self.drive_service.get_drive(drive_id=shared_drive_id)
-            except HttpError as e:
-                raise ConfigError(
-                    f"The shared drive configured as shared_drive.id"
-                    f" ({shared_drive_id}) is not accessible (HTTP {http_status(e)})."
-                    " Check the ID and that the workspace admin is a member of"
-                    " the drive, or remove shared_drive.id to use a drive found"
-                    " or created by name."
-                ) from e
             except DRIVE_CALL_CANDIDATES as e:
                 if not is_drive_call_error(e):
                     raise
-                raise APIError(
-                    f"Could not open the shared drive configured as"
-                    f" shared_drive.id ({shared_drive_id}): {e}"
+                if shared_drives_unavailable(e):
+                    raise ConfigError(
+                        f"The shared drive configured as shared_drive.id"
+                        f" ({shared_drive_id}) is not accessible (HTTP"
+                        f" {http_status(e)}). Check the ID and that the workspace"
+                        " admin is a member of the drive, or remove"
+                        " shared_drive.id to use a drive found or created by"
+                        " name."
+                    ) from e
+                raise _api_error(
+                    f"open the shared drive configured as shared_drive.id"
+                    f" ({shared_drive_id})",
+                    e,
                 ) from e
             log_with_context(
                 logging.INFO,
@@ -220,8 +264,8 @@ class SharedDriveManager:
             if not is_drive_call_error(e):
                 raise
             if not shared_drives_unavailable(e):
-                raise APIError(
-                    f"Could not find or create shared drive {drive_name!r}: {e}"
+                raise _api_error(
+                    f"find or create shared drive {drive_name!r}", e
                 ) from e
             self.last_error = (
                 f"this account can't use or create shared drive {drive_name!r}: {e}"

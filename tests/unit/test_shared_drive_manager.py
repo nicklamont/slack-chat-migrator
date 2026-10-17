@@ -171,6 +171,69 @@ class TestGetOrCreateSharedDrive:
         assert manager.get_or_create_shared_drive() is None
         assert manager.last_error and "Test Drive" in manager.last_error
 
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "dailyLimitExceeded",
+            "quotaExceeded",
+            "storageQuotaExceeded",
+            "teamDriveFileLimitExceeded",
+        ],
+    )
+    @pytest.mark.parametrize("call", ["list_drives", "create_drive"])
+    def test_quota_errors_stop_with_a_quota_message(self, reason, call):
+        """A quota 403 is not "can't use shared drives": no My Drive fallback."""
+        manager, drive_service = _make_manager(
+            shared_drive_id=None, shared_drive_name="Test Drive"
+        )
+        drive_service.list_drives.return_value = {"drives": []}
+        body = b'{"error": {"errors": [{"reason": "%s"}]}}' % reason.encode()
+        getattr(drive_service, call).side_effect = _make_http_error(403, body)
+
+        with pytest.raises(APIError, match=f"quota reached \\({reason}\\)"):
+            manager.get_or_create_shared_drive()
+
+        assert manager.last_error is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _make_http_error(503, b"Service Unavailable"),
+            _make_http_error(429, b"Too Many Requests"),
+            _make_http_error(
+                403, b'{"error": {"errors": [{"reason": "rateLimitExceeded"}]}}'
+            ),
+            _make_http_error(
+                403, b'{"error": {"errors": [{"reason": "dailyLimitExceeded"}]}}'
+            ),
+            OSError(101, "Network is unreachable"),
+            RefreshError("invalid_grant"),
+        ],
+        ids=["503", "429", "403-rate-limit", "403-quota", "network", "refresh"],
+    )
+    def test_configured_drive_failure_that_is_not_a_refusal_is_an_api_error(
+        self, error
+    ):
+        """Only a refusal gets the "check the ID and membership" ConfigError."""
+        manager, drive_service = _make_manager(shared_drive_id="SD9")
+        drive_service.get_drive.side_effect = error
+
+        with pytest.raises(APIError, match="SD9") as excinfo:
+            manager.get_or_create_shared_drive()
+
+        assert not isinstance(excinfo.value, ConfigError)
+        assert excinfo.value.__cause__ is error
+        drive_service.list_drives.assert_not_called()
+        drive_service.create_drive.assert_not_called()
+
+    @pytest.mark.parametrize("status", [403, 404])
+    def test_configured_drive_refusal_is_a_config_error(self, status):
+        manager, drive_service = _make_manager(shared_drive_id="SD9")
+        drive_service.get_drive.side_effect = _make_http_error(status, b"no")
+
+        with pytest.raises(ConfigError, match=f"SD9.*HTTP {status}"):
+            manager.get_or_create_shared_drive()
+
     def test_configured_drive_network_error_is_an_api_error(self):
         manager, drive_service = _make_manager(shared_drive_id="SD9")
         drive_service.get_drive.side_effect = TimeoutError("timed out")

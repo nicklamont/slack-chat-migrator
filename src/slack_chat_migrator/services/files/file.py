@@ -365,10 +365,11 @@ class FileHandler:
         """
         self._initialize_drive()
         if not self._drive_status.ready:
+            detail = self._drive_status.detail.rstrip(".")
             raise APIError(
-                "Google Drive can't be used for attachments:"
-                f" {self._drive_status.detail}. Check network access and the"
-                " workspace admin's Drive access, then run again."
+                f"Google Drive can't be used for attachments: {detail}."
+                " Check network access and the workspace admin's Drive access,"
+                " then run again."
             )
 
     def _initialize_drive(self) -> None:
