@@ -286,7 +286,7 @@ def backoff_seconds(base_delay: float, attempt: int) -> float:
     """
     ceiling = min(MAX_BACKOFF_SECONDS, base_delay * (2.0 ** min(attempt, 32)))
     # Jitter spreads retries out; it has no security role.
-    return random.uniform(0, ceiling)  # noqa: S311
+    return random.uniform(0, ceiling)  # noqa: S311  # nosec B311
 
 
 class RetryWrapper:
