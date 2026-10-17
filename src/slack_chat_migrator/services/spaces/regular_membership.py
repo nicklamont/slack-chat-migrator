@@ -435,55 +435,25 @@ def _update_folder_permissions(
 ) -> None:
     """Update Drive folder permissions to match active channel members.
 
-    If the file_handler has a ``folder_manager``, looks up the channel's
-    Drive folder and updates its permissions so only the given
-    *active_user_emails* have access.
+    Looks up the channel's Drive folder and syncs its permissions so only
+    the given *active_user_emails* have access.  Failures (lookup, listing,
+    grants, removals) are logged and counted in the file statistics by
+    :meth:`FileHandler.sync_channel_folder_permissions`; none are raised.
 
     Args:
         file_handler: FileHandler instance (may be None).
         channel: Slack channel name for folder lookup and log context.
         active_user_emails: Email addresses that should have folder access.
     """
-    if not (file_handler is not None and hasattr(file_handler, "folder_manager")):
+    if file_handler is None:
         return
 
-    root_folder_id = file_handler.folder_id
-    if root_folder_id is None:
-        return
-
-    folder_id = None
-
-    try:
-        # Get the channel folder if it exists
-        folder_id = file_handler.folder_manager.get_channel_folder_id(
-            channel,
-            root_folder_id,
-            file_handler.shared_drive_id,
-        )
-
-        if folder_id:
-            # Step 6: Update file permissions
-            log_with_context(
-                logging.INFO,
-                f"Step 6/6: Updating file permissions for {channel} folder to match {len(active_user_emails)} active members",
-                channel=channel,
-                folder_id=folder_id,
-            )
-
-            # Update permissions to ensure only active members have access
-            file_handler.folder_manager.set_channel_folder_permissions(
-                folder_id,
-                channel,
-                active_user_emails,
-                file_handler.shared_drive_id,
-            )
-    except HttpError as e:
-        log_with_context(
-            logging.WARNING,
-            f"Error updating channel folder permissions: {e}",
-            channel=channel,
-            error=str(e),
-        )
+    log_with_context(
+        logging.INFO,
+        f"Step 6/6: Updating file permissions for {channel} folder to match {len(active_user_emails)} active members",
+        channel=channel,
+    )
+    file_handler.sync_channel_folder_permissions(channel, active_user_emails)
 
 
 def add_regular_members(

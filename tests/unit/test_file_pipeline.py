@@ -1068,6 +1068,27 @@ class TestLimitedAccessFolders:
         assert result.lookup_error
         assert handler.get_file_statistics()["folder_sync_failures"] == 1
 
+    @pytest.mark.parametrize(
+        "error",
+        [http_error(500), ConnectionResetError("reset"), RefreshError("revoked")],
+        ids=["http", "network", "refresh"],
+    )
+    def test_production_caller_counts_a_failed_lookup(self, tmp_path, downloads, error):
+        """regular_membership goes through the counting path (#118)."""
+        from slack_chat_migrator.services.spaces.regular_membership import (
+            _update_folder_permissions,
+        )
+
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"x")
+        handler.folder_manager.folder_cache.clear()
+        fake.failing["files.list"] = error
+
+        _update_folder_permissions(handler, "c", ["alice@example.com"])  # no raise
+
+        assert handler.get_file_statistics()["folder_sync_failures"] == 1
+
     def test_channel_without_folder_needs_no_sync(self, tmp_path):
         handler = make_meta_handler(FakeDrive(), tmp_path)
 
