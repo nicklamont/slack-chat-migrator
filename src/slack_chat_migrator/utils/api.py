@@ -300,13 +300,18 @@ class RetryWrapper:
 
     - 408, 429, 5xx and 403 rate-limit/quota errors, and network errors
       (connection resets, timeouts, DNS failures, truncated responses) are
-      retried with full-jitter exponential backoff capped at
-      :data:`MAX_BACKOFF_SECONDS`, honouring ``Retry-After``.
-    - Rate-limit errors have their own budget of
-      :data:`RATE_LIMIT_BUDGET_SECONDS`; other errors are retried
-      ``max_retries`` times.
-    - Other 4xx errors are raised at once (a 401 also clears the service
-      cache).  409s are left to the callers.
+      retried.  Each wait is the server's ``Retry-After`` when it sends one,
+      otherwise full-jitter exponential backoff capped at
+      :data:`MAX_BACKOFF_SECONDS`.
+    - Rate-limit errors (429 and the rate-limit 403s) are retried until the
+      next wait would take the total past
+      :data:`RATE_LIMIT_BUDGET_SECONDS` (or after
+      :data:`RATE_LIMIT_MAX_ATTEMPTS`), whatever ``max_retries`` says.  Their
+      ``Retry-After`` is used as sent: only that budget limits it.
+    - Other retryable errors are retried ``max_retries`` times, and their
+      ``Retry-After`` is capped at :data:`MAX_BACKOFF_SECONDS`.
+    - Other 4xx errors, 409 conflicts included, are raised at once (a 401
+      also clears the service cache).
     """
 
     def __init__(
@@ -787,6 +792,9 @@ def get_gcp_service(
     # Retry settings are part of the key so callers never silently get a
     # client configured by someone else.  The channel isn't: it only tags log
     # lines, and keying on it would build one client per user per channel.
+    # So a cached client keeps tagging its log lines with the channel it was
+    # created for, which is stale once it is reused in another channel,
+    # until the channel context moves to a contextvar.
     cache_key: _ServiceKey = (
         creds_path,
         user_email,
