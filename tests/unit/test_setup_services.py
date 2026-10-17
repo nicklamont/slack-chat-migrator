@@ -1412,13 +1412,18 @@ class TestKeyStep:
         tmp_path: Path,
         check,  # type: ignore[no-untyped-def]
         confirm_answer: bool = False,
-        download_error: Exception | None = None,
+        download_error: BaseException | None = None,
+        name: str = "key.json",
+        resumed: bool = False,
     ):  # type: ignore[no-untyped-def]
         from slack_chat_migrator.cli.setup_cmd import _step_download_key
 
-        key = tmp_path / "key.json"
+        key = tmp_path / name
+        key.parent.mkdir(parents=True, exist_ok=True)
         key.write_text("{}")
         state = SetupState(project_id="p", service_account_email=SA)
+        if resumed:  # an earlier run kept this file (UNKNOWN)
+            state.key_path = str(key)
         with (
             patch(
                 "slack_chat_migrator.cli.setup_cmd.click.prompt", return_value=str(key)
@@ -1621,6 +1626,99 @@ class TestKeyStep:
         assert state.key_path is None
         assert state.step_status("key") == StepStatus.SKIPPED
         assert "google-auth can't read it" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "create_refused",
+            "not_saved",
+            "os_error",
+            "unexpected",
+        ],
+    )
+    def test_failed_overwrite_forgets_the_key_path(
+        self, tmp_path: Path, error: str
+    ) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeyCreateError,
+            KeyNotSavedError,
+        )
+
+        errors: dict[str, Exception] = {
+            "create_refused": KeyCreateError("refused", maybe_created=False),
+            "not_saved": KeyNotSavedError("m", NEW_KEY_NAME, deleted=True),
+            "os_error": PermissionError(13, "denied"),
+            "unexpected": RuntimeError("odd"),
+        }
+        state, _, _, _ = self._run_key_step(
+            tmp_path,
+            _key_check("INACTIVE", "it was deleted"),
+            confirm_answer=True,
+            download_error=errors[error],
+            resumed=True,
+        )
+        assert state.key_path is None
+        assert state.step_status("key") == StepStatus.SKIPPED
+
+    def test_interrupted_overwrite_forgets_the_key_path(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.cli.setup_cmd import _step_download_key
+        from slack_chat_migrator.services.setup.service_account import (
+            KeySetupInterrupted,
+        )
+
+        key = tmp_path / "key.json"
+        key.write_text("{}")
+        state = SetupState(project_id="p", service_account_email=SA)
+        state.key_path = str(key)
+        with (
+            patch(
+                "slack_chat_migrator.cli.setup_cmd.click.prompt", return_value=str(key)
+            ),
+            patch("slack_chat_migrator.cli.setup_cmd.click.confirm", return_value=True),
+            patch(
+                "slack_chat_migrator.services.setup.service_account.check_existing_key",
+                return_value=_key_check("INACTIVE", "it was deleted"),
+            ),
+            patch(
+                "slack_chat_migrator.services.setup.service_account.download_key",
+                side_effect=KeySetupInterrupted("m", NEW_KEY_NAME),
+            ),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            _step_download_key(MagicMock(), state)
+        assert state.key_path is None
+
+    def test_markup_in_paths_and_messages_is_printed_literally(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        from slack_chat_migrator.services.setup.service_account import (
+            KeySetupInterrupted,
+        )
+
+        error = KeySetupInterrupted(
+            f"delete {NEW_KEY_NAME} [/x] [bold]now[/bold]", NEW_KEY_NAME
+        )
+        with pytest.raises(KeyboardInterrupt):
+            self._run_key_step(
+                tmp_path,
+                _key_check("INACTIVE", "it was [/deleted]"),
+                confirm_answer=True,
+                download_error=error,
+                name="keys[/prod]/key.json",
+            )
+        out = " ".join(capsys.readouterr().out.split())
+        assert f"delete {NEW_KEY_NAME} [/x] [bold]now[/bold]" in out
+
+    @pytest.mark.parametrize("status", ["UNKNOWN", "UNREADABLE"])
+    def test_markup_in_kept_file_messages(
+        self, tmp_path: Path, capsys, status: str
+    ) -> None:
+        self._run_key_step(
+            tmp_path, _key_check(status, "reason [/oops]"), name="k[/p]/key.json"
+        )
+        out = " ".join(capsys.readouterr().out.split())
+        assert "k[/p]" in out
+        assert "reason [/oops]" in out
 
     def test_unknown_future_status_never_records_the_key_path(
         self, tmp_path: Path

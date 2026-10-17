@@ -199,7 +199,9 @@ def _run_setup() -> None:
         state = _step_download_key(credentials, state)
         save_state(state)
     else:
-        console.print(f"[green]\u2713[/green] [4/6] Key: [bold]{state.key_path}[/bold]")
+        console.print(
+            f"[green]\u2713[/green] [4/6] Key: [bold]{escape(str(state.key_path))}[/bold]"
+        )
 
     # Step 5: Configure Chat app (verified via API call)
     if state.step_status("chat_app") != StepStatus.COMPLETE:
@@ -450,7 +452,7 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
                 pass
             state.key_path = str(key_path)
             console.print(
-                f"[green]Reusing the existing key in {key_path}"
+                f"[green]Reusing the existing key in {escape(str(key_path))}"
                 " (no new key created).[/green]"
             )
             state.mark_step("key", StepStatus.COMPLETE)
@@ -491,47 +493,57 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
         )
     except KeySetupInterrupted as e:
         # Say what Ctrl-C left behind, then stop like any Ctrl-C.
-        console.print(f"\n[red]{e}[/red]")
+        console.print(f"\n[red]{escape(str(e))}[/red]")
+        _forget_failed_key_file(state, key_path)
         state.mark_step("key", StepStatus.SKIPPED)
         raise
     except KeyNotSavedError as e:
-        console.print(f"[red]Failed to save the new key: {e}[/red]")
-        state.mark_step("key", StepStatus.SKIPPED)
-        return state
+        console.print(f"[red]Failed to save the new key: {escape(str(e))}[/red]")
     except KeyCreateError as e:
         # The message says whether a key may exist and what to do.
-        console.print(f"[red]{e}[/red]")
-        state.mark_step("key", StepStatus.SKIPPED)
-        return state
+        console.print(f"[red]{escape(str(e))}[/red]")
     except OSError as e:
         # Raised before any request: the output file or the IAM client.
-        console.print(f"[red]Can't write the key to {key_path}: {e}[/red]")
+        console.print(
+            f"[red]Can't write the key to {escape(str(key_path))}:"
+            f" {escape(str(e))}[/red]"
+        )
         console.print("[dim]No key was created. Choose another path.[/dim]")
-        state.mark_step("key", StepStatus.SKIPPED)
-        return state
     except Exception as e:
-        console.print(f"[red]Failed to download key: {e}[/red]")
+        console.print(f"[red]Failed to download key: {escape(str(e))}[/red]")
         console.print(
             "[dim]If IAM created a key anyway, it is listed by 'gcloud iam"
             " service-accounts keys list"
-            f" --iam-account={state.service_account_email} --managed-by=user'"
-            " with a CREATED_AT of about"
+            f" --iam-account={escape(state.service_account_email)}"
+            " --managed-by=user' with a CREATED_AT of about"
             f" {started_at:%Y-%m-%d %H:%M} UTC; delete only that key, not the"
             " account's other keys, which may be in use elsewhere.[/dim]"
         )
-        state.mark_step("key", StepStatus.SKIPPED)
-        return state
-
-    state.key_path = str(path)
-    console.print(f"[green]Key saved to: {path}[/green]")
-    console.print(
-        warning_panel(
-            "Security",
-            "Keep this file secure and [bold]do not commit it to git[/bold].",
+    else:
+        state.key_path = str(path)
+        console.print(f"[green]Key saved to: {escape(str(path))}[/green]")
+        console.print(
+            warning_panel(
+                "Security",
+                "Keep this file secure and [bold]do not commit it to git[/bold].",
+            )
         )
-    )
-    state.mark_step("key", StepStatus.COMPLETE)
+        state.mark_step("key", StepStatus.COMPLETE)
+        return state
+    _forget_failed_key_file(state, key_path)
+    state.mark_step("key", StepStatus.SKIPPED)
     return state
+
+
+def _forget_failed_key_file(state, key_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """Stop using *key_path* after creating a key for it failed.
+
+    A resumed session may still name the file (kept as UNKNOWN earlier);
+    after a failed overwrite it holds nothing usable, so later steps must
+    not test delegation with it.
+    """
+    if state.key_path == str(key_path):
+        state.key_path = None
 
 
 def _offer_bom_rewrite(state, key_path: Path):  # type: ignore[no-untyped-def]
@@ -582,8 +594,9 @@ def _keep_unchecked_key_file(state, key_path: Path, check):  # type: ignore[no-u
     console = get_console()
     if check.status is KeyStatus.UNKNOWN:
         console.print(
-            f"[yellow]Couldn't check whether {key_path} is still an active"
-            f" key for {state.service_account_email}: {check.reason}[/yellow]"
+            f"[yellow]Couldn't check whether {escape(str(key_path))} is still an"
+            f" active key for {escape(state.service_account_email)}:"
+            f" {escape(check.reason)}[/yellow]"
         )
         console.print(
             "[dim]Kept the existing file unchanged; the next steps use it"
@@ -593,7 +606,10 @@ def _keep_unchecked_key_file(state, key_path: Path, check):  # type: ignore[no-u
         state.key_path = str(key_path)
     else:
         # UNREADABLE, or a status added later: keep the file, don't use it.
-        console.print(f"[yellow]Can't use {key_path}: {check.reason}[/yellow]")
+        console.print(
+            f"[yellow]Can't use {escape(str(key_path))}:"
+            f" {escape(check.reason)}[/yellow]"
+        )
         console.print(
             "[dim]Left it unchanged. Fix the file (or its permissions) and"
             " re-run setup, or choose another path to create a new key.[/dim]"
