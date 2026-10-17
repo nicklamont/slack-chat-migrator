@@ -15,6 +15,7 @@ from slack_chat_migrator.constants import (
     DRIVE_FOLDER_MIME_TYPE,
     DRIVE_PROTECTED_ROLES,
     DRIVE_ROLE_READER,
+    HTTP_BAD_REQUEST,
 )
 from slack_chat_migrator.services.drive_adapter import PermissionChange
 from slack_chat_migrator.utils.api import escape_drive_query_value
@@ -55,6 +56,10 @@ class FolderManager:
         # (parent_folder_id, folder name) -> folder ID, shared by every lookup.
         # Folders are created or found once per run; the cache is trusted.
         self.folder_cache: dict[tuple[str, str], str] = {}
+        # Folders known to have inherited permissions disabled, and folders
+        # Drive refused to restrict (so it isn't retried for every file).
+        self.restricted_folders: set[str] = set()
+        self._restriction_failed: set[str] = set()
 
     def _is_outside_workspace_domain(self, email: str) -> bool:
         """Default external check: the email's domain isn't the workspace's."""
@@ -62,14 +67,86 @@ class FolderManager:
             return False
         return email.rsplit("@", 1)[-1].lower() != self.workspace_domain.lower()
 
-    def remember_folder(self, parent_folder_id: str, name: str, folder_id: str) -> None:
+    def remember_folder(
+        self,
+        parent_folder_id: str,
+        name: str,
+        folder_id: str,
+        *,
+        restricted: bool = False,
+    ) -> None:
         """Record a known folder so lookups by name need no API call.
 
         The first folder seen for a name wins, matching what a search returns.
+
+        Args:
+            parent_folder_id: Parent folder ID.
+            name: Folder name.
+            folder_id: Folder ID.
+            restricted: Whether the folder has ``inheritedPermissionsDisabled``.
         """
         self.folder_cache.setdefault(
             (parent_folder_id, self._sanitize_folder_name(name)), folder_id
         )
+        if restricted:
+            self.restricted_folders.add(folder_id)
+
+    def ensure_restricted(
+        self, folder_id: str, channel: str, shared_drive_id: str | None = None
+    ) -> bool:
+        """Turn *folder_id* into a limited-access folder, if it isn't one yet.
+
+        A limited-access folder (``inheritedPermissionsDisabled``) is open
+        only to people with direct access, plus shared drive managers, not
+        to every member of the shared drive.
+
+        Args:
+            folder_id: Folder to restrict.
+            channel: Channel name, for logging.
+            shared_drive_id: ID of the shared drive (if applicable).
+
+        Returns:
+            True if the folder is restricted.
+        """
+        if folder_id in self.restricted_folders:
+            return True
+        if folder_id in self._restriction_failed:
+            return False
+        try:
+            response = self.drive_service.update_file(
+                folder_id,
+                {"inheritedPermissionsDisabled": True},
+                fields="id, inheritedPermissionsDisabled",
+                supports_all_drives=bool(shared_drive_id),
+            )
+        except HttpError as e:
+            self._restriction_failed.add(folder_id)
+            log_with_context(
+                logging.WARNING,
+                f"Could not limit access to the {channel} folder ({e}); its files"
+                " are visible to every member of the shared drive",
+                channel=channel,
+                folder_id=folder_id,
+            )
+            return False
+        if response.get("inheritedPermissionsDisabled") is False:
+            self._restriction_failed.add(folder_id)
+            log_with_context(
+                logging.WARNING,
+                f"Drive did not limit access to the {channel} folder; its files"
+                " are visible to every member of the shared drive",
+                channel=channel,
+                folder_id=folder_id,
+            )
+            return False
+        self.restricted_folders.add(folder_id)
+        log_with_context(
+            logging.INFO,
+            f"Limited access to the {channel} folder to its members",
+            channel=channel,
+            folder_id=folder_id,
+        )
+        return True
 
     def list_child_folders(
         self, parent_folder_id: str, shared_drive_id: str | None = None
@@ -83,7 +160,8 @@ class FolderManager:
             shared_drive_id: ID of the shared drive (if applicable).
 
         Returns:
-            Folder resources with ``id`` and ``name``.
+            Folder resources with ``id``, ``name`` and
+            ``inheritedPermissionsDisabled``.
 
         Raises:
             HttpError: If a page can't be listed.
@@ -95,7 +173,7 @@ class FolderManager:
         )
         list_kwargs: dict[str, Any] = {
             "q": query,
-            "fields": "nextPageToken, files(id, name)",
+            "fields": "nextPageToken, files(id, name, inheritedPermissionsDisabled)",
             "page_size": DRIVE_FILES_PAGE_SIZE,
         }
         if shared_drive_id:
@@ -198,6 +276,7 @@ class FolderManager:
             HttpError: If the search fails.
         """
         query = self._folder_query(name, parent_folder_id)
+        fields = "files(id, name, inheritedPermissionsDisabled)"
         if shared_drive_id:
             results = self.drive_service.list_files(
                 q=query,
@@ -205,18 +284,28 @@ class FolderManager:
                 drive_id=shared_drive_id,
                 include_items_from_all_drives=True,
                 supports_all_drives=True,
-                fields="files(id, name)",
+                fields=fields,
             )
         else:
-            results = self.drive_service.list_files(q=query, fields="files(id, name)")
+            results = self.drive_service.list_files(q=query, fields=fields)
         items = results.get("files", [])
         found: str | None = items[0].get("id") if items else None
         if found:
-            self.remember_folder(parent_folder_id, name, found)
+            self.remember_folder(
+                parent_folder_id,
+                name,
+                found,
+                restricted=bool(items[0].get("inheritedPermissionsDisabled")),
+            )
         return found
 
     def get_or_create_channel_folder(
-        self, channel: str, parent_folder_id: str, shared_drive_id: str | None = None
+        self,
+        channel: str,
+        parent_folder_id: str,
+        shared_drive_id: str | None = None,
+        *,
+        restricted: bool = False,
     ) -> str | None:
         """Get or create a channel-specific folder.
 
@@ -224,65 +313,36 @@ class FolderManager:
             channel: The channel name
             parent_folder_id: ID of the parent folder
             shared_drive_id: ID of the shared drive (if applicable)
+            restricted: Make it a limited-access folder
+                (``inheritedPermissionsDisabled``), for private channels and
+                DMs.  An existing folder is restricted too.
 
         Returns:
             The folder ID if successful, None otherwise
         """
         name = self._sanitize_folder_name(channel)
-        cached = self.folder_cache.get((parent_folder_id, name))
-        if cached:
-            return cached
+        folder_id = self.folder_cache.get((parent_folder_id, name))
 
         try:
-            log_with_context(
-                logging.DEBUG,
-                f"Searching for existing channel folder: {channel}",
-                channel=channel,
-            )
-            existing_id = self._search_folder(name, parent_folder_id, shared_drive_id)
-            if existing_id:
+            if not folder_id:
                 log_with_context(
                     logging.DEBUG,
-                    f"Found existing channel folder: {channel} (ID: {existing_id})",
+                    f"Searching for existing channel folder: {channel}",
                     channel=channel,
                 )
-                return existing_id
-
-            # Create new channel folder
-            log_with_context(
-                logging.INFO, f"Creating channel folder: {channel}", channel=channel
-            )
-
-            folder_metadata = {
-                "name": name,
-                "mimeType": DRIVE_FOLDER_MIME_TYPE,
-                "parents": [parent_folder_id],
-            }
-            folder = self.drive_service.create_file(
-                body=folder_metadata,
-                fields="id",
-                supports_all_drives=bool(shared_drive_id),
-            )
-
-            created_folder_id: str | None = folder.get("id")
-            if not created_folder_id:
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to create channel folder: {channel}",
-                    channel=channel,
+                folder_id = self._search_folder(name, parent_folder_id, shared_drive_id)
+                if folder_id:
+                    log_with_context(
+                        logging.DEBUG,
+                        f"Found existing channel folder: {channel} (ID: {folder_id})",
+                        channel=channel,
+                    )
+            if not folder_id:
+                folder_id = self._create_channel_folder(
+                    channel, name, parent_folder_id, shared_drive_id, restricted
                 )
-                return None
-
-            log_with_context(
-                logging.INFO,
-                f"Successfully created channel folder: {channel} (ID: {created_folder_id})",
-                channel=channel,
-            )
-            # Members are granted access after the migration, with
-            # set_channel_folder_permissions.
-            self.remember_folder(parent_folder_id, name, created_folder_id)
-            return created_folder_id
-
+                if not folder_id:
+                    return None
         except HttpError as e:
             log_with_context(
                 logging.WARNING,
@@ -291,6 +351,76 @@ class FolderManager:
                 error=str(e),
             )
             return None
+
+        if restricted:
+            self.ensure_restricted(folder_id, channel, shared_drive_id)
+        return folder_id
+
+    def _create_channel_folder(
+        self,
+        channel: str,
+        name: str,
+        parent_folder_id: str,
+        shared_drive_id: str | None,
+        restricted: bool,
+    ) -> str | None:
+        """Create a channel folder, limited-access when *restricted*.
+
+        Raises:
+            HttpError: If the folder can't be created.
+        """
+        log_with_context(
+            logging.INFO, f"Creating channel folder: {channel}", channel=channel
+        )
+        folder_metadata: dict[str, Any] = {
+            "name": name,
+            "mimeType": DRIVE_FOLDER_MIME_TYPE,
+            "parents": [parent_folder_id],
+        }
+        if restricted:
+            folder_metadata["inheritedPermissionsDisabled"] = True
+        fields = "id, inheritedPermissionsDisabled"
+        supports_all_drives = bool(shared_drive_id)
+        try:
+            folder = self.drive_service.create_file(
+                body=folder_metadata,
+                fields=fields,
+                supports_all_drives=supports_all_drives,
+            )
+        except HttpError as e:
+            if not restricted or e.resp.status != HTTP_BAD_REQUEST:
+                raise
+            # Create it open, then restrict it with an update.
+            folder_metadata.pop("inheritedPermissionsDisabled")
+            folder = self.drive_service.create_file(
+                body=folder_metadata,
+                fields=fields,
+                supports_all_drives=supports_all_drives,
+            )
+
+        created_folder_id: str | None = folder.get("id")
+        if not created_folder_id:
+            log_with_context(
+                logging.WARNING,
+                f"Failed to create channel folder: {channel}",
+                channel=channel,
+            )
+            return None
+
+        log_with_context(
+            logging.INFO,
+            f"Successfully created channel folder: {channel} (ID: {created_folder_id})",
+            channel=channel,
+        )
+        # Members are granted access after the migration, with
+        # set_channel_folder_permissions.
+        self.remember_folder(
+            parent_folder_id,
+            name,
+            created_folder_id,
+            restricted=bool(folder.get("inheritedPermissionsDisabled")),
+        )
+        return created_folder_id
 
     def get_channel_folder_id(
         self, channel: str, parent_folder_id: str, shared_drive_id: str | None = None

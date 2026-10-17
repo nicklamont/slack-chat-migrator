@@ -854,10 +854,10 @@ class TestPreCacheRootFolder:
             "root123", "drive123"
         )
         handler.folder_manager.remember_folder.assert_any_call(
-            "root123", "general", "folder_a"
+            "root123", "general", "folder_a", restricted=False
         )
         handler.folder_manager.remember_folder.assert_any_call(
-            "root123", "random", "folder_b"
+            "root123", "random", "folder_b", restricted=False
         )
         # Only the root folder's files are listed at start-up.
         handler.drive_uploader.pre_cache_folder_file_hashes.assert_called_once_with(

@@ -7,6 +7,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import mimetypes
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import requests
@@ -81,6 +82,7 @@ class FileHandler:
         user_resolver: Any,
         state: MigrationState,
         dry_run: bool = False,
+        channels_meta: Mapping[str, Any] | None = None,
     ) -> None:
         """Initialize the FileHandler.
 
@@ -94,6 +96,12 @@ class FileHandler:
             user_resolver: User resolver for external user detection
             state: Mutable migration state
             dry_run: Whether to run in dry run mode
+            channels_meta: Channel name -> ``channels.json`` record.  A
+                channel listed there and not ``is_private`` counts as public;
+                every other conversation (private channels, DMs, group DMs)
+                gets a limited-access folder when
+                ``config.restrict_private_channel_folders`` is set.  Use
+                :meth:`set_conversation_type` to say it explicitly instead.
         """
         self.drive_service = drive_service
         self.chat_service = chat_service
@@ -111,6 +119,10 @@ class FileHandler:
 
         # (drive_file_id, email) pairs that already received writer access
         self._granted_posters: set[tuple[str, str]] = set()
+
+        # Conversation privacy, for limited-access folders
+        self.channels_meta: Mapping[str, Any] = channels_meta or {}
+        self._conversation_types: dict[str, str] = {}
 
         # Initialize file upload statistics
         self.file_stats: dict[str, Any] = {
@@ -276,7 +288,10 @@ class FileHandler:
 
         for folder in folders:
             self.folder_manager.remember_folder(
-                self._root_folder_id, folder.get("name", ""), folder["id"]
+                self._root_folder_id,
+                folder.get("name", ""),
+                folder["id"],
+                restricted=bool(folder.get("inheritedPermissionsDisabled")),
             )
         log_with_context(
             logging.DEBUG,
@@ -854,9 +869,13 @@ class FileHandler:
         """
         folder_id = None
 
+        restricted = bool(channel) and self.should_restrict_folder(channel or "")
         if channel and self._root_folder_id:
             folder_id = self.folder_manager.get_or_create_channel_folder(
-                channel, self._root_folder_id, self._shared_drive_id
+                channel,
+                self._root_folder_id,
+                self._shared_drive_id,
+                restricted=restricted,
             )
 
             if folder_id:
@@ -864,7 +883,8 @@ class FileHandler:
                     folder_id, self._shared_drive_id
                 )
 
-        if not folder_id:
+        if not folder_id and not restricted:
+            # A private conversation's files never fall back to the open root.
             folder_id = self._root_folder_id
 
         if not folder_id:
@@ -877,6 +897,42 @@ class FileHandler:
             return None
 
         return folder_id
+
+    def set_conversation_type(self, channel: str, conversation_type: str) -> None:
+        """Record a conversation's type: public, private, mpim or dm.
+
+        Overrides the guess from ``channels_meta``.
+
+        Args:
+            channel: Channel (folder) name.
+            conversation_type: One of ``config.CONVERSATION_TYPES``.
+        """
+        self._conversation_types[channel] = conversation_type
+
+    def is_public_conversation(self, channel: str) -> bool:
+        """Whether *channel* is a public channel.
+
+        An explicit :meth:`set_conversation_type` wins.  Otherwise a channel
+        is public when ``channels.json`` lists it and it isn't private.
+        """
+        explicit = self._conversation_types.get(channel)
+        if explicit is not None:
+            return explicit == "public"
+        meta = self.channels_meta.get(channel)
+        return isinstance(meta, Mapping) and not meta.get("is_private", False)
+
+    def should_restrict_folder(self, channel: str) -> bool:
+        """Whether *channel*'s Drive folder should be a limited-access folder.
+
+        True for non-public conversations when the run uses a shared drive
+        and ``config.restrict_private_channel_folders`` is set.  In regular
+        Drive mode the folders sit in the admin's unshared My Drive.
+        """
+        return bool(
+            self.config.restrict_private_channel_folders
+            and self._shared_drive_id
+            and not self.is_public_conversation(channel)
+        )
 
     def _execute_drive_upload(
         self,

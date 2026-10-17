@@ -530,3 +530,158 @@ class TestDriveCallBudget:
         assert round_trips <= 2 * 5
         assert fake.count("files.get") == 0
         assert fake.count("files.list") == 0
+
+
+# ---------------------------------------------------------------------------
+# Limited-access folders for private conversations (F10)
+# ---------------------------------------------------------------------------
+
+CHANNELS_META = {
+    "general": {"name": "general", "is_private": False},
+    "hr": {"name": "hr", "is_private": True},
+}
+
+
+def make_meta_handler(
+    fake, tmp_path, *, shared=True, restrict=True, meta=CHANNELS_META
+):
+    config = MigrationConfig(
+        shared_drive=SharedDriveConfig(name=DRIVE_NAME),
+        restrict_private_channel_folders=restrict,
+    )
+    handler = make_handler(fake, tmp_path, shared=shared, config=config)
+    handler.channels_meta = meta
+    return handler
+
+
+def created_folder(fake, name):
+    return next(
+        kw["body"]
+        for method, kw in fake.calls
+        if method == "files.create" and kw["body"].get("name") == name
+    )
+
+
+class TestLimitedAccessFolders:
+    @pytest.mark.parametrize(
+        ("channel", "restricted"),
+        [("hr", True), ("general", False), ("D0123-dm", True)],
+        ids=["private", "public", "not-in-channels-json"],
+    )
+    def test_folder_body(self, tmp_path, downloads, channel, restricted):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path)
+
+        result = upload(handler, downloads, channel, "F1", "UA", b"x", space=None)
+
+        body = created_folder(fake, channel)
+        assert body.get("inheritedPermissionsDisabled", False) is restricted
+        folder_id = fake.files_db[result.drive_id]["parents"][0]
+        assert (
+            fake.files_db[folder_id].get("inheritedPermissionsDisabled", False)
+            is restricted
+        )
+
+    def test_restriction_can_be_turned_off(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path, restrict=False)
+        upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
+        assert "inheritedPermissionsDisabled" not in created_folder(fake, "hr")
+
+    def test_regular_drive_folders_are_not_restricted(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path, shared=False)
+        upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
+        assert "inheritedPermissionsDisabled" not in created_folder(fake, "hr")
+
+    def test_explicit_conversation_type_wins(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path)
+        handler.set_conversation_type("general", "private")
+        handler.set_conversation_type("hr", "public")
+
+        upload(handler, downloads, "general", "F1", "UA", b"x", space=None)
+        upload(handler, downloads, "hr", "F2", "UA", b"y", space=None)
+
+        assert created_folder(fake, "general")["inheritedPermissionsDisabled"] is True
+        assert "inheritedPermissionsDisabled" not in created_folder(fake, "hr")
+
+    def test_existing_open_private_folder_is_restricted_once(self, tmp_path, downloads):
+        fake = FakeDrive()
+        fake.drives_db.append({"id": "SD1", "name": DRIVE_NAME})
+        fake.add_folder("OLD", "hr", "SD1")  # from a run before this feature
+        handler = make_meta_handler(fake, tmp_path)
+
+        upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
+        upload(handler, downloads, "hr", "F2", "UA", b"y", space=None)
+
+        updates = [kw for method, kw in fake.calls if method == "files.update"]
+        assert len(updates) == 1
+        assert updates[0]["fileId"] == "OLD"
+        assert updates[0]["body"] == {"inheritedPermissionsDisabled": True}
+        assert fake.files_db["OLD"]["inheritedPermissionsDisabled"] is True
+
+    def test_restricted_folder_from_listing_needs_no_update(self, tmp_path, downloads):
+        fake = FakeDrive()
+        fake.drives_db.append({"id": "SD1", "name": DRIVE_NAME})
+        fake.add_folder("OLD", "hr", "SD1", inheritedPermissionsDisabled=True)
+        handler = make_meta_handler(fake, tmp_path)
+
+        upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
+
+        assert fake.count("files.update") == 0
+
+    def test_create_rejecting_the_flag_falls_back_to_update(self, tmp_path, downloads):
+        fake = FakeDrive(reject_inherited_flag_on_create=True)
+        handler = make_meta_handler(fake, tmp_path)
+
+        result = upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
+
+        assert result.success
+        folder_id = fake.files_db[result.drive_id]["parents"][0]
+        assert fake.files_db[folder_id]["inheritedPermissionsDisabled"] is True
+
+    def test_private_folder_is_shared_with_members_and_admin_only(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path)
+        handler.user_resolver.workspace_admin = "admin@example.com"
+        result = upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
+        folder_id = fake.files_db[result.drive_id]["parents"][0]
+        fake.permissions_db[folder_id] = [
+            {
+                "id": "a",
+                "type": "user",
+                "role": "writer",
+                "emailAddress": "admin@example.com",
+            },
+            {
+                "id": "s",
+                "type": "user",
+                "role": "reader",
+                "emailAddress": "stale@example.com",
+            },
+        ]
+
+        handler.folder_manager.set_channel_folder_permissions(
+            folder_id,
+            "hr",
+            ["alice@example.com", "ext@other.org"],
+            handler.shared_drive_id,
+        )
+
+        members = sorted(p["emailAddress"] for p in fake.permissions_db[folder_id])
+        assert members == ["admin@example.com", "alice@example.com"]
+
+    def test_private_files_never_fall_back_to_the_root(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path)
+        handler.folder_manager.get_or_create_channel_folder = MagicMock(
+            return_value=None
+        )
+
+        result = upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
+
+        assert not result.success
+        assert fake.count("files.create") == 0

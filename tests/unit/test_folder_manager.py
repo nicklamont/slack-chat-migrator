@@ -460,3 +460,47 @@ class TestSanitizeFolderName:
         fm = FolderManager(svc)
 
         assert fm._sanitize_folder_name("general") == "general"
+
+
+class TestEnsureRestricted:
+    """Limited-access folders (F10)."""
+
+    def test_failed_update_is_not_retried(self):
+        svc = MagicMock()
+        svc.update_file.side_effect = _make_http_error(403)
+        fm = FolderManager(svc)
+
+        assert fm.ensure_restricted("F", "hr", "SD") is False
+        assert fm.ensure_restricted("F", "hr", "SD") is False
+        svc.update_file.assert_called_once()
+
+    def test_update_sets_flag_and_supports_all_drives(self):
+        svc = MagicMock()
+        svc.update_file.return_value = {"id": "F", "inheritedPermissionsDisabled": True}
+        fm = FolderManager(svc)
+
+        assert fm.ensure_restricted("F", "hr", "SD") is True
+        assert fm.ensure_restricted("F", "hr", "SD") is True
+        svc.update_file.assert_called_once_with(
+            "F",
+            {"inheritedPermissionsDisabled": True},
+            fields="id, inheritedPermissionsDisabled",
+            supports_all_drives=True,
+        )
+
+    def test_drive_ignoring_the_flag_is_reported(self):
+        svc = MagicMock()
+        svc.update_file.return_value = {
+            "id": "F",
+            "inheritedPermissionsDisabled": False,
+        }
+        fm = FolderManager(svc)
+        assert fm.ensure_restricted("F", "hr") is False
+
+    def test_unrestricted_request_leaves_folder_alone(self):
+        fake = FakeDrive()
+        fm = FolderManager(DriveAdapter(fake))
+        fm.get_or_create_channel_folder("general", "ROOT", "SD")
+        assert fake.count("files.update") == 0
+        body = next(kw["body"] for name, kw in fake.calls if name == "files.create")
+        assert "inheritedPermissionsDisabled" not in body
