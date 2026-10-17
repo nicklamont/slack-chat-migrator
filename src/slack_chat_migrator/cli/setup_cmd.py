@@ -480,6 +480,8 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
                 "[dim]Kept the existing file. Re-run setup and choose another"
                 " path to create a key.[/dim]"
             )
+            # A resumed session may still name it; the next steps can't use it.
+            _forget_failed_key_file(state, key_path)
             state.mark_step("key", StepStatus.SKIPPED)
             return state
         overwrite = True
@@ -536,11 +538,11 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
 
 
 def _forget_failed_key_file(state, key_path: Path) -> None:  # type: ignore[no-untyped-def]
-    """Stop using *key_path* after creating a key for it failed.
+    """Stop using *key_path*, which holds no key the next steps can use.
 
-    A resumed session may still name the file (kept as UNKNOWN earlier);
-    after a failed overwrite it holds nothing usable, so later steps must
-    not test delegation with it.
+    A resumed session may still name the file (kept as UNKNOWN earlier).
+    After a failed overwrite, or when the user declined to overwrite a key
+    that can't be used, later steps must not test delegation with it.
     """
     if state.key_path == str(key_path):
         state.key_path = None
@@ -789,9 +791,14 @@ def _step_delegation(state):  # type: ignore[no-untyped-def]
     except ValueError as e:
         console.print(f"[red]{escape(str(e))}[/red]")
         console.print(
-            "[dim]Re-run setup to check the key file (step 4) before setting up"
-            " domain-wide delegation.[/dim]"
+            "[dim]Re-run setup: step 4 runs again. Enter"
+            f" {escape(state.key_path)} there to check the file again, or"
+            " another path to create a new key.[/dim]"
         )
+        # Step 4 counted this file as a usable key, so a resumed run would
+        # skip it and fail here again: make the next run check it again.
+        state.key_path = None
+        state.mark_step("key", StepStatus.SKIPPED)
         state.mark_step("delegation", StepStatus.SKIPPED)
         return state
     scopes_csv = ",".join(_get_required_scopes())

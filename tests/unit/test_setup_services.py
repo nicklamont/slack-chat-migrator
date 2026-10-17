@@ -1481,6 +1481,23 @@ class TestKeyStep:
         assert state.step_status("key") == StepStatus.SKIPPED
         assert key.read_text() == "{}"
 
+    @pytest.mark.parametrize(
+        ("status", "reason"),
+        [("INACTIVE", "it is disabled"), ("NOT_A_KEY", "it is a key of x@else.com")],
+    )
+    def test_declined_overwrite_forgets_the_key_path(
+        self, tmp_path: Path, status: str, reason: str
+    ) -> None:
+        """A resumed session must not keep using a key the user won't replace."""
+        state, key, confirm, download = self._run_key_step(
+            tmp_path, _key_check(status, reason), confirm_answer=False, resumed=True
+        )
+        confirm.assert_called_once()
+        download.assert_not_called()
+        assert key.read_text() == "{}"
+        assert state.key_path is None
+        assert state.step_status("key") == StepStatus.SKIPPED
+
     def test_never_overwrites_a_key_it_could_not_check(
         self, tmp_path: Path, capsys
     ) -> None:
@@ -1791,7 +1808,12 @@ class TestReadClientId:
             state = _step_delegation(state)
         delegation.assert_not_called()
         assert state.step_status("delegation") == StepStatus.SKIPPED
-        assert "Can't read the key file" in capsys.readouterr().out
+        # The next run checks the file again in step 4
+        assert state.step_status("key") == StepStatus.SKIPPED
+        assert state.key_path is None
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Can't read the key file" in out
+        assert f"step 4 runs again. Enter {key} there" in out
 
 
 def _run_saved_setup(
@@ -1851,6 +1873,30 @@ def _saved_state(key_path: str, *, delegation_verified: bool = False) -> SetupSt
 
 class TestSetupRun:
     """The whole wizard, resumed from a saved session."""
+
+    def test_unreadable_key_is_checked_again_on_the_next_run(
+        self, tmp_path: Path
+    ) -> None:
+        """Step 6's "re-run setup" advice works: the next run re-runs step 4."""
+        key = tmp_path / "key.json"
+        # Re-saved with a byte order mark after step 4 accepted it
+        key.write_bytes(b"\xef\xbb\xbf" + json.dumps({"client_id": "1"}).encode())
+        saved = {"state": _saved_state(str(key))}
+
+        step4 = MagicMock(side_effect=lambda credentials, state: state)
+        first = _run_saved_setup(saved, _step_download_key=step4)
+        assert first.exit_code == 0, first.output
+        assert "[4/6] Key:" in first.output
+        assert "Can't read the key file" in first.output
+        step4.assert_not_called()
+        assert saved["state"].step_status("key") == StepStatus.SKIPPED
+        assert saved["state"].key_path is None
+
+        second = _run_saved_setup(saved, _step_download_key=step4)
+        assert second.exit_code == 0, second.output
+        step4.assert_called_once()
+        assert "[4/6] Key:" not in second.output
+        assert "Can't read the key file" not in second.output
 
     @pytest.mark.parametrize("verified", [True, False], ids=["complete", "almost"])
     def test_summary_prints_the_key_path_literally(self, verified: bool) -> None:
