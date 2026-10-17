@@ -9,9 +9,11 @@ import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
+from google.auth.exceptions import RefreshError
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.exceptions import APIError
 from slack_chat_migrator.services.drive.folder_manager import FolderLookup
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
 from slack_chat_migrator.services.files import file as file_mod
@@ -238,6 +240,38 @@ class TestGrants:
             ("alice@example.com", "writer")
         ]
         assert not any(kw.get("transferOwnership") for kw in calls)
+
+
+class TestDriveSetup:
+    """Drive setup stops the run on transient errors (#118)."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [ConnectionResetError("connection reset"), RefreshError("unauthorized_client")],
+        ids=["network", "refresh"],
+    )
+    def test_existing_shared_drive_is_never_replaced_by_my_drive(self, tmp_path, error):
+        fake = FakeDrive(drives=[{"id": "SD1", "name": DRIVE_NAME}])
+        fake.failing["drives.list"] = error
+        handler = make_handler(fake, tmp_path, shared=False)
+        handler._drive_status = file_mod.DriveStatus("not_initialized")
+
+        with pytest.raises(APIError, match=DRIVE_NAME):
+            handler.ensure_drive_initialized()
+
+        assert handler.drive_status.mode == "none"
+        assert fake.count("files.create") == 0  # no My Drive folder made
+
+    def test_account_without_shared_drives_uses_my_drive(self, tmp_path):
+        fake = FakeDrive()
+        fake.failing["drives.create"] = http_error(403, "insufficient permissions")
+        handler = make_handler(fake, tmp_path, shared=False)
+        handler._drive_status = file_mod.DriveStatus("not_initialized")
+
+        handler.ensure_drive_initialized()
+
+        assert handler.drive_status.mode == "my_drive"
+        assert "insufficient permissions" in handler.drive_status.detail
 
 
 class TestWorkspaceDomains:

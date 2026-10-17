@@ -10,17 +10,37 @@ from typing import TYPE_CHECKING
 
 from googleapiclient.errors import HttpError
 
-from slack_chat_migrator.constants import DRIVES_PAGE_SIZE
+from slack_chat_migrator.constants import (
+    DRIVES_PAGE_SIZE,
+    HTTP_FORBIDDEN,
+    HTTP_NOT_FOUND,
+)
 from slack_chat_migrator.core.config import MigrationConfig
-from slack_chat_migrator.exceptions import ConfigError
+from slack_chat_migrator.exceptions import APIError, ConfigError
 from slack_chat_migrator.services.drive_adapter import DRIVE_CALL_ERRORS
-from slack_chat_migrator.utils.api import escape_drive_query_value
+from slack_chat_migrator.utils.api import escape_drive_query_value, is_rate_limit_error
 from slack_chat_migrator.utils.logging import (
     log_with_context,
 )
 
 if TYPE_CHECKING:
     from slack_chat_migrator.services.drive_adapter import DriveAdapter
+
+
+def shared_drives_unavailable(error: BaseException) -> bool:
+    """Whether *error* says this account can't use or create shared drives.
+
+    Only a definitive refusal counts: a 403 that isn't a rate limit, or a
+    404.  Network errors, credentials that can't be refreshed, 5xx and
+    other statuses say nothing about shared drives, so they never justify
+    storing attachments somewhere else.
+    """
+    if not isinstance(error, HttpError) or is_rate_limit_error(error):
+        return False
+    return int(getattr(error.resp, "status", 0) or 0) in (
+        HTTP_FORBIDDEN,
+        HTTP_NOT_FOUND,
+    )
 
 
 class SharedDriveManager:
@@ -46,12 +66,18 @@ class SharedDriveManager:
         """Get or create the shared drive for storing attachments.
 
         Returns:
-            Shared drive ID if successful, None otherwise (the reason is in
-            :attr:`last_error`)
+            Shared drive ID, or None when Drive says this account can't use
+            or create shared drives (see :func:`shared_drives_unavailable`);
+            the reason is then in :attr:`last_error`.
 
         Raises:
-            ConfigError: If ``shared_drive.id`` is configured but the drive
-                can't be opened.  A new drive is never created in its place.
+            ConfigError: If ``shared_drive.id`` is configured and Drive
+                refuses to open it.  A new drive is never created in its
+                place.
+            APIError: If Drive couldn't be asked: a network error,
+                credentials that can't be refreshed, or an HTTP error that
+                doesn't mean shared drives are unavailable.  The caller must
+                not fall back to another location for these.
         """
         self.last_error = None
         # Get shared drive configuration
@@ -73,6 +99,11 @@ class SharedDriveManager:
                     " Check the ID and that the workspace admin is a member of"
                     " the drive, or remove shared_drive.id to use a drive found"
                     " or created by name."
+                ) from e
+            except DRIVE_CALL_ERRORS as e:
+                raise APIError(
+                    f"Could not open the shared drive configured as"
+                    f" shared_drive.id ({shared_drive_id}): {e}"
                 ) from e
             log_with_context(
                 logging.INFO,
@@ -122,7 +153,12 @@ class SharedDriveManager:
             drive_name: Name of the shared drive to find or create
 
         Returns:
-            Shared drive ID if successful, None otherwise
+            Shared drive ID, or None if shared drives are unavailable to
+            this account (:attr:`last_error` says why)
+
+        Raises:
+            APIError: For any other failure (see
+                :meth:`get_or_create_shared_drive`).
         """
         try:
             # First, search for existing shared drives with this name
@@ -162,8 +198,9 @@ class SharedDriveManager:
 
             created_drive_id: str | None = created_drive.get("id")
             if not created_drive_id:
-                self.last_error = "Drive returned no ID for the new shared drive"
-                return None
+                raise APIError(
+                    f"Drive returned no ID for the new shared drive {drive_name!r}"
+                )
 
             log_with_context(
                 logging.INFO,
@@ -174,11 +211,15 @@ class SharedDriveManager:
             return created_drive_id
 
         except DRIVE_CALL_ERRORS as e:
+            if not shared_drives_unavailable(e):
+                raise APIError(
+                    f"Could not find or create shared drive {drive_name!r}: {e}"
+                ) from e
             self.last_error = (
-                f"could not find or create shared drive {drive_name!r}: {e}"
+                f"this account can't use or create shared drive {drive_name!r}: {e}"
             )
             log_with_context(
-                logging.ERROR,
-                f"Failed to find or create shared drive {drive_name}: {e}",
+                logging.WARNING,
+                f"Shared drive {drive_name!r} is unavailable to this account: {e}",
             )
             return None

@@ -3,11 +3,12 @@
 from unittest.mock import MagicMock
 
 import pytest
+from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
-from slack_chat_migrator.exceptions import ConfigError
+from slack_chat_migrator.exceptions import APIError, ConfigError
 from slack_chat_migrator.services.drive.shared_drive_manager import (
     SharedDriveManager,
 )
@@ -136,30 +137,54 @@ class TestGetOrCreateSharedDrive:
 
         assert result == "default-id"
 
-    def test_http_error_during_get_returns_none(self):
-        """HttpError at the top-level try block returns None."""
-        manager, drive_service = _make_manager(
-            shared_drive_id=None,
-            shared_drive_name="Test Drive",
-        )
-        # list_drives raises HttpError
-        drive_service.list_drives.side_effect = _make_http_error(
-            500, b"Internal Server Error"
-        )
-
-        result = manager.get_or_create_shared_drive()
-
-        assert result is None
-        assert manager.last_error and "Test Drive" in manager.last_error
-
-    def test_network_error_is_reported_not_raised(self):
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _make_http_error(500, b"Internal Server Error"),
+            _make_http_error(
+                403, b'{"error": {"errors": [{"reason": "userRateLimitExceeded"}]}}'
+            ),
+            _make_http_error(400, b"Bad Request"),
+            ConnectionResetError("reset"),
+            RefreshError("unauthorized_client"),
+        ],
+        ids=["500", "403-rate-limit", "400", "network", "refresh"],
+    )
+    def test_transient_errors_raise_instead_of_falling_back(self, error):
+        """Only a definitive "no shared drives" answer allows the fallback."""
         manager, drive_service = _make_manager(
             shared_drive_id=None, shared_drive_name="Test Drive"
         )
-        drive_service.list_drives.side_effect = ConnectionResetError("reset")
+        drive_service.list_drives.side_effect = error
+
+        with pytest.raises(APIError, match="Test Drive"):
+            manager.get_or_create_shared_drive()
+
+    @pytest.mark.parametrize("status", [403, 404])
+    def test_definitive_refusal_returns_none_with_the_reason(self, status):
+        manager, drive_service = _make_manager(
+            shared_drive_id=None, shared_drive_name="Test Drive"
+        )
+        drive_service.list_drives.return_value = {"drives": []}
+        drive_service.create_drive.side_effect = _make_http_error(status, b"no")
 
         assert manager.get_or_create_shared_drive() is None
-        assert manager.last_error and "reset" in manager.last_error
+        assert manager.last_error and "Test Drive" in manager.last_error
+
+    def test_configured_drive_network_error_is_an_api_error(self):
+        manager, drive_service = _make_manager(shared_drive_id="SD9")
+        drive_service.get_drive.side_effect = TimeoutError("timed out")
+
+        with pytest.raises(APIError, match="SD9"):
+            manager.get_or_create_shared_drive()
+
+    def test_new_drive_without_an_id_is_an_api_error(self):
+        manager, drive_service = _make_manager(shared_drive_name="Test Drive")
+        drive_service.list_drives.return_value = {"drives": []}
+        drive_service.create_drive.return_value = {}
+
+        with pytest.raises(APIError, match="no ID"):
+            manager.get_or_create_shared_drive()
 
     def test_success_clears_the_last_error(self):
         manager, drive_service = _make_manager(

@@ -21,6 +21,7 @@ from slack_chat_migrator.constants import (
 )
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.exceptions import APIError
 from slack_chat_migrator.services.chat import ChatFileUploader
 from slack_chat_migrator.services.drive import (
     DriveFileUploader,
@@ -304,7 +305,31 @@ class FileHandler:
         return self._drive_status.mode != "not_initialized"
 
     def ensure_drive_initialized(self) -> None:
-        """Ensure drive structures are initialized. Call this after permission validation."""
+        """Set up Drive for attachments (once), and check that it can be used.
+
+        Call this after the permission checks; the migrate preflight does,
+        so a run never starts without a place for its attachments.
+
+        Raises:
+            APIError: If Drive can't be used for attachments; the message
+                gives the cause from :attr:`drive_status`.
+            ConfigError: If the configured ``shared_drive.id`` can't be
+                opened.
+        """
+        self._initialize_drive()
+        if not self._drive_status.ready:
+            raise APIError(
+                "Google Drive can't be used for attachments:"
+                f" {self._drive_status.detail}. Check network access and the"
+                " workspace admin's Drive access, then run again."
+            )
+
+    def _initialize_drive(self) -> None:
+        """Set up Drive once; a failure is recorded in :attr:`drive_status`.
+
+        Unlike :meth:`ensure_drive_initialized` this doesn't raise when
+        Drive can't be used: each upload then fails with the cause.
+        """
         if not self._drive_initialized:
             log_with_context(
                 logging.INFO,
@@ -318,10 +343,10 @@ class FileHandler:
         """Backward compatibility property for the root folder ID.
 
         Returns:
-            The root Google Drive folder ID, or None if not yet initialised.
+            The root Google Drive folder ID (Drive is set up first), or None
+            if Drive couldn't be set up.
         """
-        # Ensure drive is initialized when accessing folder_id
-        self.ensure_drive_initialized()
+        self._initialize_drive()
         return self._root_folder_id
 
     @folder_id.setter
@@ -364,23 +389,28 @@ class FileHandler:
         """Initialize the shared drive and root folder for attachments.
 
         Delegates shared drive creation/validation to :class:`SharedDriveManager`
-        (single source of truth).  Without a shared drive, a regular Drive
-        folder is used instead.  Sets the root folder ID and
-        :attr:`drive_status`, then pre-caches the root folder for
-        deduplication.  A configured ``shared_drive.id`` that can't be
-        opened raises ``ConfigError``; other failures only show in the
-        status.
+        (single source of truth).  Only when Drive says this account can't
+        use or create shared drives is a regular Drive folder used instead.
+        A network error, credentials that can't be refreshed or any other
+        failure never lead to that fallback: :attr:`drive_status` becomes
+        ``none`` with the cause.  Then pre-caches the root folder for
+        deduplication.
+
+        Raises:
+            ConfigError: If the configured ``shared_drive.id`` can't be
+                opened.
         """
         fallback_name = "Imported Slack Attachments"
         try:
             # SharedDriveManager handles: validate configured ID → find by
             # name → create new drive.  No need to duplicate that here.
             shared_drive_id = self.shared_drive_manager.get_or_create_shared_drive()
-            shared_error = self.shared_drive_manager.last_error
-        except HttpError as e:
-            shared_drive_id = None
-            shared_error = str(e)
-            fallback_name = "Slack Attachments Fallback"
+        except APIError as e:
+            self._drive_status = DriveStatus("none", detail=str(e))
+            log_with_context(
+                logging.ERROR, f"Drive is not available for attachments: {e}"
+            )
+            return
 
         if shared_drive_id:
             self._drive_status = DriveStatus(
@@ -391,11 +421,11 @@ class FileHandler:
                 f"Using shared drive root as attachment folder: {shared_drive_id}",
             )
         else:
-            why = f"shared drive unavailable: {shared_error or 'no drive returned'}"
+            why = self.shared_drive_manager.last_error or "no shared drive"
             log_with_context(
                 logging.WARNING,
-                f"Could not set up shared drive ({why}), falling back to"
-                f" regular Drive folder {fallback_name!r}",
+                f"Shared drives can't be used ({why}); storing attachments in"
+                f" the regular Drive folder {fallback_name!r} instead",
             )
             lookup = self.folder_manager.find_or_create_root_folder(fallback_name)
             self._drive_status = (
@@ -413,7 +443,7 @@ class FileHandler:
                 log_with_context(
                     logging.ERROR,
                     "Drive is not available for attachments"
-                    f" ({self._drive_status.detail}); every Drive upload will fail",
+                    f" ({self._drive_status.detail})",
                 )
 
         self._pre_cache_root_folder()
@@ -491,7 +521,7 @@ class FileHandler:
         name = file_obj.get("name") or f"file_{file_id}"
 
         try:
-            self.ensure_drive_initialized()
+            self._initialize_drive()
             self._update_file_stats(file_obj, channel)
 
             log_with_context(

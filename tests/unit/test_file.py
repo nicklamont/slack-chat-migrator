@@ -13,6 +13,7 @@ from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.exceptions import APIError
 from slack_chat_migrator.services.drive import DriveUpload, DriveUploadFailure
 from slack_chat_migrator.services.drive.folder_manager import FolderLookup
 from slack_chat_migrator.services.files.file import DriveStatus, FileHandler
@@ -688,17 +689,46 @@ class TestEnsureDriveInitialized:
     def test_dry_run_delegates_to_init(self):
         """Dry run no longer short-circuits — DI stubs handle API calls."""
         handler = _make_handler(dry_run=True)
-        handler._initialize_shared_drive_and_folder = MagicMock()
+        handler._initialize_shared_drive_and_folder = MagicMock(
+            side_effect=lambda: _use_drive(handler)
+        )
 
         handler.ensure_drive_initialized()
         handler._initialize_shared_drive_and_folder.assert_called_once()
 
     def test_calls_init_when_needed(self):
         handler = _make_handler()
-        handler._initialize_shared_drive_and_folder = MagicMock()
+        handler._initialize_shared_drive_and_folder = MagicMock(
+            side_effect=lambda: _use_drive(handler)
+        )
 
         handler.ensure_drive_initialized()
         handler._initialize_shared_drive_and_folder.assert_called_once()
+
+    def test_unusable_drive_raises_with_the_cause(self):
+        """The preflight stops instead of migrating without attachments (#118)."""
+        handler = _make_handler()
+        handler.shared_drive_manager.get_or_create_shared_drive.side_effect = APIError(
+            "Could not find or create shared drive 'X': connection reset"
+        )
+
+        with pytest.raises(APIError, match="connection reset"):
+            handler.ensure_drive_initialized()
+        # Set up once: the next call reports the same status without retrying.
+        with pytest.raises(APIError, match="connection reset"):
+            handler.ensure_drive_initialized()
+        handler.shared_drive_manager.get_or_create_shared_drive.assert_called_once()
+
+    def test_upload_path_does_not_raise(self):
+        handler = _make_handler()
+        handler.shared_drive_manager.get_or_create_shared_drive.side_effect = APIError(
+            "reset"
+        )
+
+        handler._initialize_drive()
+
+        assert handler.drive_status.mode == "none"
+        assert handler.folder_id is None
 
 
 # ===========================================================================
@@ -797,22 +827,18 @@ class TestInitializeSharedDriveAndFolder:
         assert handler.drive_status.mode == "my_drive"
         assert "403 insufficient permissions" in handler.drive_status.detail
 
-    def test_http_error_falls_back_to_fallback_folder(self):
-        """When an HttpError occurs, fall back to 'Slack Attachments Fallback'."""
+    def test_transient_error_never_falls_back_to_my_drive(self):
+        """A network or auth error isn't a reason to store files elsewhere."""
         handler = _make_handler()
-        handler.shared_drive_manager.get_or_create_shared_drive.side_effect = HttpError(
-            Response({"status": "500"}), b"error"
-        )
-        handler.folder_manager.find_or_create_root_folder.return_value = FolderLookup(
-            "fallback_folder"
+        handler.shared_drive_manager.get_or_create_shared_drive.side_effect = APIError(
+            "Could not find or create shared drive 'X': connection reset"
         )
 
         handler._initialize_shared_drive_and_folder()
 
-        assert handler._root_folder_id == "fallback_folder"
-        handler.folder_manager.find_or_create_root_folder.assert_called_once_with(
-            "Slack Attachments Fallback"
-        )
+        assert handler.drive_status.mode == "none"
+        assert "connection reset" in handler.drive_status.detail
+        handler.folder_manager.find_or_create_root_folder.assert_not_called()
 
     def test_no_shared_drive_and_no_folder_is_not_ready(self):
         """SF12: the status says Drive isn't usable, and why."""
