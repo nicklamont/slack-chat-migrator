@@ -5,6 +5,8 @@ Integrated file attachment service for message processing.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from slack_chat_migrator.types import UploadResult
@@ -13,6 +15,99 @@ from slack_chat_migrator.utils.logging import log_with_context
 if TYPE_CHECKING:
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
     from slack_chat_migrator.services.files.file import FileHandler
+
+#: AttachmentIssue.status values.
+ISSUE_UNAVAILABLE = "unavailable"
+ISSUE_FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class AttachmentIssue:
+    """A file of a message that couldn't be attached.
+
+    Attributes:
+        file_id: Slack file ID.
+        name: File name, for the placeholder.
+        status: ``"unavailable"`` (deleted, hidden, external, expired link...)
+            or ``"failed"`` (an upload or network error).
+        reason: Short reason, e.g. ``deleted``, ``external``, ``html_page``,
+            ``http_403``, or the error text.
+        url: Link to keep in the message, when there is one (external files).
+    """
+
+    file_id: str
+    name: str
+    status: str
+    reason: str
+    url: str | None = None
+
+    @property
+    def placeholder(self) -> str:
+        """One line to show in the message instead of the file."""
+        text = f"[File unavailable: {self.name}]"
+        return f"{text} {self.url}" if self.url else text
+
+
+class AttachmentList(list[dict[str, Any]]):
+    """Attachment payloads for a message, plus the files that couldn't be attached.
+
+    It is a plain list of Chat attachment objects, so existing callers keep
+    working; :attr:`issues` lists each file that was unavailable or failed,
+    in message order.
+    """
+
+    def __init__(
+        self,
+        attachments: Iterable[dict[str, Any]] = (),
+        issues: Iterable[AttachmentIssue] = (),
+    ) -> None:
+        super().__init__(attachments)
+        self.issues: list[AttachmentIssue] = list(issues)
+
+    @property
+    def unavailable(self) -> list[AttachmentIssue]:
+        """Files that could not be fetched (not counted as failures)."""
+        return [i for i in self.issues if i.status == ISSUE_UNAVAILABLE]
+
+    @property
+    def failed(self) -> list[AttachmentIssue]:
+        """Files whose upload failed."""
+        return [i for i in self.issues if i.status == ISSUE_FAILED]
+
+
+def collect_message_files(message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return a message's own files plus files of shared/forwarded messages.
+
+    The message is not modified.  A file that appears twice (same ID) is
+    listed once.
+
+    Args:
+        message: Slack message.
+
+    Returns:
+        A new list of Slack file objects.
+    """
+    if not message or not isinstance(message, dict):
+        return []
+    files: list[dict[str, Any]] = list(message.get("files") or [])
+    for attachment in message.get("attachments") or []:
+        if not isinstance(attachment, dict):
+            continue
+        if attachment.get("is_share") or attachment.get("is_msg_unfurl"):
+            files.extend(attachment.get("files") or [])
+
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for file_obj in files:
+        if not isinstance(file_obj, dict):
+            continue
+        file_id = file_obj.get("id")
+        if file_id:
+            if file_id in seen:
+                continue
+            seen.add(file_id)
+        unique.append(file_obj)
+    return unique
 
 
 class MessageAttachmentProcessor:
@@ -40,8 +135,11 @@ class MessageAttachmentProcessor:
         user_id: str | None = None,
         user_service: ChatAdapter | None = None,
         sender_email: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> AttachmentList:
         """Process all file attachments for a message and return attachment payload list.
+
+        Files of forwarded/shared messages are included.  The message is not
+        modified.
 
         Args:
             message: The Slack message containing files
@@ -52,27 +150,21 @@ class MessageAttachmentProcessor:
             sender_email: Optional email of the message sender
 
         Returns:
-            List of attachment objects for Google Chat message payload
+            The attachment objects for the Chat message payload, as an
+            :class:`AttachmentList` whose ``issues`` name the files that were
+            unavailable or failed, so the caller can add a placeholder.
         """
-        files = message.get("files", [])
-
-        # Also check for files in forwarded message attachments
-        attachments = message.get("attachments", [])
-        for attachment in attachments:
-            # Check if this is a forwarded/shared message with files
-            if (
-                attachment.get("is_share") or attachment.get("is_msg_unfurl")
-            ) and "files" in attachment:
-                forwarded_files = attachment.get("files", [])
-                files.extend(forwarded_files)
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found {len(forwarded_files)} files in forwarded message attachment",
-                    channel=channel,
-                )
-
+        files = collect_message_files(message)
         if not files:
-            return []
+            return AttachmentList()
+
+        forwarded = len(files) - len(message.get("files") or [])
+        if forwarded > 0:
+            log_with_context(
+                logging.DEBUG,
+                f"Found {forwarded} files in forwarded message attachments",
+                channel=channel,
+            )
 
         if self.dry_run:
             log_with_context(
@@ -92,9 +184,9 @@ class MessageAttachmentProcessor:
                         "name": f"attachment-dry-{i}",
                     }
                 )
-            return mock_attachments
+            return AttachmentList(mock_attachments)
 
-        attachments = []
+        result = AttachmentList()
 
         log_with_context(
             logging.DEBUG,
@@ -103,10 +195,13 @@ class MessageAttachmentProcessor:
         )
 
         for file_obj in files:
+            file_id = file_obj.get("id", "unknown")
+            name = file_obj.get("name") or f"file_{file_id}"
             try:
-                # Ensure the file has the user ID from the message if it doesn't have one
+                # Attribute the file to the sender if it names no user,
+                # without changing the export data.
                 if "user" not in file_obj and user_id:
-                    file_obj["user"] = user_id
+                    file_obj = {**file_obj, "user": user_id}
 
                 # Upload the file using FileHandler
                 upload_result = self.file_handler.upload_attachment(
@@ -118,48 +213,69 @@ class MessageAttachmentProcessor:
                         logging.DEBUG,
                         f"Skipping attachment (reason: {upload_result.skip_reason or 'unknown'}): {upload_result.name or 'unknown'}",
                         channel=channel,
-                        file_id=file_obj.get("id", "unknown"),
+                        file_id=file_id,
                     )
+                    if upload_result.skip_reason == ISSUE_UNAVAILABLE:
+                        result.issues.append(
+                            AttachmentIssue(
+                                file_id,
+                                name,
+                                ISSUE_UNAVAILABLE,
+                                str(
+                                    upload_result.metadata.get("unavailable_reason")
+                                    or "unknown"
+                                ),
+                                upload_result.url,
+                            )
+                        )
                     continue
 
                 if upload_result.success:
                     attachment = self._create_attachment_from_result(upload_result)
                     if attachment:
-                        attachments.append(attachment)
+                        result.append(attachment)
                         log_with_context(
                             logging.DEBUG,
                             f"Added attachment to message: {upload_result.name or 'unknown'}",
                             channel=channel,
-                            file_id=file_obj.get("id", "unknown"),
+                            file_id=file_id,
                         )
-                    else:
-                        log_with_context(
-                            logging.WARNING,
-                            f"Failed to create attachment from upload result for file: {file_obj.get('name', 'unknown')}",
-                            channel=channel,
-                            file_id=file_obj.get("id", "unknown"),
-                            upload_result_type=upload_result.upload_type or "unknown",
-                        )
+                        continue
+                    log_with_context(
+                        logging.WARNING,
+                        f"Failed to create attachment from upload result for file: {name}",
+                        channel=channel,
+                        file_id=file_id,
+                        upload_result_type=upload_result.upload_type or "unknown",
+                    )
+                    reason = "invalid upload result"
                 else:
                     log_with_context(
                         logging.WARNING,
-                        f"Failed to upload file: {file_obj.get('name', 'unknown')}",
+                        f"Failed to upload file: {name}",
                         channel=channel,
-                        file_id=file_obj.get("id", "unknown"),
+                        file_id=file_id,
                     )
+                    reason = upload_result.error or "upload failed"
+                result.issues.append(
+                    AttachmentIssue(file_id, name, ISSUE_FAILED, reason)
+                )
 
             except Exception as e:
                 log_with_context(
                     logging.ERROR,
-                    f"Error processing file attachment: {file_obj.get('name', 'unknown')} - {e!s}",
+                    f"Error processing file attachment: {name} - {e!s}",
                     channel=channel,
-                    file_id=file_obj.get("id", "unknown"),
+                    file_id=file_id,
                     error=str(e),
+                )
+                result.issues.append(
+                    AttachmentIssue(file_id, name, ISSUE_FAILED, str(e))
                 )
                 # Continue processing other files even if one fails
                 continue
 
-        return attachments
+        return result
 
     def _create_attachment_from_result(
         self, upload_result: UploadResult
@@ -235,14 +351,12 @@ class MessageAttachmentProcessor:
         return None
 
     def count_message_files(self, message: dict[str, Any]) -> int:
-        """Count the number of files in a message.
+        """Count the files in a message, including forwarded ones.
 
         Args:
             message: The Slack message object
 
         Returns:
-            Number of files in the message
+            Number of files that :meth:`process_message_attachments` handles
         """
-        if not message or not isinstance(message, dict):
-            return 0
-        return len(message.get("files", []))
+        return len(collect_message_files(message))

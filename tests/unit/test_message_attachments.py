@@ -4,7 +4,10 @@ from unittest.mock import MagicMock
 
 from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.services.messages.message_attachments import (
+    AttachmentIssue,
+    AttachmentList,
     MessageAttachmentProcessor,
+    collect_message_files,
 )
 from slack_chat_migrator.types import UploadResult
 
@@ -469,7 +472,9 @@ class TestProcessMessageAttachmentsUserId:
         processor.process_message_attachments(
             message=message, channel="general", user_id="U999"
         )
-        assert file_obj["user"] == "U999"
+        uploaded = handler.upload_attachment.call_args[0][0]
+        assert uploaded["user"] == "U999"
+        assert "user" not in file_obj  # the export data is not modified
 
     def test_does_not_override_existing_user(self):
         handler = _make_file_handler()
@@ -618,3 +623,137 @@ class TestMultipleFiles:
         assert len(result) == 3
         drive_ids = [att["driveDataRef"]["driveFileId"] for att in result]
         assert drive_ids == ["drv_1", "drv_2", "drv_3"]
+
+
+# ---------------------------------------------------------------------------
+# Forwarded files are counted (I37) and the input is left alone
+# ---------------------------------------------------------------------------
+
+
+class TestForwardedFileCounting:
+    def test_count_matches_uploads(self):
+        handler = _make_file_handler()
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="drive", drive_id="D", name="n"
+        )
+        processor = _make_processor(file_handler=handler)
+        message = {
+            "files": [{"id": "F1", "name": "a"}],
+            "attachments": [{"is_share": True, "files": [{"id": "F2", "name": "b"}]}],
+        }
+
+        assert processor.count_message_files(message) == 2
+        processor.process_message_attachments(message, "c", "spaces/S")
+        assert handler.upload_attachment.call_count == 2
+
+    def test_processing_does_not_mutate_message(self):
+        handler = _make_file_handler()
+        handler.upload_attachment.return_value = UploadResult(
+            upload_type="drive", drive_id="D"
+        )
+        processor = _make_processor(file_handler=handler)
+        message = {
+            "files": [{"id": "F1", "name": "a"}],
+            "attachments": [{"is_share": True, "files": [{"id": "F2", "name": "b"}]}],
+        }
+
+        processor.process_message_attachments(message, "c", "spaces/S", user_id="U1")
+        processor.process_message_attachments(message, "c", "spaces/S", user_id="U1")
+
+        assert message == {
+            "files": [{"id": "F1", "name": "a"}],
+            "attachments": [{"is_share": True, "files": [{"id": "F2", "name": "b"}]}],
+        }
+        assert processor.count_message_files(message) == 2
+
+    def test_duplicate_file_ids_are_listed_once(self):
+        message = {
+            "files": [{"id": "F1"}],
+            "attachments": [
+                {"is_msg_unfurl": True, "files": [{"id": "F1"}, {"id": "F3"}]}
+            ],
+        }
+        assert [f["id"] for f in collect_message_files(message)] == ["F1", "F3"]
+
+    def test_tolerates_odd_shapes(self):
+        assert collect_message_files(None) == []
+        assert collect_message_files({"files": None, "attachments": None}) == []
+        assert collect_message_files({"attachments": ["x", {"is_share": True}]}) == []
+
+
+# ---------------------------------------------------------------------------
+# Files that couldn't be attached are reported (for I03 placeholders)
+# ---------------------------------------------------------------------------
+
+
+class TestAttachmentIssues:
+    def _run(self, *results):
+        handler = _make_file_handler()
+        handler.upload_attachment.side_effect = list(results)
+        processor = _make_processor(file_handler=handler)
+        files = [{"id": f"F{i}", "name": f"file{i}.pdf"} for i in range(len(results))]
+        return processor.process_message_attachments({"files": files}, "c", "spaces/S")
+
+    def test_returns_a_list_with_issues(self):
+        result = self._run(UploadResult(upload_type="drive", drive_id="D1"))
+        assert isinstance(result, AttachmentList)
+        assert isinstance(result, list)
+        assert result == [{"driveDataRef": {"driveFileId": "D1"}}]
+        assert result.issues == []
+
+    def test_unavailable_and_failed_files_are_named(self):
+        result = self._run(
+            UploadResult(
+                upload_type="skip",
+                skip_reason="unavailable",
+                name="file0.pdf",
+                metadata={"unavailable_reason": "deleted"},
+            ),
+            UploadResult(error="Download failed: http_503", name="file1.pdf"),
+            UploadResult(upload_type="drive", drive_id="D2"),
+            UploadResult(
+                upload_type="skip",
+                skip_reason="unavailable",
+                url="https://www.dropbox.com/s/x",
+                metadata={"unavailable_reason": "external"},
+            ),
+        )
+
+        assert len(result) == 1
+        assert result.unavailable == [
+            AttachmentIssue("F0", "file0.pdf", "unavailable", "deleted"),
+            AttachmentIssue(
+                "F3",
+                "file3.pdf",
+                "unavailable",
+                "external",
+                "https://www.dropbox.com/s/x",
+            ),
+        ]
+        assert result.failed == [
+            AttachmentIssue("F1", "file1.pdf", "failed", "Download failed: http_503")
+        ]
+        assert [i.placeholder for i in result.issues] == [
+            "[File unavailable: file0.pdf]",
+            "[File unavailable: file1.pdf]",
+            "[File unavailable: file3.pdf] https://www.dropbox.com/s/x",
+        ]
+
+    def test_google_docs_links_are_not_issues(self):
+        result = self._run(
+            UploadResult(upload_type="skip", skip_reason="google_docs_link", name="d")
+        )
+        assert result == []
+        assert result.issues == []
+
+    def test_exception_is_reported_as_failed(self):
+        result = self._run(RuntimeError("boom"))
+        assert result.failed == [AttachmentIssue("F0", "file0.pdf", "failed", "boom")]
+
+    def test_dry_run_reports_no_issues(self):
+        processor = _make_processor(dry_run=True)
+        result = processor.process_message_attachments(
+            {"files": [{"id": "F1", "mode": "tombstone"}]}, "c"
+        )
+        assert len(result) == 1
+        assert result.issues == []
