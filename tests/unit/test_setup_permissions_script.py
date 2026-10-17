@@ -32,7 +32,7 @@ pytestmark = pytest.mark.skipif(
 STUB = r"""#!/bin/bash
 echo "$*" >> "$GCLOUD_LOG"
 # Like real gcloud, "keys create" creates its output file before calling IAM.
-if [ "$1 $2 $3 $4" = "iam service-accounts keys create" ]; then
+if [ -n "${STUB_TOUCH:-}" ] && [ "$1 $2 $3 $4" = "iam service-accounts keys create" ]; then
   : > "$5"
 fi
 for pattern in ${FAIL_ON:-}; do
@@ -94,6 +94,7 @@ def _run(
     with_gcloud: bool = True,
     fail_on: str = "",
     key_list: str = ACTIVE_KEY,
+    stub_writes_key: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     env = {
         "PATH": str(_bin_dir(tmp_path, with_gcloud)),
@@ -102,6 +103,8 @@ def _run(
         "FAIL_ON": fail_on,
         "KEY_JSON": json.dumps(KEY),
         "KEY_LIST": key_list,
+        # Opening a FIFO for writing would block: let the test turn it off.
+        "STUB_TOUCH": "1" if stub_writes_key else "",
     }
     return subprocess.run(  # noqa: S603
         [str(SCRIPT), *args],
@@ -176,6 +179,24 @@ class TestSetupPermissionsScript:
         result = _run(tmp_path)
         assert result.returncode == 0, result.stderr
         assert json.loads(key.read_text()) == KEY
+
+    def test_failed_create_never_removes_a_symlink(self, tmp_path: Path) -> None:
+        """A key path that is a symlink (here to /dev/null) is left alone."""
+        key = tmp_path / "slack-chat-migrator-sa-key.json"
+        key.symlink_to("/dev/null")
+        result = _run(tmp_path, fail_on="keys_create")
+        assert result.returncode != 0
+        assert key.is_symlink()
+
+    def test_failed_create_keeps_a_file_it_did_not_create(self, tmp_path: Path) -> None:
+        """A FIFO the user named isn't a regular file, so it is kept."""
+        import os
+
+        key = tmp_path / "slack-chat-migrator-sa-key.json"
+        os.mkfifo(key)
+        result = _run(tmp_path, fail_on="keys_create", stub_writes_key=False)
+        assert result.returncode != 0
+        assert key.exists()
 
     @pytest.mark.parametrize(
         ("content", "message"),
