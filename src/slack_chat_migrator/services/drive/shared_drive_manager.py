@@ -36,24 +36,6 @@ class SharedDriveManager:
         self.drive_service = drive_service
         self.config = config
 
-    def validate_shared_drive(self, shared_drive_id: str) -> bool:
-        """Validate that a shared drive exists and is accessible.
-
-        Args:
-            shared_drive_id: ID of the shared drive to validate
-
-        Returns:
-            True if valid and accessible, False otherwise
-        """
-        try:
-            self.drive_service.get_drive(drive_id=shared_drive_id)
-            return True
-        except HttpError as e:
-            log_with_context(
-                logging.WARNING, f"Shared drive {shared_drive_id} not accessible: {e}"
-            )
-            return False
-
     def get_or_create_shared_drive(self) -> str | None:
         """Get or create the shared drive for storing attachments.
 

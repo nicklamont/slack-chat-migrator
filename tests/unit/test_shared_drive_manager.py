@@ -36,39 +36,6 @@ def _make_manager(
     return manager, drive_service
 
 
-class TestValidateSharedDrive:
-    """Tests for SharedDriveManager.validate_shared_drive."""
-
-    def test_dry_run_delegates_to_drive_service(self):
-        """Dry run no longer short-circuits — DI stubs handle it."""
-        manager, drive_service = _make_manager()
-        drive_service.get_drive.return_value = {"id": "some-drive-id"}
-
-        result = manager.validate_shared_drive("some-drive-id")
-
-        assert result is True
-        drive_service.get_drive.assert_called_once()
-
-    def test_valid_drive_returns_true(self):
-        manager, drive_service = _make_manager()
-        drive_service.get_drive.return_value = {
-            "id": "drive-123",
-            "name": "My Drive",
-        }
-
-        result = manager.validate_shared_drive("drive-123")
-
-        assert result is True
-
-    def test_http_error_returns_false(self):
-        manager, drive_service = _make_manager()
-        drive_service.get_drive.side_effect = _make_http_error(404, b"Not Found")
-
-        result = manager.validate_shared_drive("bad-id")
-
-        assert result is False
-
-
 class TestGetOrCreateSharedDrive:
     """Tests for SharedDriveManager.get_or_create_shared_drive."""
 

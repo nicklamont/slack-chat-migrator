@@ -104,29 +104,6 @@ class TestCountMessageFiles:
 
 
 # ---------------------------------------------------------------------------
-# Tests: has_files
-# ---------------------------------------------------------------------------
-
-
-class TestHasFiles:
-    def test_has_files_true(self):
-        processor = _make_processor()
-        assert processor.has_files({"files": [{"id": "F1"}]}) is True
-
-    def test_has_files_false_empty(self):
-        processor = _make_processor()
-        assert processor.has_files({"files": []}) is False
-
-    def test_has_files_false_no_key(self):
-        processor = _make_processor()
-        assert processor.has_files({"text": "hello"}) is False
-
-    def test_has_files_false_none(self):
-        processor = _make_processor()
-        assert processor.has_files(None) is False
-
-
-# ---------------------------------------------------------------------------
 # Tests: process_message_attachments — no files
 # ---------------------------------------------------------------------------
 

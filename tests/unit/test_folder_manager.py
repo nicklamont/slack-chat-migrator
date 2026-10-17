@@ -24,68 +24,6 @@ def _make_drive_service():
 
 
 # -----------------------------------------------------------
-# create_root_folder_in_shared_drive
-# -----------------------------------------------------------
-
-
-class TestCreateRootFolderInSharedDrive:
-    """Tests for create_root_folder_in_shared_drive."""
-
-    def test_dry_run_delegates_to_drive_service(self):
-        """Dry run no longer short-circuits — DI stubs handle API calls."""
-        svc = _make_drive_service()
-        svc.list_files.return_value = {"files": []}
-        svc.create_file.return_value = {"id": "stub-folder-id"}
-
-        fm = FolderManager(svc)
-        result = fm.create_root_folder_in_shared_drive("attachments", "drive123")
-
-        assert result == "stub-folder-id"
-        svc.list_files.assert_called_once()
-
-    def test_creates_folder_in_shared_drive(self):
-        svc = _make_drive_service()
-
-        # list returns no existing folders
-        svc.list_files.return_value = {"files": []}
-        # create returns new folder id
-        svc.create_file.return_value = {"id": "new_folder_id"}
-
-        fm = FolderManager(svc)
-        result = fm.create_root_folder_in_shared_drive("attachments", "drive123")
-
-        assert result == "new_folder_id"
-        svc.create_file.assert_called_once()
-        call_kwargs = svc.create_file.call_args[1]
-        body = call_kwargs["body"]
-        assert body["name"] == "attachments"
-        assert body["parents"] == ["drive123"]
-        assert call_kwargs["supports_all_drives"] is True
-
-    def test_finds_existing_folder_returns_its_id(self):
-        svc = _make_drive_service()
-
-        svc.list_files.return_value = {
-            "files": [{"id": "existing_id", "name": "attachments"}]
-        }
-
-        fm = FolderManager(svc)
-        result = fm.create_root_folder_in_shared_drive("attachments", "drive123")
-
-        assert result == "existing_id"
-        svc.create_file.assert_not_called()
-
-    def test_http_error_returns_none(self):
-        svc = _make_drive_service()
-        svc.list_files.side_effect = _make_http_error(500)
-
-        fm = FolderManager(svc)
-        result = fm.create_root_folder_in_shared_drive("attachments", "drive123")
-
-        assert result is None
-
-
-# -----------------------------------------------------------
 # get_or_create_channel_folder
 # -----------------------------------------------------------
 

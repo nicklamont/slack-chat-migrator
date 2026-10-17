@@ -17,14 +17,12 @@ from slack_chat_migrator.services.drive.drive_uploader import (
 
 def _make_uploader(
     workspace_domain="example.com",
-    service_account_email=None,
 ):
     """Build a DriveFileUploader with a mocked drive service."""
     drive_service = MagicMock()
     return DriveFileUploader(
         drive_service=drive_service,
         workspace_domain=workspace_domain,
-        service_account_email=service_account_email,
     )
 
 
@@ -483,173 +481,12 @@ class TestInit:
 
     def test_default_state(self):
         """Initializes with expected default attributes."""
-        uploader = _make_uploader(
-            workspace_domain="test.com",
-            service_account_email="sa@test.com",
-        )
+        uploader = _make_uploader(workspace_domain="test.com")
 
         assert uploader.workspace_domain == "test.com"
-        assert uploader.service_account_email == "sa@test.com"
         assert uploader.file_hash_cache == {}
         assert uploader.folders_pre_cached == set()
         assert uploader.current_channel is None
-
-
-# -------------------------------------------------------------------
-# TestSetFilePermissionsForUsers
-# -------------------------------------------------------------------
-
-
-class TestSetFilePermissionsForUsers:
-    """Tests for set_file_permissions_for_users."""
-
-    def test_single_user_gets_reader_role(self):
-        """A user not matching message_poster gets reader role."""
-        uploader = _make_uploader()
-        uploader.drive_service.create_permission.return_value = {"id": "perm1"}
-
-        result = uploader.set_file_permissions_for_users(
-            "file1", ["reader@example.com"]
-        )
-
-        assert result is True
-        call_kwargs = uploader.drive_service.create_permission.call_args
-        body = call_kwargs.kwargs.get("body", call_kwargs[1].get("body"))
-        assert body["role"] == "reader"
-
-    def test_message_poster_in_list_gets_editor(self):
-        """Message poster in user list gets editor role."""
-        uploader = _make_uploader()
-        uploader.drive_service.create_permission.return_value = {"id": "perm1"}
-
-        result = uploader.set_file_permissions_for_users(
-            "file1",
-            ["poster@example.com"],
-            message_poster_email="poster@example.com",
-        )
-
-        assert result is True
-        call_kwargs = uploader.drive_service.create_permission.call_args
-        body = call_kwargs.kwargs.get("body", call_kwargs[1].get("body"))
-        assert body["role"] == "editor"
-
-    def test_message_poster_not_in_list_added_separately(self):
-        """Message poster not in user_emails gets added with editor role."""
-        uploader = _make_uploader()
-        uploader.drive_service.create_permission.return_value = {"id": "perm1"}
-
-        result = uploader.set_file_permissions_for_users(
-            "file1",
-            ["reader@example.com"],
-            message_poster_email="poster@example.com",
-        )
-
-        assert result is True
-        # Should have 2 calls: reader + poster
-        assert uploader.drive_service.create_permission.call_count == 2
-
-    def test_service_account_gets_editor(self):
-        """Service account always gets editor permission."""
-        uploader = _make_uploader(service_account_email="sa@example.com")
-        uploader.drive_service.create_permission.return_value = {"id": "perm1"}
-
-        result = uploader.set_file_permissions_for_users(
-            "file1", ["reader@example.com"]
-        )
-
-        assert result is True
-        # 1 reader + 1 service account
-        assert uploader.drive_service.create_permission.call_count == 2
-
-    def test_partial_failure(self):
-        """Some users fail but processing continues."""
-        uploader = _make_uploader()
-        # First succeeds, second fails
-        uploader.drive_service.create_permission.side_effect = [
-            {"id": "perm1"},
-            _http_error(403, "Forbidden"),
-        ]
-
-        result = uploader.set_file_permissions_for_users(
-            "file1", ["a@example.com", "b@example.com"]
-        )
-
-        assert result is False
-
-    def test_http_error_logged_not_crash(self):
-        """HttpError during permission creation doesn't crash."""
-        uploader = _make_uploader()
-        uploader.drive_service.create_permission.side_effect = _http_error(
-            500, "Server Error"
-        )
-
-        result = uploader.set_file_permissions_for_users("file1", ["user@example.com"])
-
-        assert result is False
-
-    def test_empty_user_emails_returns_false(self):
-        """Empty user list returns False."""
-        uploader = _make_uploader()
-
-        result = uploader.set_file_permissions_for_users("file1", [])
-
-        assert result is False
-
-    def test_all_permissions_succeed_returns_true(self):
-        """Returns True when all permissions are set successfully."""
-        uploader = _make_uploader(service_account_email="sa@example.com")
-        uploader.drive_service.create_permission.return_value = {"id": "perm1"}
-
-        result = uploader.set_file_permissions_for_users(
-            "file1",
-            ["a@example.com", "b@example.com"],
-            message_poster_email="a@example.com",
-        )
-
-        assert result is True
-        # 2 users + 1 service account = 3
-        assert uploader.drive_service.create_permission.call_count == 3
-
-
-# -------------------------------------------------------------------
-# TestTransferOwnership
-# -------------------------------------------------------------------
-
-
-class TestTransferOwnership:
-    """Tests for transfer_ownership."""
-
-    def test_successful_transfer(self):
-        """Successful ownership transfer returns True."""
-        uploader = _make_uploader()
-        uploader.drive_service.create_permission.return_value = {"id": "perm1"}
-
-        result = uploader.transfer_ownership("file1", "owner@example.com")
-
-        assert result is True
-        call_kwargs = uploader.drive_service.create_permission.call_args
-        assert call_kwargs.kwargs.get("transfer_ownership") is True
-
-    def test_dry_run_delegates_to_service(self):
-        """Dry run mode delegates to the (injected) drive service."""
-        uploader = _make_uploader()
-        uploader.drive_service.create_permission.return_value = {}
-
-        result = uploader.transfer_ownership("file1", "owner@example.com")
-
-        assert result is True
-        uploader.drive_service.create_permission.assert_called_once()
-
-    def test_http_error_returns_false(self):
-        """HttpError during transfer returns False."""
-        uploader = _make_uploader()
-        uploader.drive_service.create_permission.side_effect = _http_error(
-            403, "Forbidden"
-        )
-
-        result = uploader.transfer_ownership("file1", "owner@example.com")
-
-        assert result is False
 
 
 # -------------------------------------------------------------------

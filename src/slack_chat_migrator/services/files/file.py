@@ -30,9 +30,6 @@ from slack_chat_migrator.services.files.file_download import (
     download_file,
 )
 from slack_chat_migrator.services.files.file_permissions import (
-    share_file_with_members as _share_file_with_members,
-)
-from slack_chat_migrator.services.files.file_permissions import (
     transfer_file_ownership,
 )
 from slack_chat_migrator.types import UploadResult
@@ -100,9 +97,6 @@ class FileHandler:
 
         # Initialize the dictionary to track processed files
         self.processed_files: dict[str, Any] = {}
-
-        # Initialize cache to track which channel folders have already been shared
-        self.shared_channel_folders: set[str] = set()
 
         # Initialize file upload statistics
         self.file_stats: dict[str, Any] = {
@@ -172,17 +166,6 @@ class FileHandler:
     def shared_drive_id(self) -> str | None:
         """Property to access the shared drive ID."""
         return self._shared_drive_id
-
-    def reset_shared_folder_cache(self) -> None:
-        """Reset the cache of shared channel folders.
-
-        This can be useful when starting a fresh migration or for testing.
-        """
-        self.shared_channel_folders.clear()
-        log_with_context(
-            logging.DEBUG,
-            "Cleared shared channel folder cache",
-        )
 
     def _initialize_shared_drive_and_folder(self) -> None:
         """Initialize the shared drive and root folder for attachments.
@@ -625,37 +608,6 @@ class FileHandler:
         self.file_stats["failed_uploads"] += 1
         return None
 
-    def upload_file(
-        self, file_obj: dict[str, Any], channel: str | None = None
-    ) -> str | None:
-        """Upload a file from Slack to Google Drive.
-
-        This method is maintained for backward compatibility.
-        For new code, use upload_attachment instead.
-
-        Args:
-            file_obj: The file object from Slack
-            channel: Optional channel name for context
-
-        Returns:
-            The Drive file ID if successful, None otherwise
-        """
-        try:
-            result = self.upload_attachment(file_obj, channel)
-            if result.upload_type == "drive":
-                return result.drive_id
-            return None
-
-        except (HttpError, requests.RequestException, OSError) as e:
-            log_with_context(
-                logging.ERROR,
-                f"Error uploading file: {e!s}",
-                channel=channel,
-                file_id=file_obj.get("id", "unknown"),
-                error=str(e),
-            )
-            return None
-
     def _upload_direct_to_chat(
         self,
         file_obj: dict[str, Any],
@@ -841,21 +793,6 @@ class FileHandler:
             folder_id = self.folder_manager.get_or_create_channel_folder(
                 channel, self._root_folder_id, self._shared_drive_id
             )
-
-            channel_folder_key = f"{channel}_{folder_id}"
-            if folder_id and channel_folder_key not in self.shared_channel_folders:
-                log_with_context(
-                    logging.DEBUG,
-                    f"Channel folder created for {channel}, permissions will be set after migration completes",
-                    channel=channel,
-                )
-                self.shared_channel_folders.add(channel_folder_key)
-            else:
-                log_with_context(
-                    logging.DEBUG,
-                    f"Channel folder for {channel} already processed",
-                    channel=channel,
-                )
 
             if folder_id:
                 self.drive_uploader.pre_cache_folder_file_hashes(
@@ -1070,18 +1007,4 @@ class FileHandler:
         """
         return create_drive_reference(
             file_obj, channel, self.processed_files, self.file_stats
-        )
-
-    def share_file_with_members(self, drive_file_id: str, channel: str) -> bool:
-        """Share a Drive file with all active members of a channel.
-
-        Delegates to :func:`file_permissions.share_file_with_members`.
-        """
-        return _share_file_with_members(
-            self.drive_service,
-            drive_file_id,
-            channel,
-            self._shared_drive_id,
-            self.state.progress.active_users_by_channel,
-            self.user_map,
         )

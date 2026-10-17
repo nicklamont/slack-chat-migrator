@@ -94,7 +94,6 @@ class TestFileHandlerInit:
     def test_basic_attributes(self):
         handler = _make_handler()
         assert handler.processed_files == {}
-        assert handler.shared_channel_folders == set()
         assert handler.dry_run is False
         assert handler._drive_initialized is False
 
@@ -220,24 +219,6 @@ class TestGetCurrentChannel:
     def test_returns_none_without_current_channel(self):
         handler = _make_handler(current_channel=None)
         assert handler._get_current_channel() is None
-
-
-# ===========================================================================
-# reset_shared_folder_cache tests
-# ===========================================================================
-
-
-class TestResetSharedFolderCache:
-    """Tests for reset_shared_folder_cache."""
-
-    def test_clears_cache(self):
-        handler = _make_handler()
-        handler.shared_channel_folders.add("general_folder1")
-        handler.shared_channel_folders.add("random_folder2")
-        assert len(handler.shared_channel_folders) == 2
-
-        handler.reset_shared_folder_cache()
-        assert len(handler.shared_channel_folders) == 0
 
 
 # ===========================================================================
@@ -531,51 +512,6 @@ class TestUploadStrategy:
 
         assert handler.file_stats["files_by_channel"]["general"] == 2
         assert handler.file_stats["files_by_channel"]["random"] == 1
-
-
-# ===========================================================================
-# upload_file backward compat
-# ===========================================================================
-
-
-class TestUploadFile:
-    """Tests for the backward-compatible upload_file method."""
-
-    def test_returns_drive_id_on_success(self):
-        handler = _make_handler(folder_id="root")
-        handler._drive_initialized = True
-        handler.upload_attachment = MagicMock(
-            return_value=UploadResult(upload_type="drive", drive_id="d_abc")
-        )
-
-        result = handler.upload_file({"id": "F1", "name": "test.txt"}, channel="ch")
-        assert result == "d_abc"
-
-    def test_returns_none_on_direct_upload(self):
-        handler = _make_handler(folder_id="root")
-        handler._drive_initialized = True
-        handler.upload_attachment = MagicMock(
-            return_value=UploadResult(upload_type="direct", attachment_ref={})
-        )
-
-        result = handler.upload_file({"id": "F1", "name": "test.png"})
-        assert result is None
-
-    def test_returns_none_on_failure(self):
-        handler = _make_handler(folder_id="root")
-        handler._drive_initialized = True
-        handler.upload_attachment = MagicMock(return_value=UploadResult(error="failed"))
-
-        result = handler.upload_file({"id": "F1", "name": "test.txt"})
-        assert result is None
-
-    def test_exception_returns_none(self):
-        handler = _make_handler(folder_id="root")
-        handler._drive_initialized = True
-        handler.upload_attachment = MagicMock(side_effect=OSError("oops"))
-
-        result = handler.upload_file({"id": "F1", "name": "test.txt"})
-        assert result is None
 
 
 # ===========================================================================
@@ -1615,8 +1551,7 @@ class TestUploadToDrive:
         handler._upload_to_drive(file_obj1, b"data", channel="general")
         handler._upload_to_drive(file_obj2, b"data", channel="general")
 
-        # Folder key should be in the shared_channel_folders set
-        assert "general_channel_folder" in handler.shared_channel_folders
+        assert handler.drive_uploader.upload_file_to_drive.call_count == 2
 
     def test_no_public_url_generates_default_link(self):
         """When drive_uploader returns None for public_url, generates a default link."""
@@ -1687,175 +1622,6 @@ class TestUploadToDrive:
         assert result.upload_type == "drive"
         assert result.drive_id == "file_id"
         assert handler.file_stats["ownership_transferred"] == 0
-
-
-# ===========================================================================
-# share_file_with_members tests
-# ===========================================================================
-
-
-class TestShareFileWithMembers:
-    """Tests for share_file_with_members."""
-
-    def _make_ready_handler(self, **kwargs):
-        handler = _make_handler(folder_id="root_folder", **kwargs)
-        handler._drive_initialized = True
-        return handler
-
-    def test_shared_drive_file_in_channel_folder_skips_permissions(self):
-        """File already in correct channel folder should skip individual permissions."""
-        handler = self._make_ready_handler()
-        handler._shared_drive_id = "drive123"
-        handler.drive_service.get_file.side_effect = [
-            {"parents": ["channel_folder_id"]},  # file info
-            {"name": "general"},  # folder info
-        ]
-
-        result = handler.share_file_with_members("file123", "general")
-
-        assert result is True
-
-    def test_shared_drive_file_in_drive_root_skips_permissions(self):
-        """File in shared drive root should skip individual permissions."""
-        handler = self._make_ready_handler()
-        handler._shared_drive_id = "drive123"
-        handler.drive_service.get_file.side_effect = [
-            {"parents": ["drive123"]},  # file info, parent is the shared drive itself
-            {"name": "Imported Slack Attachments"},  # folder info
-        ]
-
-        result = handler.share_file_with_members("file123", "general")
-
-        assert result is True
-
-    def test_no_shared_drive_file_info_retrieval(self):
-        """File info retrieval without shared drive."""
-        handler = self._make_ready_handler()
-        handler._shared_drive_id = None
-        handler.drive_service.get_file.side_effect = [
-            {"parents": ["some_folder"]},  # file info
-            {"name": "other"},  # folder info - does not match channel
-        ]
-        handler.state.progress.active_users_by_channel = {}
-
-        result = handler.share_file_with_members("file123", "general")
-
-        # No active users for channel -> False
-        assert result is False
-
-    def test_shares_with_active_users(self):
-        """Shares file with all active channel members."""
-        handler = self._make_ready_handler(
-            user_map={"U1": "alice@example.com", "U2": "bob@example.com"},
-        )
-        handler._shared_drive_id = None
-        handler.drive_service.get_file.side_effect = [
-            {"parents": ["some_folder"]},
-            {"name": "other_folder"},
-        ]
-        handler.state.progress.active_users_by_channel = {"general": {"U1", "U2"}}
-        handler.drive_service.create_permission.return_value = {}
-
-        result = handler.share_file_with_members("file123", "general")
-
-        assert result is True
-
-    def test_no_emails_for_active_users_returns_false(self):
-        """Returns False when active users have no emails in user_map."""
-        handler = self._make_ready_handler(user_map={})
-        handler._shared_drive_id = None
-        handler.drive_service.get_file.side_effect = [
-            {"parents": ["some_folder"]},
-            {"name": "other"},
-        ]
-        handler.state.progress.active_users_by_channel = {"general": {"U999"}}
-
-        result = handler.share_file_with_members("file123", "general")
-
-        assert result is False
-
-    def test_http_error_sharing_individual_file_continues(self):
-        """HttpError when sharing with individual user should not fail."""
-        handler = self._make_ready_handler(
-            user_map={"U1": "alice@example.com", "U2": "bob@example.com"},
-        )
-        handler._shared_drive_id = None
-        handler.drive_service.get_file.side_effect = [
-            {"parents": ["some_folder"]},
-            {"name": "other"},
-        ]
-        handler.state.progress.active_users_by_channel = {"general": {"U1", "U2"}}
-        # Permissions create raises for one user but succeeds overall
-        handler.drive_service.create_permission.side_effect = [
-            HttpError(Response({"status": "403"}), b"forbidden"),
-            {},
-        ]
-
-        result = handler.share_file_with_members("file123", "general")
-
-        assert result is True
-
-    def test_http_error_on_get_file_info_re_raises(self):
-        """HttpError when getting file info should re-raise."""
-        handler = self._make_ready_handler()
-        handler._shared_drive_id = None
-        handler.drive_service.get_file.side_effect = HttpError(
-            Response({"status": "500"}), b"error"
-        )
-
-        with pytest.raises(HttpError):
-            handler.share_file_with_members("file123", "general")
-
-    def test_folder_info_http_error_continues_check(self):
-        """HttpError getting folder info should continue to next parent."""
-        handler = self._make_ready_handler(
-            user_map={"U1": "alice@example.com"},
-        )
-        handler._shared_drive_id = None
-
-        # First call: file info with parents
-        # Second call: folder info - raises HttpError
-        handler.drive_service.get_file.side_effect = [
-            {"parents": ["folder1"]},
-            HttpError(Response({"status": "404"}), b"not found"),
-        ]
-        handler.state.progress.active_users_by_channel = {"general": {"U1"}}
-        handler.drive_service.create_permission.return_value = {}
-
-        result = handler.share_file_with_members("file123", "general")
-
-        assert result is True
-
-    def test_no_parents_shares_individually(self):
-        """File with no parents shares with individual users."""
-        handler = self._make_ready_handler(
-            user_map={"U1": "alice@example.com"},
-        )
-        handler._shared_drive_id = None
-        handler.drive_service.get_file.return_value = {"parents": []}
-        handler.state.progress.active_users_by_channel = {"general": {"U1"}}
-        handler.drive_service.create_permission.return_value = {}
-
-        result = handler.share_file_with_members("file123", "general")
-
-        assert result is True
-
-    def test_shared_drive_uses_supports_all_drives_for_permissions(self):
-        """When shared drive is set, permissions should use supportsAllDrives."""
-        handler = self._make_ready_handler(
-            user_map={"U1": "alice@example.com"},
-        )
-        handler._shared_drive_id = "drive123"
-        handler.drive_service.get_file.side_effect = [
-            {"parents": ["some_folder"]},
-            {"name": "other"},
-        ]
-        handler.state.progress.active_users_by_channel = {"general": {"U1"}}
-        handler.drive_service.create_permission.return_value = {}
-
-        result = handler.share_file_with_members("file123", "general")
-
-        assert result is True
 
 
 # ===========================================================================

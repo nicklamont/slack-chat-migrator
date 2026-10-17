@@ -32,18 +32,15 @@ class DriveFileUploader:
         self,
         drive_service: DriveAdapter,
         workspace_domain: str | None = None,
-        service_account_email: str | None = None,
     ) -> None:
         """Initialize the DriveFileUploader.
 
         Args:
             drive_service: DriveAdapter instance wrapping the Google Drive API
             workspace_domain: The workspace domain for permissions
-            service_account_email: The email of the service account to grant access to
         """
         self.drive_service = drive_service
         self.workspace_domain = workspace_domain
-        self.service_account_email = service_account_email
         self.file_hash_cache: dict[str, tuple[str | None, str | None]] = {}
         self.folders_pre_cached: set[str] = set()
         # Set by FileHandler before each channel is processed
@@ -427,178 +424,6 @@ class DriveFileUploader:
             log_with_context(
                 logging.WARNING,
                 f"Failed to set editor permission for message poster on file {file_id}: {e}",
-                channel=self._get_current_channel(),
-            )
-            return False
-
-    def set_file_permissions_for_users(
-        self,
-        file_id: str,
-        user_emails: list,
-        message_poster_email: str | None = None,
-    ) -> bool:
-        """Set file permissions for specific users only (not domain-wide).
-
-        Args:
-            file_id: ID of the file to set permissions on
-            user_emails: List of user emails to grant access to
-            message_poster_email: Optional email of the user who will post the message with this attachment
-                                  This user will get editor permissions instead of reader
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if not user_emails:
-            log_with_context(
-                logging.WARNING,
-                f"No user emails provided for setting permissions on file {file_id}",
-                channel=self._get_current_channel(),
-            )
-            return False
-
-        success_count = 0
-        failed_count = 0
-        editor_set = False
-
-        for email in user_emails:
-            try:
-                # Give editor permissions to the message poster, reader to everyone else
-                role = "editor" if email == message_poster_email else "reader"
-                if email == message_poster_email:
-                    editor_set = True
-                    log_with_context(
-                        logging.DEBUG,
-                        f"Granting editor permission to message poster {email} for file {file_id}",
-                        channel=self._get_current_channel(),
-                    )
-
-                permission = {"type": "user", "role": role, "emailAddress": email}
-                self.drive_service.create_permission(
-                    file_id=file_id,
-                    body=permission,
-                    fields="id",
-                    send_notification_email=False,
-                )
-
-                success_count += 1
-
-            except HttpError as e:
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to set permission for {email} on file {file_id}: {e}",
-                    channel=self._get_current_channel(),
-                )
-                failed_count += 1
-
-        # If the message poster wasn't in the user_emails list, add them separately with editor permission
-        if (
-            message_poster_email
-            and not editor_set
-            and message_poster_email not in user_emails
-        ):
-            try:
-                permission = {
-                    "type": "user",
-                    "role": "editor",
-                    "emailAddress": message_poster_email,
-                }
-
-                log_with_context(
-                    logging.DEBUG,
-                    f"Adding separate editor permission for message poster {message_poster_email} for file {file_id}",
-                    channel=self._get_current_channel(),
-                )
-                self.drive_service.create_permission(
-                    file_id=file_id,
-                    body=permission,
-                    fields="id",
-                    send_notification_email=False,
-                )
-
-                success_count += 1
-
-            except HttpError as e:
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to set editor permission for message poster {message_poster_email} on file {file_id}: {e}",
-                    channel=self._get_current_channel(),
-                )
-                failed_count += 1
-
-        # Always add the service account with editor permissions if available
-        if self.service_account_email:
-            try:
-                permission = {
-                    "type": "user",
-                    "role": "editor",
-                    "emailAddress": self.service_account_email,
-                }
-
-                log_with_context(
-                    logging.DEBUG,
-                    f"Adding editor permission for service account {self.service_account_email} for file {file_id}",
-                    channel=self._get_current_channel(),
-                )
-                self.drive_service.create_permission(
-                    file_id=file_id,
-                    body=permission,
-                    fields="id",
-                    send_notification_email=False,
-                )
-
-                success_count += 1
-
-            except HttpError as e:
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to set editor permission for service account {self.service_account_email} on file {file_id}: {e}",
-                    channel=self._get_current_channel(),
-                )
-                failed_count += 1
-
-        log_with_context(
-            logging.DEBUG if failed_count == 0 else logging.WARNING,
-            f"Set file permissions for {file_id}: {success_count} successful, {failed_count} failed",
-            channel=self._get_current_channel(),
-        )
-
-        return failed_count == 0
-
-    def transfer_ownership(self, file_id: str, new_owner_email: str) -> bool:
-        """Transfer ownership of a file to a new owner.
-
-        Args:
-            file_id: ID of the file to transfer
-            new_owner_email: Email of the new owner
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            permission = {
-                "type": "user",
-                "role": "owner",
-                "emailAddress": new_owner_email,
-            }
-            self.drive_service.create_permission(
-                file_id=file_id,
-                body=permission,
-                transfer_ownership=True,
-                send_notification_email=False,
-            )
-
-            log_with_context(
-                logging.DEBUG,
-                f"Transferred ownership of file {file_id} to {new_owner_email}",
-                channel=self._get_current_channel(),
-            )
-
-            return True
-
-        except HttpError as e:
-            log_with_context(
-                logging.WARNING,
-                f"Failed to transfer file ownership: {e}",
                 channel=self._get_current_channel(),
             )
             return False

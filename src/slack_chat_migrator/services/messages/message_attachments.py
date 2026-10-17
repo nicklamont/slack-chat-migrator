@@ -246,14 +246,3 @@ class MessageAttachmentProcessor:
         if not message or not isinstance(message, dict):
             return 0
         return len(message.get("files", []))
-
-    def has_files(self, message: dict[str, Any]) -> bool:
-        """Check if a message has file attachments.
-
-        Args:
-            message: The Slack message object
-
-        Returns:
-            True if message has files, False otherwise
-        """
-        return self.count_message_files(message) > 0
