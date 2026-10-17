@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from slack_chat_migrator.exceptions import MigrationAbortedError
 from tests.integration.conftest import (
     GENERAL_CHANNEL,
     RANDOM_CHANNEL,
@@ -103,9 +104,11 @@ class TestAbortOnErrorStopsMigration:
             config_text=config,
             message_error_schedule={1: 400},
         )
-        m.migrate()
+        with pytest.raises(MigrationAbortedError):
+            m.migrate()
 
         assert len(m.state.messages.failed_messages) == 1
+        assert m.state.errors.channels_with_errors == ["general"]
 
         # general: 3 messages, error at position 1 → 2 succeed, 1 fails.
         # Abort prevents random from being processed → 0 from random.

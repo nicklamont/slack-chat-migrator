@@ -4,11 +4,10 @@ Main migrator class for the Slack to Google Chat migration tool
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
-import os
 import signal
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -23,7 +22,11 @@ from slack_chat_migrator.core.checkpoint import (
     save_checkpoint,
 )
 from slack_chat_migrator.core.cleanup import cleanup_channel_handlers
-from slack_chat_migrator.core.config import load_config, load_space_mapping
+from slack_chat_migrator.core.config import (
+    MigrationConfig,
+    load_config,
+    load_space_mapping,
+)
 from slack_chat_migrator.core.context import MigrationContext
 from slack_chat_migrator.core.migration_logging import (
     log_migration_failure,
@@ -31,6 +34,7 @@ from slack_chat_migrator.core.migration_logging import (
 )
 from slack_chat_migrator.core.progress import ProgressTracker
 from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.exceptions import MigrationAbortedError
 from slack_chat_migrator.services.chat.dry_run_service import DryRunChatService
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
 from slack_chat_migrator.services.drive.dry_run_service import DryRunDriveService
@@ -47,13 +51,50 @@ from slack_chat_migrator.services.spaces.discovery import (
 )
 from slack_chat_migrator.services.user import generate_user_map
 from slack_chat_migrator.services.user_resolver import UserResolver
-from slack_chat_migrator.utils.api import get_gcp_service
-from slack_chat_migrator.utils.logging import log_with_context
+from slack_chat_migrator.utils.api import get_gcp_service, scopes_for
+from slack_chat_migrator.utils.logging import create_output_directory, log_with_context
 from slack_chat_migrator.utils.user_validation import (
     initialize_unmapped_user_tracking,
     log_unmapped_user_summary_for_dry_run,
     scan_channel_members_for_unmapped_users,
 )
+
+#: Returned by _install_sigint_handler() when no handler was installed.
+_SIGINT_NOT_INSTALLED = object()
+
+
+def _raise_keyboard_interrupt(signum: int, frame: Any) -> None:
+    """Handle SIGINT (Ctrl+C) gracefully.
+
+    Raises KeyboardInterrupt so the existing ``except BaseException``
+    block in ``migrate()`` handles logging and cleanup in one place.
+
+    Args:
+        signum: Signal number received.
+        frame: Current stack frame (unused).
+    """
+    raise KeyboardInterrupt("Migration interrupted by signal")
+
+
+def _install_sigint_handler() -> Any:
+    """Install the SIGINT handler and return the previous one.
+
+    ``signal.signal()`` only works in the main thread; when the migrator is
+    driven from a worker thread (library use), Ctrl-C handling is left to
+    the caller and nothing is installed.
+
+    Returns:
+        The previous handler, or ``_SIGINT_NOT_INSTALLED``.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return _SIGINT_NOT_INSTALLED
+    return signal.signal(signal.SIGINT, _raise_keyboard_interrupt)
+
+
+def _restore_sigint_handler(previous: Any) -> None:
+    """Restore the handler returned by :func:`_install_sigint_handler`."""
+    if previous is not _SIGINT_NOT_INSTALLED:
+        signal.signal(signal.SIGINT, previous)
 
 
 class SlackToChatMigrator:
@@ -70,11 +111,16 @@ class SlackToChatMigrator:
         update_mode: bool = False,
         debug_api: bool = False,
         message_error_schedule: dict[int, int] | None = None,
+        config: MigrationConfig | None = None,
     ):
         """Initialize the migrator with the required parameters.
 
         ``message_error_schedule`` is test-only: maps 1-based message
         ordinal to HTTP status code for error injection in dry-run mode.
+
+        ``config`` is an already-loaded configuration (the CLI loads and
+        validates it once, up front); when omitted it is loaded from
+        ``config_path``.
 
         In dry-run mode, ``creds_path`` and ``workspace_admin`` may be
         ``None`` — no real API calls are made.
@@ -104,7 +150,6 @@ class SlackToChatMigrator:
         self.users_without_email: list[
             dict[str, Any]
         ] = []  # List of users without email mappings
-        self.progress_file = self.export_root / ".migration_progress.json"
 
         # Validate workspace admin email format (skip when None in dry-run)
         if self.workspace_admin is not None:
@@ -127,7 +172,7 @@ class SlackToChatMigrator:
         self._validate_export_format()
 
         # Load config using the shared load_config function
-        self.config = load_config(self.config_path)
+        self.config = config if config is not None else load_config(self.config_path)
 
         # Load space_mapping overrides from config YAML into state
         self.state.spaces.space_mapping = load_space_mapping(self.config_path)
@@ -222,6 +267,8 @@ class SlackToChatMigrator:
                 "Initializing Google Chat and Drive API services...",
             )
             creds_path_str = str(self.creds_path)
+            # The admin Chat client also requests the optional scopes the
+            # config needs (e.g. custom emoji).
             raw_chat = get_gcp_service(
                 creds_path_str,
                 self.workspace_admin,
@@ -229,6 +276,7 @@ class SlackToChatMigrator:
                 "v1",
                 max_retries=self.config.max_retries,
                 retry_delay=self.config.retry_delay,
+                scopes=scopes_for(self.config),
             )
             self.chat = ChatAdapter(raw_chat)
             self.drive = DriveAdapter(
@@ -375,27 +423,20 @@ class SlackToChatMigrator:
                 to renderers (Rich, plain text).
 
         Returns:
-            True on successful completion.
+            True when every channel migrated without errors; False when the
+            run finished but some channels had errors or imports were left
+            incomplete (see ``state.errors``).
+
+        Raises:
+            MigrationAbortedError: If a channel failed and ``abort_on_error``
+                is enabled.
         """
         self._progress_tracker = progress_tracker
         migration_start_time = time.time()
         log_with_context(logging.INFO, "Starting migration process")
 
         # Set up signal handler to ensure we log migration status on interrupt
-        def signal_handler(signum: int, frame: Any) -> None:
-            """Handle SIGINT (Ctrl+C) gracefully.
-
-            Raises KeyboardInterrupt so the existing ``except BaseException``
-            block handles logging and cleanup in one place.
-
-            Args:
-                signum: Signal number received.
-                frame: Current stack frame (unused).
-            """
-            raise KeyboardInterrupt("Migration interrupted by signal")
-
-        # Install the signal handler
-        old_signal_handler = signal.signal(signal.SIGINT, signal_handler)
+        old_signal_handler = _install_sigint_handler()
 
         try:
             self._emit_phase("Initializing")
@@ -405,15 +446,12 @@ class SlackToChatMigrator:
 
             # Output directory should already be set up by CLI, but provide a sensible default
             if not self.state.context.output_dir:
-                # Create default output directory with timestamp
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                self.state.context.output_dir = f"migration_logs/run_{timestamp}"
+                # Create a private default output directory with timestamp
+                self.state.context.output_dir = create_output_directory()
                 log_with_context(
                     logging.INFO,
                     f"Using default output directory: {self.state.context.output_dir}",
                 )
-                # Create the directory
-                os.makedirs(self.state.context.output_dir, exist_ok=True)
 
             # Reset per-run state
             self.state.reset_for_run()
@@ -493,8 +531,18 @@ class SlackToChatMigrator:
                     continue
 
                 result = self.channel_processor.process_channel(ch)
+                if (
+                    result.had_errors
+                    and channel_name not in self.state.errors.channels_with_errors
+                ):
+                    self.state.errors.channels_with_errors.append(channel_name)
                 if result.should_abort:
-                    break
+                    # abort_on_error: the run fails here; the failure path
+                    # below logs it and the checkpoint is kept.
+                    raise MigrationAbortedError(
+                        f"Migration aborted after errors in channel '{channel_name}'"
+                        " (abort_on_error is enabled)"
+                    )
 
                 # Only checkpoint channels that completed without errors
                 if not result.had_errors:
@@ -548,7 +596,9 @@ class SlackToChatMigrator:
             # Clean up channel handlers in success case (finally block will also run)
             cleanup_channel_handlers(self.state)
 
-            return True
+            return not (
+                self.state.has_errors or self.state.errors.incomplete_import_spaces
+            )
 
         except BaseException as e:
             # Calculate migration duration
@@ -561,6 +611,6 @@ class SlackToChatMigrator:
             raise
         finally:
             # Restore the original signal handler
-            signal.signal(signal.SIGINT, old_signal_handler)
+            _restore_sigint_handler(old_signal_handler)
             # Always ensure proper cleanup of channel log handlers
             cleanup_channel_handlers(self.state)

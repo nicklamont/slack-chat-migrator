@@ -15,7 +15,7 @@ shared_drive:
 # Optional: Channels to exclude from migration (by name)
 exclude_channels:
   - "random"        # Example: Skip the random channel
-  - "shitposting"   # Example: Skip off-topic channels
+  - "off-topic"     # Example: Skip off-topic channels
   # - "general"     # Uncomment to exclude more channels as needed
 
 # Space mapping configuration
@@ -62,8 +62,9 @@ ignore_bots: true
 # If false, migration will continue to process other channels even if errors occur
 abort_on_error: false
 
-# Maximum percentage of failed messages allowed before skipping a channel
-# If the failure rate exceeds this percentage, the channel processing will stop
+# Maximum percentage of a channel's messages that may fail to import.
+# Only when more than this percentage fail is the channel marked as failed
+# (and its import not completed); the other messages are still imported.
 max_failure_percentage: 10
 
 # Strategy for completing import mode when errors occur
@@ -74,8 +75,9 @@ import_completion_strategy: "skip_on_error"
 
 # Whether to delete spaces that had errors during migration
 # If true, spaces with errors will be deleted during cleanup
-# If false, spaces with errors will be kept (you can complete import manually)
-cleanup_on_error: true
+# If false (default), spaces with errors will be kept (you can complete
+# import manually with 'slack-chat-migrator migrate --complete')
+cleanup_on_error: false
 
 # Advanced options
 

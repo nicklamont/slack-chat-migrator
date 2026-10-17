@@ -55,11 +55,6 @@ class MigrationContext:
         return not self.update_mode
 
     @property
-    def progress_file(self) -> Path:
-        """Path to the migration progress tracking file."""
-        return self.export_root / ".migration_progress.json"
-
-    @property
     def log_prefix(self) -> str:
         """Mode-aware log prefix.
 

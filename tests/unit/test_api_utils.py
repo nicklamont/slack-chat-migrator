@@ -1,18 +1,37 @@
 """Unit tests for the API utilities module."""
 
+import copy
+import datetime
+import email.utils
+import http.client
 import json
+import ssl
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httplib2
 import pytest
+from googleapiclient.discovery import Resource
 from googleapiclient.errors import HttpError
+from googleapiclient.http import BatchHttpRequest, HttpRequest
 
 from slack_chat_migrator.utils.api import (
+    CUSTOM_EMOJI_SCOPE,
+    MAX_BACKOFF_SECONDS,
+    RATE_LIMIT_BUDGET_SECONDS,
+    RATE_LIMIT_MAX_ATTEMPTS,
+    REQUIRED_SCOPES,
+    SERVICE_CACHE_MAX_ENTRIES,
     RetryWrapper,
+    _credentials_cache,
     _service_cache,
+    clear_service_cache,
     escape_drive_query_value,
     get_gcp_service,
+    http_error_reasons,
+    is_rate_limit_error,
+    retry_after_seconds,
+    scopes_for,
     slack_ts_to_rfc3339,
 )
 
@@ -21,11 +40,40 @@ from slack_chat_migrator.utils.api import (
 # ---------------------------------------------------------------------------
 
 
-def _make_http_error(status: int, reason: str = "error") -> HttpError:
+def _make_http_error(
+    status: int,
+    reason: str = "error",
+    content: bytes = b"error body",
+    headers: dict[str, str] | None = None,
+) -> HttpError:
     """Create an HttpError with the given status code."""
-    resp = httplib2.Response({"status": status})
+    resp = httplib2.Response({"status": status, **(headers or {})})
     resp.reason = reason
-    return HttpError(resp, b"error body")
+    return HttpError(resp, content)
+
+
+def _drive_403(reason: str) -> HttpError:
+    """A Drive-style 403 with an ``error.errors[].reason`` body."""
+    body = {
+        "error": {
+            "code": 403,
+            "message": reason,
+            "errors": [{"domain": "usageLimits", "reason": reason, "message": reason}],
+        }
+    }
+    return _make_http_error(403, "Forbidden", json.dumps(body).encode())
+
+
+def _typed_mock(cls: type) -> MagicMock:
+    """A MagicMock that passes ``isinstance(mock, cls)``."""
+    mock = MagicMock()
+    mock.__class__ = cls
+    return mock
+
+
+def _max_jitter(low: float, high: float) -> float:
+    """Deterministic stand-in for random.uniform: the top of the range."""
+    return high
 
 
 # ---------------------------------------------------------------------------
@@ -84,20 +132,34 @@ class TestRetryWrapperDelegation:
         wrapper = RetryWrapper(inner)
         assert wrapper.value == 42
 
-    def test_callable_non_execute_returns_retry_wrapper(self):
-        """Calling a method that returns an object with `execute` re-wraps."""
-        inner_result = MagicMock()
-        inner_result.execute = MagicMock(return_value="ok")
-
+    @pytest.mark.parametrize("cls", [Resource, HttpRequest, BatchHttpRequest])
+    def test_googleapiclient_results_are_wrapped(self, cls):
+        """Resources and requests are wrapped by type, not attribute names."""
         inner = MagicMock()
-        inner.spaces.return_value = inner_result
+        inner.spaces.return_value = _typed_mock(cls)
 
         wrapper = RetryWrapper(inner)
         result = wrapper.spaces()
         assert isinstance(result, RetryWrapper)
 
+    def test_media_resource_is_wrapped(self):
+        """chat.media() has no execute/list/create but is still wrapped."""
+        media = _typed_mock(Resource)
+        del media.execute, media.list, media.create
+        inner = MagicMock()
+        inner.media.return_value = media
+
+        assert isinstance(RetryWrapper(inner).media(), RetryWrapper)
+
+    def test_other_objects_with_execute_not_wrapped(self):
+        """Duck-typed objects are not mistaken for API requests."""
+        inner = MagicMock()
+        inner.helper.return_value = SimpleNamespace(execute=lambda: "x")
+
+        assert not isinstance(RetryWrapper(inner).helper(), RetryWrapper)
+
     def test_callable_returning_plain_value_not_wrapped(self):
-        """Methods whose return has no execute/list/create are not wrapped."""
+        """Methods returning plain values are not wrapped."""
         inner = MagicMock()
         inner.plain_method.return_value = "plain_string"
 
@@ -107,7 +169,7 @@ class TestRetryWrapperDelegation:
 
     def test_channel_context_getter_passed_to_child_wrappers(self):
         """Child RetryWrappers inherit the channel_context_getter."""
-        inner_result = MagicMock()
+        inner_result = _typed_mock(HttpRequest)
         inner_result.execute = MagicMock(return_value="ok")
 
         inner = MagicMock()
@@ -122,7 +184,7 @@ class TestRetryWrapperDelegation:
         assert child._channel_context_getter is getter
 
     def test_retry_params_passed_to_child_wrappers(self):
-        inner_result = MagicMock()
+        inner_result = _typed_mock(Resource)
         inner_result.execute = MagicMock(return_value="ok")
 
         inner = MagicMock()
@@ -366,10 +428,11 @@ class TestRetryWrapperMaxRetries:
 
 
 class TestRetryWrapperBackoff:
-    """Verify exponential backoff sleep durations."""
+    """Verify full-jitter exponential backoff."""
 
+    @patch("slack_chat_migrator.utils.api.random.uniform", side_effect=_max_jitter)
     @patch("slack_chat_migrator.utils.api.time.sleep")
-    def test_backoff_increases_exponentially(self, mock_sleep):
+    def test_backoff_ceiling_doubles(self, mock_sleep, _uniform):
         inner = MagicMock()
         inner.execute.side_effect = [
             _make_http_error(500, "err"),
@@ -377,15 +440,16 @@ class TestRetryWrapperBackoff:
             _make_http_error(500, "err"),
             "ok",
         ]
-        # initial_delay=1, backoff_factor=2.0 → sleeps: 1, 2, 4
+        # retry_delay=1 → jitter ceilings 1, 2, 4
         wrapper = RetryWrapper(inner)
         result = wrapper.execute()
         assert result == "ok"
         sleep_values = [call.args[0] for call in mock_sleep.call_args_list]
         assert sleep_values == [1.0, 2.0, 4.0]
 
+    @patch("slack_chat_migrator.utils.api.random.uniform", side_effect=_max_jitter)
     @patch("slack_chat_migrator.utils.api.time.sleep")
-    def test_backoff_respects_custom_initial_delay(self, mock_sleep):
+    def test_backoff_respects_custom_initial_delay(self, mock_sleep, _uniform):
         inner = MagicMock()
         inner.execute.side_effect = [
             _make_http_error(500, "err"),
@@ -394,25 +458,30 @@ class TestRetryWrapperBackoff:
         wrapper = RetryWrapper(inner, max_retries=3, retry_delay=5)
         result = wrapper.execute()
         assert result == "ok"
-        # first attempt (attempt=0): delay * backoff^0 = 5 * 1 = 5
         mock_sleep.assert_called_once_with(5.0)
 
+    @patch("slack_chat_migrator.utils.api.random.uniform", side_effect=_max_jitter)
     @patch("slack_chat_migrator.utils.api.time.sleep")
-    def test_backoff_capped_at_max_delay(self, mock_sleep):
-        """Sleep time should never exceed 60 seconds."""
+    def test_backoff_capped_at_max_delay(self, mock_sleep, _uniform):
+        """No single sleep exceeds 64 seconds."""
         inner = MagicMock()
-        # With initial_delay=30, backoff=2: attempt 0→30, attempt 1→60, attempt 2→60 (capped)
-        inner.execute.side_effect = [
-            _make_http_error(500, "err"),
-            _make_http_error(500, "err"),
-            _make_http_error(500, "err"),
-            "ok",
-        ]
+        inner.execute.side_effect = [_make_http_error(500, "err")] * 3 + ["ok"]
         wrapper = RetryWrapper(inner, max_retries=3, retry_delay=30)
-        result = wrapper.execute()
-        assert result == "ok"
+        assert wrapper.execute() == "ok"
         sleep_values = [call.args[0] for call in mock_sleep.call_args_list]
-        assert all(v <= 60 for v in sleep_values)
+        assert sleep_values == [30.0, 60.0, 64.0]
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_jitter_applied(self, mock_sleep):
+        """Sleeps are drawn from uniform(0, ceiling), not fixed values."""
+        with patch(
+            "slack_chat_migrator.utils.api.random.uniform", return_value=0.25
+        ) as uniform:
+            inner = MagicMock()
+            inner.execute.side_effect = [_make_http_error(503, "err"), "ok"]
+            assert RetryWrapper(inner, retry_delay=2).execute() == "ok"
+        uniform.assert_called_once_with(0, 2.0)
+        mock_sleep.assert_called_once_with(0.25)
 
 
 # ---------------------------------------------------------------------------
@@ -463,15 +532,18 @@ class TestRetryWrapperChaining:
 
     @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_deep_chain_execute(self, _sleep):
-        """Simulate service.spaces().messages().list().execute()."""
+        """Simulate service.spaces().messages().list().execute() with a retry."""
         # Build the chain from inside out
-        final_request = MagicMock()
-        final_request.execute.return_value = {"messages": []}
+        final_request = _typed_mock(HttpRequest)
+        final_request.execute.side_effect = [
+            _make_http_error(503, "Unavailable"),
+            {"messages": []},
+        ]
 
-        list_method = MagicMock()
+        list_method = _typed_mock(Resource)
         list_method.list.return_value = final_request
 
-        messages_method = MagicMock()
+        messages_method = _typed_mock(Resource)
         messages_method.messages.return_value = list_method
 
         spaces_method = MagicMock()
@@ -480,6 +552,7 @@ class TestRetryWrapperChaining:
         wrapper = RetryWrapper(spaces_method)
         result = wrapper.spaces().messages().list().execute()
         assert result == {"messages": []}
+        assert final_request.execute.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -835,9 +908,9 @@ class TestGetGcpService:
     @pytest.fixture(autouse=True)
     def _clear_cache(self):
         """Ensure the service cache is empty before and after each test."""
-        _service_cache.clear()
+        clear_service_cache()
         yield
-        _service_cache.clear()
+        clear_service_cache()
 
     @patch("slack_chat_migrator.utils.api.build")
     @patch(
@@ -1059,9 +1132,9 @@ class TestServiceCacheTTL:
     @pytest.fixture(autouse=True)
     def _clear_cache(self):
         """Ensure the service cache is empty before and after each test."""
-        _service_cache.clear()
+        clear_service_cache()
         yield
-        _service_cache.clear()
+        clear_service_cache()
 
     @patch("slack_chat_migrator.utils.api.build")
     @patch(
@@ -1078,7 +1151,13 @@ class TestServiceCacheTTL:
         assert mock_build.call_count == 1
 
         # Artificially age the cache entry past TTL
-        cache_key = "/path/creds.json:user@example.com:chat:v1"
+        cache_key = (
+            "/path/creds.json",
+            "user@example.com",
+            "chat",
+            "v1",
+            tuple(REQUIRED_SCOPES),
+        )
         old_service, _ = _service_cache[cache_key]
         _service_cache[cache_key] = (old_service, 0.0)  # epoch = very old
 
@@ -1110,15 +1189,15 @@ class TestServiceCache401Eviction:
 
     @pytest.fixture(autouse=True)
     def _clear_cache(self):
-        _service_cache.clear()
+        clear_service_cache()
         yield
-        _service_cache.clear()
+        clear_service_cache()
 
     @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_401_clears_service_cache(self, _sleep):
         """A 401 HttpError in _wrap_execute should clear the service cache."""
         # Pre-populate the cache with a fake entry
-        _service_cache["fake:key"] = (MagicMock(), 999999999.0)
+        _service_cache[("c", "u", "chat", "v1", ())] = (MagicMock(), 999999999.0)
         assert len(_service_cache) == 1
 
         inner = MagicMock()
@@ -1134,7 +1213,7 @@ class TestServiceCache401Eviction:
     @patch("slack_chat_migrator.utils.api.time.sleep")
     def test_403_does_not_clear_service_cache(self, _sleep):
         """A 403 HttpError should NOT clear the service cache."""
-        _service_cache["fake:key"] = (MagicMock(), 999999999.0)
+        _service_cache[("c", "u", "chat", "v1", ())] = (MagicMock(), 999999999.0)
         assert len(_service_cache) == 1
 
         inner = MagicMock()
@@ -1146,3 +1225,388 @@ class TestServiceCache401Eviction:
 
         # Cache should NOT have been cleared
         assert len(_service_cache) == 1
+
+
+# ---------------------------------------------------------------------------
+# Retry policy (issue #111)
+# ---------------------------------------------------------------------------
+
+
+class TestRetryClassification:
+    """Which errors are retried."""
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "rateLimitExceeded",
+            "userRateLimitExceeded",
+            "sharingRateLimitExceeded",
+            "quotaExceeded",
+        ],
+    )
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_drive_rate_limit_403_retried(self, mock_sleep, reason):
+        inner = MagicMock()
+        inner.execute.side_effect = [_drive_403(reason), {"id": "f1"}]
+        assert RetryWrapper(inner).execute() == {"id": "f1"}
+        assert inner.execute.call_count == 2
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_rate_limit_reason_in_rpc_details(self, mock_sleep):
+        body = {
+            "error": {
+                "code": 403,
+                "status": "PERMISSION_DENIED",
+                "details": [{"@type": "x", "reason": "rateLimitExceeded"}],
+            }
+        }
+        inner = MagicMock()
+        inner.execute.side_effect = [
+            _make_http_error(403, "Forbidden", json.dumps(body).encode()),
+            "ok",
+        ]
+        assert RetryWrapper(inner).execute() == "ok"
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_plain_403_not_retried(self, mock_sleep):
+        body = {"error": {"errors": [{"reason": "insufficientPermissions"}]}}
+        inner = MagicMock()
+        inner.execute.side_effect = _make_http_error(
+            403, "Forbidden", json.dumps(body).encode()
+        )
+        with pytest.raises(HttpError):
+            RetryWrapper(inner).execute()
+        inner.execute.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_408_retried(self, mock_sleep):
+        inner = MagicMock()
+        inner.execute.side_effect = [_make_http_error(408, "Timeout"), "ok"]
+        assert RetryWrapper(inner).execute() == "ok"
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            httplib2.ServerNotFoundError("Unable to find the server at chat"),
+            http.client.IncompleteRead(b"partial"),
+            http.client.RemoteDisconnected("closed"),
+            TimeoutError("timed out"),
+            ssl.SSLError("bad record mac"),
+            ConnectionResetError("reset"),
+        ],
+    )
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_network_errors_retried(self, mock_sleep, exc):
+        inner = MagicMock()
+        inner.execute.side_effect = [exc, "ok"]
+        assert RetryWrapper(inner).execute() == "ok"
+        assert inner.execute.call_count == 2
+
+    @pytest.mark.parametrize(
+        "exc", [PermissionError("denied"), FileNotFoundError("missing"), OSError(5)]
+    )
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_local_os_errors_not_retried(self, mock_sleep, exc):
+        inner = MagicMock()
+        inner.execute.side_effect = exc
+        with pytest.raises(type(exc)):
+            RetryWrapper(inner).execute()
+        inner.execute.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    def test_is_rate_limit_error(self):
+        assert is_rate_limit_error(_make_http_error(429))
+        assert is_rate_limit_error(_drive_403("userRateLimitExceeded"))
+        assert not is_rate_limit_error(_make_http_error(403))
+        assert not is_rate_limit_error(_make_http_error(503))
+        assert not is_rate_limit_error(ValueError("x"))
+
+    def test_http_error_reasons_tolerates_garbage(self):
+        assert http_error_reasons(_make_http_error(403, content=b"\xff\xfe")) == set()
+        assert http_error_reasons(_make_http_error(403, content=b"[]")) == set()
+
+
+class TestRetryAfter:
+    """Retry-After is honoured."""
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_retry_after_seconds_honoured(self, mock_sleep):
+        inner = MagicMock()
+        inner.execute.side_effect = [
+            _make_http_error(429, "Too Many", headers={"retry-after": "30"}),
+            "ok",
+        ]
+        assert RetryWrapper(inner, max_retries=3, retry_delay=2).execute() == "ok"
+        mock_sleep.assert_called_once_with(30.0)
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_retry_after_http_date_honoured(self, mock_sleep):
+        when = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+            seconds=20
+        )
+        header = email.utils.format_datetime(when, usegmt=True)
+        inner = MagicMock()
+        inner.execute.side_effect = [
+            _make_http_error(503, "Unavailable", headers={"retry-after": header}),
+            "ok",
+        ]
+        assert RetryWrapper(inner).execute() == "ok"
+        slept = mock_sleep.call_args.args[0]
+        assert 15 <= slept <= 21
+
+    def test_retry_after_parsing(self):
+        assert retry_after_seconds(_make_http_error(429)) is None
+        err = _make_http_error(429, headers={"retry-after": "nonsense"})
+        assert retry_after_seconds(err) is None
+        err = _make_http_error(429, headers={"retry-after": "-5"})
+        assert retry_after_seconds(err) == 0.0
+        past = "Wed, 21 Oct 2015 07:28:00 GMT"
+        err = _make_http_error(429, headers={"retry-after": past})
+        assert retry_after_seconds(err) == 0.0
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_server_error_retry_after_capped(self, mock_sleep):
+        inner = MagicMock()
+        inner.execute.side_effect = [
+            _make_http_error(503, "Unavailable", headers={"retry-after": "3600"}),
+            "ok",
+        ]
+        assert RetryWrapper(inner).execute() == "ok"
+        mock_sleep.assert_called_once_with(MAX_BACKOFF_SECONDS)
+
+
+class TestRateLimitBudget:
+    """Rate limits get a time budget independent of max_retries."""
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_rate_limits_retried_beyond_max_retries(self, mock_sleep):
+        inner = MagicMock()
+        inner.execute.side_effect = [_make_http_error(429)] * 6 + ["ok"]
+        assert RetryWrapper(inner, max_retries=1, retry_delay=2).execute() == "ok"
+        assert inner.execute.call_count == 7
+
+    @patch("slack_chat_migrator.utils.api.random.uniform", side_effect=_max_jitter)
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_rate_limit_budget_exhausted(self, mock_sleep, _uniform):
+        inner = MagicMock()
+        inner.execute.side_effect = _make_http_error(429)
+        with pytest.raises(HttpError):
+            RetryWrapper(inner, max_retries=3, retry_delay=2).execute()
+        slept = [c.args[0] for c in mock_sleep.call_args_list]
+        assert sum(slept) <= RATE_LIMIT_BUDGET_SECONDS
+        assert max(slept) <= MAX_BACKOFF_SECONDS
+        # 2+4+8+16+32+64+64+64 = 254; the next 64 would exceed 300 s
+        assert slept == [2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 64.0, 64.0]
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_zero_retry_after_cannot_loop_forever(self, mock_sleep):
+        inner = MagicMock()
+        inner.execute.side_effect = _make_http_error(429, headers={"retry-after": "0"})
+        with pytest.raises(HttpError):
+            RetryWrapper(inner).execute()
+        assert inner.execute.call_count == RATE_LIMIT_MAX_ATTEMPTS + 1
+
+    @patch("slack_chat_migrator.utils.api.random.uniform", side_effect=_max_jitter)
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_zero_retry_delay_still_backs_off_on_rate_limits(
+        self, mock_sleep, _uniform
+    ):
+        inner = MagicMock()
+        inner.execute.side_effect = [_make_http_error(429), "ok"]
+        assert RetryWrapper(inner, retry_delay=0).execute() == "ok"
+        mock_sleep.assert_called_once_with(1.0)
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_server_errors_limited_by_max_retries(self, mock_sleep):
+        inner = MagicMock()
+        inner.execute.side_effect = _make_http_error(503)
+        with pytest.raises(HttpError):
+            RetryWrapper(inner, max_retries=2).execute()
+        assert inner.execute.call_count == 3
+
+
+class TestRetryWrapperCopy:
+    """copy.copy and attribute writes go through to the wrapped object."""
+
+    def test_copy_does_not_recurse(self):
+        inner = SimpleNamespace(uri="https://x/1")
+        wrapper = RetryWrapper(inner, max_retries=4)
+        clone = copy.copy(wrapper)
+        assert isinstance(clone, RetryWrapper)
+        assert clone._max_retries == 4
+        clone.uri = "https://x/2"
+        assert clone.uri == "https://x/2"
+        assert wrapper.uri == "https://x/1"
+
+    def test_deepcopy_does_not_recurse(self):
+        wrapper = RetryWrapper(SimpleNamespace(value=[1]))
+        clone = copy.deepcopy(wrapper)
+        assert clone.value == [1]
+
+    def test_setattr_forwards_to_wrapped(self):
+        inner = SimpleNamespace(uri="a")
+        wrapper = RetryWrapper(inner)
+        wrapper.uri = "b"
+        assert inner.uri == "b"
+
+    def test_dunder_lookup_not_forwarded(self):
+        wrapper = RetryWrapper(SimpleNamespace())
+        assert not hasattr(wrapper, "__setstate__")
+
+
+class TestRealDiscoveryService:
+    """RetryWrapper around a real discovery-built Chat client (mocked HTTP)."""
+
+    @staticmethod
+    def _chat(responses):
+        from googleapiclient.discovery import build
+        from googleapiclient.http import HttpMockSequence
+
+        http_mock = HttpMockSequence(
+            [
+                ({"status": str(status)}, json.dumps(body).encode())
+                for status, body in responses
+            ]
+        )
+        return RetryWrapper(build("chat", "v1", http=http_mock, static_discovery=True))
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_list_next_paginates(self, _sleep):
+        chat = self._chat(
+            [
+                (503, {"error": {"code": 503}}),
+                (200, {"spaces": [{"name": "spaces/A"}], "nextPageToken": "tok"}),
+                (200, {"spaces": [{"name": "spaces/B"}]}),
+            ]
+        )
+        request = chat.spaces().list(pageSize=1)
+        page1 = request.execute()
+        page2_request = chat.spaces().list_next(request, page1)
+        assert isinstance(page2_request, RetryWrapper)
+        assert "pageToken=tok" in page2_request.uri
+        assert "pageToken" not in request.uri
+        assert page2_request.execute() == {"spaces": [{"name": "spaces/B"}]}
+        assert chat.spaces().list_next(page2_request, {"spaces": []}) is None
+
+    @patch("slack_chat_migrator.utils.api.time.sleep")
+    def test_media_upload_is_retried(self, mock_sleep):
+        from googleapiclient.http import MediaInMemoryUpload
+
+        from slack_chat_migrator.services.chat_adapter import ChatAdapter
+
+        chat = self._chat(
+            [
+                (503, {"error": {"code": 503}}),
+                (200, {"attachmentDataRef": {"resourceName": "ref"}}),
+            ]
+        )
+        result = ChatAdapter(chat).upload_media(
+            parent="spaces/A",
+            media_body=MediaInMemoryUpload(b"hello", mimetype="text/plain"),
+            body={"filename": "a.txt"},
+        )
+        assert result == {"attachmentDataRef": {"resourceName": "ref"}}
+        mock_sleep.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Bounded caches, credential reuse and optional scopes (issue #119)
+# ---------------------------------------------------------------------------
+
+_FROM_FILE = "slack_chat_migrator.utils.api.service_account.Credentials.from_service_account_file"
+
+
+class TestBoundedServiceCache:
+    """The per-user client cache is an LRU with a fixed size."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        clear_service_cache()
+        yield
+        clear_service_cache()
+
+    @patch("slack_chat_migrator.utils.api.build")
+    @patch(_FROM_FILE)
+    def test_cache_is_bounded(self, mock_creds, mock_build):
+        mock_build.side_effect = lambda *a, **k: MagicMock()
+        for i in range(SERVICE_CACHE_MAX_ENTRIES + 50):
+            get_gcp_service("/c.json", f"u{i}@example.com", "chat", "v1")
+        assert len(_service_cache) == SERVICE_CACHE_MAX_ENTRIES
+        # The oldest entries were evicted, the newest kept
+        users = {key[1] for key in _service_cache}
+        assert "u0@example.com" not in users
+        assert f"u{SERVICE_CACHE_MAX_ENTRIES + 49}@example.com" in users
+
+    @patch("slack_chat_migrator.utils.api.build")
+    @patch(_FROM_FILE)
+    def test_recently_used_entry_survives_eviction(self, mock_creds, mock_build):
+        mock_build.side_effect = lambda *a, **k: MagicMock()
+        first = get_gcp_service("/c.json", "keep@example.com", "chat", "v1")
+        for i in range(SERVICE_CACHE_MAX_ENTRIES - 1):
+            get_gcp_service("/c.json", f"u{i}@example.com", "chat", "v1")
+        # Touch the first entry, then overflow the cache
+        assert get_gcp_service("/c.json", "keep@example.com", "chat", "v1") is first
+        get_gcp_service("/c.json", "new@example.com", "chat", "v1")
+        assert get_gcp_service("/c.json", "keep@example.com", "chat", "v1") is first
+        users = {key[1] for key in _service_cache}
+        assert "u0@example.com" not in users
+
+    @patch("slack_chat_migrator.utils.api.build")
+    @patch(_FROM_FILE)
+    def test_credentials_loaded_once_per_file(self, mock_creds, mock_build):
+        base = mock_creds.return_value
+        get_gcp_service("/c.json", "a@example.com", "chat", "v1")
+        get_gcp_service("/c.json", "b@example.com", "chat", "v1")
+        get_gcp_service("/c.json", "a@example.com", "drive", "v3")
+        mock_creds.assert_called_once()
+        assert base.with_subject.call_count == 3
+
+    @patch("slack_chat_migrator.utils.api.build")
+    @patch(_FROM_FILE)
+    def test_clear_service_cache_clears_credentials(self, mock_creds, mock_build):
+        get_gcp_service("/c.json", "a@example.com", "chat", "v1")
+        clear_service_cache()
+        assert not _service_cache and not _credentials_cache
+        get_gcp_service("/c.json", "a@example.com", "chat", "v1")
+        assert mock_creds.call_count == 2
+        assert mock_build.call_count == 2
+
+
+class TestOptionalScopes:
+    """scopes_for() adds optional scopes only when the config needs them."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        clear_service_cache()
+        yield
+        clear_service_cache()
+
+    def test_default_scopes_unchanged(self):
+        from slack_chat_migrator.core.config import MigrationConfig
+
+        assert scopes_for(MigrationConfig()) == REQUIRED_SCOPES
+        assert scopes_for(None) == REQUIRED_SCOPES
+        assert CUSTOM_EMOJI_SCOPE not in REQUIRED_SCOPES
+
+    def test_custom_emoji_scope_added(self):
+        from slack_chat_migrator.core.config import MigrationConfig
+
+        scopes = scopes_for(MigrationConfig(use_chat_custom_emoji=True))
+        assert scopes == [*REQUIRED_SCOPES, CUSTOM_EMOJI_SCOPE]
+
+    def test_scopes_for_returns_a_copy(self):
+        scopes_for(None).append("x")
+        assert "x" not in REQUIRED_SCOPES
+
+    @patch("slack_chat_migrator.utils.api.build")
+    @patch(_FROM_FILE)
+    def test_get_gcp_service_requests_given_scopes(self, mock_creds, mock_build):
+        scopes = [*REQUIRED_SCOPES, CUSTOM_EMOJI_SCOPE]
+        default = get_gcp_service("/c.json", "a@example.com", "chat", "v1")
+        extended = get_gcp_service(
+            "/c.json", "a@example.com", "chat", "v1", scopes=scopes
+        )
+        assert default is not extended
+        requested = [c.kwargs["scopes"] for c in mock_creds.call_args_list]
+        assert requested == [REQUIRED_SCOPES, scopes]

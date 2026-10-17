@@ -16,12 +16,35 @@ from typing import Any
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
-from slack_chat_migrator.constants import HTTP_CONFLICT, SPACE_TYPE
+from slack_chat_migrator.constants import (
+    HTTP_CONFLICT,
+    HTTP_FORBIDDEN,
+    HTTP_UNAUTHORIZED,
+    SPACE_TYPE,
+)
 from slack_chat_migrator.exceptions import PermissionCheckError
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
 from slack_chat_migrator.utils.api import REQUIRED_SCOPES, get_gcp_service
 from slack_chat_migrator.utils.logging import log_with_context
+
+#: Display name of the throwaway space the permission check creates.  It
+#: deliberately doesn't start with ``SPACE_NAME_PREFIX`` ("Slack #"), so
+#: ``migrate --complete`` never completes it.
+TEST_SPACE_DISPLAY_NAME = "slack-chat-migrator permission test (safe to delete)"
+
+#: Name of the small file the permission check uploads to the admin's Drive.
+TEST_FILE_NAME = "slack-chat-migrator-permission-test.txt"
+
+
+def _is_scope_error(error: HttpError) -> bool:
+    """Return True if *error* means the token lacks a required scope."""
+    if error.resp.status == HTTP_UNAUTHORIZED:
+        return True
+    text = f"{error} {error.content!r}".lower()
+    return error.resp.status == HTTP_FORBIDDEN and (
+        "insufficient" in text or "access_token_scope_insufficient" in text
+    )
 
 
 @dataclass
@@ -42,7 +65,9 @@ class PermissionValidator:
     starting the actual migration process.
     """
 
-    def __init__(self, migrator: PermissionCheckContext | Any) -> None:
+    def __init__(
+        self, migrator: PermissionCheckContext | Any, scopes: list[str] | None = None
+    ) -> None:
         """
         Initialize the permission validator.
 
@@ -50,8 +75,11 @@ class PermissionValidator:
             migrator: Any object exposing ``.chat``, ``.drive``, and
                 ``.workspace_admin`` attributes — typically a
                 ``SlackToChatMigrator`` or ``PermissionCheckContext``.
+            scopes: The OAuth scopes the run requests, listed in the error
+                report (default ``REQUIRED_SCOPES``).
         """
         self.migrator = migrator
+        self.scopes = list(scopes) if scopes is not None else list(REQUIRED_SCOPES)
         self.permission_errors: list[str] = []
         self.test_resources: dict[str, Any] = {}
 
@@ -106,7 +134,7 @@ class PermissionValidator:
             )
 
             test_space = {
-                "displayName": "Permission Test Space",
+                "displayName": TEST_SPACE_DISPLAY_NAME,
                 "spaceType": SPACE_TYPE,
                 "importMode": True,
                 "createTime": space_create_time,
@@ -284,14 +312,22 @@ class PermissionValidator:
         )
 
     def _test_drive_operations(self) -> None:
-        """Test Drive-related operations."""
+        """Test Drive-related operations.
+
+        Uploads a small file and shares it.  The migration only grants
+        individual users access to files, so sharing is tested with a
+        ``domain`` permission on the admin's own domain (never ``anyone``,
+        which locked-down organisations reject).  A sharing failure caused
+        by a missing scope is an error; one caused by the domain's sharing
+        policy is only a warning, since the migration doesn't need it.
+        """
         log_with_context(logging.INFO, "Testing Drive operations...")
 
         # Test 10: Drive file creation and sharing
         log_with_context(logging.INFO, "  • Testing Drive file operations...")
         try:
             # Create a test file
-            file_metadata = {"name": "permission-test.txt", "parents": []}
+            file_metadata = {"name": TEST_FILE_NAME, "parents": []}
             media_body = MediaIoBaseUpload(
                 io.BytesIO(b"Permission test file content"), mimetype="text/plain"
             )
@@ -300,56 +336,76 @@ class PermissionValidator:
             )
             file_id: str = test_file["id"]
             self.test_resources["drive_file"] = file_id
-
-            # Test file sharing permissions
-            permission_body = {"role": "reader", "type": "anyone"}
-            self.migrator.drive.create_permission(file_id=file_id, body=permission_body)
-
-            log_with_context(logging.INFO, "    ✓ Drive operations: PASSED")
-
         except HttpError as e:
             self.permission_errors.append(f"Drive operations failed: {e}")
             log_with_context(logging.ERROR, f"    ✗ Drive operations: FAILED - {e}")
+            return
+
+        domain = str(self.migrator.workspace_admin).rsplit("@", 1)[-1]
+        permission_body = {
+            "role": "reader",
+            "type": "domain",
+            "domain": domain,
+            "allowFileDiscovery": False,
+        }
+        try:
+            self.migrator.drive.create_permission(file_id=file_id, body=permission_body)
+            log_with_context(logging.INFO, "    ✓ Drive operations: PASSED")
+        except HttpError as e:
+            if _is_scope_error(e):
+                self.permission_errors.append(f"Drive operations failed: {e}")
+                log_with_context(
+                    logging.ERROR,
+                    f"    ✗ Drive operations: FAILED (missing scope) - {e}",
+                )
+            else:
+                log_with_context(
+                    logging.WARNING,
+                    f"    ⚠ Drive sharing test with a {domain} domain permission"
+                    f" failed: {e}. This doesn't block the migration, which shares"
+                    " files with individual users, but check your Drive sharing"
+                    " settings if attachments end up unshared.",
+                )
 
     def _cleanup_test_resources(self) -> None:
-        """Clean up all test resources."""
+        """Delete the test file and test space, warning about leftovers.
+
+        Each deletion is attempted independently, whatever the other one
+        does.  A test space that can't be deleted is reported by name: it
+        stays in import mode with no members until it is deleted (Google
+        removes import-mode spaces after 90 days).  Its import is never
+        completed.
+        """
         log_with_context(logging.INFO, "Cleaning up test resources...")
 
         # Clean up Drive file
         if "drive_file" in self.test_resources:
+            file_id = self.test_resources["drive_file"]
             try:
-                self.migrator.drive.delete_file(
-                    file_id=self.test_resources["drive_file"]
-                )
+                self.migrator.drive.delete_file(file_id=file_id)
                 log_with_context(logging.DEBUG, "Cleaned up test Drive file")
-            except HttpError as e:
-                log_with_context(logging.WARNING, f"Failed to clean up Drive file: {e}")
+            except Exception as e:
+                log_with_context(
+                    logging.WARNING,
+                    f"Failed to delete the permission test file {TEST_FILE_NAME!r}"
+                    f" ({file_id}) from the admin's Drive: {e}. Delete it manually.",
+                )
 
         # Clean up test space - simple deletion without import completion
         if "space" in self.test_resources:
+            space_name = self.test_resources["space"]
             try:
-                # Try to delete the space directly
-                self.migrator.chat.delete_space(name=self.test_resources["space"])
-                log_with_context(logging.DEBUG, "Cleaned up test space")
+                self.migrator.chat.delete_space(name=space_name)
+                log_with_context(logging.DEBUG, f"Cleaned up test space {space_name}")
             except Exception as e:
-                # Import mode spaces often cannot be deleted, which is expected
-                if any(
-                    keyword in str(e).lower()
-                    for keyword in [
-                        "insufficient authentication scopes",
-                        "permission denied",
-                        "cannot delete",
-                        "import mode",
-                    ]
-                ):
-                    log_with_context(
-                        logging.DEBUG,
-                        "Test space cleanup skipped (expected for import mode)",
-                    )
-                else:
-                    log_with_context(
-                        logging.WARNING, f"Failed to clean up test space: {e}"
-                    )
+                log_with_context(
+                    logging.WARNING,
+                    f"Could not delete the permission test space"
+                    f" {TEST_SPACE_DISPLAY_NAME!r} ({space_name}): {e}. It is still"
+                    " in import mode and has no members; delete it in the Google"
+                    " Chat admin console (Google removes it after 90 days). Don't"
+                    " complete its import.",
+                )
 
     def _report_results(self) -> bool:
         """Report validation results and return success status."""
@@ -362,7 +418,7 @@ class PermissionValidator:
             log_with_context(
                 logging.ERROR, "Required scopes for domain-wide delegation:"
             )
-            for scope in REQUIRED_SCOPES:
+            for scope in self.scopes:
                 log_with_context(logging.ERROR, f"  • {scope}")
 
             log_with_context(logging.ERROR, "")
@@ -408,7 +464,8 @@ def check_permissions_standalone(
     creds_path: str,
     workspace_admin: str,
     max_retries: int = 3,
-    retry_delay: int = 2,
+    retry_delay: float = 2,
+    scopes: list[str] | None = None,
 ) -> bool:
     """
     Run permission checks without creating a full SlackToChatMigrator.
@@ -425,6 +482,8 @@ def check_permissions_standalone(
         workspace_admin: Email of workspace admin to impersonate.
         max_retries: Maximum API retry attempts (default 3).
         retry_delay: Delay in seconds between retries (default 2).
+        scopes: OAuth scopes the Chat client requests (default
+            ``REQUIRED_SCOPES``; see ``scopes_for``).
 
     Returns:
         True if all permissions are valid.
@@ -441,6 +500,7 @@ def check_permissions_standalone(
         "v1",
         max_retries=max_retries,
         retry_delay=retry_delay,
+        scopes=scopes,
     )
     drive = get_gcp_service(
         creds_path,
@@ -457,5 +517,5 @@ def check_permissions_standalone(
         workspace_admin=workspace_admin,
     )
 
-    validator = PermissionValidator(ctx)
+    validator = PermissionValidator(ctx, scopes=scopes)
     return validator.validate_all_permissions()

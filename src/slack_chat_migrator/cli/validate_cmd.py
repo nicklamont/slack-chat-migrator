@@ -13,14 +13,14 @@ import click
 from slack_chat_migrator.cli.common import (
     cli,
     common_options,
-    handle_exception,
-    show_security_warning,
+    stdin_is_interactive,
 )
 from slack_chat_migrator.cli.migrate_cmd import (
     MigrationOrchestrator,
     _print_config_panel,
     _quiet_console,
     create_migration_output_directory,
+    run_orchestrator,
 )
 from slack_chat_migrator.cli.renderers import error_panel, get_console
 from slack_chat_migrator.utils.logging import log_with_context, setup_logger
@@ -56,6 +56,8 @@ def validate(
     """Dry-run validation of export data, user mappings, and channels.
 
     Equivalent to ``migrate --dry_run`` but expressed as an explicit command.
+    Exits with status 1 when validation finds problems (unmapped users,
+    channels with errors) or fails.
 
     Args:
         creds_path: Path to service account credentials JSON.
@@ -85,6 +87,8 @@ def validate(
                 f"{export_path}[/bold]",
             )
         )
+        if not stdin_is_interactive():
+            sys.exit(1)
         if click.confirm("Run init now?", default=True):
             from slack_chat_migrator.cli.init_cmd import init
 
@@ -102,6 +106,8 @@ def validate(
         export_path=export_path,
         workspace_admin=workspace_admin,
         config=config,
+        # The config file was checked (or created via init) above.
+        config_required=True,
         verbose=verbose,
         debug_api=debug_api,
         dry_run=True,  # always dry run
@@ -123,12 +129,6 @@ def validate(
     orchestrator = MigrationOrchestrator(args)
     orchestrator.output_dir = output_dir
 
-    try:
-        orchestrator.validate_prerequisites()
-        orchestrator.run_migration()
-    except Exception as e:
-        handle_exception(e)
-        sys.exit(1)
-    finally:
-        orchestrator.cleanup()
-        show_security_warning()
+    exit_code = run_orchestrator(orchestrator, export_path)
+    if exit_code:
+        sys.exit(exit_code)

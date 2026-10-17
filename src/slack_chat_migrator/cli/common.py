@@ -5,9 +5,9 @@ from __future__ import annotations
 import functools
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Callable, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import click
 
@@ -21,11 +21,26 @@ from slack_chat_migrator.constants import (
     HTTP_SERVER_ERROR_MIN,
     PERMISSION_DENIED_ERROR,
 )
-from slack_chat_migrator.exceptions import MigratorError
+from slack_chat_migrator.exceptions import ConfirmationRequiredError, MigratorError
 from slack_chat_migrator.utils.logging import log_with_context
 
 # Create logger instance
 logger = logging.getLogger("slack_chat_migrator")
+
+# ---------------------------------------------------------------------------
+# Exit codes
+# ---------------------------------------------------------------------------
+
+#: The run succeeded with no errors.
+EXIT_OK = 0
+#: The run failed, was aborted or cancelled, or completed with errors
+#: (channels with errors, incomplete imports, failed completions,
+#: unmapped users in validation).
+EXIT_FAILURE = 1
+#: Click usage errors (missing or invalid options) exit with 2.
+EXIT_USAGE = 2
+#: Interrupted with Ctrl-C (128 + SIGINT).
+EXIT_INTERRUPTED = 130
 
 
 # ---------------------------------------------------------------------------
@@ -253,8 +268,11 @@ class InterruptHandler:
                     "To resume from where you left off:",
                     f"  [bold]{resume_cmd}[/bold]",
                     "",
+                    "Spaces this run created are still in import mode;"
+                    " nothing was finalized.",
                     "[red]Spaces in import mode must be completed within 90 days.[/red]",
-                    "Run [bold]migrate --complete[/bold] to finalize all spaces.",
+                    "When you're done, run [bold]migrate --complete[/bold] to"
+                    " finalize them.",
                 ]
                 console.print(
                     Panel(
@@ -276,13 +294,105 @@ class InterruptHandler:
         )
         log_with_context(
             logging.WARNING,
-            "Spaces in import mode must be completed within 90 days.",
+            "Spaces this run created are still in import mode and must be"
+            " completed within 90 days (migrate --resume, then migrate --complete).",
         )
+
+
+# ---------------------------------------------------------------------------
+# Confirmation prompts
+# ---------------------------------------------------------------------------
+
+#: Environment variable equivalent of ``--yes``.
+YES_ENVVAR = "SLACK_CHAT_MIGRATOR_YES"
+
+
+def yes_option(f: Callable[..., Any]) -> Callable[..., Any]:
+    """Add ``--yes/-y`` (also ``SLACK_CHAT_MIGRATOR_YES=1``) to a command.
+
+    Args:
+        f: The Click command function to decorate.
+
+    Returns:
+        The decorated function.
+    """
+    return click.option(
+        "--yes",
+        "-y",
+        is_flag=True,
+        default=False,
+        envvar=YES_ENVVAR,
+        show_envvar=True,
+        help="Answer yes to confirmation prompts (for unattended runs).",
+    )(f)
+
+
+def stdin_is_interactive() -> bool:
+    """Return True if prompts can be answered (stdin is a terminal).
+
+    Returns:
+        True when stdin is a TTY.
+    """
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def confirm_action(prompt: str, *, assume_yes: bool, default: bool = False) -> bool:
+    """Ask the user to confirm *prompt*.
+
+    Args:
+        prompt: The question to ask.
+        assume_yes: True when ``--yes`` was given: the answer is yes.
+        default: The default answer at the prompt.
+
+    Returns:
+        True to proceed, False if the user declined (or pressed Ctrl-D/Ctrl-C
+        at the prompt).
+
+    Raises:
+        ConfirmationRequiredError: If stdin isn't interactive and
+            *assume_yes* is False, so nobody can answer.
+    """
+    if assume_yes:
+        log_with_context(logging.INFO, f"{prompt} [yes: --yes given]")
+        return True
+    if not stdin_is_interactive():
+        raise ConfirmationRequiredError(
+            f"Confirmation needed ({prompt!r}) but stdin is not an interactive"
+            f" terminal. Re-run with --yes (or set {YES_ENVVAR}=1) to proceed"
+            " without prompts."
+        )
+    try:
+        return click.confirm(prompt, default=default)
+    except click.Abort:
+        return False
 
 
 # ---------------------------------------------------------------------------
 # Shared option decorator
 # ---------------------------------------------------------------------------
+
+
+def config_was_given() -> bool:
+    """Return True when the user passed ``--config`` explicitly.
+
+    An explicitly named config file must exist; the default ``config.yaml``
+    may be missing (the defaults are then used, with a warning).
+
+    Returns:
+        True if ``--config`` came from the command line or environment.
+    """
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return False
+    source = ctx.get_parameter_source("config")
+    return source not in (
+        None,
+        click.core.ParameterSource.DEFAULT,
+        click.core.ParameterSource.DEFAULT_MAP,
+    )
 
 
 def common_options(f: Callable[..., None]) -> Callable[..., None]:

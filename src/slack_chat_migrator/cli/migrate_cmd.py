@@ -3,23 +3,30 @@
 from __future__ import annotations
 
 import contextlib
-import datetime
 import logging
-import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 import click
 
 from slack_chat_migrator.cli.common import (
+    EXIT_FAILURE,
+    EXIT_INTERRUPTED,
+    EXIT_OK,
+    YES_ENVVAR,
     InterruptHandler,
     cli,
     common_options,
+    config_was_given,
+    confirm_action,
     deprecated_option,
     handle_exception,
     show_security_warning,
+    stdin_is_interactive,
+    yes_option,
 )
 from slack_chat_migrator.cli.report import (
     generate_report,
@@ -27,14 +34,29 @@ from slack_chat_migrator.cli.report import (
     print_rich_summary,
 )
 from slack_chat_migrator.core.cleanup import cleanup_channel_handlers, run_cleanup
+from slack_chat_migrator.core.config import MigrationConfig, load_config
 from slack_chat_migrator.core.migrator import SlackToChatMigrator
 from slack_chat_migrator.core.progress import ProgressTracker
 from slack_chat_migrator.exceptions import (
     ConfigError,
+    ConfirmationRequiredError,
     PermissionCheckError,
 )
-from slack_chat_migrator.utils.logging import log_with_context, setup_logger
-from slack_chat_migrator.utils.permissions import validate_permissions
+from slack_chat_migrator.utils.api import scopes_for
+from slack_chat_migrator.utils.logging import (
+    create_output_directory,
+    log_with_context,
+    setup_logger,
+)
+from slack_chat_migrator.utils.permissions import (
+    check_permissions_standalone,
+    validate_permissions,
+)
+
+if TYPE_CHECKING:
+    from slack_chat_migrator.services.spaces.space_creator import (
+        ImportCompletionResult,
+    )
 
 # Create logger instance
 logger = logging.getLogger("slack_chat_migrator")
@@ -49,8 +71,8 @@ logger = logging.getLogger("slack_chat_migrator")
 @common_options
 @click.option(
     "--export_path",
-    required=True,
-    help="Path to Slack export directory",
+    default=None,
+    help="Path to Slack export directory (required unless --complete)",
 )
 @click.option(
     "--dry_run",
@@ -69,7 +91,8 @@ logger = logging.getLogger("slack_chat_migrator")
     "--complete",
     is_flag=True,
     default=False,
-    help="Complete import mode on all spaces without migrating messages",
+    help="Complete import mode on this tool's spaces (named 'Slack #...') "
+    "without migrating messages. Lists them and asks first.",
 )
 @click.option(
     "--skip_permission_check",
@@ -77,9 +100,10 @@ logger = logging.getLogger("slack_chat_migrator")
     default=False,
     help="Skip permission checks (not recommended)",
 )
+@yes_option
 def migrate(
     creds_path: str | None,
-    export_path: str,
+    export_path: str | None,
     workspace_admin: str | None,
     config: str,
     verbose: bool,
@@ -88,6 +112,7 @@ def migrate(
     resume: bool,
     complete: bool,
     skip_permission_check: bool,
+    yes: bool,
 ) -> None:
     """Run the full Slack-to-Google-Chat migration.
 
@@ -100,23 +125,36 @@ def migrate(
         debug_api: Enable detailed API request/response logging.
         dry_run: Validation-only mode.
         resume: Resume a previous migration (reuse existing spaces).
-        complete: Complete import mode on all spaces without migrating.
+        complete: Complete import mode on this tool's spaces without migrating.
         skip_permission_check: Skip permission checks before migration.
+        yes: Answer yes to confirmation prompts.
     """
     if complete:
-        _run_complete_mode(creds_path, workspace_admin, config, verbose, debug_api)
+        try:
+            exit_code = _run_complete_mode(
+                creds_path, workspace_admin, config, verbose, debug_api, yes
+            )
+        except KeyboardInterrupt:
+            click.echo("\nInterrupted.", err=True)
+            exit_code = EXIT_INTERRUPTED
+        if exit_code:
+            sys.exit(exit_code)
         return
+    if not export_path:
+        raise click.MissingParameter(param_type="option", param_hint="'--export_path'")
 
     args = SimpleNamespace(
         creds_path=creds_path,
         export_path=export_path,
         workspace_admin=workspace_admin,
         config=config,
+        config_required=config_was_given(),
         verbose=verbose,
         debug_api=debug_api,
         dry_run=dry_run,
         update_mode=resume,
         skip_permission_check=skip_permission_check,
+        assume_yes=yes,
     )
 
     # Create output directory early so all operations are logged to file
@@ -136,16 +174,52 @@ def migrate(
     orchestrator = MigrationOrchestrator(args)
     orchestrator.output_dir = output_dir
 
-    with InterruptHandler(export_path=export_path):
-        try:
-            orchestrator.validate_prerequisites()
-            orchestrator.run_migration()
-        except Exception as e:
-            handle_exception(e)
-            sys.exit(1)
-        finally:
-            orchestrator.cleanup()
-            show_security_warning()
+    exit_code = run_orchestrator(orchestrator, export_path)
+    if exit_code:
+        sys.exit(exit_code)
+
+
+def run_orchestrator(orchestrator: MigrationOrchestrator, export_path: str) -> int:
+    """Run prerequisites, the migration and cleanup, and return the exit code.
+
+    Exit codes: 0 success with no errors; 1 failed, aborted, cancelled or
+    completed with errors; 130 interrupted (Ctrl-C).  Click usage errors
+    propagate (exit 2).
+
+    Args:
+        orchestrator: The configured orchestrator.
+        export_path: The export path (for the resume hint after Ctrl-C).
+
+    Returns:
+        The process exit code.
+    """
+    exit_code = EXIT_OK
+    try:
+        with InterruptHandler(export_path=export_path):
+            try:
+                orchestrator.validate_prerequisites()
+                exit_code = orchestrator.run_migration()
+            except click.ClickException:
+                raise
+            except Exception as e:
+                handle_exception(e)
+                exit_code = EXIT_FAILURE
+            finally:
+                orchestrator.cleanup()
+                show_security_warning()
+    except KeyboardInterrupt:
+        return EXIT_INTERRUPTED
+
+    cleanup_result = orchestrator.cleanup_result
+    if cleanup_result is not None and cleanup_result.failed:
+        log_with_context(
+            logging.ERROR,
+            "Post-migration import completion failed for"
+            f" {len(cleanup_result.failed)} space(s): "
+            + ", ".join(sorted(cleanup_result.failed)),
+        )
+        exit_code = EXIT_FAILURE
+    return exit_code
 
 
 def _run_complete_mode(
@@ -154,13 +228,19 @@ def _run_complete_mode(
     config: str,
     verbose: bool,
     debug_api: bool,
-) -> None:
-    """Complete import mode on all spaces without migrating messages.
+    assume_yes: bool = False,
+) -> int:
+    """Complete import mode on this tool's spaces without migrating messages.
 
     This is equivalent to the standalone ``cleanup`` command but accessible
-    via ``migrate --complete``.
+    via ``migrate --complete``.  Only spaces named ``Slack #...`` are
+    considered; they are listed and the user confirms first (``--yes``
+    skips the prompt).
+
+    Returns:
+        The exit code: 0 if every listed space was completed (or none were
+        found), 1 if anything failed or the user cancelled.
     """
-    from slack_chat_migrator.core.config import load_config
     from slack_chat_migrator.services.chat_adapter import ChatAdapter
     from slack_chat_migrator.services.spaces.space_creator import (
         cleanup_import_mode_spaces,
@@ -174,40 +254,111 @@ def _run_complete_mode(
     if not workspace_admin:
         raise click.UsageError("--workspace_admin is required for --complete")
 
-    is_tty = sys.stdout.isatty()
+    # Load (and validate) the config before any API call, outside the quiet
+    # console so its warnings are visible.
+    try:
+        cfg = load_config(Path(config), required=config_was_given())
+    except Exception as e:
+        handle_exception(e)
+        return EXIT_FAILURE
 
+    is_tty = sys.stdout.isatty()
     if is_tty:
         try:
             from slack_chat_migrator.cli.renderers import get_console
 
-            console = get_console()
-            console.print("\n[bold]Completing import mode on all spaces...[/bold]")
+            get_console().print("\n[bold]Finding spaces still in import mode...[/bold]")
         except Exception:
             is_tty = False
 
-    ctx = _quiet_console() if is_tty else contextlib.nullcontext()
-
-    with ctx:
-        log_with_context(logging.INFO, "Completing import mode on all spaces...")
-        cfg = load_config(Path(config))
-        chat = get_gcp_service(
-            creds_path,
-            workspace_admin,
-            "chat",
-            "v1",
-            max_retries=cfg.max_retries,
-            retry_delay=cfg.retry_delay,
-        )
+    with _quiet_console() if is_tty else contextlib.nullcontext():
+        log_with_context(logging.INFO, "Finding spaces still in import mode...")
         try:
-            cleanup_import_mode_spaces(ChatAdapter(chat))
+            chat = get_gcp_service(
+                creds_path,
+                workspace_admin,
+                "chat",
+                "v1",
+                max_retries=cfg.max_retries,
+                retry_delay=cfg.retry_delay,
+            )
+            result = cleanup_import_mode_spaces(
+                ChatAdapter(chat), confirm=completion_confirmer(assume_yes)
+            )
         except Exception as e:
             handle_exception(e)
-            sys.exit(1)
+            return EXIT_FAILURE
 
-    if is_tty:
-        console.print("[green]\u2713[/green] All spaces completed successfully.")
-    else:
-        log_with_context(logging.INFO, "All spaces completed successfully.")
+    return report_import_completion(result)
+
+
+def completion_confirmer(
+    assume_yes: bool,
+) -> Callable[[list[dict[str, Any]]], bool]:
+    """Build the callback that lists the spaces to complete and asks first.
+
+    Args:
+        assume_yes: True when ``--yes`` was given (no prompt).
+
+    Returns:
+        A callback for ``cleanup_import_mode_spaces(confirm=...)``.
+    """
+
+    def _confirm(spaces: list[dict[str, Any]]) -> bool:
+        lines = [
+            f"  {space.get('displayName', '?')}  ({space.get('name', '?')})"
+            for space in spaces
+        ]
+        message = (
+            f"{len(spaces)} space(s) are still in import mode:\n"
+            + "\n".join(lines)
+            + "\nCompleting import mode is irreversible: imported history can"
+            " no longer be added afterwards."
+        )
+        # Show the list even when INFO is hidden on the console.
+        click.echo(message)
+        log_with_context(logging.DEBUG, message)
+        return confirm_action(
+            f"Complete import mode on these {len(spaces)} space(s)?",
+            assume_yes=assume_yes,
+        )
+
+    return _confirm
+
+
+def report_import_completion(result: ImportCompletionResult) -> int:
+    """Print an accurate summary of an import-completion run.
+
+    Args:
+        result: The outcome from ``cleanup_import_mode_spaces``.
+
+    Returns:
+        The exit code: 0 when everything listed was completed, else 1.
+    """
+    if result.cancelled:
+        click.echo("Import completion cancelled; no spaces were changed.")
+        return EXIT_FAILURE
+
+    lines: list[str] = []
+    if not result.candidates and not result.errors:
+        lines.append(
+            "No spaces named 'Slack #...' are in import mode (only spaces the"
+            " workspace admin can see are listed)."
+        )
+    if result.completed:
+        lines.append(f"Completed import mode on {len(result.completed)} space(s).")
+    if result.failed:
+        lines.append(f"Failed to complete {len(result.failed)} space(s):")
+        lines.extend(f"  {name}: {error}" for name, error in result.failed.items())
+    if result.errors:
+        lines.append(f"{len(result.errors)} error(s) while finding spaces:")
+        lines.extend(f"  {error}" for error in result.errors)
+
+    for line in lines:
+        click.echo(line)
+    level = logging.INFO if result.ok else logging.ERROR
+    log_with_context(level, " ".join(line.strip() for line in lines))
+    return EXIT_OK if result.ok else EXIT_FAILURE
 
 
 def _warn_import_mode_deadline() -> None:
@@ -249,6 +400,30 @@ class MigrationOrchestrator:
         self.migrator: SlackToChatMigrator | None = None
         self.dry_run_migrator: SlackToChatMigrator | None = None
         self.output_dir: str | None = None
+        self.config: MigrationConfig | None = None
+        # Set only when a live migrate() returned normally; gates the
+        # irreversible post-migration import completion in cleanup().
+        self.live_migration_finished = False
+        self.cleanup_result: ImportCompletionResult | None = None
+
+    def load_config(self) -> MigrationConfig:
+        """Load and validate the config file once for this run.
+
+        A ``--config`` path given explicitly must exist; the default
+        ``config.yaml`` may be missing (defaults are used, with a warning).
+
+        Returns:
+            The validated MigrationConfig.
+
+        Raises:
+            ConfigError: If the config is required but missing, or invalid.
+        """
+        if self.config is None:
+            self.config = load_config(
+                Path(self.args.config),
+                required=bool(getattr(self.args, "config_required", False)),
+            )
+        return self.config
 
     def create_migrator(self, force_dry_run: bool = False) -> SlackToChatMigrator:
         """Create a migrator instance with the given parameters.
@@ -268,6 +443,7 @@ class MigrationOrchestrator:
             verbose=self.args.verbose,
             update_mode=self.args.update_mode,
             debug_api=self.args.debug_api,
+            config=self.load_config(),
         )
 
         # Set output directory if we have one
@@ -276,8 +452,14 @@ class MigrationOrchestrator:
 
         return migrator
 
-    def validate_prerequisites(self) -> None:
-        """Validate all prerequisites before migration."""
+    def _check_credential_args(self) -> None:
+        """Check the credential options needed for this run.
+
+        Raises:
+            click.UsageError: If a live run lacks ``--creds_path`` or
+                ``--workspace_admin``.
+            ConfigError: If a given credentials file doesn't exist.
+        """
         # In dry-run mode, credentials and workspace_admin are optional
         if not self.args.dry_run:
             if not self.args.creds_path:
@@ -286,21 +468,48 @@ class MigrationOrchestrator:
                 raise click.UsageError(
                     "--workspace_admin is required for live migration"
                 )
-            # Check credentials file exists
-            creds_path = Path(self.args.creds_path)
-            if not creds_path.exists():
-                raise ConfigError(
-                    f"Credentials file not found: {self.args.creds_path}. "
-                    "Make sure your service account JSON key file exists and has the correct path."
-                )
-        elif self.args.creds_path:
-            # Dry-run with creds provided — still validate the file exists
-            creds_path = Path(self.args.creds_path)
-            if not creds_path.exists():
-                raise ConfigError(
-                    f"Credentials file not found: {self.args.creds_path}. "
-                    "Make sure your service account JSON key file exists and has the correct path."
-                )
+        # Check the credentials file exists (dry runs too, when one is given)
+        if self.args.creds_path and not Path(self.args.creds_path).exists():
+            raise ConfigError(
+                f"Credentials file not found: {self.args.creds_path}. "
+                "Make sure your service account JSON key file exists and has the correct path."
+            )
+
+    def _load_and_report_config(self) -> None:
+        """Load the config (warnings visible) and show its status."""
+        self.load_config()
+        config_path = Path(self.args.config)
+        if config_path.exists():
+            _print_preflight_status("Config loaded", detail=str(config_path))
+        else:
+            _print_preflight_status(
+                "Config not found, using defaults",
+                status="warn",
+                detail=str(config_path),
+            )
+
+    def _check_can_confirm(self) -> None:
+        """Fail fast when a live run would need a prompt nobody can answer.
+
+        Raises:
+            ConfirmationRequiredError: For a live migration without
+                ``--yes`` when stdin isn't an interactive terminal.
+        """
+        if (
+            not self.args.dry_run
+            and not getattr(self.args, "assume_yes", False)
+            and not stdin_is_interactive()
+        ):
+            raise ConfirmationRequiredError(
+                "A live migration asks for confirmation before it starts, but"
+                " stdin is not an interactive terminal. Re-run with --yes (or"
+                f" set {YES_ENVVAR}=1) to run unattended."
+            )
+
+    def validate_prerequisites(self) -> None:
+        """Validate all prerequisites before migration."""
+        self._check_credential_args()
+        self._check_can_confirm()
 
         is_tty = sys.stdout.isatty()
         if is_tty:
@@ -309,7 +518,10 @@ class MigrationOrchestrator:
             console = get_console()
             console.print("\n[bold]Preflight Checks[/bold]")
 
-        # Initialize main migrator (suppressing per-user warnings on console)
+        # Load and validate the config before anything else
+        self._load_and_report_config()
+
+        # Initialize main migrator (INFO noise hidden; warnings still shown)
         with _quiet_console():
             self.migrator = self.create_migrator()
 
@@ -335,33 +547,13 @@ class MigrationOrchestrator:
         if not self.args.skip_permission_check:
             has_creds = bool(self.args.creds_path and self.args.workspace_admin)
             if has_creds:
-                log_with_context(
-                    logging.INFO, "Checking permissions before proceeding..."
-                )
-                try:
-                    with _quiet_console():
-                        validate_permissions(self.migrator)
-                    log_with_context(logging.INFO, "Permission checks passed!")
-                    _print_preflight_status("Permissions verified")
-
-                    # Now that permissions are validated, initialize drive structures
-                    if (
-                        hasattr(self.migrator, "file_handler")
-                        and self.migrator.file_handler
-                    ):
-                        with _quiet_console():
-                            self.migrator.file_handler.ensure_drive_initialized()
-                        log_with_context(
-                            logging.INFO, "Drive structures initialized successfully"
-                        )
-                        _print_preflight_status("Drive initialized")
-
-                except Exception as e:
-                    raise PermissionCheckError(
-                        f"Permission checks failed: {e}. "
-                        "Fix the issues or run with --skip_permission_check if you're sure."
-                    ) from e
+                self._run_permission_checks()
             else:
+                log_with_context(
+                    logging.INFO,
+                    "Permission checks skipped: no credentials (pass --creds_path"
+                    " and --workspace_admin to check them).",
+                )
                 _print_preflight_status(
                     "Permissions", status="skip", detail="no credentials"
                 )
@@ -372,13 +564,57 @@ class MigrationOrchestrator:
             )
             _print_preflight_status("Permissions", status="skip", detail="skipped")
             # Still initialize drive structures even if permission checks are skipped
-            if hasattr(self.migrator, "file_handler") and self.migrator.file_handler:
-                with _quiet_console():
-                    self.migrator.file_handler.ensure_drive_initialized()
-                log_with_context(
-                    logging.INFO, "Drive structures initialized successfully"
-                )
-                _print_preflight_status("Drive initialized")
+            self._initialize_drive()
+
+    def _run_permission_checks(self) -> None:
+        """Test the permissions the migration needs against the real APIs.
+
+        Data validation in a dry run (``validate``, ``migrate --dry_run``)
+        uses no-op services, but the permission checks always build real
+        Chat and Drive clients from ``--creds_path``, so an invalid key,
+        missing scopes or broken delegation fail here.
+
+        Raises:
+            PermissionCheckError: If any check fails (including an unusable
+                credentials file).
+        """
+        log_with_context(
+            logging.INFO, "Checking permissions against the Google APIs..."
+        )
+        try:
+            with _quiet_console():
+                if self.args.dry_run:
+                    cfg = self.load_config()
+                    check_permissions_standalone(
+                        creds_path=self.args.creds_path,
+                        workspace_admin=self.args.workspace_admin,
+                        max_retries=cfg.max_retries,
+                        retry_delay=cfg.retry_delay,
+                        scopes=scopes_for(cfg),
+                    )
+                else:
+                    validate_permissions(self.migrator)
+        except Exception as e:
+            raise PermissionCheckError(
+                f"Permission checks failed: {e}. "
+                "Fix the issues or run with --skip_permission_check if you're sure."
+            ) from e
+        log_with_context(logging.INFO, "Permission checks passed!")
+        _print_preflight_status("Permissions verified")
+
+        # Now that permissions are validated, initialize drive structures
+        # (live runs only; a dry run's migrator has no real services).
+        if not self.args.dry_run:
+            self._initialize_drive()
+
+    def _initialize_drive(self) -> None:
+        """Initialize the shared drive and folders, if the file handler exists."""
+        file_handler = getattr(self.migrator, "file_handler", None)
+        if file_handler:
+            with _quiet_console():
+                file_handler.ensure_drive_initialized()
+            log_with_context(logging.INFO, "Drive structures initialized successfully")
+            _print_preflight_status("Drive initialized")
 
     def check_unmapped_users(self, migrator_instance: SlackToChatMigrator) -> bool:
         """Check for unmapped users and return True if any found.
@@ -458,25 +694,20 @@ class MigrationOrchestrator:
             return False  # In explicit dry run, just report and exit
 
         # Ask user if they want to proceed anyway
-        try:
-            if click.confirm(
-                "Proceed anyway despite unmapped users? (NOT RECOMMENDED)",
-                default=False,
-            ):
-                log_with_context(
-                    logging.WARNING,
-                    "Proceeding with unmapped users - messages will be attributed to workspace admin",
-                )
-                return True
-            else:
-                log_with_context(
-                    logging.INFO,
-                    "Migration cancelled. Please fix the user mappings and try again.",
-                )
-                return False
-        except click.Abort:
-            log_with_context(logging.INFO, "\nMigration cancelled by user.")
-            return False
+        if confirm_action(
+            "Proceed anyway despite unmapped users? (NOT RECOMMENDED)",
+            assume_yes=bool(getattr(self.args, "assume_yes", False)),
+        ):
+            log_with_context(
+                logging.WARNING,
+                "Proceeding with unmapped users - messages will be attributed to workspace admin",
+            )
+            return True
+        log_with_context(
+            logging.WARNING,
+            "Migration cancelled. Please fix the user mappings and try again.",
+        )
+        return False
 
     def report_validation_success(self, is_explicit_dry_run: bool = False) -> None:
         """Report successful validation.
@@ -527,7 +758,7 @@ class MigrationOrchestrator:
         self.dry_run_migrator = self.create_migrator(force_dry_run=True)
 
         try:
-            self.dry_run_migrator.migrate()
+            validation_clean = self.dry_run_migrator.migrate()
         except BaseException as e:
             # Generate report even on failure to show progress made
             try:
@@ -580,6 +811,9 @@ class MigrationOrchestrator:
                 report_file,
             )
 
+        if not validation_clean:
+            self._report_run_errors(m, "Validation")
+
         # Check validation results
         if self.check_unmapped_users(self.dry_run_migrator):
             return self.report_validation_issues(self.dry_run_migrator)
@@ -595,17 +829,41 @@ class MigrationOrchestrator:
         log_with_context(logging.INFO, "STEP 2: Ready to proceed with actual migration")
         log_with_context(logging.INFO, "")
 
-        try:
-            return click.confirm("Proceed with the actual migration?", default=False)
-        except click.Abort:
-            log_with_context(logging.INFO, "\nMigration cancelled by user.")
-            return False
+        return confirm_action(
+            "Proceed with the actual migration?",
+            assume_yes=bool(getattr(self.args, "assume_yes", False)),
+        )
 
-    def _run_with_progress(self, m: SlackToChatMigrator) -> None:
+    @staticmethod
+    def _report_run_errors(m: SlackToChatMigrator, label: str) -> None:
+        """Log which channels had errors or were left in import mode."""
+        errors = m.state.errors
+        if errors.channels_with_errors:
+            log_with_context(
+                logging.ERROR,
+                f"{label} completed with errors in"
+                f" {len(errors.channels_with_errors)} channel(s): "
+                + ", ".join(errors.channels_with_errors),
+            )
+        if errors.incomplete_import_spaces:
+            log_with_context(
+                logging.ERROR,
+                f"{len(errors.incomplete_import_spaces)} space(s) were left in"
+                " import mode: "
+                + ", ".join(
+                    f"#{channel} ({space})"
+                    for space, channel in errors.incomplete_import_spaces
+                ),
+            )
+
+    def _run_with_progress(self, m: SlackToChatMigrator) -> bool:
         """Run ``m.migrate()`` with a ProgressTracker and renderer.
 
         On failure the report is still generated so partial results are
         available for inspection.
+
+        Returns:
+            ``m.migrate()``'s result: True if no channel had errors.
         """
         from slack_chat_migrator.cli.renderers import create_renderer
 
@@ -616,12 +874,13 @@ class MigrationOrchestrator:
         )
         renderer.start()
         try:
-            m.migrate(progress_tracker=tracker)
+            succeeded = m.migrate(progress_tracker=tracker)
         except BaseException as e:
             renderer.stop()
             self._generate_partial_report(m, e)
             raise
         renderer.stop()
+        return bool(succeeded)
 
     @staticmethod
     def _generate_partial_report(m: SlackToChatMigrator, exc: BaseException) -> None:
@@ -668,7 +927,11 @@ class MigrationOrchestrator:
             _warn_import_mode_deadline()
 
     def _confirm_start(self) -> bool:
-        """Show a confirmation prompt before starting migration/validation."""
+        """Show a confirmation prompt before starting a dry-run validation.
+
+        A dry run changes nothing, so there's no prompt when nobody can
+        answer it (no terminal) or ``--yes`` was given.
+        """
         if self.migrator is None:
             return True
 
@@ -678,53 +941,79 @@ class MigrationOrchestrator:
         )
         msg = f"Ready to begin {mode} of {channel_count} channels."
 
-        if sys.stdout.isatty():
-            from slack_chat_migrator.cli.renderers import get_console
-
-            console = get_console()
-            console.print(f"\n{msg}")
-            if not click.confirm("Continue?", default=True):
-                click.echo("Aborted.")
-                return False
-        else:
+        interactive = sys.stdout.isatty() and stdin_is_interactive()
+        if not interactive or getattr(self.args, "assume_yes", False):
             log_with_context(logging.INFO, msg)
+            return True
+
+        from slack_chat_migrator.cli.renderers import get_console
+
+        get_console().print(f"\n{msg}")
+        if not confirm_action("Continue?", assume_yes=False, default=True):
+            click.echo("Aborted.")
+            return False
         return True
 
-    def run_migration(self) -> None:
-        """Execute the main migration logic."""
+    def run_migration(self) -> int:
+        """Execute the main migration logic.
+
+        Returns:
+            The exit code: 0 when the run succeeded with no errors; 1 when it
+            was cancelled, completed with errors, or (validation) found
+            unmapped users.
+        """
         if self.args.dry_run:
             # Explicit dry run mode
             if self.migrator is None:
                 raise RuntimeError("Migrator not initialized")
 
             if not self._confirm_start():
-                return
+                log_with_context(logging.WARNING, "Validation cancelled.")
+                return EXIT_FAILURE
 
             m = self.migrator
-            self._run_with_progress(m)
+            succeeded = self._run_with_progress(m)
             self._print_summary(m)
 
+            exit_code = EXIT_OK
+            if not succeeded:
+                self._report_run_errors(m, "Validation")
+                exit_code = EXIT_FAILURE
             if self.check_unmapped_users(self.migrator):
                 self.report_validation_issues(self.migrator, is_explicit_dry_run=True)
-            else:
+                exit_code = EXIT_FAILURE
+            elif succeeded:
                 self.report_validation_success(is_explicit_dry_run=True)
-        else:
-            # Full migration with automatic validation
-            if self.run_validation():
-                self.report_validation_success()
+            return exit_code
 
-                if self.get_user_confirmation():
-                    if self.migrator is None:
-                        raise RuntimeError("Migrator not initialized")
-                    m = self.migrator
-                    self._run_with_progress(m)
-                    self._print_summary(m)
-                else:
-                    log_with_context(logging.INFO, "Migration cancelled by user.")
-                    return
+        # Full migration with automatic validation
+        if not self.run_validation():
+            return EXIT_FAILURE
+        self.report_validation_success()
+
+        if not self.get_user_confirmation():
+            log_with_context(logging.WARNING, "Migration cancelled by user.")
+            return EXIT_FAILURE
+
+        if self.migrator is None:
+            raise RuntimeError("Migrator not initialized")
+        m = self.migrator
+        succeeded = self._run_with_progress(m)
+        self.live_migration_finished = True
+        self._print_summary(m)
+        if not succeeded:
+            self._report_run_errors(m, "Migration")
+            return EXIT_FAILURE
+        return EXIT_OK
 
     def cleanup(self) -> None:
-        """Perform cleanup operations."""
+        """Perform cleanup operations.
+
+        Channel log handlers are always closed.  The irreversible
+        post-migration import completion runs only after a live migration
+        actually finished: never on cancel, Ctrl-C, an exception, or failed
+        validation or permission checks.
+        """
         if self.migrator:
             m = self.migrator
             # Suppress cleanup log lines on TTY (detail goes to log file)
@@ -745,10 +1034,10 @@ class MigrationOrchestrator:
                             exc_info=True,
                         )
 
-                    # Only perform space cleanup if not in dry run mode
-                    if not self.args.dry_run:
+                    # Only complete imports after a finished live migration
+                    if self.live_migration_finished and not self.args.dry_run:
                         try:
-                            run_cleanup(
+                            self.cleanup_result = run_cleanup(
                                 m.ctx,
                                 m.state,
                                 m.chat,
@@ -765,6 +1054,15 @@ class MigrationOrchestrator:
                                 logging.WARNING,
                                 "Some spaces may still be in import mode and require manual cleanup",
                             )
+                    elif not self.args.dry_run and m.state.spaces.created_spaces:
+                        log_with_context(
+                            logging.WARNING,
+                            "The migration did not finish, so import mode was not"
+                            f" completed on the {len(m.state.spaces.created_spaces)}"
+                            " space(s) this run worked on. Finish them with"
+                            " 'migrate --resume' or 'migrate --complete' within"
+                            " 90 days.",
+                        )
 
                     log_with_context(logging.INFO, "Cleanup completed successfully.")
                 except Exception as cleanup_e:
@@ -790,23 +1088,21 @@ class MigrationOrchestrator:
 
 @contextlib.contextmanager
 def _quiet_console() -> Iterator[None]:
-    """Suppress INFO/WARNING from console output (still goes to log file)."""
-    root = logging.getLogger()
+    """Suppress INFO/DEBUG noise on the console (it still goes to the log file).
+
+    Warnings and errors stay visible, so problems such as an ignored config
+    option are never hidden.
+    """
     restored: list[tuple[logging.Handler, int]] = []
-    for handler in root.handlers:
-        if isinstance(handler, logging.StreamHandler) and not isinstance(
-            handler, logging.FileHandler
-        ):
-            restored.append((handler, handler.level))
-            handler.setLevel(logging.ERROR)
-    # Also check the package logger
-    pkg = logging.getLogger("slack_chat_migrator")
-    for handler in pkg.handlers:
-        if isinstance(handler, logging.StreamHandler) and not isinstance(
-            handler, logging.FileHandler
-        ):
-            restored.append((handler, handler.level))
-            handler.setLevel(logging.ERROR)
+    for lgr in (logging.getLogger(), logging.getLogger("slack_chat_migrator")):
+        for handler in lgr.handlers:
+            if (
+                isinstance(handler, logging.StreamHandler)
+                and not isinstance(handler, logging.FileHandler)
+                and handler.level < logging.WARNING
+            ):
+                restored.append((handler, handler.level))
+                handler.setLevel(logging.WARNING)
     try:
         yield
     finally:
@@ -848,7 +1144,10 @@ def _print_config_panel(args: SimpleNamespace, output_dir: str) -> None:
     table.add_column("Value")
 
     table.add_row("Export", str(args.export_path))
-    table.add_row("Config", str(config_path))
+    config_label = str(config_path)
+    if not config_path.exists():
+        config_label += " [yellow](not found, using defaults)[/yellow]"
+    table.add_row("Config", config_label)
     table.add_row("Admin", str(args.workspace_admin or "(none)"))
     mode = "Dry Run" if args.dry_run else "Live Migration"
     if getattr(args, "update_mode", False):
@@ -893,14 +1192,10 @@ def _print_preflight_status(label: str, status: str = "ok", detail: str = "") ->
 def create_migration_output_directory() -> str:
     """Create output directory for migration with timestamp.
 
+    The run directory (``migration_logs/run_<timestamp>``) and its
+    ``channel_logs`` folder are private to the current user (mode ``0700``).
+
     Returns:
         The path to the newly created output directory.
     """
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = f"migration_logs/run_{timestamp}"
-
-    # Create subdirectories
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(os.path.join(output_dir, "channel_logs"), exist_ok=True)
-
-    return output_dir
+    return create_output_directory("migration_logs")

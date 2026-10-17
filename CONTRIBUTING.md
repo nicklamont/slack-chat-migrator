@@ -29,8 +29,8 @@ pytest tests/ -v
 # Tests with coverage
 pytest tests/ --cov=slack_chat_migrator
 
-# Integration tests (require GCP credentials)
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json pytest tests/integration/ -v
+# Integration tests (dry-run pipeline and CLI; no credentials needed)
+pytest tests/integration/ -v
 ```
 
 ## Commit Messages
@@ -60,5 +60,6 @@ cz check --message "fix: resolve edge case in user mapping"
 
 1. Create a feature branch from `main`
 2. Make your changes with conventional commit messages
-3. Ensure all checks pass (`ruff check`, `pytest`, `mypy`)
+3. Ensure all checks pass (`ruff check`, `ruff format --check`, `pytest`, `mypy`).
+   CI pins ruff to the version in `.pre-commit-config.yaml`.
 4. Open a PR against `main`

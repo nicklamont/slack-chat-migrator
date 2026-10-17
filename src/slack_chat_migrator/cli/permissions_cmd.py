@@ -10,6 +10,7 @@ import click
 from slack_chat_migrator.cli.common import (
     cli,
     common_options,
+    config_was_given,
     deprecated_command,
     handle_exception,
 )
@@ -55,7 +56,7 @@ def check_permissions(
         raise click.UsageError("--workspace_admin is required for check-permissions")
 
     try:
-        cfg = load_config(Path(config))
+        cfg = load_config(Path(config), required=config_was_given())
         check_permissions_standalone(
             creds_path=creds_path,
             workspace_admin=workspace_admin,

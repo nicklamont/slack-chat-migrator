@@ -17,6 +17,15 @@ from slack_chat_migrator.exceptions import (
     PermissionCheckError,
 )
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
+from slack_chat_migrator.services.spaces.space_creator import ImportCompletionResult
+
+
+def _mock_orchestrator() -> MagicMock:
+    """A MagicMock orchestrator whose run succeeds (exit code 0)."""
+    orch = MagicMock()
+    orch.run_migration.return_value = 0
+    orch.cleanup_result = None
+    return orch
 
 
 class TestCLIGroup:
@@ -168,7 +177,7 @@ class TestValidateCommand:
     ):
         """Validate always passes dry_run=True to the orchestrator."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
         config_file = tmp_path / "config.yaml"
         config_file.write_text("{}")
@@ -201,7 +210,7 @@ class TestValidateCommand:
     ):
         """Validate command delegates permission checks to orchestrator."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
         config_file = tmp_path / "config.yaml"
         config_file.write_text("{}")
@@ -250,6 +259,7 @@ class TestCleanupCommand:
         mock_config.return_value = MigrationConfig()
         mock_chat = MagicMock()
         mock_svc.return_value = mock_chat
+        mock_cleanup.return_value = ImportCompletionResult()
 
         runner = CliRunner()
         result = runner.invoke(
@@ -275,23 +285,35 @@ class TestCleanupCommand:
     def test_prompts_for_confirmation_without_yes(
         self, mock_config, mock_svc, mock_cleanup
     ):
-        """Without --yes, cleanup should prompt and abort on 'n'."""
+        """Without --yes, cleanup lists the spaces, prompts and cancels on 'n'."""
         mock_config.return_value = MigrationConfig()
+
+        def fake_cleanup(chat, confirm):
+            result = ImportCompletionResult(
+                candidates=[{"name": "spaces/a", "displayName": "Slack #a"}]
+            )
+            result.cancelled = not confirm(result.candidates)
+            return result
+
+        mock_cleanup.side_effect = fake_cleanup
         runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "cleanup",
-                "--creds_path",
-                "fake.json",
-                "--workspace_admin",
-                "a@b.com",
-            ],
-            input="n\n",
-        )
-        assert result.exit_code == 0
-        assert "Cleanup cancelled" in result.output
-        mock_cleanup.assert_not_called()
+        with patch(
+            "slack_chat_migrator.cli.common.stdin_is_interactive", return_value=True
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "cleanup",
+                    "--creds_path",
+                    "fake.json",
+                    "--workspace_admin",
+                    "a@b.com",
+                ],
+                input="n\n",
+            )
+        assert result.exit_code == 1
+        assert "Slack #a" in result.output
+        assert "cancelled" in result.output
 
 
 class TestBackwardsCompatibility:
@@ -352,6 +374,24 @@ class TestHandleException:
             logging.ERROR, "Migration failed: unexpected", exc_info=True
         )
 
+    def test_generic_exception_log_has_traceback(self, tmp_path):
+        """The "Migration failed" entry in migration.log includes the traceback."""
+        from slack_chat_migrator.utils.logging import setup_logger
+
+        logger = setup_logger(output_dir=str(tmp_path))
+        try:
+            try:
+                raise RuntimeError("unexpected")
+            except RuntimeError as e:
+                handle_exception(e)
+        finally:
+            for handler in logger.handlers[:]:
+                logger.removeHandler(handler)
+                handler.close()
+        text = (tmp_path / "migration.log").read_text()
+        assert "Migration failed: unexpected" in text
+        assert "Traceback (most recent call last)" in text
+
 
 class TestMigrateExceptionPaths:
     """Tests for exception paths in the migrate command."""
@@ -364,7 +404,7 @@ class TestMigrateExceptionPaths:
         self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
     ):
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch.validate_prerequisites.side_effect = ConfigError("creds not found")
         mock_orch_cls.return_value = mock_orch
 
@@ -391,7 +431,7 @@ class TestMigrateExceptionPaths:
         self, mock_orch_cls, mock_logger, mock_outdir, mock_warn
     ):
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch.validate_prerequisites.return_value = None
         mock_orch.run_migration.side_effect = MigrationAbortedError("unmapped users")
         mock_orch_cls.return_value = mock_orch
@@ -424,7 +464,7 @@ class TestCredentialFreeDryRun:
     ):
         """Dry-run mode accepts missing --creds_path and --workspace_admin."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
 
         runner = CliRunner()
@@ -450,7 +490,7 @@ class TestCredentialFreeDryRun:
     ):
         """Live migration (no --dry_run) rejects missing --creds_path."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch.validate_prerequisites.side_effect = click.UsageError(
             "--creds_path is required for live migration"
         )
@@ -475,7 +515,7 @@ class TestCredentialFreeDryRun:
     ):
         """Validate command works without --creds_path or --workspace_admin."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
         config_file = tmp_path / "config.yaml"
         config_file.write_text("{}")
@@ -552,7 +592,7 @@ class TestMigrateResumeFlag:
     ):
         """--resume sets update_mode=True in the args namespace."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
 
         runner = CliRunner()
@@ -582,7 +622,7 @@ class TestMigrateResumeFlag:
     ):
         """--update_mode still works but emits a deprecation warning."""
         mock_outdir.return_value = "/tmp/fake"
-        mock_orch = MagicMock()
+        mock_orch = _mock_orchestrator()
         mock_orch_cls.return_value = mock_orch
 
         runner = CliRunner()
@@ -615,7 +655,8 @@ class TestMigrateCompleteFlag:
         # Patch at source — these are deferred imports inside _run_complete_mode
         with (
             patch(
-                "slack_chat_migrator.services.spaces.space_creator.cleanup_import_mode_spaces"
+                "slack_chat_migrator.services.spaces.space_creator.cleanup_import_mode_spaces",
+                return_value=ImportCompletionResult(),
             ) as mock_cleanup,
             patch(
                 "slack_chat_migrator.utils.api.get_gcp_service",
@@ -667,6 +708,7 @@ class TestCleanupDeprecation:
         """cleanup command emits deprecation warning pointing to migrate --complete."""
         mock_config.return_value = MigrationConfig()
         mock_svc.return_value = MagicMock()
+        mock_cleanup.return_value = ImportCompletionResult()
 
         runner = CliRunner()
         result = runner.invoke(
@@ -829,7 +871,7 @@ class TestQuietConsole:
     """Tests for _quiet_console context manager."""
 
     def test_suppresses_console_handler(self):
-        """_quiet_console raises console handler level to ERROR."""
+        """_quiet_console hides INFO/DEBUG but keeps warnings visible."""
         from slack_chat_migrator.cli.migrate_cmd import _quiet_console
 
         handler = logging.StreamHandler()
@@ -842,11 +884,46 @@ class TestQuietConsole:
         root.addHandler(handler)
         try:
             with _quiet_console():
-                assert handler.level == logging.ERROR
+                assert handler.level == logging.WARNING
             assert handler.level == logging.DEBUG
         finally:
             root.removeHandler(handler)
             test_logger.removeHandler(handler)
+
+    def test_warnings_still_reach_console(self):
+        """A WARNING logged inside _quiet_console is still emitted."""
+        import io
+
+        from slack_chat_migrator.cli.migrate_cmd import _quiet_console
+        from slack_chat_migrator.utils.logging import log_with_context
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setLevel(logging.INFO)
+        pkg = logging.getLogger("slack_chat_migrator")
+        pkg.addHandler(handler)
+        try:
+            with _quiet_console():
+                log_with_context(logging.INFO, "info noise")
+                log_with_context(logging.WARNING, "config warning")
+        finally:
+            pkg.removeHandler(handler)
+        assert "config warning" in stream.getvalue()
+        assert "info noise" not in stream.getvalue()
+
+    def test_does_not_lower_a_higher_level(self):
+        """A handler already above WARNING is left alone."""
+        from slack_chat_migrator.cli.migrate_cmd import _quiet_console
+
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.ERROR)
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            with _quiet_console():
+                assert handler.level == logging.ERROR
+        finally:
+            root.removeHandler(handler)
 
     def test_restores_level_on_exception(self):
         """_quiet_console restores level even if body raises."""

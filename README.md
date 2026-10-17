@@ -41,7 +41,7 @@ flowchart LR
 
 ### Prerequisites
 
-- Python 3.9+ (with `venv` module for virtual environment management)
+- Python 3.10+ (with `venv` module for virtual environment management)
 - Google Cloud SDK (`gcloud`) (optional, only needed for `setup_permissions.sh` script)
   - Not required if using `slack-chat-migrator setup` (recommended) or manual console setup
   - If installing:
@@ -56,6 +56,7 @@ flowchart LR
   - https://www.googleapis.com/auth/chat.spaces.readonly
   - https://www.googleapis.com/auth/chat.memberships.readonly
   - https://www.googleapis.com/auth/drive (for file uploads and shared drive creation)
+  - Optional: https://www.googleapis.com/auth/chat.customemojis.readonly, only if you set `use_chat_custom_emoji: true` (the tool requests it only then, so existing delegation entries keep working)
 - Slack export folder:
   ```
   export_root/
@@ -131,7 +132,7 @@ shared_drive:
 # Optional: Channels to exclude from migration (by name)
 exclude_channels:
   - "random"
-  - "shitposting"
+  - "off-topic"
 
 # Optional: Channels to include in migration (if specified, only these will be processed)
 include_channels: []
@@ -160,8 +161,9 @@ ignore_bots: false
 # Whether to abort the entire migration if errors are encountered in a channel
 abort_on_error: false
 
-# Maximum percentage of message failures allowed per channel before skipping
-# If more than this percentage of messages fail in a channel, the channel will be skipped
+# Maximum percentage of a channel's messages that may fail to import.
+# Only when more than this percentage fail is the channel marked as failed
+# (and its import not completed); the other messages are still imported.
 max_failure_percentage: 10
 
 # Strategy for completing import mode when errors occur
@@ -180,6 +182,17 @@ max_retries: 3
 # Delay between retries (in seconds)
 retry_delay: 2
 ```
+
+#### Config Validation
+
+The config file is validated before anything is migrated, so a typo can't silently change what gets imported:
+
+- If you pass `--config` and the file doesn't exist, the command fails. Without `--config`, a missing `config.yaml` means "use the defaults" (all channels, no user overrides), and a warning says so.
+- A file that isn't valid YAML, or whose top level isn't a mapping, is an error.
+- Values are type-checked. Booleans must be YAML `true`/`false` (not the string `"false"`), counts must be whole numbers, and `retry_delay` must be a number. List options such as `include_channels` also accept a single name (`include_channels: general` means `[general]`, with a warning) or an empty value. Channel names may be numeric and may start with `#`.
+- An unknown option that looks like a misspelling of a real one (for example `include_channel` or `max_retry`) is an error with a "did you mean" hint. Other unknown options are ignored with a warning.
+
+Config errors exit with status 1 and name the offending option.
 
 #### Space Mapping
 
@@ -229,6 +242,17 @@ slack-chat-migrator cleanup           # Complete import mode (deprecated — use
 
 > **Backwards compatibility:** Running `slack-chat-migrator --creds_path ...` (flags without a subcommand) automatically routes to `migrate`, but this implicit routing is deprecated. Use `slack-chat-migrator migrate ...` instead.
 
+#### Exit Codes and Unattended Runs
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | Success with no errors |
+| `1` | Failed, aborted (`abort_on_error`), cancelled at a prompt, or completed with errors: a channel had errors, a space was left in import mode, an import completion failed, or `validate`/`--dry_run` found unmapped users |
+| `2` | Usage error (missing or invalid options) |
+| `130` | Interrupted with Ctrl-C |
+
+A live `migrate` asks for confirmation before it starts. To run it unattended (cron, CI, `nohup`), pass `--yes` (or set `SLACK_CHAT_MIGRATOR_YES=1`), which answers yes to every prompt, including "proceed despite unmapped users". Without a terminal and without `--yes`, a live run exits with status 1 before doing anything, instead of silently doing nothing. Dry runs and `validate` never need `--yes`.
+
 #### Subcommands
 
 ##### `setup`
@@ -252,7 +276,7 @@ Generate a `config.yaml` file interactively by analysing your Slack export. Walk
 
 ##### `validate`
 
-Dry-run validation of export data, user mappings, and channels. Equivalent to `migrate --dry_run` but expressed as an explicit command. Credentials are optional — you can run a full validation with only `--export_path`. When `--creds_path` is provided, permission checks are also performed.
+Dry-run validation of export data, user mappings, and channels. Equivalent to `migrate --dry_run` but expressed as an explicit command. Credentials are optional — you can run a full validation with only `--export_path`, and the permission check is then reported as skipped. When `--creds_path` and `--workspace_admin` are provided, the data validation still runs as a dry run, but the permission checks run against the real Google Chat and Drive APIs with your key and domain-wide delegation: an unreadable key file, a missing scope or broken delegation fails the command. The check creates and then deletes a test space (named "slack-chat-migrator permission test (safe to delete)") and a small test file in the admin's Drive, which it shares with your domain (never with "anyone"). If your domain's sharing policy rejects that share, you get a warning rather than a failure, since the migration only shares files with individual users. If the test space can't be deleted, a warning names it so you can delete it in the admin console. It exits with status 1 when it finds unmapped users or channels with errors, or when a permission check fails.
 
 | Option | Required | Description |
 |--------|----------|-------------|
@@ -270,12 +294,13 @@ Run the full Slack-to-Google-Chat migration.
 | Option | Required | Description |
 |--------|----------|-------------|
 | `--creds_path` | Live only | Path to the service account credentials JSON file (optional with `--dry_run`) |
-| `--export_path` | Yes | Path to the Slack export directory |
+| `--export_path` | Yes (not with `--complete`) | Path to the Slack export directory |
 | `--workspace_admin` | Live only | Email of workspace admin to impersonate (optional with `--dry_run`) |
 | `--config` | No | Path to config YAML (default: config.yaml) |
 | `--dry_run` | No | Validation-only mode - performs comprehensive validation without making changes |
 | `--resume` | No | Resume an interrupted migration - finds existing spaces and imports only newer messages |
-| `--complete` | No | Complete import mode on all spaces without running a migration |
+| `--complete` | No | Complete import mode on this tool's spaces (display name `Slack #…`) that are still in import mode, without running a migration. `--export_path` isn't needed. The spaces are listed and you confirm first |
+| `--yes` or `-y` | No | Answer yes to confirmation prompts, for unattended runs (also `SLACK_CHAT_MIGRATOR_YES=1`) |
 | `--verbose` or `-v` | No | Enable verbose console logging (shows DEBUG level messages) |
 | `--debug_api` | No | Enable detailed API request/response logging (creates very large log files) |
 | `--skip_permission_check` | No | Skip permission checks (not recommended) |
@@ -298,7 +323,7 @@ Validate that the service account has all required API scopes.
 
 > **Deprecated:** Use `migrate --complete` instead.
 
-Complete import mode on spaces that are stuck.
+Complete import mode on this tool's spaces (named `Slack #…`) that are stuck in import mode. Same behaviour as `migrate --complete`.
 
 | Option | Required | Description |
 |--------|----------|-------------|
@@ -313,10 +338,12 @@ Complete import mode on spaces that are stuck.
 
 The migration tool provides two levels of debug logging:
 
-- **`--verbose` / `-v`**: Enables verbose console output showing DEBUG level messages. Useful for understanding the migration flow and troubleshooting issues.
-- **`--debug_api`**: Enables detailed HTTP API request/response logging to files. This creates very large log files but is invaluable for diagnosing API-related issues or developing the tool. Only enable this when specifically needed.
+- **`--verbose` / `-v`**: Enables verbose console output showing DEBUG level messages. Useful for understanding the migration flow and troubleshooting issues. It doesn't change what is written to the log files.
+- **`--debug_api`**: Writes DEBUG detail to the log files: HTTP API request/response data and full message payloads (message text). This creates very large log files but is invaluable for diagnosing API-related issues or developing the tool. Only enable this when specifically needed. Without it, log files record INFO and above, and failure logs list message and file IDs instead of message content.
 
 Both options are independent and can be used together for maximum debugging information.
+
+Slack tokens (`xoxb-…`, `xoxp-…`, `xoxe-…`), `t=`/`token=` URL parameters and `Bearer` tokens are redacted from every log line, on the console and in the files.
 
 > **Note:** The `--skip_permission_check` option (on `migrate`) bypasses validation of service account permissions. Only use this if you're certain your service account is properly configured and you're encountering false positives in the permission check.
 
@@ -458,8 +485,7 @@ The migration processes each channel through the following stages:
 ```mermaid
 flowchart TD
     A[Create Space in Import Mode] --> B[Add Historical Members]
-    B --> C[Post Channel Intro\npurpose / topic]
-    C --> D[Import Messages\nattachments & reactions]
+    B --> D[Import Messages\nattachments & reactions]
     D --> E{Errors?}
     E -->|No| F[Complete Import Mode]
     E -->|Yes| G{import_completion_strategy}
@@ -472,18 +498,17 @@ flowchart TD
 
 1. **Create Space**: Creates a Google Chat space in import mode
 2. **Add Historical Members**: Adds users who were in the Slack channel (with `createTime`/`deleteTime` for accurate membership history)
-3. **Send Intro**: Posts channel metadata (purpose/topic) as the first message
-4. **Import Messages**: Migrates all messages with their attachments and reactions
-5. **Complete Import**: Finishes the import mode for the space
-6. **Add Regular Members**: Adds all members back to the space as regular members
+3. **Import Messages**: Migrates all messages with their attachments and reactions
+4. **Complete Import**: Finishes the import mode for the space
+5. **Add Regular Members**: Adds all members back to the space as regular members
 
 #### Error Handling
 
 The tool provides several configurable options for handling errors during migration:
 
-1. **Abort on Error**: When enabled (`abort_on_error: true`), the migration will stop after encountering errors in a channel. When disabled (default), the migration will continue processing other channels even if errors occur.
+1. **Abort on Error**: When enabled (`abort_on_error: true`), the migration stops after the first channel with errors; the run counts as failed (exit status 1) and no post-migration import completion runs. When disabled (default), the migration will continue processing other channels even if errors occur, and the run still exits with status 1 if any channel had errors.
 
-2. **Maximum Failure Percentage**: Controls how many message failures are tolerated within a channel before skipping the rest of that channel (`max_failure_percentage: 10` by default). If the failure rate exceeds this percentage, the channel processing will stop.
+2. **Maximum Failure Percentage**: The share of a channel's messages that may fail to import (`max_failure_percentage: 10` by default). A channel is marked as failed, and its import isn't completed, only when its failure rate exceeds this percentage; the remaining messages are still attempted. Failed messages are listed in the report either way.
 
 3. **Import Completion Strategy**: Determines how to handle import mode completion when errors occur:
    - `skip_on_error` (default): Don't complete import mode if there were errors
@@ -494,6 +519,8 @@ The tool provides several configurable options for handling errors during migrat
 5. **API Retry Settings**: Configure how API calls are retried when errors occur:
    - `max_retries: 3` (default): Maximum number of retry attempts for failed API calls
    - `retry_delay: 2` (default): Initial delay in seconds between retry attempts
+
+   Google API calls are retried on 408, 429 and 5xx responses, on 403 responses whose reason is a rate limit or quota (`rateLimitExceeded`, `userRateLimitExceeded`, `sharingRateLimitExceeded`, `quotaExceeded`, which is how Drive reports throttling), and on network errors (connection resets, timeouts, DNS failures, TLS errors, truncated responses). Other 4xx errors, and local errors such as a missing or unreadable file, are not retried. Each wait uses exponential backoff with full jitter (a random delay up to `retry_delay × 2ⁿ`, capped at 64 seconds), or the server's `Retry-After` header when it sends one. Rate-limit errors are retried for up to 5 minutes in total, whatever `max_retries` says, because Chat and Drive quotas are per-minute windows.
 
 These options can be configured in your `config.yaml` file:
 
@@ -511,15 +538,15 @@ retry_delay: 2
 
 #### Cleanup Process
 
-After all channels are processed, a **cleanup process** runs to ensure all spaces are properly out of import mode. This cleanup:
+Each channel's space normally leaves import mode at the end of that channel (step 4 above). After a live migration **finishes**, a cleanup step acts as a safety net. It:
 
-1. Lists all spaces created by the migration tool
-2. Identifies any spaces still in "import mode" that weren't properly completed
-3. Completes the import mode for these spaces with retry logic
-4. Preserves external user access settings where applicable
-5. Adds regular members to these spaces
+1. Looks only at the spaces this run created. It never lists or touches other spaces: earlier runs' spaces, the permission-check test space, or spaces made by other tools.
+2. Skips spaces deliberately left in import mode: channels whose completion was skipped or failed, and, with `import_completion_strategy: skip_on_error`, channels that had errors.
+3. Completes import mode on the remaining spaces that are still in import mode, restores external user access where applicable, and adds the regular members.
 
-The cleanup process is important because spaces in import mode have limitations and will be automatically deleted after 90 days if not properly completed.
+Completing import mode is irreversible, so this step does **not** run when the migration didn't finish: if you answer "no" at a prompt, press Ctrl-C, hit an error, or the permission checks fail. Spaces left in import mode can be finished later with `migrate --resume` or `migrate --complete`. Do this within 90 days: Google deletes spaces that stay in import mode longer.
+
+`migrate --complete` (and the deprecated `cleanup`) only considers spaces whose display name starts with `Slack #`. It lists the spaces it found in import mode and asks before completing them (`--yes` skips the prompt; without a terminal and without `--yes` it exits with status 1). It then reports how many were completed and lists any that failed. The exit status is 1 if any failed. Note that the Chat API only lists spaces the workspace admin is a member of, and import-mode spaces have no members, so some may not be visible.
 
 #### Checkpoint and Resumption
 
@@ -564,20 +591,20 @@ migration_logs/
 ├── run_20250806_153200/          # Timestamped run directory
 │   ├── migration.log             # Main migration log
 │   ├── migration_report.yaml     # Summary report
-│   ├── channel_logs/            # Per-channel detailed logs
-│   │   ├── general_migration.log
-│   │   └── random_migration.log
-│   └── failed_messages.txt       # Failed messages (if any)
+│   └── channel_logs/            # Per-channel detailed logs
+│       ├── general_migration.log
+│       └── random_migration.log
 ```
 
 **Log File Types:**
 
 - **migration.log**: Main log file containing overall migration progress, errors, and system messages
-- **channel_logs/*.log**: Per-channel detailed logs with message-level details (when `--debug_api` is enabled)
+- **channel_logs/*.log**: Per-channel logs. A "FAILED MESSAGES DETAILS" section at the end lists each failed message by timestamp, error, user and file IDs. Message-level details (payloads, API request/response data) are added only when `--debug_api` is enabled.
 - **migration_report.yaml**: Structured summary report with statistics and recommendations
-- **failed_messages.txt**: Details of any messages that failed to migrate (created only if there are failures)
 
-> **Note:** When using `--debug_api`, channel logs can become quite large as they include complete API request/response data.
+The run directory is created with mode `0700` and the files in it with mode `0600`, so other local users can't read them.
+
+> **Note:** When using `--debug_api`, channel logs can become quite large as they include complete API request/response data and message content. Treat those logs as sensitive.
 
 ### Migration Reports
 
@@ -739,6 +766,7 @@ If you prefer not to use the setup script, follow these steps manually:
    - Set Avatar URL (e.g. `https://developers.google.com/chat/images/quickstart-app-avatar.png`)
    - Set Description (e.g. "Slack to Google Chat migration")
    - Leave Interactive features **disabled** (the migration uses server-to-server API calls, not a bot)
+   - Keep **Markup syntax** set to **Chat** (the tool writes Chat markup, and sets it explicitly on every message anyway)
    - Click Save
 
 5. **Set Up Domain-Wide Delegation**:
@@ -752,6 +780,7 @@ If you prefer not to use the setup script, follow these steps manually:
      - `https://www.googleapis.com/auth/chat.spaces.readonly`
      - `https://www.googleapis.com/auth/chat.memberships.readonly`
      - `https://www.googleapis.com/auth/drive`
+     - Only if you set `use_chat_custom_emoji: true`: `https://www.googleapis.com/auth/chat.customemojis.readonly`. Requesting a scope that isn't authorized makes every API call fail, so the tool asks for this one only when that option is on.
 
 #### Migration Issues
 
@@ -859,14 +888,16 @@ The wizard guides you through six steps:
 1. **GCP project** — create or select a project
 2. **Enable APIs** — enable Chat, Drive, and Admin APIs
 3. **Service account** — create a service account for delegation
-4. **Download key** — download credentials JSON (saved with restricted permissions)
+4. **Download key** — download credentials JSON (saved with mode `0600`). If the key file you name already holds an active key for the service account, it's reused instead of creating another key (a service account can have at most 10). Any other existing file is only overwritten after you confirm.
 5. **Configure Chat app** — set up the Chat app in GCP Console (required by the Chat API)
-6. **Test delegation** — verify domain-wide delegation works
+6. **Test delegation** — verify domain-wide delegation works, requesting every scope the migration needs, so a delegation entry that's missing a scope fails here
+
+A step that fails or that you skip (for example enabling the APIs) is offered again the next time you run the wizard.
 
 Progress is saved between runs, so you can resume if interrupted.
 
 **Alternative approaches:**
-- Use the `setup_permissions.sh` script (requires Google Cloud SDK installed as a system component)
+- Use the `setup_permissions.sh` script (requires Google Cloud SDK installed as a system component). It enables the APIs, creates the service account (without granting it any project-level IAM roles: everything comes from domain-wide delegation) and a key file, or checks that an existing key file belongs to the service account and is still active. It stops with a non-zero exit status if any step fails.
 - Follow the [manual setup steps](#manual-google-cloud-setup-without-using-the-script) in the Troubleshooting section
 
 > **Note:** After any setup method, you still need to complete domain-wide delegation in your Google Workspace Admin Console.

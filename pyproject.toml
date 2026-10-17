@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,7 @@ name = "slack-chat-migrator"
 description = "Tool for migrating Slack exports to Google Chat"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "Nick Lamont", email = "nick@nicklamont.com" }]
 keywords = ["slack", "google-chat", "migration", "workspace", "chat", "data-migration"]
 classifiers = [
@@ -15,10 +15,11 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Communications :: Chat",
     "Topic :: Utilities",
 ]
@@ -77,7 +78,7 @@ slack_chat_migrator = ["py.typed"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "RUF", "C90", "S"]
@@ -93,7 +94,7 @@ max-complexity = 15
 known-first-party = ["slack_chat_migrator"]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -104,7 +105,7 @@ no_implicit_optional = true
 strict_optional = true
 
 [[tool.mypy.overrides]]
-module = ["emoji.*", "slackblocks.*", "googleapiclient.*"]
+module = ["emoji.*", "googleapiclient.*"]
 ignore_missing_imports = true
 
 [tool.bandit]
@@ -140,12 +141,11 @@ source = ["slack_chat_migrator"]
 show_missing = true
 skip_covered = true
 fail_under = 90
-# CLI orchestration modules are omitted because they wire together
-# already-tested services and require full end-to-end setup (credentials,
-# Slack export, Google API access) that unit tests cannot provide.
+# The interactive GCP setup wizard is omitted: it drives the Cloud Resource
+# Manager, Service Usage and IAM admin APIs step by step and is covered by
+# targeted unit tests only.  The migrate/validate/--complete CLI modules are
+# measured (they are where cleanup, exit-code and config handling live).
 omit = [
-    "src/slack_chat_migrator/cli/migrate_cmd.py",
-    "src/slack_chat_migrator/cli/cleanup_cmd.py",
     "src/slack_chat_migrator/cli/setup_cmd.py",
     "src/slack_chat_migrator/services/setup/*.py",
 ]

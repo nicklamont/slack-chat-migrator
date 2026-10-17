@@ -7,6 +7,17 @@ import pytest
 from slack_chat_migrator.core.config import MigrationConfig
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cwd(tmp_path_factory, monkeypatch):
+    """Run every test from a fresh temporary working directory.
+
+    The CLI and the migrator write ``migration_logs/run_*`` relative to the
+    current directory.  Running each test from its own temporary directory
+    keeps the repository checkout clean, whatever the test does.
+    """
+    monkeypatch.chdir(tmp_path_factory.mktemp("cwd"))
+
+
 @pytest.fixture()
 def sample_users():
     """Return a list of sample Slack user dicts."""

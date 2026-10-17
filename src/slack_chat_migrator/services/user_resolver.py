@@ -66,6 +66,23 @@ class UserResolver:
         self.workspace_domain = workspace_domain
         self._users_data: dict[str, dict[str, Any]] | None = None
 
+    def _delegate_service(self, email: str) -> Any:
+        """Return the (cached) impersonated Chat client for *email*.
+
+        Clients are cached by :func:`get_gcp_service` in a bounded LRU
+        cache with a TTL, which a 401 clears, so the delegates are bounded
+        too and are rebuilt after an authentication failure.
+        """
+        return get_gcp_service(
+            str(self.creds_path),
+            email,
+            "chat",
+            "v1",
+            self.state.context.current_channel,
+            max_retries=self.config.max_retries,
+            retry_delay=self.config.retry_delay,
+        )
+
     def get_delegate(self, email: str) -> ChatAdapter:
         """Get a Google Chat API service with user impersonation.
 
@@ -88,19 +105,11 @@ class UserResolver:
 
         if email not in self.state.users.valid_users:
             try:
-                raw_service = get_gcp_service(
-                    str(self.creds_path),
-                    email,
-                    "chat",
-                    "v1",
-                    self.state.context.current_channel,
-                    max_retries=self.config.max_retries,
-                    retry_delay=self.config.retry_delay,
-                )
+                raw_service = self._delegate_service(email)
                 # Validate impersonation with a lightweight API call
                 raw_service.spaces().list(pageSize=1).execute()
                 self.state.users.valid_users[email] = True
-                self.state.users.chat_delegates[email] = ChatAdapter(raw_service)
+                return ChatAdapter(raw_service)
             except (HttpError, RefreshError, TransportError) as e:
                 error_code = e.resp.status if isinstance(e, HttpError) else "N/A"
                 log_with_context(
@@ -112,7 +121,18 @@ class UserResolver:
                 self.state.users.valid_users[email] = False
                 return self.chat
 
-        return self.state.users.chat_delegates.get(email, self.chat)
+        if not self.state.users.valid_users[email]:
+            return self.chat
+        try:
+            return ChatAdapter(self._delegate_service(email))
+        except (OSError, ValueError) as e:
+            log_with_context(
+                logging.WARNING,
+                f"Could not rebuild the delegate for {email}, falling back to admin"
+                f" user. Error: {e}",
+                user=email,
+            )
+            return self.chat
 
     def get_internal_email(
         self, user_id: str, user_email: str | None = None
