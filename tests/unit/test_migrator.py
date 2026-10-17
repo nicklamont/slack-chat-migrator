@@ -1695,6 +1695,8 @@ class TestMigrate:
         mock_log_success.assert_not_called()
         mock_clear_cp.assert_not_called()
         assert m.state.errors.channels_with_errors == ["general"]
+        # Pending Drive grants are still retried after an abort.
+        m.file_handler.retry_pending_permissions.assert_called_once_with()
 
     @patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
     @patch("slack_chat_migrator.core.migrator.log_migration_success")
@@ -2031,3 +2033,96 @@ class TestMigrate:
         # Tracker should be passed to ChannelProcessor
         _, kwargs = mock_cp_cls.call_args
         assert kwargs["progress_tracker"] is tracker
+
+
+@patch("slack_chat_migrator.core.migrator.cleanup_channel_handlers")
+@patch("slack_chat_migrator.core.migrator.log_migration_success")
+@patch("slack_chat_migrator.core.migrator.clear_checkpoint")
+@patch("slack_chat_migrator.core.migrator.save_checkpoint")
+@patch("slack_chat_migrator.core.migrator.load_checkpoint", return_value=None)
+@patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
+@patch("slack_chat_migrator.core.migrator.ChannelProcessor")
+class TestPendingSweepNeverFailsTheRun:
+    """The end-of-run sweep can't change the run's outcome (SF-N1, TA S9)."""
+
+    @staticmethod
+    def _migrator(tmp_path, mock_cp_cls, **result):
+        m = _make_migrator_for_migrate(tmp_path)
+        mock_cp = MagicMock()
+        mock_cp.process_channel.return_value = MagicMock(
+            should_abort=False, had_errors=False, **result
+        )
+        mock_cp_cls.return_value = mock_cp
+        return m, mock_cp
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ConnectionResetError("reset"),
+            OSError(101, "Network is unreachable"),
+            RuntimeError("bug"),
+        ],
+        ids=["reset", "unreachable", "bug"],
+    )
+    def test_sweep_error_is_logged_and_the_run_succeeds(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+        caplog,
+        error,
+    ):
+        m, _ = self._migrator(tmp_path, mock_cp_cls)
+        m.file_handler.retry_pending_permissions.side_effect = error
+
+        assert m.migrate() is True
+
+        mock_clear_cp.assert_called_once()  # the run finished
+        errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert any("Retrying pending Drive grants" in msg for msg in errors)
+
+    def test_sweep_error_does_not_hide_an_abort(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        m, _ = self._migrator(tmp_path, mock_cp_cls)
+        mock_cp_cls.return_value.process_channel.return_value = MagicMock(
+            should_abort=True, had_errors=True
+        )
+        m.file_handler.retry_pending_permissions.side_effect = RuntimeError("bug")
+
+        with pytest.raises(MigrationAbortedError):
+            m.migrate()
+
+        m.file_handler.retry_pending_permissions.assert_called_once_with()
+
+    def test_ctrl_c_skips_the_sweep(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        m, mock_cp = self._migrator(tmp_path, mock_cp_cls)
+        mock_cp.process_channel.side_effect = KeyboardInterrupt()
+
+        with pytest.raises(KeyboardInterrupt):
+            m.migrate()
+
+        m.file_handler.retry_pending_permissions.assert_not_called()

@@ -1815,11 +1815,13 @@ class FileHandler:
     def retry_pending_permissions(self) -> None:
         """Retry the poster grants and ownership transfers that failed.
 
-        Run at the end of every migration run (also with ``--resume``, which
-        doesn't link files of already-sent messages again).  The flagged
-        files are those this run flagged plus those whose appProperties
-        flags an earlier run left: the whole shared drive is searched, or in
-        regular Drive the attachment root and its channel folders.
+        Run when the migration's channel loop ends: also after an abort
+        (``abort_on_error``) and with ``--resume`` (which doesn't link files
+        of already-sent messages again), but not after Ctrl-C or SIGTERM.
+        The flagged files are those this run flagged plus those whose
+        appProperties flags an earlier run left: the whole shared drive is
+        searched, or in regular Drive the attachment root and its channel
+        folders.
 
         Each recipient is looked up again by its stored Slack user ID in
         today's user mapping (the stored email is used for flags without
