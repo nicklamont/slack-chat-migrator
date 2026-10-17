@@ -15,7 +15,7 @@ def normalize_domain(domain: object) -> str:
     """Return a domain lowercased, without spaces or a leading ``@``."""
     if not isinstance(domain, str):
         return ""
-    return domain.strip().lower().lstrip("@")
+    return domain.strip().lower().lstrip("@").strip()
 
 
 def internal_domains(

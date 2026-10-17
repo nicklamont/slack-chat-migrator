@@ -2,7 +2,7 @@
 
 import pytest
 
-from slack_chat_migrator.services.drive.domains import (
+from slack_chat_migrator.utils.domains import (
     internal_domains,
     is_external_email,
     normalize_domain,
@@ -14,6 +14,7 @@ from slack_chat_migrator.services.drive.domains import (
     [
         (" Example.COM ", "example.com"),
         ("@corp.example.net", "corp.example.net"),
+        (" @ corp.example.net", "corp.example.net"),
         ("", ""),
         (None, ""),
     ],

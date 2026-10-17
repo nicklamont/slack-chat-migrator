@@ -18,15 +18,15 @@ from slack_chat_migrator.constants import (
     DRIVE_ROLE_READER,
     HTTP_BAD_REQUEST,
 )
-from slack_chat_migrator.services.drive.domains import (
-    internal_domains,
-    is_external_email,
-)
 from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_ERRORS,
     PermissionChange,
 )
 from slack_chat_migrator.utils.api import escape_drive_query_value
+from slack_chat_migrator.utils.domains import (
+    internal_domains,
+    is_external_email,
+)
 from slack_chat_migrator.utils.logging import (
     log_with_context,
 )

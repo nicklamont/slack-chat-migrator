@@ -28,10 +28,6 @@ from slack_chat_migrator.services.drive import (
     FolderManager,
     SharedDriveManager,
 )
-from slack_chat_migrator.services.drive.domains import (
-    internal_domains,
-    is_external_email,
-)
 from slack_chat_migrator.services.drive.drive_uploader import (
     DriveUploadFailure,
     DriveUploadSource,
@@ -62,6 +58,10 @@ from slack_chat_migrator.services.files.temp_files import (
     sweep_stale_temp_dirs,
 )
 from slack_chat_migrator.types import UploadResult
+from slack_chat_migrator.utils.domains import (
+    internal_domains,
+    is_external_email,
+)
 from slack_chat_migrator.utils.logging import log_with_context
 from slack_chat_migrator.utils.mime import (
     is_slack_canvas,
