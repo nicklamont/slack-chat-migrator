@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime
 import difflib
 import logging
+import math
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
@@ -185,6 +186,8 @@ class MigrationConfig:
                 ``conversation_types``, ``import_completion_strategy``), or a
                 ``custom_emoji_map`` key is invalid or repeated or its value
                 is empty.
+            TypeError: If a field has no type check (a programming error;
+                see :func:`_check_field_types`).
         """
         if isinstance(self.custom_emoji_map, Mapping):
             self.custom_emoji_map = _normalize_emoji_map(self.custom_emoji_map)
@@ -222,8 +225,10 @@ class MigrationConfig:
                 f"max_failure_percentage must be between 0 and 100,"
                 f" got {self.max_failure_percentage}"
             )
-        if self.retry_delay < 0:
-            raise ConfigError(f"retry_delay must be >= 0, got {self.retry_delay}")
+        if not math.isfinite(self.retry_delay) or self.retry_delay < 0:
+            raise ConfigError(
+                f"retry_delay must be >= 0 and finite, got {self.retry_delay}"
+            )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> MigrationConfig:
@@ -457,12 +462,12 @@ def _get_mapping(data: Mapping[str, Any], key: str) -> dict[str, str]:
     """Return a string-to-string mapping option.
 
     Keys must be names: strings, or integers as their digits (see
-    :func:`_mapping_key`).  Scalar values are coerced to strings; an empty
-    value means an empty mapping.
+    :func:`_mapping_key`).  String and number values become strings; an
+    empty value means an empty mapping.
 
     Raises:
-        ConfigError: If the value isn't a mapping, a value isn't a scalar,
-            a key isn't a name, or two keys give the same name.
+        ConfigError: If the value isn't a mapping, a value isn't a string
+            or a number, a key isn't a name, or two keys give the same name.
     """
     value = data.get(key)
     if value is None:
@@ -621,7 +626,8 @@ def _normalize_emoji_map(mapping: Mapping[Any, str]) -> dict[str, str]:
     would silently never match.
 
     Raises:
-        ConfigError: If a key isn't a name (a YAML boolean or date), is
+        ConfigError: If a key isn't a name (a YAML boolean, null, date or
+            decimal number), is
             empty after stripping, or two keys name the same emoji (also
             when they differ only in case or colons), or a value is an
             empty string (it would silently map nothing).
@@ -727,6 +733,8 @@ _YAML_STR_TAG = "tag:yaml.org,2002:str"
 _YAML_INT_TAG = "tag:yaml.org,2002:int"
 _YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
 _YAML_VALUE_TAG = "tag:yaml.org,2002:value"
+#: Marks a boolean, null, date or float key in the duplicate check.
+_RETYPED_KEY = object()
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -742,8 +750,10 @@ class _UniqueKeyLoader(yaml.SafeLoader):
       ``0x10``, ``1_000``, ``+1`` and ``1:30`` as numbers (7, 16, 1000, 1,
       90), which would rename a channel or emoji silently.  A plain key
       that resolves to an integer is kept as the text written, so ``1``
-      and ``"1"`` are the same (duplicate) key.  Booleans, dates and nulls
-      as keys are left for ``_mapping_key`` to reject with a quoting hint.
+      and ``"1"`` are the same (duplicate) key.  Booleans, nulls, dates and
+      decimal numbers as keys are left for ``_mapping_key`` to reject with a
+      quoting hint; for the duplicate check they are compared as written,
+      so ``on`` next to ``yes`` gets that hint, not "duplicate key True".
 
     The check runs in ``flatten_mapping``, once per mapping node and before
     merges are applied, so a merge source is checked as written, both when
@@ -786,15 +796,24 @@ class _UniqueKeyLoader(yaml.SafeLoader):
                 )
                 node.value[index] = (key_node, value_node)
             key = self.construct_object(key_node, deep=True)
+            if key is None or isinstance(
+                key, (bool, float, datetime.date)
+            ):  # their text is lost; compare it as written
+                key = (_RETYPED_KEY, key_node.value)
             try:
                 seen = key in first_line
             except TypeError:  # unhashable; the base class reports it
                 continue
             if seen:
+                shown = (
+                    key[1]
+                    if isinstance(key, tuple) and key[:1] == (_RETYPED_KEY,)
+                    else key
+                )
                 raise yaml.constructor.ConstructorError(
                     "while constructing a mapping",
                     node.start_mark,
-                    f"found duplicate key {key!r} (first on line"
+                    f"found duplicate key {shown!r} (first on line"
                     f" {first_line[key]}); remove one of the entries",
                     key_node.start_mark,
                 )

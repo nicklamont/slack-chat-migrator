@@ -488,6 +488,11 @@ class TestScalarOptions:
     def test_retry_delay_accepts_floats(self, tmp_path):
         assert _load(tmp_path, "retry_delay: 1.5\n").retry_delay == 1.5
 
+    @pytest.mark.parametrize("value", [".nan", ".inf", "-.inf"])
+    def test_retry_delay_must_be_finite(self, tmp_path, value):
+        with pytest.raises(ConfigError, match="finite"):
+            _load(tmp_path, f"retry_delay: {value}\n")
+
     def test_retry_delay_rejects_strings(self, tmp_path):
         with pytest.raises(ConfigError, match="must be a number"):
             _load(tmp_path, "retry_delay: '2'\n")
@@ -763,6 +768,25 @@ class TestDuplicateKeys:
     def test_number_and_quoted_text_are_the_same_key(self, tmp_path, text):
         with pytest.raises(ConfigError, match="duplicate key"):
             _load(tmp_path, text)
+
+    @pytest.mark.parametrize(
+        ("text", "hint"),
+        [
+            ("custom_emoji_map:\n  on: a\n  yes: b\n", "boolean True"),
+            ("space_mapping:\n  null: AAA\n  ~: BBB\n", "read as null"),
+            ("custom_emoji_map:\n  1.5: a\n  1.50: b\n", "number 1.5"),
+        ],
+    )
+    def test_retyped_keys_get_the_quoting_hint_not_a_duplicate(
+        self, tmp_path, text, hint
+    ):
+        with pytest.raises(ConfigError, match=hint) as raised:
+            _load(tmp_path, text)
+        assert "duplicate" not in str(raised.value)
+
+    def test_the_same_retyped_key_twice_is_a_duplicate(self, tmp_path):
+        with pytest.raises(ConfigError, match="duplicate key 'on'"):
+            _load(tmp_path, "custom_emoji_map:\n  on: a\n  on: b\n")
 
     def test_merge_source_with_its_own_merge_is_not_a_duplicate(self, tmp_path):
         config = _load(
