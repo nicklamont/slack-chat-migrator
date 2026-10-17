@@ -19,8 +19,9 @@ from slack_chat_migrator.constants import (
     HTTP_BAD_REQUEST,
 )
 from slack_chat_migrator.services.drive_adapter import (
-    DRIVE_CALL_ERRORS,
+    DRIVE_CALL_CANDIDATES,
     PermissionChange,
+    is_drive_call_error,
 )
 from slack_chat_migrator.utils.api import escape_drive_query_value
 from slack_chat_migrator.utils.domains import (
@@ -216,7 +217,9 @@ class FolderManager:
                 fields="id, inheritedPermissionsDisabled",
                 supports_all_drives=bool(shared_drive_id),
             )
-        except DRIVE_CALL_ERRORS as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             self._log_restriction_failure(folder_id, channel, str(e))
             return False
         if response.get("inheritedPermissionsDisabled") is not True:
@@ -352,7 +355,9 @@ class FolderManager:
             )
             return FolderLookup(new_folder_id)
 
-        except DRIVE_CALL_ERRORS as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             log_with_context(
                 logging.ERROR, f"Failed to create regular Drive folder: {e}"
             )
@@ -447,7 +452,9 @@ class FolderManager:
                 )
                 if not folder_id:
                     return FolderLookup(None, "Drive returned no folder ID")
-        except DRIVE_CALL_ERRORS as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             log_with_context(
                 logging.WARNING,
                 f"Failed to get or create channel folder {channel}: {e}",
@@ -592,7 +599,9 @@ class FolderManager:
             return FolderLookup(
                 self.get_channel_folder_id(channel, parent_folder_id, shared_drive_id)
             )
-        except DRIVE_CALL_ERRORS as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             log_with_context(
                 logging.WARNING,
                 f"Failed to look up the Drive folder of {channel}: {e}",
@@ -684,7 +693,9 @@ class FolderManager:
             existing = self.drive_service.list_permissions(
                 folder_id, supports_all_drives=supports_all_drives
             )
-        except DRIVE_CALL_ERRORS as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             log_with_context(
                 logging.WARNING,
                 f"Could not list permissions of the {channel} folder ({e});"

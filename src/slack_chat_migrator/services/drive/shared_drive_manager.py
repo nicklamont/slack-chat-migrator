@@ -17,7 +17,10 @@ from slack_chat_migrator.constants import (
 )
 from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.exceptions import APIError, ConfigError
-from slack_chat_migrator.services.drive_adapter import DRIVE_CALL_ERRORS
+from slack_chat_migrator.services.drive_adapter import (
+    DRIVE_CALL_CANDIDATES,
+    is_drive_call_error,
+)
 from slack_chat_migrator.utils.api import escape_drive_query_value, is_rate_limit_error
 from slack_chat_migrator.utils.logging import (
     log_with_context,
@@ -100,7 +103,9 @@ class SharedDriveManager:
                     " the drive, or remove shared_drive.id to use a drive found"
                     " or created by name."
                 ) from e
-            except DRIVE_CALL_ERRORS as e:
+            except DRIVE_CALL_CANDIDATES as e:
+                if not is_drive_call_error(e):
+                    raise
                 raise APIError(
                     f"Could not open the shared drive configured as"
                     f" shared_drive.id ({shared_drive_id}): {e}"
@@ -210,7 +215,9 @@ class SharedDriveManager:
 
             return created_drive_id
 
-        except DRIVE_CALL_ERRORS as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             if not shared_drives_unavailable(e):
                 raise APIError(
                     f"Could not find or create shared drive {drive_name!r}: {e}"

@@ -9,8 +9,9 @@ if TYPE_CHECKING:
     from slack_chat_migrator.services.drive_adapter import DriveAdapter
 
 from slack_chat_migrator.services.drive_adapter import (
-    DRIVE_CALL_ERRORS,
+    DRIVE_CALL_CANDIDATES,
     PermissionChange,
+    is_drive_call_error,
 )
 from slack_chat_migrator.utils.logging import log_with_context
 
@@ -71,7 +72,9 @@ def transfer_file_ownership(
 
         return True
 
-    except DRIVE_CALL_ERRORS as e:
+    except DRIVE_CALL_CANDIDATES as e:
+        if not is_drive_call_error(e):
+            raise
         log_with_context(
             logging.WARNING,
             f"Failed to transfer ownership of {file_id} to {new_owner_email}: {e}",

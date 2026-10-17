@@ -38,7 +38,12 @@ from slack_chat_migrator.services.drive.folder_manager import (
     FolderSyncResult,
 )
 from slack_chat_migrator.services.drive.pending import UNKNOWN_TARGET
-from slack_chat_migrator.services.drive_adapter import DRIVE_CALL_ERRORS
+from slack_chat_migrator.services.drive_adapter import (
+    DRIVE_CALL_CANDIDATES,
+    DRIVE_CALL_ERRORS,
+    is_drive_call_error,
+    is_fatal_local_error,
+)
 from slack_chat_migrator.services.files.file_download import (
     AUTH_FAILURE_REASONS,
     REASON_DISALLOWED_HOST,
@@ -79,7 +84,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger("slack_chat_migrator")
 
 #: Errors that fail one file without stopping the run: any Drive call error,
-#: a download error, or an OSError on the temp file.
+#: a download error, or an OSError on the temp file, except the local faults
+#: in ``FATAL_LOCAL_ERRNOS`` (a full disk), which are re-raised.
 _FILE_ERRORS: tuple[type[BaseException], ...] = (
     requests.RequestException,
     OSError,
@@ -509,7 +515,9 @@ class FileHandler:
             folders = self.folder_manager.list_child_folders(
                 self._root_folder_id, self._shared_drive_id
             )
-        except DRIVE_CALL_ERRORS as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             # Don't fail the entire process if subfolder caching fails
             log_with_context(
                 logging.WARNING,
@@ -582,6 +590,8 @@ class FileHandler:
             return result
 
         except _FILE_ERRORS as e:
+            if is_fatal_local_error(e):
+                raise  # a full disk would fail every file in turn
             self._increment_stat("failed_uploads")
             log_with_context(
                 logging.ERROR,
@@ -858,7 +868,9 @@ class FileHandler:
             existing = self.drive_uploader.find_uploaded_slack_file(
                 folder_id, file_id, self._shared_drive_id
             )
-        except DRIVE_CALL_ERRORS as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             # Not knowing whether it's there, don't make a second copy.
             return UploadResult(
                 error="Could not check Drive for an earlier upload of this file:"
@@ -1288,6 +1300,8 @@ class FileHandler:
             )
 
         except _FILE_ERRORS as e:
+            if is_fatal_local_error(e):
+                raise  # a full disk would fail every file in turn
             return UploadResult(
                 error=f"Drive upload failed: {type(e).__name__}: {e}", name=name
             )
@@ -1768,7 +1782,9 @@ class FileHandler:
         try:
             folder_ids = set() if self._shared_drive_id else self._migration_folders()
             pending.find_flagged(self._shared_drive_id, folder_ids)
-        except DRIVE_CALL_ERRORS as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             log_with_context(
                 logging.WARNING,
                 f"Could not look for Drive files with pending grants ({e});"

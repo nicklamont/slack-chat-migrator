@@ -1,5 +1,8 @@
 """Unit tests for the DriveAdapter."""
 
+import errno
+import os
+import socket
 from unittest.mock import MagicMock
 
 import pytest
@@ -541,3 +544,69 @@ class TestResendRule:
             [PermissionChange("F", body={"role": "reader"})]
         )
         assert isinstance(errors[0], RefreshError)
+
+
+class TestErrorClassification:
+    """Network-down OSErrors fail a call; local faults stop the run (#118)."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            OSError(errno.ENETUNREACH, "Network is unreachable"),
+            OSError(errno.EHOSTUNREACH, "No route to host"),
+            ConnectionResetError(errno.ECONNRESET, "reset"),
+            TimeoutError("timed out"),
+            socket.gaierror(-2, "Name or service not known"),
+        ],
+        ids=["enetunreach", "ehostunreach", "reset", "timeout", "dns"],
+    )
+    def test_network_errors_are_drive_call_errors(self, error):
+        from slack_chat_migrator.services.drive_adapter import (
+            is_drive_call_error,
+            is_fatal_local_error,
+            is_network_error,
+        )
+
+        assert is_network_error(error)
+        assert is_drive_call_error(error)
+        assert not is_fatal_local_error(error)
+
+    @pytest.mark.parametrize(
+        "code", [errno.ENOSPC, errno.EROFS, errno.EMFILE, errno.ENFILE]
+    )
+    def test_local_faults_are_fatal_not_call_errors(self, code):
+        from slack_chat_migrator.services.drive_adapter import (
+            is_drive_call_error,
+            is_fatal_local_error,
+        )
+
+        error = OSError(code, os.strerror(code))
+        assert is_fatal_local_error(error)
+        assert not is_drive_call_error(error)
+
+    def test_network_oserror_in_a_grant_is_returned(self):
+        from slack_chat_migrator.services.drive_adapter import PermissionChange
+
+        failing = MagicMock()
+        failing.permissions.return_value.create.return_value.execute.side_effect = (
+            OSError(errno.ENETUNREACH, "Network is unreachable")
+        )
+
+        errors = DriveAdapter(failing).apply_permission_changes(
+            [PermissionChange("F", body={"role": "reader"})]
+        )
+
+        assert isinstance(errors[0], OSError)
+
+    def test_local_fault_in_a_grant_is_raised(self):
+        from slack_chat_migrator.services.drive_adapter import PermissionChange
+
+        failing = MagicMock()
+        failing.permissions.return_value.create.return_value.execute.side_effect = (
+            OSError(errno.EMFILE, "Too many open files")
+        )
+
+        with pytest.raises(OSError, match="Too many open files"):
+            DriveAdapter(failing).apply_permission_changes(
+                [PermissionChange("F", body={"role": "reader"})]
+            )

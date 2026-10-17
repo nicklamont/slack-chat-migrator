@@ -27,7 +27,10 @@ import logging
 from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any
 
-from slack_chat_migrator.services.drive_adapter import DRIVE_CALL_ERRORS
+from slack_chat_migrator.services.drive_adapter import (
+    DRIVE_CALL_CANDIDATES,
+    is_drive_call_error,
+)
 from slack_chat_migrator.utils.logging import log_with_context
 
 if TYPE_CHECKING:
@@ -182,7 +185,9 @@ class PendingPermissions:
                 {"appProperties": props},
                 supports_all_drives=bool(shared_drive_id),
             )
-        except DRIVE_CALL_ERRORS as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             log_with_context(
                 logging.WARNING,
                 f"Could not record a pending grant or transfer on Drive file"

@@ -10,12 +10,16 @@ failed inside a batch request; its docstring states the rule.
 
 Every other method raises what the service raises once its retries are
 spent: ``HttpError``, ``RefreshError`` (credentials that can't be refreshed)
-or a network error.  :data:`DRIVE_CALL_ERRORS` names them all, for callers
-that handle a failed call.
+or a network error.  :data:`DRIVE_CALL_ERRORS` names them all.  Callers that
+handle a failed call catch :data:`DRIVE_CALL_CANDIDATES` and re-raise what
+:func:`is_drive_call_error` rejects, so a network-down ``OSError`` fails the
+call while a local fault (a full disk) still stops the run.
 """
 
 from __future__ import annotations
 
+import errno
+import socket
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,14 +37,88 @@ from slack_chat_migrator.utils.api import (
     RETRYABLE_NETWORK_ERRORS,
 )
 
+#: Network failures with a class of their own.  Built from the shared retry
+#: tuple, so classes added there (e.g. ``http.client.HTTPException``) count
+#: here too; DNS failures are plain ``socket.gaierror``/``herror``.
+_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
+    *RETRYABLE_NETWORK_ERRORS,
+    socket.gaierror,
+    socket.herror,
+)
+
 #: Errors a Drive call raises once retries are spent: API errors, credentials
 #: that can't be refreshed and network errors.  apply_permission_changes
 #: returns them instead of raising.
 DRIVE_CALL_ERRORS: tuple[type[BaseException], ...] = (
     HttpError,
     RefreshError,
-    *RETRYABLE_NETWORK_ERRORS,
+    *_NETWORK_ERRORS,
 )
+
+#: ``errno`` values of a plain OSError that mean the network is down.
+#: httplib2 and googleapiclient pass these on as plain OSErrors, so they
+#: aren't in :data:`DRIVE_CALL_ERRORS` by class.
+NETWORK_ERRNOS: frozenset[int] = frozenset(
+    {
+        errno.ENETUNREACH,
+        errno.EHOSTUNREACH,
+        errno.ENETDOWN,
+        errno.EHOSTDOWN,
+        errno.ENETRESET,
+        errno.EADDRNOTAVAIL,
+        errno.ECONNREFUSED,
+        errno.ECONNRESET,
+        errno.ECONNABORTED,
+        errno.ETIMEDOUT,
+        errno.EPIPE,
+    }
+)
+
+#: ``errno`` values of a local fault that would hit every file in turn (no
+#: space, quota, read-only file system, too many open files).  These must
+#: stop the run instead of failing one file.
+FATAL_LOCAL_ERRNOS: frozenset[int] = frozenset(
+    code
+    for code in (
+        errno.ENOSPC,
+        getattr(errno, "EDQUOT", None),
+        errno.EROFS,
+        errno.EMFILE,
+        errno.ENFILE,
+    )
+    if code is not None
+)
+
+#: What to catch around a Drive call: :data:`DRIVE_CALL_ERRORS` plus OSError,
+#: so that network-down errors without a class of their own are caught too.
+#: Handlers re-raise what :func:`is_drive_call_error` rejects.
+DRIVE_CALL_CANDIDATES: tuple[type[BaseException], ...] = (*DRIVE_CALL_ERRORS, OSError)
+
+
+def is_network_error(error: BaseException) -> bool:
+    """Whether *error* means the network failed, not the local machine."""
+    if isinstance(error, _NETWORK_ERRORS):
+        return True
+    return isinstance(error, OSError) and error.errno in NETWORK_ERRNOS
+
+
+def is_drive_call_error(error: BaseException) -> bool:
+    """Whether *error* should fail one Drive call rather than the run.
+
+    True for :data:`DRIVE_CALL_ERRORS` and network-down OSErrors; False for
+    local OSErrors such as a full disk, which handlers re-raise.
+    """
+    return isinstance(error, DRIVE_CALL_ERRORS) or is_network_error(error)
+
+
+def is_fatal_local_error(error: BaseException) -> bool:
+    """Whether *error* is a local fault that must stop the run (see
+    :data:`FATAL_LOCAL_ERRNOS`)."""
+    return (
+        isinstance(error, OSError)
+        and not is_network_error(error)
+        and error.errno in FATAL_LOCAL_ERRNOS
+    )
 
 
 @dataclass(frozen=True)
@@ -365,8 +443,9 @@ class DriveAdapter:
 
         Returns:
             One entry per change, in order: None on success, else the error.
-            ``HttpError``, ``RefreshError`` and network errors that outlast
-            the retries are returned, never raised.
+            ``HttpError``, ``RefreshError`` and network errors (including
+            network-down OSErrors) that outlast the retries are returned,
+            never raised; a local fault such as a full disk is raised.
         """
         requests = [self._permission_request(change) for change in changes]
         results: list[BaseException | None] = [None] * len(requests)
@@ -395,7 +474,9 @@ class DriveAdapter:
                     )
                 try:
                     batch.execute()
-                except DRIVE_CALL_ERRORS as e:
+                except DRIVE_CALL_CANDIDATES as e:
+                    if not is_drive_call_error(e):
+                        raise
                     # The whole batch request failed: each call in it gets the
                     # error, then the re-send rule applies.
                     for offset in range(len(chunk)):
@@ -412,7 +493,9 @@ class DriveAdapter:
             try:
                 requests[index].execute()
                 results[index] = None
-            except DRIVE_CALL_ERRORS as e:
+            except DRIVE_CALL_CANDIDATES as e:
+                if not is_drive_call_error(e):
+                    raise
                 results[index] = e
         return results
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import http.server
 import io
@@ -9,6 +10,7 @@ import os
 import threading
 import tracemalloc
 from typing import ClassVar
+from unittest.mock import patch
 
 import pytest
 import requests
@@ -785,6 +787,30 @@ def test_network_error_logs_do_not_leak_tokens(dest, caplog):
     assert "SECRET" not in caplog.text
     for record in caplog.records:
         assert "SECRET" not in str(getattr(record, "error", ""))
+
+
+class TestLocalWriteErrors:
+    """A full disk stops the run; other write errors fail one file (#96)."""
+
+    def _session(self):
+        return FakeSession({SLACK_URL: make_response(body=b"img")})
+
+    @pytest.mark.parametrize("code", [errno.ENOSPC, errno.EROFS, errno.EMFILE])
+    def test_fatal_disk_error_propagates(self, dest, code):
+        with (
+            patch.object(fd, "_stream_to_file", side_effect=OSError(code, "disk")),
+            pytest.raises(OSError),
+        ):
+            download_file(png_file(), str(dest), session=self._session())
+
+    def test_other_write_error_fails_the_file(self, dest):
+        with patch.object(
+            fd, "_stream_to_file", side_effect=OSError(errno.EIO, "I/O error")
+        ):
+            result = download_file(png_file(), str(dest), session=self._session())
+
+        assert result.status is DownloadStatus.FAILED
+        assert result.reason == "write_error"
 
 
 class TestDownloadResultInvariant:

@@ -3,6 +3,7 @@ over an in-memory Drive fake (tests/unit/drive_fakes.py)."""
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import tempfile
@@ -490,6 +491,53 @@ class TestOwnershipTransfer:
 
 class TestUploadErrorsAreCounted:
     """Every upload error comes back as a counted failure (#118)."""
+
+    UNREACHABLE = OSError(errno.ENETUNREACH, "Network is unreachable")
+
+    def test_unreachable_network_on_the_grant_keeps_the_upload(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = self.UNREACHABLE
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"one")
+
+        assert result.success
+        stats = handler.get_file_statistics()
+        assert stats["poster_grant_failures"] == 1
+        assert stats["failed_uploads"] == 0
+
+    def test_unreachable_network_on_the_folder_sync_is_counted(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"x")
+        handler.folder_manager.folder_cache.clear()
+        fake.failing["files.list"] = self.UNREACHABLE
+
+        result = handler.sync_channel_folder_permissions("c", ["alice@example.com"])
+
+        assert result.lookup_error
+        assert handler.get_file_statistics()["folder_sync_failures"] == 1
+
+    def test_full_disk_stops_the_run(self, tmp_path):
+        handler = make_handler(FakeDrive(), tmp_path)
+        handler._download_file = MagicMock(
+            side_effect=OSError(errno.ENOSPC, "No space left on device")
+        )
+
+        with pytest.raises(OSError, match="No space"):
+            handler.upload_attachment(
+                {
+                    "id": "F1",
+                    "name": "a.pdf",
+                    "url_private": "https://files.slack.com/x",
+                },
+                "c",
+            )
+        assert handler.get_file_statistics()["failed_uploads"] == 0
 
     def test_refresh_error_during_upload_is_counted(self, tmp_path, downloads):
         fake = FakeDrive()

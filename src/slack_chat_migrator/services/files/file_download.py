@@ -46,6 +46,7 @@ from slack_chat_migrator.constants import (
     HTTP_UNAUTHORIZED,
     SLACK_FILE_HOST_SUFFIXES,
 )
+from slack_chat_migrator.services.drive_adapter import is_fatal_local_error
 from slack_chat_migrator.services.files.temp_files import (
     remove_temp_file,
     safe_temp_suffix,
@@ -619,6 +620,8 @@ def download_file(
                 url=target,
             )
         except OSError as e:
+            if is_fatal_local_error(e):
+                raise  # no space, quota or file handles: every file would fail
             log_with_context(
                 logging.ERROR,
                 f"Could not write download of {name} to disk: {e}",
