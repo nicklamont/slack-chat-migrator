@@ -23,12 +23,18 @@ def _read_key_info(creds_path: Path) -> dict[str, str]:
 def test_delegation(
     creds_path: Path,
     workspace_admin: str,
+    scopes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Verify delegation works by making a test API call as the admin.
+
+    The test requests every scope the migration requests (by default
+    ``REQUIRED_SCOPES``), so a domain-wide delegation entry missing any of
+    them fails here instead of during the migration.
 
     Args:
         creds_path: Path to the service account JSON key file.
         workspace_admin: Email of the workspace admin to impersonate.
+        scopes: The scopes to request (default ``REQUIRED_SCOPES``).
 
     Returns:
         Dict with 'success' bool, 'detail' message, and 'key_info' diagnostics.
@@ -46,9 +52,11 @@ def test_delegation(
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
 
-        scopes = ["https://www.googleapis.com/auth/chat.spaces.readonly"]
+        from slack_chat_migrator.utils.api import REQUIRED_SCOPES
+
+        requested = list(scopes) if scopes is not None else list(REQUIRED_SCOPES)
         sa_creds = service_account.Credentials.from_service_account_file(
-            str(creds_path), scopes=scopes
+            str(creds_path), scopes=requested
         )
         delegated = sa_creds.with_subject(workspace_admin)
         service = build("chat", "v1", credentials=delegated)
@@ -72,4 +80,9 @@ def test_delegation(
                 "key_info": key_info,
                 "chat_app_missing": True,
             }
+        if "unauthorized_client" in error_str:
+            error_str += (
+                " (the delegation entry is missing, or doesn't authorize every"
+                " required scope)"
+            )
         return {"success": False, "detail": error_str, "key_info": key_info}

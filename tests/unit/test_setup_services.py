@@ -272,3 +272,252 @@ class TestDelegation:
         result = test_delegation(key_file, "admin@example.com")
         assert result["success"] is False
         assert "Delegation not configured" in result["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #121: delegation scopes, API step status, clipboard, key handling
+# ---------------------------------------------------------------------------
+
+
+class TestDelegationScopes:
+    """The delegation test requests every scope the migration requests."""
+
+    @patch("google.oauth2.service_account.Credentials")
+    @patch("googleapiclient.discovery.build")
+    def test_requests_all_required_scopes(
+        self, mock_build: MagicMock, mock_sa_creds: MagicMock, tmp_path: Path
+    ) -> None:
+        from slack_chat_migrator.services.setup.delegation import test_delegation
+        from slack_chat_migrator.utils.api import REQUIRED_SCOPES
+
+        key_file = tmp_path / "key.json"
+        key_file.write_text("{}")
+        test_delegation(key_file, "admin@example.com")
+
+        scopes = mock_sa_creds.from_service_account_file.call_args.kwargs["scopes"]
+        assert scopes == REQUIRED_SCOPES
+
+    @patch("google.oauth2.service_account.Credentials")
+    @patch("googleapiclient.discovery.build")
+    def test_missing_scope_fails(
+        self, mock_build: MagicMock, mock_sa_creds: MagicMock, tmp_path: Path
+    ) -> None:
+        """A delegation entry missing a scope makes the token request fail."""
+        from google.auth.exceptions import RefreshError
+
+        from slack_chat_migrator.services.setup.delegation import test_delegation
+
+        key_file = tmp_path / "key.json"
+        key_file.write_text("{}")
+        mock_build.return_value.spaces.return_value.list.return_value.execute.side_effect = RefreshError(
+            "unauthorized_client: Client is unauthorized to retrieve access tokens"
+        )
+
+        result = test_delegation(key_file, "admin@example.com")
+
+        assert result["success"] is False
+        assert "every required scope" in result["detail"]
+
+
+class TestApisStep:
+    """The APIs step is complete only when enabling succeeded."""
+
+    def _run(self, confirm: bool, side_effect=None):
+        from slack_chat_migrator.cli.setup_cmd import _step_apis
+
+        state = SetupState(project_id="proj")
+        with (
+            patch(
+                "slack_chat_migrator.cli.setup_cmd.click.confirm", return_value=confirm
+            ),
+            patch(
+                "slack_chat_migrator.services.setup.api_enablement.enable_required_apis",
+                side_effect=side_effect,
+                return_value=["chat.googleapis.com"],
+            ),
+        ):
+            return _step_apis(MagicMock(), state)
+
+    def test_success_is_complete(self) -> None:
+        assert self._run(True).step_status("apis") == StepStatus.COMPLETE
+
+    def test_failure_is_not_complete(self) -> None:
+        state = self._run(True, side_effect=RuntimeError("permission denied"))
+        assert state.step_status("apis") == StepStatus.SKIPPED
+
+    def test_skip_is_not_complete(self) -> None:
+        assert self._run(False).step_status("apis") == StepStatus.SKIPPED
+
+
+class TestClipboard:
+    """xclip/xsel write the CLIPBOARD selection, and output isn't captured."""
+
+    @staticmethod
+    def _copy(available: set[str]):
+        import subprocess
+
+        from slack_chat_migrator.cli import setup_cmd
+
+        with (
+            patch("platform.system", return_value="Linux"),
+            patch("shutil.which", side_effect=lambda c: c if c in available else None),
+            patch("subprocess.run") as run,
+        ):
+            ok = setup_cmd._copy_to_clipboard("scopes")
+        return ok, run, subprocess
+
+    def test_xclip_uses_clipboard_selection(self) -> None:
+        ok, run, subprocess = self._copy({"xclip"})
+        assert ok
+        assert run.call_args.args[0] == ["xclip", "-selection", "clipboard"]
+        kwargs = run.call_args.kwargs
+        assert "capture_output" not in kwargs
+        assert kwargs["stdout"] is subprocess.DEVNULL
+
+    def test_xsel_uses_clipboard(self) -> None:
+        ok, run, _ = self._copy({"xsel"})
+        assert ok
+        assert run.call_args.args[0] == ["xsel", "--clipboard", "--input"]
+
+    def test_wl_copy_preferred(self) -> None:
+        ok, run, _ = self._copy({"wl-copy", "xclip"})
+        assert ok
+        assert run.call_args_list[0].args[0] == ["wl-copy"]
+
+    def test_none_available(self) -> None:
+        ok, run, _ = self._copy(set())
+        assert ok is False
+        run.assert_not_called()
+
+
+def _iam_with_key(key_id: str = "kid1") -> MagicMock:
+    import base64
+
+    service = MagicMock()
+    keys = service.projects.return_value.serviceAccounts.return_value.keys.return_value
+    keys.create.return_value.execute.return_value = {
+        "privateKeyData": base64.b64encode(
+            json.dumps(
+                {
+                    "client_email": "sa@p.iam.gserviceaccount.com",
+                    "private_key_id": "new",
+                    "private_key": "PK",
+                }
+            ).encode()
+        ).decode()
+    }
+    keys.list.return_value.execute.return_value = {
+        "keys": [{"name": f"projects/p/serviceAccounts/sa/keys/{key_id}"}]
+    }
+    return service
+
+
+class TestKeyFiles:
+    """download_key and key reuse."""
+
+    def test_overwrite_makes_file_private(self, tmp_path: Path) -> None:
+        import os
+        import stat
+
+        from slack_chat_migrator.services.setup import service_account as sa
+
+        key = tmp_path / "key.json"
+        key.write_text("{}")
+        os.chmod(key, 0o644)
+        with patch.object(sa, "_build_iam_service", return_value=_iam_with_key()):
+            sa.download_key(None, "sa@p.iam.gserviceaccount.com", key, overwrite=True)
+        assert stat.S_IMODE(key.stat().st_mode) == 0o600
+        assert "PK" in key.read_text()
+
+    def test_refuses_to_overwrite_by_default(self, tmp_path: Path) -> None:
+        import pytest
+
+        from slack_chat_migrator.services.setup import service_account as sa
+
+        key = tmp_path / "key.json"
+        key.write_text("{}")
+        service = _iam_with_key()
+        with patch.object(sa, "_build_iam_service", return_value=service):
+            with pytest.raises(FileExistsError):
+                sa.download_key(None, "sa@p.iam.gserviceaccount.com", key)
+        keys = (
+            service.projects.return_value.serviceAccounts.return_value.keys.return_value
+        )
+        keys.create.assert_not_called()
+
+    def test_existing_key_is_valid(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.services.setup import service_account as sa
+
+        key = tmp_path / "key.json"
+        key.write_text(
+            json.dumps(
+                {
+                    "client_email": "sa@p.iam.gserviceaccount.com",
+                    "private_key_id": "kid1",
+                }
+            )
+        )
+        with patch.object(sa, "_build_iam_service", return_value=_iam_with_key("kid1")):
+            assert sa.existing_key_is_valid(None, "sa@p.iam.gserviceaccount.com", key)
+        with patch.object(
+            sa, "_build_iam_service", return_value=_iam_with_key("other")
+        ):
+            assert not sa.existing_key_is_valid(
+                None, "sa@p.iam.gserviceaccount.com", key
+            )
+        assert not sa.existing_key_is_valid(None, "someone@else.com", key)
+        (tmp_path / "bad.json").write_text("not json")
+        assert not sa.existing_key_is_valid(None, "x", tmp_path / "bad.json")
+
+    def test_key_step_reuses_valid_key(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.cli.setup_cmd import _step_download_key
+
+        key = tmp_path / "key.json"
+        key.write_text("{}")
+        state = SetupState(
+            project_id="p", service_account_email="sa@p.iam.gserviceaccount.com"
+        )
+        with (
+            patch(
+                "slack_chat_migrator.cli.setup_cmd.click.prompt", return_value=str(key)
+            ),
+            patch(
+                "slack_chat_migrator.services.setup.service_account.existing_key_is_valid",
+                return_value=True,
+            ),
+            patch(
+                "slack_chat_migrator.services.setup.service_account.download_key"
+            ) as download,
+        ):
+            state = _step_download_key(MagicMock(), state)
+        download.assert_not_called()
+        assert state.key_path == str(key)
+        assert state.step_status("key") == StepStatus.COMPLETE
+
+    def test_key_step_asks_before_overwriting(self, tmp_path: Path) -> None:
+        from slack_chat_migrator.cli.setup_cmd import _step_download_key
+
+        key = tmp_path / "key.json"
+        key.write_text("{}")
+        state = SetupState(
+            project_id="p", service_account_email="sa@p.iam.gserviceaccount.com"
+        )
+        with (
+            patch(
+                "slack_chat_migrator.cli.setup_cmd.click.prompt", return_value=str(key)
+            ),
+            patch(
+                "slack_chat_migrator.cli.setup_cmd.click.confirm", return_value=False
+            ),
+            patch(
+                "slack_chat_migrator.services.setup.service_account.existing_key_is_valid",
+                return_value=False,
+            ),
+            patch(
+                "slack_chat_migrator.services.setup.service_account.download_key"
+            ) as download,
+        ):
+            state = _step_download_key(MagicMock(), state)
+        download.assert_not_called()
+        assert state.step_status("key") == StepStatus.SKIPPED
+        assert key.read_text() == "{}"

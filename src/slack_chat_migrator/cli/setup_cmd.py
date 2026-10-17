@@ -300,6 +300,9 @@ def _step_apis(credentials, state):  # type: ignore[no-untyped-def]
     console.print("\n[bold][2/6] Enable APIs[/bold]")
     console.print(f"Required: {', '.join(REQUIRED_APIS)}")
 
+    # Only a successful run marks the step complete; a failed or skipped
+    # step is offered again on the next run.
+    status = StepStatus.SKIPPED
     if click.confirm("Enable required APIs?", default=True):
         try:
 
@@ -314,13 +317,14 @@ def _step_apis(credentials, state):  # type: ignore[no-untyped-def]
             )
             state.apis_enabled = newly
             console.print(f"  [green]{len(newly)} API(s) newly enabled.[/green]")
+            status = StepStatus.COMPLETE
         except Exception as e:
             console.print(f"[red]Failed to enable APIs: {e}[/red]")
             console.print("[dim]You can enable them manually in the GCP Console.[/dim]")
     else:
         console.print("[dim]Skipped. Enable APIs manually before migrating.[/dim]")
 
-    state.mark_step("apis", StepStatus.COMPLETE)
+    state.mark_step("apis", status)
     return state
 
 
@@ -397,8 +401,13 @@ def _create_new_service_account(credentials, state, console):  # type: ignore[no
 
 
 def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
-    """Step 4: Download service account key."""
-    from slack_chat_migrator.services.setup.service_account import download_key
+    """Step 4: Download service account key (or reuse a valid existing one)."""
+    import os
+
+    from slack_chat_migrator.services.setup.service_account import (
+        download_key,
+        existing_key_is_valid,
+    )
     from slack_chat_migrator.services.setup.setup_service import StepStatus
 
     console = get_console()
@@ -411,11 +420,42 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
         state.mark_step("key", StepStatus.SKIPPED)
         return state
 
-    default_path = f"{state.project_id}-credentials.json"
-    key_path = click.prompt("Key file output path", default=default_path)
+    default_path = state.key_path or f"{state.project_id}-credentials.json"
+    key_path = Path(click.prompt("Key file output path", default=default_path))
+
+    overwrite = False
+    if key_path.exists():
+        # Don't mint a new key (at most 10 per service account) when the
+        # file already holds an active key for this account.
+        if existing_key_is_valid(credentials, state.service_account_email, key_path):
+            try:
+                os.chmod(key_path, 0o600)
+            except OSError:
+                pass
+            state.key_path = str(key_path)
+            console.print(
+                f"[green]Reusing the existing key in {key_path}"
+                " (no new key created).[/green]"
+            )
+            state.mark_step("key", StepStatus.COMPLETE)
+            return state
+        if not click.confirm(
+            f"{key_path} exists but isn't an active key for"
+            f" {state.service_account_email}. Overwrite it with a new key?",
+            default=False,
+        ):
+            console.print(
+                "[dim]Kept the existing file. Re-run setup and choose another"
+                " path to create a key.[/dim]"
+            )
+            state.mark_step("key", StepStatus.SKIPPED)
+            return state
+        overwrite = True
 
     try:
-        path = download_key(credentials, state.service_account_email, Path(key_path))
+        path = download_key(
+            credentials, state.service_account_email, key_path, overwrite=overwrite
+        )
         state.key_path = str(path)
         console.print(f"[green]Key saved to: {path}[/green]")
         console.print(
@@ -432,6 +472,16 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
     return state
 
 
+#: Clipboard commands to try on Linux/BSD, in order.  ``xclip`` and ``xsel``
+#: need explicit flags: by default they write the PRIMARY selection, not the
+#: clipboard that Ctrl-V pastes.
+_CLIPBOARD_COMMANDS = (
+    ["wl-copy"],
+    ["xclip", "-selection", "clipboard"],
+    ["xsel", "--clipboard", "--input"],
+)
+
+
 def _copy_to_clipboard(text: str) -> bool:
     """Try to copy text to the system clipboard. Returns True on success."""
     import platform
@@ -439,21 +489,28 @@ def _copy_to_clipboard(text: str) -> bool:
     import subprocess
 
     if platform.system() == "Darwin":
-        cmd = "pbcopy"
-    elif shutil.which("xclip"):
-        cmd = "xclip"
-    elif shutil.which("xsel"):
-        cmd = "xsel"
+        commands: tuple[list[str], ...] = (["pbcopy"],)
     else:
-        return False
+        commands = _CLIPBOARD_COMMANDS
 
-    try:
-        subprocess.run(  # noqa: S603
-            [cmd], input=text.encode(), check=True, capture_output=True
-        )
-        return True
-    except Exception:
-        return False
+    for cmd in commands:
+        if not shutil.which(cmd[0]):
+            continue
+        try:
+            # Don't capture output: xclip keeps running to serve the
+            # selection, and a captured pipe would block until it exits.
+            subprocess.run(  # noqa: S603
+                cmd,
+                input=text.encode(),
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def _read_client_id(key_path: str) -> str | None:
@@ -477,6 +534,13 @@ def _get_required_scopes() -> list[str]:
     from slack_chat_migrator.utils.api import REQUIRED_SCOPES
 
     return list(REQUIRED_SCOPES)
+
+
+def _custom_emoji_scope() -> str:
+    """Return the optional scope needed for ``use_chat_custom_emoji``."""
+    from slack_chat_migrator.utils.api import CUSTOM_EMOJI_SCOPE
+
+    return CUSTOM_EMOJI_SCOPE
 
 
 def _prompt_email(prompt_text: str, default: str = "") -> str:
@@ -518,7 +582,9 @@ def _step_chat_app(state):  # type: ignore[no-untyped-def]
             "  3. Set Avatar URL (e.g. https://developers.google.com/chat/images/quickstart-app-avatar.png)\n"
             '  4. Set Description (e.g. "Slack to Google Chat migration")\n'
             "  5. Leave Interactive features [bold]disabled[/bold]\n"
-            "  6. Click [bold]Save[/bold]\n\n"
+            "  6. Keep [bold]Markup syntax[/bold] set to [bold]Chat[/bold] (the tool\n"
+            "     sends Chat markup and sets it on every message anyway)\n"
+            "  7. Click [bold]Save[/bold]\n\n"
             "[dim]This cannot be automated — it requires the GCP Console.\n"
             "The next step (delegation) will verify the Chat app is working.[/dim]",
             title="Instructions",
@@ -583,6 +649,10 @@ def _step_delegation(state):  # type: ignore[no-untyped-def]
         prereq_lines.append("  3. Add the OAuth scopes printed below")
 
     prereq_lines.append("  4. Click [bold]Authorize[/bold]")
+    prereq_lines.append(
+        "\n[dim]Only if you'll set use_chat_custom_emoji: true, also add\n"
+        f"  {_custom_emoji_scope()}[/dim]"
+    )
 
     console.print(
         Panel(
@@ -668,7 +738,9 @@ def _step_delegation(state):  # type: ignore[no-untyped-def]
         if key_info.get("project_id"):
             diag_lines.append(f"  Project:      {key_info['project_id']}")
         diag_lines.append(f"  Impersonating: {workspace_admin}")
-        diag_lines.append("  Test scope:   chat.spaces.readonly")
+        diag_lines.append(
+            f"  Test scopes:  all {len(_get_required_scopes())} required scopes"
+        )
         diag_section = "\n".join(diag_lines)
 
         console.print(
@@ -678,6 +750,7 @@ def _step_delegation(state):  # type: ignore[no-untyped-def]
                 f"{diag_section}\n\n"
                 "Common causes:\n"
                 "  \u2022 Client ID in Admin Console doesn't match the one above\n"
+                "  \u2022 A required scope is missing from the delegation entry\n"
                 "  \u2022 Scopes were pasted with extra spaces or got truncated\n"
                 "  \u2022 The admin email isn't a super admin in your Workspace\n\n"
                 "To fix:\n"

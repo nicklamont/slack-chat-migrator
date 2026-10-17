@@ -727,6 +727,7 @@ If you prefer not to use the setup script, follow these steps manually:
    - Set Avatar URL (e.g. `https://developers.google.com/chat/images/quickstart-app-avatar.png`)
    - Set Description (e.g. "Slack to Google Chat migration")
    - Leave Interactive features **disabled** (the migration uses server-to-server API calls, not a bot)
+   - Keep **Markup syntax** set to **Chat** (the tool writes Chat markup, and sets it explicitly on every message anyway)
    - Click Save
 
 5. **Set Up Domain-Wide Delegation**:
@@ -846,14 +847,16 @@ The wizard guides you through six steps:
 1. **GCP project** — create or select a project
 2. **Enable APIs** — enable Chat, Drive, and Admin APIs
 3. **Service account** — create a service account for delegation
-4. **Download key** — download credentials JSON (saved with restricted permissions)
+4. **Download key** — download credentials JSON (saved with mode `0600`). If the key file you name already holds an active key for the service account, it's reused instead of creating another key (a service account can have at most 10). Any other existing file is only overwritten after you confirm.
 5. **Configure Chat app** — set up the Chat app in GCP Console (required by the Chat API)
-6. **Test delegation** — verify domain-wide delegation works
+6. **Test delegation** — verify domain-wide delegation works, requesting every scope the migration needs, so a delegation entry that's missing a scope fails here
+
+A step that fails or that you skip (for example enabling the APIs) is offered again the next time you run the wizard.
 
 Progress is saved between runs, so you can resume if interrupted.
 
 **Alternative approaches:**
-- Use the `setup_permissions.sh` script (requires Google Cloud SDK installed as a system component)
+- Use the `setup_permissions.sh` script (requires Google Cloud SDK installed as a system component). It enables the APIs, creates the service account (without granting it any project-level IAM roles: everything comes from domain-wide delegation) and a key file, or checks that an existing key file belongs to the service account and is still active. It stops with a non-zero exit status if any step fails.
 - Follow the [manual setup steps](#manual-google-cloud-setup-without-using-the-script) in the Troubleshooting section
 
 > **Note:** After any setup method, you still need to complete domain-wide delegation in your Google Workspace Admin Console.
