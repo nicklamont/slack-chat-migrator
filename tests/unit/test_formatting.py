@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.utils.formatting import (
     _parse_rich_text_elements,
@@ -307,7 +309,7 @@ class TestConvertFormatting:
 
     def test_special_mention(self):
         result = convert_formatting("<!here> <!channel|channel>", {})
-        assert result == "@here @channel"
+        assert result == "<users/all> <users/all>"
 
     def test_emoji_conversion(self):
         result = convert_formatting("great :thumbsup:", {})
@@ -1136,3 +1138,152 @@ class TestParseSlackBlocksMultipleBlocks:
         result = parse_slack_blocks(message)
         # message_blocks didn't produce content, falls back to text
         assert "fallback text" in result
+
+
+# --- mrkdwn <...> tokens ---
+
+TOKEN_USER_MAP = {"U123": "alice@example.com", "W456": "bob@example.com"}
+TOKEN_CHANNELS = {"C0123ABC": "general", "G0456DEF": "secret-plans"}
+ZWSP = "\N{ZERO WIDTH SPACE}"
+
+
+class TestMrkdwnTokens:
+    """Every Slack <...> token form converts to the expected Chat text."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            # Users
+            ("<@U123> hi", "<users/alice@example.com> hi"),
+            ("<@U123|alice> hi", "<users/alice@example.com> hi"),
+            ("<@W456> (enterprise)", "<users/bob@example.com> (enterprise)"),
+            ("<@U999|carol> hi", "@carol hi"),
+            ("<@U999>", "@U999"),
+            # Channels
+            ("<#C0123ABC|general>", "#general"),
+            ("<#C0123ABC|>", "#general"),
+            ("<#C0123ABC>", "#general"),
+            ("<#G0456DEF>", "#secret-plans"),
+            ("<#G0456DEF|renamed>", "#renamed"),
+            ("<#C9999999|>", "#C9999999"),
+            # Broadcasts
+            ("<!here> deploy", "<users/all> deploy"),
+            ("<!channel>", "<users/all>"),
+            ("<!everyone>", "<users/all>"),
+            ("<!here|@here>", "<users/all>"),
+            # User groups
+            ("<!subteam^S0123|@eng-team> please look", "@eng-team please look"),
+            ("<!subteam^S0123|eng-team>", "@eng-team"),
+            ("<!subteam^S0123>", "@S0123"),
+            # Dates
+            (
+                "<!date^1392734382^{date_num} {time_secs}"
+                "|February 18th, 2014 at 6:39 AM PST>",
+                "February 18th, 2014 at 6:39 AM PST",
+            ),
+            ("<!date^1392734382^{date}^https://example.com|Feb 18>", "Feb 18"),
+            ("<!date^1392734382^{date_num}>", "2014-02-18 14:39 UTC"),
+            # Links
+            (
+                "<mailto:bob@example.com|bob@example.com>",
+                "<mailto:bob@example.com|bob@example.com>",
+            ),
+            ("<mailto:bob@example.com>", "mailto:bob@example.com"),
+            ("<tel:+15551234|+1 555 1234>", "<tel:+15551234|+1 555 1234>"),
+            ("<https://example.com|docs>", "<https://example.com|docs>"),
+            ("<https://example.com|https://example.com>", "https://example.com"),
+            ("<https://example.com>", "https://example.com"),
+            (
+                "<https://example.com/?a=1&amp;b=2|Q&amp;A>",
+                "<https://example.com/?a=1&b=2|Q&A>",
+            ),
+            # Unknown tokens keep their label, or their inner text
+            ("<weird-token>", "weird-token"),
+            ("<weird|label>", "label"),
+        ],
+    )
+    def test_token(self, text, expected):
+        result = convert_formatting(
+            text, TOKEN_USER_MAP, channel_id_to_name=TOKEN_CHANNELS
+        )
+        assert result == expected
+
+    def test_unmapped_labelled_mention_is_tracked(self):
+        state = MigrationState()
+        state.context.current_channel = "general"
+        state.context.current_message_ts = "1700000000.000100"
+        tracker = MagicMock()
+        result = convert_formatting(
+            "<@U999|carol> hi", {}, state=state, unmapped_user_tracker=tracker
+        )
+        assert result == "@carol hi"
+        tracker.track_unmapped_mention.assert_called_once_with(
+            "U999", "general", "1700000000.000100", "<@U999|carol> hi"
+        )
+
+    def test_link_label_cannot_break_out_of_chat_link(self):
+        result = convert_formatting("<https://example.com|a &gt; b>", {})
+        assert result.startswith("<https://example.com|a ")
+        assert result.count(">") == 1
+
+    def test_raw_angle_bracket_without_token_is_text(self):
+        assert convert_formatting("a < b and c > d", {}) == "a < b and c > d"
+
+
+class TestEscapedTextStaysLiteral:
+    """Text a user typed as <...> never becomes a live link or mention."""
+
+    def test_escaped_link_is_not_a_link(self):
+        result = convert_formatting(
+            "&lt;https://evil.example|https://bank.example&gt;", TOKEN_USER_MAP
+        )
+        assert "<https://evil.example|" not in result
+        assert result.replace(ZWSP, "") == (
+            "<https://evil.example|https://bank.example>"
+        )
+
+    def test_escaped_slack_mention_is_not_a_mention(self):
+        result = convert_formatting("&lt;@U123&gt;", TOKEN_USER_MAP)
+        assert "users/" not in result
+        assert result == "<@U123>"
+
+    def test_escaped_chat_markup_is_defused(self):
+        result = convert_formatting("&lt;users/all&gt; ping", {})
+        assert "<users/all>" not in result
+        assert result.replace(ZWSP, "") == "<users/all> ping"
+
+    def test_entities_are_decoded_once(self):
+        assert convert_formatting("&amp;lt;b&amp;gt; &amp;amp;", {}) == (
+            "&lt;b&gt; &amp;"
+        )
+
+    def test_comparison_operators_are_untouched(self):
+        assert convert_formatting("x &lt;= 3 &amp;&amp; y &gt; 2 &lt;3", {}) == (
+            "x <= 3 && y > 2 <3"
+        )
+
+    def test_rich_text_literal_tokens_stay_text(self):
+        """Rich-text text is literal: typed <@U123> or <url|label> stays text."""
+        message = {
+            "text": "&lt;@U123&gt; &lt;https://evil|https://bank&gt;",
+            "blocks": [
+                {
+                    "type": "rich_text",
+                    "elements": [
+                        {
+                            "type": "rich_text_section",
+                            "elements": [
+                                {
+                                    "type": "text",
+                                    "text": "<@U123> <https://evil|https://bank> & co",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        result = convert_formatting(parse_slack_blocks(message), TOKEN_USER_MAP)
+        assert "users/" not in result
+        assert "<https://evil|" not in result
+        assert result.replace(ZWSP, "") == "<@U123> <https://evil|https://bank> & co"

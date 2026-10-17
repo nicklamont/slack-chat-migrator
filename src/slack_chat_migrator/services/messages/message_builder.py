@@ -80,6 +80,8 @@ def build_message_payload(
         user_map_with_overrides,
         state=state,
         unmapped_user_tracker=getattr(user_resolver, "unmapped_user_tracker", None),
+        # Resolves channel references without a label (<#C123>, <#C123|>)
+        channel_id_to_name=ctx.channel_id_to_name,
     )
 
     # For edited messages, add an edit indicator

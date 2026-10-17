@@ -1,15 +1,24 @@
 """
 Message formatting utilities for converting Slack messages to Google Chat format.
 
-This module provides functions to parse Slack's block kit structure and
-convert Slack's markdown syntax to the format expected by Google Chat.
+Conversion happens in two steps:
+
+1. :func:`parse_slack_blocks` renders a Slack message (Block Kit ``blocks``,
+   attachments or the ``text`` field) as Slack *mrkdwn*.  Literal text from
+   rich-text elements is entity-escaped (``&amp; &lt; &gt;``), exactly like
+   Slack's own ``text`` field, so the result is well-formed mrkdwn.
+2. :func:`convert_formatting` converts that mrkdwn into Google Chat markup
+   (``MARKUP_SYNTAX_CHAT``): it parses ``<…>`` tokens on the escaped text and
+   decodes entities only in the literal text between them.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -70,13 +79,14 @@ def _parse_rich_text_elements(elements: list[dict]) -> str:
 
         return result
 
-    output_parts = []
+    output_parts: list[str] = []
     for el in elements:
         el_type = el.get("type")
         style = el.get("style", {})
 
         if el_type == "text":
-            text_content = el.get("text", "")
+            # Rich-text text is literal; escape it so it stays text in mrkdwn.
+            text_content = _escape_mrkdwn(el.get("text", ""))
 
             # Handle the simple cases first
             if not text_content:
@@ -108,8 +118,8 @@ def _parse_rich_text_elements(elements: list[dict]) -> str:
                 )
 
         elif el_type == "link":
-            url = el.get("url", "")
-            text = el.get("text", url)
+            url = _escape_mrkdwn(el.get("url", ""))
+            text = _escape_mrkdwn(el.get("text", "")) or url
             # Create the base link markdown
             link_markdown = f"<{url}|{text}>"
             # Apply styles to the entire link
@@ -393,92 +403,276 @@ def parse_slack_blocks(message: dict) -> str:
     return result
 
 
-def convert_formatting(
-    text: str,
-    user_map: dict[str, str],
-    state: MigrationState | None = None,
-    unmapped_user_tracker: UnmappedUserTracker | None = None,
-) -> str:
-    """
-    Convert Slack-specific markdown to Google Chat compatible format.
+# --- mrkdwn → Google Chat conversion -------------------------------------
+
+# Slack's broadcast commands (``<!here>`` etc.), all mapped to Chat's @all.
+_BROADCAST_COMMANDS = frozenset({"here", "channel", "everyone", "group"})
+
+# A URI scheme at the start of a token: ``https:``, ``mailto:``, ``tel:``...
+_URL_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*:")
+
+# Slack user / channel / user group IDs (``U0123``, ``W0123``, ``C0123``...).
+_SLACK_ID_RE = re.compile(r"[A-Z][A-Z0-9]+")
+
+# A literal "<" followed by a letter could open Chat markup (``<users/…>``,
+# ``<https://…|…>``, ``<customEmojis/…>``).  A zero-width space keeps it text.
+_CHAT_MARKUP_START_RE = re.compile(r"<(?=[A-Za-z])")
+_ZERO_WIDTH_SPACE = "\N{ZERO WIDTH SPACE}"
+
+
+@dataclass
+class _ConversionContext:
+    """Lookups and tracking shared by one :func:`convert_formatting` call."""
+
+    user_map: Mapping[str, str]
+    channel_id_to_name: Mapping[str, str]
+    state: MigrationState | None
+    unmapped_user_tracker: UnmappedUserTracker | None
+    original_text: str
+
+
+def _escape_mrkdwn(text: str) -> str:
+    """Escape literal text for mrkdwn, as Slack does in a message's ``text``.
 
     Args:
-        text: The Slack message text to convert
-        user_map: A dictionary mapping Slack user IDs to Google Chat user IDs/emails
-        state: Optional MigrationState for context (context.current_channel, context.current_message_ts)
-        unmapped_user_tracker: Optional tracker for unmapped user mentions
+        text: Literal text, e.g. from a rich-text ``text`` element.
 
     Returns:
-        The formatted text with Slack mentions converted to Google Chat format
+        The text with ``&``, ``<`` and ``>`` replaced by HTML entities.
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _decode_entities(text: str) -> str:
+    """Decode the three HTML entities Slack uses in mrkdwn.
+
+    Args:
+        text: Escaped mrkdwn text without ``<…>`` tokens.
+
+    Returns:
+        The literal text.
+    """
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
+def _render_literal(text: str) -> str:
+    """Render escaped literal mrkdwn text as Chat text.
+
+    Entities are decoded, and a decoded ``<`` that could open Chat markup is
+    defused, so text a user typed as ``&lt;https://a|b&gt;`` or
+    ``&lt;users/x&gt;`` stays text instead of becoming a link or a mention.
+
+    Args:
+        text: Escaped literal text (no ``<…>`` tokens).
+
+    Returns:
+        Text that is safe to embed in a Chat message.
+    """
+    decoded = _decode_entities(text)
+    decoded = _CHAT_MARKUP_START_RE.sub("<" + _ZERO_WIDTH_SPACE, decoded)
+    return str(emoji.emojize(decoded, language="alias"))
+
+
+def _find_token_end(text: str, start: int) -> int:
+    """Return the index of the ``>`` closing the ``<`` at *start*, or -1.
+
+    Slack escapes every literal ``<`` and ``>``, so a raw ``<`` always opens a
+    token; a ``<`` that isn't followed by a well-formed token (no ``>``, a
+    nested ``<``, a newline or leading whitespace) is treated as text.
+    """
+    end = text.find(">", start + 1)
+    if end == -1:
+        return -1
+    inner = text[start + 1 : end]
+    if not inner or inner[0].isspace() or "<" in inner or "\n" in inner:
+        return -1
+    return end
+
+
+def _track_unmapped_mention(slack_user_id: str, ctx: _ConversionContext) -> None:
+    """Log (and record, when a tracker is available) an unmapped mention."""
+    state = ctx.state
+    if ctx.unmapped_user_tracker and state is not None:
+        current_channel = state.context.current_channel or "unknown"
+        current_ts = state.context.current_message_ts or "unknown"
+        ctx.unmapped_user_tracker.track_unmapped_mention(
+            slack_user_id, current_channel, current_ts, ctx.original_text
+        )
+        log_with_context(
+            logging.ERROR,
+            f"Could not map Slack user ID: {slack_user_id} in message mention (channel: {current_channel})",
+            user_id=slack_user_id,
+            channel=current_channel,
+            message_ts=current_ts,
+        )
+    else:
+        log_with_context(
+            logging.WARNING, f"Could not map Slack user ID: {slack_user_id}"
+        )
+
+
+def _render_user_token(user_id: str, label: str, ctx: _ConversionContext) -> str:
+    """Render ``<@U123>`` / ``<@U123|alice>`` as a Chat mention.
+
+    Unmapped users become ``@alice`` (or ``@U123`` without a label) and are
+    tracked as unmapped mentions.
+    """
+    if not _SLACK_ID_RE.fullmatch(user_id):
+        return _render_literal(label or f"@{user_id}")
+    gchat_user_id = ctx.user_map.get(user_id)
+    if gchat_user_id:
+        return f"<users/{gchat_user_id}>"
+    _track_unmapped_mention(user_id, ctx)
+    display = label.lstrip("@") or user_id
+    return "@" + _render_literal(display)
+
+
+def _render_channel_token(channel_id: str, label: str, ctx: _ConversionContext) -> str:
+    """Render ``<#C123|name>``, ``<#C123|>`` and ``<#C123>`` as ``#name``."""
+    name = label or ctx.channel_id_to_name.get(channel_id) or channel_id
+    return "#" + _render_literal(name.lstrip("#"))
+
+
+def format_epoch_utc(epoch: object, fmt: str = "%Y-%m-%d %H:%M UTC") -> str | None:
+    """Format a Unix timestamp in UTC.
+
+    Args:
+        epoch: Seconds since the epoch (number or numeric string, e.g. a
+            Slack ``ts``).
+        fmt: ``strftime`` format; it should name the zone.
+
+    Returns:
+        The formatted time, or ``None`` if *epoch* isn't a valid timestamp.
+    """
+    try:
+        moment = datetime.fromtimestamp(float(str(epoch)), tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+    return moment.strftime(fmt)
+
+
+def _render_special_token(command: str, label: str, inner: str) -> str:
+    """Render ``<!here>``, ``<!subteam^S1|@eng>``, ``<!date^…|fallback>``…"""
+    name, _, args = command.partition("^")
+    if name in _BROADCAST_COMMANDS:
+        return "<users/all>"
+    if name == "subteam":
+        handle = label or args.split("^", 1)[0]
+        if not handle:
+            return "@subteam"
+        return _render_literal(handle if handle.startswith("@") else f"@{handle}")
+    if name == "date":
+        if label:
+            return _render_literal(label)
+        return format_epoch_utc(args.split("^", 1)[0]) or ""
+    return _render_literal(label or inner)
+
+
+def _render_link_token(url: str, label: str) -> str:
+    """Render ``<https://…|label>``, ``<mailto:…|…>``, ``<tel:…>`` for Chat.
+
+    Returns the bare URL when there is no label or it equals the URL, else
+    Chat's ``<url|label>``.
+    """
+    url = _decode_entities(url)
+    if not label or _decode_entities(label) == url:
+        return url
+    # A ">" would end Chat's link early, and "<" could nest markup.
+    safe_label = (
+        _render_literal(label)
+        .replace(">", "\N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK}")
+        .replace("<", "\N{SINGLE LEFT-POINTING ANGLE QUOTATION MARK}")
+    )
+    return f"<{url}|{safe_label}>"
+
+
+def _render_token(inner: str, ctx: _ConversionContext) -> str:
+    """Render the inside of one Slack ``<…>`` token as Chat text.
+
+    Args:
+        inner: The token without its angle brackets, still escaped.
+        ctx: Lookups and tracking for this conversion.
+
+    Returns:
+        The Chat markup or text for the token.
+    """
+    target, _, label = inner.partition("|")
+    if target.startswith("@"):
+        return _render_user_token(target[1:], label, ctx)
+    if target.startswith("#"):
+        return _render_channel_token(target[1:], label, ctx)
+    if target.startswith("!"):
+        return _render_special_token(target[1:], label, inner)
+    if _URL_SCHEME_RE.match(target):
+        return _render_link_token(target, label)
+    # Unknown token: keep what a reader would have seen.
+    return _render_literal(label or inner)
+
+
+def _convert_mrkdwn(text: str, ctx: _ConversionContext) -> str:
+    """Convert escaped Slack mrkdwn into Chat markup, token by token."""
+    out: list[str] = []
+    literal_start = 0
+    pos = 0
+    while True:
+        pos = text.find("<", pos)
+        if pos == -1:
+            break
+        end = _find_token_end(text, pos)
+        if end == -1:
+            pos += 1
+            continue
+        out.append(_render_literal(text[literal_start:pos]))
+        out.append(_render_token(text[pos + 1 : end], ctx))
+        pos = literal_start = end + 1
+    out.append(_render_literal(text[literal_start:]))
+    return "".join(out)
+
+
+def convert_formatting(
+    text: str,
+    user_map: Mapping[str, str],
+    state: MigrationState | None = None,
+    unmapped_user_tracker: UnmappedUserTracker | None = None,
+    channel_id_to_name: Mapping[str, str] | None = None,
+) -> str:
+    """Convert Slack mrkdwn to Google Chat markup (``MARKUP_SYNTAX_CHAT``).
+
+    Slack ``<…>`` tokens are parsed on the still-escaped text, and HTML
+    entities (``&lt; &gt; &amp;``) are decoded only in the literal text in
+    between, so text a user typed as ``<…>`` never becomes a live link or
+    mention.  Tokens are converted as follows:
+
+    - ``<@U123>``, ``<@U123|name>``, ``<@W123>`` → ``<users/{email}>``, or
+      ``@name`` / ``@U123`` when the user is unmapped (tracked)
+    - ``<#C123|name>``, ``<#C123|>``, ``<#C123>`` → ``#name`` (via
+      *channel_id_to_name*), or ``#C123`` when unknown
+    - ``<!here>``, ``<!channel>``, ``<!everyone>`` → ``<users/all>``
+    - ``<!subteam^S123|@eng>`` → ``@eng``; ``<!date^…|fallback>`` → fallback
+    - ``<https://…|label>``, ``<mailto:…|…>``, ``<tel:…|…>`` → ``<url|label>``,
+      or the bare URL when there is no label or it equals the URL
+    - anything else → its label, or its inner text
+
+    Args:
+        text: The Slack mrkdwn text to convert (escaped, as in ``text``).
+        user_map: Slack user ID → Google Chat user ID or email.
+        state: Optional MigrationState for context
+            (``context.current_channel``, ``context.current_message_ts``).
+        unmapped_user_tracker: Optional tracker for unmapped user mentions.
+        channel_id_to_name: Slack channel ID → channel name, used for channel
+            references without a label.
+
+    Returns:
+        The text formatted for Google Chat.
     """
     if not text:
         return ""
 
-    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-
-    def replace_user_mention(match: re.Match) -> str:
-        """Replace a Slack ``<@UID>`` mention with Google Chat format.
-
-        Args:
-            match: Regex match containing the Slack user ID.
-
-        Returns:
-            The Google Chat mention, or an ``@``-prefixed Slack UID fallback.
-        """
-        slack_user_id = match.group(1)
-        gchat_user_id = user_map.get(slack_user_id)
-
-        if gchat_user_id:
-            return f"<users/{gchat_user_id}>"
-
-        # Enhanced logging and tracking for unmapped user mentions
-        if unmapped_user_tracker and state is not None:
-            current_channel = state.context.current_channel or "unknown"
-            current_ts = state.context.current_message_ts or "unknown"
-
-            # Track this unmapped mention
-            unmapped_user_tracker.track_unmapped_mention(
-                slack_user_id, current_channel, current_ts, text
-            )
-
-            log_with_context(
-                logging.ERROR,
-                f"Could not map Slack user ID: {slack_user_id} in message mention (channel: {current_channel})",
-                user_id=slack_user_id,
-                channel=current_channel,
-                message_ts=current_ts,
-            )
-        else:
-            # Fallback to original logging if no tracker
-            log_with_context(
-                logging.WARNING, f"Could not map Slack user ID: {slack_user_id}"
-            )
-
-        return f"@{slack_user_id}"
-
-    text = re.sub(r"<@([A-Z0-9]+)>", replace_user_mention, text)
-    text = re.sub(r"<#C[A-Z0-9]+\|([^>]+)>", r"#\1", text)
-
-    def replace_link(match: re.Match) -> str:
-        """
-        Replace Slack-formatted links with appropriate formatting for Google Chat.
-
-        In Slack, links are formatted as <url|text>. If the URL and display text
-        are identical, this function returns just the URL. Otherwise, it maintains
-        the link format expected by Google Chat.
-
-        Args:
-            match: A regex match object containing the URL and link text
-
-        Returns:
-            Properly formatted link for Google Chat
-        """
-        url, link_text = match.group(1), match.group(2)
-        return url if url == link_text else f"<{url}|{link_text}>"
-
-    text = re.sub(r"<(https?://[^|]+)\|([^>]+)>", replace_link, text)
-    text = re.sub(r"<(https?://[^|>]+)>", r"\1", text)
-    text = re.sub(r"<!([^|>]+)(?:\|([^>]+))?>", r"@\1", text)
-    text = emoji.emojize(text, language="alias")
-
-    return text
+    ctx = _ConversionContext(
+        user_map=user_map,
+        channel_id_to_name=channel_id_to_name or {},
+        state=state,
+        unmapped_user_tracker=unmapped_user_tracker,
+        original_text=text,
+    )
+    return _convert_mrkdwn(text, ctx)
