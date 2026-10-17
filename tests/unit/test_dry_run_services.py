@@ -454,3 +454,31 @@ class TestDriveFullChains:
         svc = DryRunDriveService()
         result = svc.drives().get(driveId="drive123").execute()
         assert result["id"] == "drive123"
+
+
+class TestDryRunDriveAdditions:
+    """Stubs used by folder permission sync and limited-access folders."""
+
+    def test_permissions_list_and_delete(self):
+        svc = DryRunDriveService()
+        assert svc.permissions().list(fileId="F").execute() == {"permissions": []}
+        assert svc.permissions().delete(fileId="F", permissionId="p").execute() == {}
+
+    def test_files_update_echoes_body(self):
+        svc = DryRunDriveService()
+        result = (
+            svc.files()
+            .update(fileId="F", body={"inheritedPermissionsDisabled": True})
+            .execute()
+        )
+        assert result == {"id": "F", "inheritedPermissionsDisabled": True}
+
+    def test_batch_runs_requests_and_calls_back(self):
+        svc = DryRunDriveService()
+        seen = []
+        batch = svc.new_batch_http_request(
+            callback=lambda rid, resp, exc: seen.append((rid, resp, exc))
+        )
+        batch.add(svc.permissions().create(fileId="F", body={}), request_id="0")
+        batch.execute()
+        assert seen == [("0", {"id": "dry-run-permission"}, None)]

@@ -7,7 +7,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import mimetypes
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional
+
+from slack_chat_migrator.services.drive_adapter import PermissionChange
 
 if TYPE_CHECKING:
     from slack_chat_migrator.services.drive_adapter import DriveAdapter
@@ -17,12 +20,58 @@ if TYPE_CHECKING:
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
+from slack_chat_migrator.constants import (
+    DRIVE_APP_PROPERTY_SLACK_CHANNEL,
+    DRIVE_APP_PROPERTY_SLACK_FILE_ID,
+    DRIVE_FILES_PAGE_SIZE,
+    DRIVE_ROLE_WRITER,
+    DRIVE_UPLOAD_CHUNK_BYTES,
+    FILE_READ_CHUNK_BYTES,
+)
 from slack_chat_migrator.utils.api import escape_drive_query_value
 from slack_chat_migrator.utils.logging import (
     log_with_context,
 )
 
 logger = logging.getLogger("slack_chat_migrator")
+
+
+#: Where a DriveUpload came from.
+SOURCE_NEW = "new"  # uploaded now
+SOURCE_HASH = "hash"  # identical content already in the folder
+SOURCE_SLACK_ID = "slack_id"  # this Slack file, uploaded by an earlier run
+
+
+@dataclass
+class DriveUpload:
+    """A Drive file holding an attachment.
+
+    Attributes:
+        file_id: Drive file ID.
+        url: ``webViewLink`` of the file, if known.
+        reused: True when an existing Drive file was linked instead of
+            uploading a new one.  Ownership is never transferred for
+            reused files.
+        source: One of ``SOURCE_NEW``, ``SOURCE_HASH`` or ``SOURCE_SLACK_ID``.
+    """
+
+    file_id: str
+    url: str | None = None
+    reused: bool = False
+    source: str = SOURCE_NEW
+
+
+#: Cached Drive file: (file_id, webViewLink).
+_CachedFile = tuple[str, Optional[str]]
+
+#: Drive limits each appProperties entry to 124 bytes of key plus value.
+_APP_PROPERTY_MAX_BYTES = 124
+
+
+def _fit_app_property(key: str, value: str) -> str:
+    """Truncate *value* so ``key + value`` fits in an appProperties entry."""
+    budget = _APP_PROPERTY_MAX_BYTES - len(key.encode("utf-8"))
+    return value.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
 
 
 class DriveFileUploader:
@@ -32,19 +81,21 @@ class DriveFileUploader:
         self,
         drive_service: DriveAdapter,
         workspace_domain: str | None = None,
-        service_account_email: str | None = None,
     ) -> None:
         """Initialize the DriveFileUploader.
 
         Args:
             drive_service: DriveAdapter instance wrapping the Google Drive API
             workspace_domain: The workspace domain for permissions
-            service_account_email: The email of the service account to grant access to
         """
         self.drive_service = drive_service
         self.workspace_domain = workspace_domain
-        self.service_account_email = service_account_email
-        self.file_hash_cache: dict[str, tuple[str | None, str | None]] = {}
+        # Every cache is scoped to a folder: content found in one channel's
+        # folder is never linked from another channel.
+        # (folder_id, md5) -> file
+        self.file_hash_cache: dict[tuple[str, str], _CachedFile] = {}
+        # (folder_id, Slack file ID) -> file, from the appProperties tag
+        self.slack_file_cache: dict[tuple[str, str], _CachedFile] = {}
         self.folders_pre_cached: set[str] = set()
         # Set by FileHandler before each channel is processed
         self.current_channel: str | None = None
@@ -64,18 +115,42 @@ class DriveFileUploader:
         """
         hash_md5 = hashlib.md5()  # noqa: S324 — not used for security
         with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
+            for chunk in iter(lambda: f.read(FILE_READ_CHUNK_BYTES), b""):
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
+
+    def remember_file(
+        self,
+        folder_id: str,
+        file_id: str,
+        url: str | None,
+        *,
+        md5: str | None = None,
+        slack_file_id: str | None = None,
+    ) -> None:
+        """Record a Drive file in the folder-scoped caches.
+
+        Args:
+            folder_id: Folder holding the file.
+            file_id: Drive file ID.
+            url: The file's ``webViewLink``.
+            md5: Content MD5, if known (converted Google files have none).
+            slack_file_id: Slack file ID the upload was tagged with.
+        """
+        entry: _CachedFile = (file_id, url)
+        if md5:
+            self.file_hash_cache.setdefault((folder_id, md5), entry)
+        if slack_file_id:
+            self.slack_file_cache.setdefault((folder_id, slack_file_id), entry)
 
     def pre_cache_folder_file_hashes(
         self, folder_id: str, shared_drive_id: str | None = None
     ) -> int:
-        """Pre-cache MD5 hashes of all files in a folder.
+        """Load a folder's files into the folder-scoped caches.
 
-        This method queries all files in the specified folder and caches their
-        MD5 hashes to avoid duplicate uploads later. This is especially useful
-        for large migrations with many potential duplicate files.
+        Indexes each file by MD5 and by the Slack file ID in its
+        ``appProperties``, so later uploads into the folder need no search
+        and re-runs can link files without downloading them again.
 
         Args:
             folder_id: ID of the folder to cache files from
@@ -86,11 +161,6 @@ class DriveFileUploader:
         """
         # Skip if already pre-cached this folder
         if folder_id in self.folders_pre_cached:
-            log_with_context(
-                logging.DEBUG,
-                f"Folder {folder_id} already pre-cached, skipping",
-                channel=self._get_current_channel(),
-            )
             return 0
 
         try:
@@ -109,8 +179,9 @@ class DriveFileUploader:
                 # Build list_files call with explicit keyword args
                 list_kwargs: dict[str, Any] = {
                     "q": query,
-                    "fields": "nextPageToken, files(id, name, md5Checksum, webViewLink)",
-                    "page_size": 1000,  # Maximum allowed page size
+                    "fields": "nextPageToken, files(id, name, md5Checksum,"
+                    " webViewLink, appProperties)",
+                    "page_size": DRIVE_FILES_PAGE_SIZE,
                 }
 
                 if page_token:
@@ -129,15 +200,22 @@ class DriveFileUploader:
                     )
 
                 response = self.drive_service.list_files(**list_kwargs)
-                files = response.get("files", [])
 
-                for file in files:
+                for file in response.get("files", []):
                     file_id = file.get("id")
-                    file_hash = file.get("md5Checksum")
-                    web_view_link = file.get("webViewLink")
-
-                    if file_hash and file_id and web_view_link:
-                        self.file_hash_cache[file_hash] = (file_id, web_view_link)
+                    if not file_id:
+                        continue
+                    app_properties = file.get("appProperties") or {}
+                    slack_file_id = app_properties.get(DRIVE_APP_PROPERTY_SLACK_FILE_ID)
+                    md5 = file.get("md5Checksum")
+                    if md5 or slack_file_id:
+                        self.remember_file(
+                            folder_id,
+                            file_id,
+                            file.get("webViewLink"),
+                            md5=md5,
+                            slack_file_id=slack_file_id,
+                        )
                         files_cached += 1
 
                 page_token = response.get("nextPageToken")
@@ -160,6 +238,25 @@ class DriveFileUploader:
             )
             return 0
 
+    def find_uploaded_slack_file(
+        self, folder_id: str, slack_file_id: str
+    ) -> DriveUpload | None:
+        """Find a Slack file that an earlier run uploaded into *folder_id*.
+
+        Only the folder cache is consulted, so pre-cache the folder first.
+
+        Args:
+            folder_id: Target folder.
+            slack_file_id: Slack file ID.
+
+        Returns:
+            The existing upload (``source == SOURCE_SLACK_ID``), or None.
+        """
+        cached = self.slack_file_cache.get((folder_id, slack_file_id))
+        if cached is None:
+            return None
+        return DriveUpload(cached[0], cached[1], reused=True, source=SOURCE_SLACK_ID)
+
     def _find_file_by_hash(
         self,
         file_hash: str,
@@ -167,7 +264,10 @@ class DriveFileUploader:
         folder_id: str,
         shared_drive_id: str | None = None,
     ) -> tuple[str | None, str | None]:
-        """Find a file in Drive by its MD5 hash.
+        """Find a file with this MD5 in *folder_id*.
+
+        The folder cache is trusted.  Drive is searched only when the folder
+        could not be pre-cached.
 
         Args:
             file_hash: MD5 hash of the file
@@ -178,45 +278,24 @@ class DriveFileUploader:
         Returns:
             Tuple of (file_id, webViewLink) if found, (None, None) otherwise
         """
+        cached = self.file_hash_cache.get((folder_id, file_hash))
+        if cached is not None:
+            log_with_context(
+                logging.DEBUG,
+                f"Found cached file ID for hash {file_hash}: {cached[0]}",
+                channel=self._get_current_channel(),
+            )
+            return cached
+        if folder_id in self.folders_pre_cached:
+            return None, None
+
         try:
-            # Check if we've seen this hash before in our cache
-            if file_hash in self.file_hash_cache:
-                cached_id, _cached_url = self.file_hash_cache[file_hash]
-
-                if cached_id is None:
-                    self.file_hash_cache.pop(file_hash, None)
-                else:
-                    log_with_context(
-                        logging.DEBUG,
-                        f"Found cached file ID for hash {file_hash}: {cached_id}",
-                        channel=self._get_current_channel(),
-                    )
-
-                    # Verify the file still exists
-                    try:
-                        file = self.drive_service.get_file(
-                            file_id=cached_id,
-                            fields="id,webViewLink",
-                            supports_all_drives=bool(shared_drive_id),
-                        )
-                        return cached_id, file.get("webViewLink")
-                    except HttpError:
-                        logger.debug(
-                            "Cached file %s may have been deleted",
-                            cached_id,
-                            exc_info=True,
-                        )
-                        # File might have been deleted, continue with search
-                        self.file_hash_cache.pop(file_hash, None)
-
-            # Search for files with matching MD5 hash in the folder
             safe_hash = escape_drive_query_value(file_hash)
-            query = f"md5Checksum='{safe_hash}' and trashed=false"
-
-            # Add folder constraint if specified
-            if folder_id:
-                safe_folder_id = escape_drive_query_value(folder_id)
-                query += f" and '{safe_folder_id}' in parents"
+            safe_folder_id = escape_drive_query_value(folder_id)
+            query = (
+                f"md5Checksum='{safe_hash}' and '{safe_folder_id}' in parents"
+                " and trashed=false"
+            )
 
             log_with_context(
                 logging.DEBUG,
@@ -245,12 +324,10 @@ class DriveFileUploader:
             response = self.drive_service.list_files(**search_kwargs)
 
             files = response.get("files", [])
-            if files:
-                file_id = files[0].get("id")
+            if files and files[0].get("id"):
+                file_id = files[0]["id"]
                 web_view_link = files[0].get("webViewLink")
-
-                # Cache the result for future lookups
-                self.file_hash_cache[file_hash] = (file_id, web_view_link)
+                self.remember_file(folder_id, file_id, web_view_link, md5=file_hash)
 
                 log_with_context(
                     logging.DEBUG,
@@ -275,39 +352,53 @@ class DriveFileUploader:
         filename: str,
         folder_id: str,
         shared_drive_id: str | None = None,
-        message_poster_email: str | None = None,
-    ) -> tuple[str | None, str | None]:
-        """Upload a file to Google Drive.
+        *,
+        mime_type: str | None = None,
+        file_hash: str | None = None,
+        slack_file_id: str | None = None,
+        channel: str | None = None,
+        target_mime_type: str | None = None,
+    ) -> DriveUpload | None:
+        """Upload a file to Google Drive, or reuse an identical one.
+
+        If a file with the same MD5 hash already exists in the folder, that
+        file is returned (``reused=True``) instead of uploading a duplicate.
+        New files are sent in a resumable session, in
+        :data:`DRIVE_UPLOAD_CHUNK_BYTES` chunks, so memory use doesn't grow
+        with the file size.  No permissions are set here; access comes from
+        the folder, and the caller grants the poster's access.
 
         Args:
             file_path: Path to the local file
             filename: Name for the uploaded file
             folder_id: ID of the Drive folder to upload to
             shared_drive_id: ID of the shared drive (if applicable)
-            message_poster_email: Email of the user who will post the message with this attachment
-                                 This user will get editor permissions on the file
-
-        We rely on folder permissions for access control instead of setting individual
-        file permissions. Only the message poster gets explicit editor access to the file.
-
-        If a file with the same MD5 hash already exists in the folder, we'll reuse that file
-        instead of uploading a duplicate.
+            mime_type: Content type (Slack's ``mimetype``); guessed from the
+                file name when omitted
+            file_hash: MD5 of the content, if already known; computed from
+                the file otherwise
+            slack_file_id: Slack file ID, stored in ``appProperties`` so a
+                re-run can find the upload without downloading the file
+            channel: Slack channel, stored in ``appProperties`` for reference
+            target_mime_type: A Google Workspace type (e.g. a Google Doc) to
+                convert the upload into.  Converted files skip MD5 dedup,
+                since their content differs from the uploaded bytes.
 
         Returns:
-            Tuple of (file_id, public_url) if successful, (None, None) otherwise
+            The DriveUpload, or None if the upload failed
         """
         try:
-            # Get MIME type
-            mime_type, _ = mimetypes.guess_type(filename)
+            if not mime_type:
+                mime_type, _ = mimetypes.guess_type(filename)
             if not mime_type:
                 mime_type = "application/octet-stream"
 
-            # Calculate the file's MD5 hash
-            file_hash = self._calculate_file_hash(file_path)
+            if not file_hash:
+                file_hash = self._calculate_file_hash(file_path)
 
             log_with_context(
                 logging.DEBUG,
-                f"Calculated MD5 hash for {filename}: {file_hash}",
+                f"MD5 hash for {filename}: {file_hash}",
                 channel=self._get_current_channel(),
             )
 
@@ -315,26 +406,28 @@ class DriveFileUploader:
             if folder_id not in self.folders_pre_cached:
                 self.pre_cache_folder_file_hashes(folder_id, shared_drive_id)
 
-            # Check if this file already exists in Drive by its hash
-            existing_file_id, existing_url = self._find_file_by_hash(
-                file_hash, filename, folder_id, shared_drive_id
+            if slack_file_id:
+                existing = self.find_uploaded_slack_file(folder_id, slack_file_id)
+                if existing is not None:
+                    return existing
+
+            # Check if this file already exists in the folder by its hash
+            existing_file_id, existing_url = (
+                self._find_file_by_hash(file_hash, filename, folder_id, shared_drive_id)
+                if not target_mime_type
+                else (None, None)
             )
 
             # If the file already exists, reuse it instead of uploading again
-            if existing_file_id and existing_url:
+            if existing_file_id:
                 log_with_context(
                     logging.DEBUG,
                     f"Reusing existing file with same hash: {filename} (ID: {existing_file_id})",
                     channel=self._get_current_channel(),
                 )
-
-                # Set permissions for the message poster on the existing file
-                if message_poster_email:
-                    self._set_message_poster_permission(
-                        existing_file_id, message_poster_email, shared_drive_id
-                    )
-
-                return existing_file_id, existing_url
+                return DriveUpload(
+                    existing_file_id, existing_url, reused=True, source=SOURCE_HASH
+                )
 
             # File doesn't exist yet, proceed with upload
             log_with_context(
@@ -343,9 +436,23 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            file_metadata = {"name": filename, "parents": [folder_id]}
+            file_metadata: dict[str, Any] = {"name": filename, "parents": [folder_id]}
+            if target_mime_type:
+                file_metadata["mimeType"] = target_mime_type
+            if slack_file_id:
+                app_properties = {DRIVE_APP_PROPERTY_SLACK_FILE_ID: slack_file_id}
+                if channel:
+                    app_properties[DRIVE_APP_PROPERTY_SLACK_CHANNEL] = (
+                        _fit_app_property(DRIVE_APP_PROPERTY_SLACK_CHANNEL, channel)
+                    )
+                file_metadata["appProperties"] = app_properties
 
-            media = MediaFileUpload(file_path, mimetype=mime_type)
+            media = MediaFileUpload(
+                file_path,
+                mimetype=mime_type,
+                resumable=True,
+                chunksize=DRIVE_UPLOAD_CHUNK_BYTES,
+            )
 
             # Upload with appropriate parameters
             file = self.drive_service.create_file(
@@ -356,14 +463,16 @@ class DriveFileUploader:
             )
 
             file_id = file.get("id")
-            public_url = file.get("webViewLink")
-
-            # We only set editor permissions for the message poster
-            # All other permissions are inherited from the folder
-            if file_id and message_poster_email:
-                self._set_message_poster_permission(
-                    file_id, message_poster_email, shared_drive_id
-                )
+            if not file_id:
+                return None
+            url = file.get("webViewLink")
+            self.remember_file(
+                folder_id,
+                file_id,
+                url,
+                md5=None if target_mime_type else file_hash,
+                slack_file_id=slack_file_id,
+            )
 
             log_with_context(
                 logging.DEBUG,
@@ -371,7 +480,7 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            return (file_id, public_url)
+            return DriveUpload(file_id, url)
 
         except HttpError as e:
             log_with_context(
@@ -379,15 +488,30 @@ class DriveFileUploader:
                 f"Failed to upload file {filename} to Drive: {e}",
                 channel=self._get_current_channel(),
             )
-            return (None, None)
+            return None
 
-    def _set_message_poster_permission(
+    @staticmethod
+    def poster_permission_change(
+        file_id: str, message_poster_email: str, shared_drive_id: str | None = None
+    ) -> PermissionChange:
+        """Describe the poster's ``writer`` grant, for batching."""
+        return PermissionChange(
+            file_id,
+            body={
+                "type": "user",
+                "role": DRIVE_ROLE_WRITER,
+                "emailAddress": message_poster_email,
+            },
+            supports_all_drives=bool(shared_drive_id),
+        )
+
+    def set_message_poster_permission(
         self,
         file_id: str,
         message_poster_email: str,
         shared_drive_id: str | None = None,
     ) -> bool:
-        """Set editor permission for the message poster on a file.
+        """Give the message poster ``writer`` access to a file.
 
         Args:
             file_id: ID of the file
@@ -399,14 +523,13 @@ class DriveFileUploader:
         """
         log_with_context(
             logging.DEBUG,
-            f"Setting editor permission for message poster {message_poster_email} on file {file_id}",
+            f"Setting writer permission for message poster {message_poster_email} on file {file_id}",
             channel=self._get_current_channel(),
         )
         try:
             permission = {
                 "type": "user",
-                "role": (shared_drive_id and "writer")
-                or "editor",  # 'writer' is used for shared drives
+                "role": DRIVE_ROLE_WRITER,
                 "emailAddress": message_poster_email,
             }
             self.drive_service.create_permission(
@@ -419,186 +542,14 @@ class DriveFileUploader:
 
             log_with_context(
                 logging.DEBUG,
-                f"Successfully set editor permission for message poster {message_poster_email} on file {file_id}",
+                f"Successfully set writer permission for message poster {message_poster_email} on file {file_id}",
                 channel=self._get_current_channel(),
             )
             return True
         except HttpError as e:
             log_with_context(
                 logging.WARNING,
-                f"Failed to set editor permission for message poster on file {file_id}: {e}",
-                channel=self._get_current_channel(),
-            )
-            return False
-
-    def set_file_permissions_for_users(
-        self,
-        file_id: str,
-        user_emails: list,
-        message_poster_email: str | None = None,
-    ) -> bool:
-        """Set file permissions for specific users only (not domain-wide).
-
-        Args:
-            file_id: ID of the file to set permissions on
-            user_emails: List of user emails to grant access to
-            message_poster_email: Optional email of the user who will post the message with this attachment
-                                  This user will get editor permissions instead of reader
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if not user_emails:
-            log_with_context(
-                logging.WARNING,
-                f"No user emails provided for setting permissions on file {file_id}",
-                channel=self._get_current_channel(),
-            )
-            return False
-
-        success_count = 0
-        failed_count = 0
-        editor_set = False
-
-        for email in user_emails:
-            try:
-                # Give editor permissions to the message poster, reader to everyone else
-                role = "editor" if email == message_poster_email else "reader"
-                if email == message_poster_email:
-                    editor_set = True
-                    log_with_context(
-                        logging.DEBUG,
-                        f"Granting editor permission to message poster {email} for file {file_id}",
-                        channel=self._get_current_channel(),
-                    )
-
-                permission = {"type": "user", "role": role, "emailAddress": email}
-                self.drive_service.create_permission(
-                    file_id=file_id,
-                    body=permission,
-                    fields="id",
-                    send_notification_email=False,
-                )
-
-                success_count += 1
-
-            except HttpError as e:
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to set permission for {email} on file {file_id}: {e}",
-                    channel=self._get_current_channel(),
-                )
-                failed_count += 1
-
-        # If the message poster wasn't in the user_emails list, add them separately with editor permission
-        if (
-            message_poster_email
-            and not editor_set
-            and message_poster_email not in user_emails
-        ):
-            try:
-                permission = {
-                    "type": "user",
-                    "role": "editor",
-                    "emailAddress": message_poster_email,
-                }
-
-                log_with_context(
-                    logging.DEBUG,
-                    f"Adding separate editor permission for message poster {message_poster_email} for file {file_id}",
-                    channel=self._get_current_channel(),
-                )
-                self.drive_service.create_permission(
-                    file_id=file_id,
-                    body=permission,
-                    fields="id",
-                    send_notification_email=False,
-                )
-
-                success_count += 1
-
-            except HttpError as e:
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to set editor permission for message poster {message_poster_email} on file {file_id}: {e}",
-                    channel=self._get_current_channel(),
-                )
-                failed_count += 1
-
-        # Always add the service account with editor permissions if available
-        if self.service_account_email:
-            try:
-                permission = {
-                    "type": "user",
-                    "role": "editor",
-                    "emailAddress": self.service_account_email,
-                }
-
-                log_with_context(
-                    logging.DEBUG,
-                    f"Adding editor permission for service account {self.service_account_email} for file {file_id}",
-                    channel=self._get_current_channel(),
-                )
-                self.drive_service.create_permission(
-                    file_id=file_id,
-                    body=permission,
-                    fields="id",
-                    send_notification_email=False,
-                )
-
-                success_count += 1
-
-            except HttpError as e:
-                log_with_context(
-                    logging.WARNING,
-                    f"Failed to set editor permission for service account {self.service_account_email} on file {file_id}: {e}",
-                    channel=self._get_current_channel(),
-                )
-                failed_count += 1
-
-        log_with_context(
-            logging.DEBUG if failed_count == 0 else logging.WARNING,
-            f"Set file permissions for {file_id}: {success_count} successful, {failed_count} failed",
-            channel=self._get_current_channel(),
-        )
-
-        return failed_count == 0
-
-    def transfer_ownership(self, file_id: str, new_owner_email: str) -> bool:
-        """Transfer ownership of a file to a new owner.
-
-        Args:
-            file_id: ID of the file to transfer
-            new_owner_email: Email of the new owner
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            permission = {
-                "type": "user",
-                "role": "owner",
-                "emailAddress": new_owner_email,
-            }
-            self.drive_service.create_permission(
-                file_id=file_id,
-                body=permission,
-                transfer_ownership=True,
-                send_notification_email=False,
-            )
-
-            log_with_context(
-                logging.DEBUG,
-                f"Transferred ownership of file {file_id} to {new_owner_email}",
-                channel=self._get_current_channel(),
-            )
-
-            return True
-
-        except HttpError as e:
-            log_with_context(
-                logging.WARNING,
-                f"Failed to transfer file ownership: {e}",
+                f"Failed to set writer permission for message poster on file {file_id}: {e}",
                 channel=self._get_current_channel(),
             )
             return False

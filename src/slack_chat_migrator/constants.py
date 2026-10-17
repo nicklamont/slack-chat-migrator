@@ -19,10 +19,33 @@ BOT_SUBTYPES = frozenset({BOT_MESSAGE_SUBTYPE, APP_MESSAGE_SUBTYPE})
 SYSTEM_SUBTYPES = frozenset({CHANNEL_JOIN_SUBTYPE, CHANNEL_LEAVE_SUBTYPE})
 
 # --- File Size Limits ---
+# Largest image sent as a direct Chat attachment; bigger files go to Drive.
 DIRECT_UPLOAD_MAX_BYTES = 25 * 1024 * 1024  # 25 MB
+# Chat ``media.upload`` limit.  Drive accepts files up to 5 TB, so Drive
+# uploads are never refused for their size.
+CHAT_MEDIA_MAX_BYTES = 200 * 1024 * 1024  # 200 MB
+# Chat media uploads above this size use a resumable session.
 RESUMABLE_UPLOAD_THRESHOLD_BYTES = 5 * 1024 * 1024  # 5 MB
-MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024  # 200 MB (Drive API limit)
-FILE_READ_CHUNK_BYTES = 4096
+# Chunk size for streaming Slack downloads to disk and for hashing files.
+FILE_READ_CHUNK_BYTES = 1024 * 1024  # 1 MiB
+# Chunk size of resumable Drive uploads (a multiple of 256 KiB).
+DRIVE_UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024  # 16 MiB
+
+# --- Slack File Downloads ---
+# Hosts Slack serves export files from.  A host matches when it equals an
+# entry or is a subdomain of one; downloads and redirects elsewhere are refused.
+SLACK_FILE_HOST_SUFFIXES = ("slack.com", "slack-edge.com", "slack-files.com")
+DOWNLOAD_MAX_REDIRECTS = 5
+DOWNLOAD_RETRY_TOTAL = 5
+DOWNLOAD_RETRY_BACKOFF_SECONDS = 1.0
+DOWNLOAD_RETRY_STATUSES = (429, 500, 502, 503, 504)
+DOWNLOAD_CONNECT_TIMEOUT_SECONDS = 10
+DOWNLOAD_READ_TIMEOUT_SECONDS = 120
+DOWNLOAD_POOL_SIZE = 16
+# Attachment downloads are streamed into a per-run directory under
+# ``<output_dir>/.attachment_tmp/`` (or the system temp dir), swept at start-up.
+ATTACHMENT_TEMP_DIRNAME = ".attachment_tmp"
+ATTACHMENT_TEMP_FALLBACK_DIRNAME = "slack_chat_migrator_attachments"
 
 # --- API Pagination ---
 SPACES_PAGE_SIZE = 100
@@ -41,8 +64,22 @@ MEMBER_TYPE_HUMAN = "HUMAN"
 MARKUP_SYNTAX = "MARKUP_SYNTAX_CHAT"
 
 # --- Google Drive Roles ---
-DRIVE_ROLE_EDITOR = "editor"
+# Drive v3 roles are owner, organizer, fileOrganizer, writer, commenter and
+# reader; there is no "editor".
+DRIVE_ROLE_WRITER = "writer"
 DRIVE_ROLE_READER = "reader"
+DRIVES_PAGE_SIZE = 100  # drives.list maximum (the API default is 10)
+DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+# Targets for converting Slack canvases (HTML) and lists (CSV) on upload.
+GOOGLE_DOCS_MIME_TYPE = "application/vnd.google-apps.document"
+GOOGLE_SHEETS_MIME_TYPE = "application/vnd.google-apps.spreadsheet"
+# Roles a folder permission sync never removes.
+DRIVE_PROTECTED_ROLES = frozenset({"owner", "organizer", "fileOrganizer"})
+DRIVE_BATCH_MAX_REQUESTS = 100  # calls per Drive batch request
+# appProperties keys that tag uploads with their Slack origin, so a re-run
+# can find an already-uploaded file without downloading it again.
+DRIVE_APP_PROPERTY_SLACK_FILE_ID = "slackFileId"
+DRIVE_APP_PROPERTY_SLACK_CHANNEL = "slackChannel"
 
 # --- Membership Time Offsets ---
 DEFAULT_FALLBACK_JOIN_TIME = "2020-01-01T00:00:00Z"

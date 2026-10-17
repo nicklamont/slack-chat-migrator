@@ -294,3 +294,44 @@ class TestCreateAttachmentForMessage:
         result = uploader.create_attachment_for_message(response, metadata)
         assert "driveDataRef" in result
         assert result["driveDataRef"]["driveFileId"] == "xyz789"
+
+
+# ===========================================================================
+# Slack MIME types (I37)
+# ===========================================================================
+
+
+class TestSlackMimeType:
+    """Slack's mimetype wins over a guess from the file name."""
+
+    @patch("slack_chat_migrator.services.chat.chat_uploader.MediaFileUpload")
+    @patch("os.path.getsize", return_value=1024)
+    def test_upload_uses_slack_mime_type(self, mock_getsize, mock_media_cls):
+        uploader = _make_uploader()
+        uploader.chat_service.upload_media.return_value = {"attachmentDataRef": {}}
+
+        _token, metadata = uploader.upload_file_to_chat(
+            "/tmp/Screenshot", "Screenshot", "spaces/S", mime_type="image/png"
+        )
+
+        assert metadata["mimeType"] == "image/png"
+        mock_media_cls.assert_called_once_with(
+            "/tmp/Screenshot", mimetype="image/png", resumable=False
+        )
+
+    @patch("slack_chat_migrator.services.chat.chat_uploader.MediaFileUpload")
+    @patch("os.path.getsize", return_value=6 * 1024 * 1024)
+    def test_large_media_is_resumable(self, mock_getsize, mock_media_cls):
+        uploader = _make_uploader()
+        uploader.chat_service.upload_media.return_value = {"attachmentDataRef": {}}
+        uploader.upload_file_to_chat("/tmp/a.png", "a.png", "spaces/S")
+        assert mock_media_cls.call_args.kwargs["resumable"] is True
+
+    def test_name_without_extension_is_suitable_with_slack_type(self):
+        uploader = _make_uploader()
+        assert not uploader.is_suitable_for_direct_upload("Screenshot", 100)
+        assert uploader.is_suitable_for_direct_upload("Screenshot", 100, "image/png")
+
+    def test_null_slack_type_falls_back_to_name(self):
+        uploader = _make_uploader()
+        assert uploader.is_supported_file_type("photo.jpg", "null")

@@ -13,6 +13,11 @@ from typing import TYPE_CHECKING, Any
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
+from slack_chat_migrator.constants import (
+    CHAT_MEDIA_MAX_BYTES,
+    DIRECT_UPLOAD_MAX_BYTES,
+    RESUMABLE_UPLOAD_THRESHOLD_BYTES,
+)
 from slack_chat_migrator.utils.logging import (
     log_with_context,
 )
@@ -39,7 +44,11 @@ class ChatFileUploader:
         return self.current_channel
 
     def upload_file_to_chat(
-        self, file_path: str, filename: str, parent_space: str | None = None
+        self,
+        file_path: str,
+        filename: str,
+        parent_space: str | None = None,
+        mime_type: str | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """Upload a file directly to Google Chat API.
 
@@ -47,6 +56,8 @@ class ChatFileUploader:
             file_path: Path to the local file
             filename: Name for the uploaded file
             parent_space: The space ID where the file should be uploaded (e.g., "spaces/AAAAy2-BTIA")
+            mime_type: Content type (Slack's ``mimetype``); guessed from the
+                file name when omitted
 
         Returns:
             Tuple of (attachment_token, attachment_metadata) if successful, (None, None) otherwise
@@ -62,9 +73,7 @@ class ChatFileUploader:
 
             # Get file size and MIME type
             file_size = os.path.getsize(file_path)
-            mime_type, _ = mimetypes.guess_type(filename)
-            if not mime_type:
-                mime_type = "application/octet-stream"
+            mime_type = _resolve_mime_type(filename, mime_type)
 
             log_with_context(
                 logging.DEBUG,
@@ -72,24 +81,17 @@ class ChatFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            # Chat API has file size limits - typically 200MB
-            max_size = 200 * 1024 * 1024  # 200MB
-            if file_size > max_size:
+            # The 200 MB limit applies to Chat media uploads only, not Drive.
+            if file_size > CHAT_MEDIA_MAX_BYTES:
                 log_with_context(
                     logging.WARNING,
-                    f"File {filename} ({file_size} bytes) exceeds Chat API limit ({max_size} bytes)",
+                    f"File {filename} ({file_size} bytes) exceeds Chat API limit ({CHAT_MEDIA_MAX_BYTES} bytes)",
                     channel=self._get_current_channel(),
                 )
                 return (None, None)
 
-            # Create media upload object
-            media = MediaFileUpload(
-                file_path,
-                mimetype=mime_type,
-                resumable=(
-                    True if file_size > 5 * 1024 * 1024 else False
-                ),  # Use resumable for files > 5MB
-            )
+            resumable = file_size > RESUMABLE_UPLOAD_THRESHOLD_BYTES
+            media = MediaFileUpload(file_path, mimetype=mime_type, resumable=resumable)
 
             log_with_context(
                 logging.DEBUG,
@@ -97,7 +99,7 @@ class ChatFileUploader:
                 api_data=json.dumps(
                     {
                         "parent_space": parent_space,
-                        "resumable": file_size > 5 * 1024 * 1024,
+                        "resumable": resumable,
                         "file_size_mb": round(file_size / (1024 * 1024), 2),
                     }
                 ),
@@ -261,16 +263,20 @@ class ChatFileUploader:
             "application/octet-stream",
         ]
 
-    def is_supported_file_type(self, filename: str) -> bool:
+    def is_supported_file_type(
+        self, filename: str, mime_type: str | None = None
+    ) -> bool:
         """Check if a file type is supported for direct Chat upload.
 
         Args:
             filename: Name of the file to check
+            mime_type: Slack's MIME type for the file; the name is only used
+                to guess one when this is missing
 
         Returns:
             True if supported, False otherwise
         """
-        mime_type, _ = mimetypes.guess_type(filename)
+        mime_type = _resolve_mime_type(filename, mime_type, default=None)
 
         # Log the MIME type detection
         log_with_context(
@@ -300,12 +306,15 @@ class ChatFileUploader:
 
         return supported
 
-    def is_suitable_for_direct_upload(self, filename: str, file_size: int) -> bool:
+    def is_suitable_for_direct_upload(
+        self, filename: str, file_size: int, mime_type: str | None = None
+    ) -> bool:
         """Check if a file is suitable for direct Chat upload considering both type and size.
 
         Args:
             filename: Name of the file to check
             file_size: Size of the file in bytes
+            mime_type: Slack's MIME type for the file, if known
 
         Returns:
             True if suitable for direct upload, False otherwise
@@ -324,7 +333,7 @@ class ChatFileUploader:
         )
 
         # Check MIME type support
-        if not self.is_supported_file_type(filename):
+        if not self.is_supported_file_type(filename, mime_type):
             log_with_context(
                 logging.DEBUG,
                 f"File {filename} has unsupported MIME type for direct Chat API upload",
@@ -332,13 +341,11 @@ class ChatFileUploader:
             )
             return False
 
-        # Check size limits - Chat API typically has smaller limits than Drive
-        # 25MB is a reasonable limit for direct upload to maintain performance
-        max_direct_upload_size = 25 * 1024 * 1024  # 25MB
-        if file_size > max_direct_upload_size:
+        # Direct uploads are kept small; bigger files go to Drive.
+        if file_size > DIRECT_UPLOAD_MAX_BYTES:
             log_with_context(
                 logging.DEBUG,
-                f"File {filename} exceeds size limit for direct Chat API upload: {file_size} bytes > {max_direct_upload_size} bytes",
+                f"File {filename} exceeds size limit for direct Chat API upload: {file_size} bytes > {DIRECT_UPLOAD_MAX_BYTES} bytes",
                 channel=self._get_current_channel(),
             )
             return False
@@ -349,3 +356,15 @@ class ChatFileUploader:
             channel=self._get_current_channel(),
         )
         return True
+
+
+def _resolve_mime_type(
+    filename: str,
+    mime_type: str | None,
+    default: str | None = "application/octet-stream",
+) -> str | None:
+    """Prefer Slack's MIME type; otherwise guess from the file name."""
+    if mime_type and mime_type != "null":
+        return mime_type
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or default
