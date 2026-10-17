@@ -596,28 +596,53 @@ _CREATE_REFUSED_ADVICE = {
 }
 
 
+#: The org-policy constraints that forbid creating keys: the legacy one and
+#: its managed successor, which new organizations enforce by default.
+_KEY_CREATION_CONSTRAINT = re.compile(
+    r"iam\.(?:managed\.)?disableServiceAccountKeyCreation"
+)
+
+
 def _key_creation_policy(error: HttpError) -> str | None:
     """Return the org-policy constraint that refused ``keys.create``, if any.
 
-    IAM reports ``iam.disableServiceAccountKeyCreation`` (or its managed
-    successor) as a 400 FAILED_PRECONDITION, like the 10-key limit, so the
-    two are told apart by the violation in the error details or, failing
-    that, by the message.
+    IAM refuses under these policies with a 400 FAILED_PRECONDITION, like
+    the 10-key limit, so the refusals are told apart by what names the
+    constraint:
+
+    - ``iam.disableServiceAccountKeyCreation`` (legacy) names itself in a
+      ``PreconditionFailure`` violation, with the message "Key creation is
+      not allowed on this service account.";
+    - ``iam.managed.disableServiceAccountKeyCreation`` refuses with
+      "Operation denied by org policy …" and names itself in an
+      ``ErrorInfo``'s ``metadata.customConstraints``.
+
+    The error details are read first, then the message.
+
+    Returns:
+        The constraint as the error names it, without ``constraints/``;
+        ``iam.disableServiceAccountKeyCreation`` when only the legacy
+        message says so; None if no key-creation policy is named.
     """
+    texts: list[str] = []
     details = getattr(error, "error_details", None)
     for detail in details if isinstance(details, list) else []:
-        violations = detail.get("violations") if isinstance(detail, Mapping) else None
+        if not isinstance(detail, Mapping):
+            continue
+        violations = detail.get("violations")
         for violation in violations if isinstance(violations, list) else []:
-            kind = (
-                str(violation.get("type", "")) if isinstance(violation, Mapping) else ""
-            )
-            if "disableServiceAccountKeyCreation" in kind:
-                return kind.removeprefix("constraints/")
+            if isinstance(violation, Mapping):
+                texts.append(str(violation.get("type", "")))
+        metadata = detail.get("metadata")
+        if isinstance(metadata, Mapping):
+            texts.append(str(metadata.get("customConstraints", "")))
     content = error.content.decode("utf-8", "replace") if error.content else ""
-    text = f"{getattr(error, 'reason', '')} {content}"
-    if "Key creation is not allowed" in text or (
-        "disableServiceAccountKeyCreation" in text
-    ):
+    message = f"{getattr(error, 'reason', '')} {content}"
+    for text in (*texts, message):
+        match = _KEY_CREATION_CONSTRAINT.search(text)
+        if match:
+            return match.group(0)
+    if "Key creation is not allowed" in message:
         return "iam.disableServiceAccountKeyCreation"
     return None
 

@@ -451,6 +451,28 @@ def _iam_error(
     )
 
 
+#: How a managed constraint refuses (cloud.google.com/iam/docs/
+#: troubleshoot-org-policies documents this shape for another iam.managed
+#: constraint; secure-by-default organizations enforce this one).
+MANAGED_POLICY_MESSAGE = (
+    "Operation denied by org policy on resource 'projects/p':"
+    ' ["constraints/iam.managed.disableServiceAccountKeyCreation":'
+    ' "Prevents creation of service account keys."].'
+)
+MANAGED_POLICY_DETAILS = [
+    {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "CUSTOM_ORG_POLICY_VIOLATION",
+        "domain": "googleapis.com",
+        "metadata": {
+            "customConstraints": (
+                "constraints/iam.managed.disableServiceAccountKeyCreation"
+            ),
+            "resource": "projects/p",
+        },
+    }
+]
+
 #: The documented response when iam.disableServiceAccountKeyCreation blocks
 #: keys.create (cloud.google.com/iam/docs/troubleshoot-org-policies, REST).
 ORG_POLICY_DETAILS = [
@@ -700,14 +722,44 @@ class TestDownloadKey:
         assert "delete one" not in message
         assert "10 keys" not in message
 
-    def test_managed_constraint_is_named(self, tmp_path: Path) -> None:
-        details = json.loads(json.dumps(ORG_POLICY_DETAILS))
-        details[0]["violations"][0]["type"] = (
-            "constraints/iam.managed.disableServiceAccountKeyCreation"
+    @pytest.mark.parametrize(
+        ("message", "details"),
+        [
+            # The documented shape of a managed-constraint refusal
+            (MANAGED_POLICY_MESSAGE, MANAGED_POLICY_DETAILS),
+            # The same without details: named by the message
+            (MANAGED_POLICY_MESSAGE, None),
+            # Named in the details only
+            ("Operation denied by org policy.", MANAGED_POLICY_DETAILS),
+            # In a PreconditionFailure, like the legacy constraint
+            (
+                "Not allowed.",
+                [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.PreconditionFailure",
+                        "violations": [
+                            {
+                                "type": "constraints/iam.managed"
+                                ".disableServiceAccountKeyCreation"
+                            }
+                        ],
+                    }
+                ],
+            ),
+        ],
+        ids=["documented", "message-only", "details-only", "precondition-failure"],
+    )
+    def test_managed_constraint_is_named(
+        self, tmp_path: Path, message: str, details: list | None
+    ) -> None:
+        error = _iam_error(400, message, "FAILED_PRECONDITION", details)
+        advice = self._refusal(tmp_path, error)
+        assert (
+            "An organization policy (iam.managed.disableServiceAccountKeyCreation)"
+            " forbids creating service account keys" in advice
         )
-        error = _iam_error(400, "Not allowed.", "FAILED_PRECONDITION", details)
-        message = self._refusal(tmp_path, error)
-        assert "(iam.managed.disableServiceAccountKeyCreation)" in message
+        assert "(iam.disableServiceAccountKeyCreation)" not in advice
+        assert "10 keys" not in advice
 
     def test_403_covers_a_missing_account_and_how_to_choose_again(
         self, tmp_path: Path
