@@ -493,6 +493,8 @@ The tool provides several configurable options for handling errors during migrat
    - `max_retries: 3` (default): Maximum number of retry attempts for failed API calls
    - `retry_delay: 2` (default): Initial delay in seconds between retry attempts
 
+   Google API calls are retried on 408, 429 and 5xx responses, on 403 responses whose reason is a rate limit or quota (`rateLimitExceeded`, `userRateLimitExceeded`, `sharingRateLimitExceeded`, `quotaExceeded`, which is how Drive reports throttling), and on network errors (connection resets, timeouts, DNS failures, TLS errors, truncated responses). Other 4xx errors, and local errors such as a missing or unreadable file, are not retried. Each wait uses exponential backoff with full jitter (a random delay up to `retry_delay × 2ⁿ`, capped at 64 seconds), or the server's `Retry-After` header when it sends one. Rate-limit errors are retried for up to 5 minutes in total, whatever `max_retries` says, because Chat and Drive quotas are per-minute windows.
+
 These options can be configured in your `config.yaml` file:
 
 ```yaml

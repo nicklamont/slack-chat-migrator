@@ -4,19 +4,34 @@ API utilities for the Slack to Google Chat migration tool
 
 from __future__ import annotations
 
+import copy
+import datetime
+import email.utils
 import functools
+import http.client
 import json
 import logging
+import math
+import random
+import socket
+import ssl
 import threading
 import time
 from typing import Any
 
+import httplib2
 from google.auth.exceptions import TransportError
 from google.oauth2 import service_account
-from googleapiclient.discovery import build
+from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import BatchHttpRequest, HttpRequest
 
-from slack_chat_migrator.constants import HTTP_RATE_LIMIT
+from slack_chat_migrator.constants import (
+    HTTP_FORBIDDEN,
+    HTTP_RATE_LIMIT,
+    HTTP_SERVER_ERROR_MIN,
+    HTTP_UNAUTHORIZED,
+)
 from slack_chat_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_chat_migrator")
@@ -63,8 +78,198 @@ def clear_service_cache() -> None:
         _service_cache.clear()
 
 
+# ---------------------------------------------------------------------------
+# Retry policy
+# ---------------------------------------------------------------------------
+
+#: Upper bound for one backoff sleep (Google recommends capping at 32-64 s).
+MAX_BACKOFF_SECONDS = 64.0
+
+#: Total time one request may spend waiting out rate limits (429 and the
+#: rate-limit 403s), independent of ``max_retries``.  Chat and Drive quotas
+#: are per-minute windows, so a handful of short retries is not enough.
+RATE_LIMIT_BUDGET_SECONDS = 300.0
+
+#: Safety valve on rate-limit attempts (e.g. a server sending
+#: ``Retry-After: 0`` forever).
+RATE_LIMIT_MAX_ATTEMPTS = 50
+
+#: Smallest base delay for rate-limit backoff, so ``retry_delay: 0`` can't
+#: hammer a throttled API.
+_RATE_LIMIT_MIN_DELAY_SECONDS = 1.0
+
+HTTP_REQUEST_TIMEOUT = 408
+
+#: Error reasons that turn a 403 into "slow down" rather than "forbidden".
+#: Drive reports its rate limits this way.
+RATE_LIMIT_REASONS = frozenset(
+    {
+        "rateLimitExceeded",
+        "userRateLimitExceeded",
+        "sharingRateLimitExceeded",
+        "quotaExceeded",
+    }
+)
+
+#: Network-level failures worth retrying.  Deliberately not a bare
+#: ``OSError``: local errors such as ``PermissionError`` or
+#: ``FileNotFoundError`` won't go away on retry.
+RETRYABLE_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
+    TransportError,
+    ConnectionError,
+    TimeoutError,
+    socket.timeout,
+    ssl.SSLError,
+    http.client.IncompleteRead,
+    http.client.RemoteDisconnected,
+    httplib2.ServerNotFoundError,
+    httplib2.HttpLib2Error,
+)
+
+#: googleapiclient objects whose methods lead to an ``execute()`` call.
+_WRAPPABLE_TYPES = (Resource, HttpRequest, BatchHttpRequest)
+
+#: RetryWrapper's own attributes (never forwarded to the wrapped object).
+_OWN_ATTRS = frozenset(
+    {"_wrapped_obj", "_channel_context_getter", "_max_retries", "_retry_delay"}
+)
+
+
+def http_error_reasons(error: HttpError) -> set[str]:
+    """Return the ``reason`` values in an API error response.
+
+    Reads both ``HttpError.error_details`` and the JSON body, which may use
+    the Drive shape (``error.errors[].reason``) or the google.rpc shape
+    (``error.details[].reason``).
+
+    Args:
+        error: The HTTP error to inspect.
+
+    Returns:
+        The set of reason strings (empty if none could be parsed).
+    """
+    reasons: set[str] = set()
+
+    def _collect(items: Any) -> None:
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and isinstance(item.get("reason"), str):
+                    reasons.add(item["reason"])
+
+    _collect(getattr(error, "error_details", None))
+    try:
+        data = json.loads(error.content.decode("utf-8"))
+    except (AttributeError, UnicodeDecodeError, ValueError):
+        data = None
+    if isinstance(data, list) and data:
+        data = data[0]
+    body = data.get("error") if isinstance(data, dict) else None
+    if isinstance(body, dict):
+        _collect(body.get("errors"))
+        _collect(body.get("details"))
+    return reasons
+
+
+def is_rate_limit_error(error: BaseException) -> bool:
+    """Return True for 429s and 403s whose reason is a rate limit or quota.
+
+    Args:
+        error: Any exception.
+
+    Returns:
+        True if *error* is an ``HttpError`` asking the client to slow down.
+    """
+    if not isinstance(error, HttpError):
+        return False
+    status = error.resp.status
+    if status == HTTP_RATE_LIMIT:
+        return True
+    return status == HTTP_FORBIDDEN and bool(
+        http_error_reasons(error) & RATE_LIMIT_REASONS
+    )
+
+
+def is_retryable_http_error(error: HttpError) -> bool:
+    """Return True for 408, 429, 5xx and rate-limit 403 responses.
+
+    Args:
+        error: The HTTP error to classify.
+
+    Returns:
+        True if the request is worth retrying.
+    """
+    status = error.resp.status
+    return (
+        status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
+        or status >= HTTP_SERVER_ERROR_MIN
+        or is_rate_limit_error(error)
+    )
+
+
+def retry_after_seconds(error: HttpError) -> float | None:
+    """Parse the ``Retry-After`` header (seconds or an HTTP date).
+
+    Args:
+        error: The HTTP error whose response headers to read.
+
+    Returns:
+        Seconds to wait (>= 0), or None if the header is absent or invalid.
+    """
+    resp = getattr(error, "resp", None)
+    if resp is None or not hasattr(resp, "get"):
+        return None
+    raw = resp.get("retry-after")
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=datetime.timezone.utc)
+        seconds = (when - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+    if not math.isfinite(seconds):
+        return None
+    return max(0.0, seconds)
+
+
+def backoff_seconds(base_delay: float, attempt: int) -> float:
+    """Full-jitter exponential backoff: ``uniform(0, min(cap, base * 2**n))``.
+
+    Args:
+        base_delay: Delay for the first retry, in seconds.
+        attempt: Zero-based retry number.
+
+    Returns:
+        Seconds to sleep before the next attempt.
+    """
+    ceiling = min(MAX_BACKOFF_SECONDS, base_delay * (2.0 ** min(attempt, 32)))
+    # Jitter spreads retries out; it has no security role.
+    return random.uniform(0, ceiling)  # noqa: S311
+
+
 class RetryWrapper:
-    """Wrapper that adds retry logic to any object's methods."""
+    """Wrapper that adds retry logic to a googleapiclient service.
+
+    Calls that return a googleapiclient ``Resource``, ``HttpRequest`` or
+    ``BatchHttpRequest`` (``spaces()``, ``media()``, ``list(...)``,
+    ``upload(...)``, ...) return wrapped objects, so every ``execute()`` in
+    the chain is retried:
+
+    - 408, 429, 5xx and 403 rate-limit/quota errors, and network errors
+      (connection resets, timeouts, DNS failures, truncated responses) are
+      retried with full-jitter exponential backoff capped at
+      :data:`MAX_BACKOFF_SECONDS`, honouring ``Retry-After``.
+    - Rate-limit errors have their own budget of
+      :data:`RATE_LIMIT_BUDGET_SECONDS`; other errors are retried
+      ``max_retries`` times.
+    - Other 4xx errors are raised at once (a 401 also clears the service
+      cache).  409s are left to the callers.
+    """
 
     def __init__(
         self,
@@ -78,7 +283,18 @@ class RetryWrapper:
         self._max_retries = max_retries
         self._retry_delay = retry_delay
 
+    def _wrap(self, obj: Any) -> RetryWrapper:
+        """Wrap *obj* with this wrapper's retry settings."""
+        return RetryWrapper(
+            obj, self._channel_context_getter, self._max_retries, self._retry_delay
+        )
+
     def __getattr__(self, name: str) -> Any:
+        # Guard against recursion while the instance is half-built (copy,
+        # pickle) and keep Python's protocol lookups off the wrapped object.
+        if name in _OWN_ATTRS or (name.startswith("__") and name.endswith("__")):
+            raise AttributeError(name)
+
         attr = getattr(self._wrapped_obj, name)
 
         # If this is a callable method, wrap it with retry logic
@@ -86,32 +302,36 @@ class RetryWrapper:
             if name == "execute":
                 # This is an execute method - wrap it with retry
                 return self._wrap_execute(attr)
-            else:
-                # For other methods, return a new wrapper that maintains the chain
-                def wrapped_method(*args: Any, **kwargs: Any) -> Any:
-                    """Invoke the method and re-wrap chainable results.
 
-                    Returns:
-                        The method result, wrapped in a RetryWrapper if chainable.
-                    """
-                    result = attr(*args, **kwargs)
-                    # If the result has methods that might need retry, wrap it too
-                    if (
-                        hasattr(result, "execute")
-                        or hasattr(result, "list")
-                        or hasattr(result, "create")
-                    ):
-                        return RetryWrapper(
-                            result,
-                            self._channel_context_getter,
-                            self._max_retries,
-                            self._retry_delay,
-                        )
-                    return result
+            # For other methods, return a new wrapper that maintains the chain
+            def wrapped_method(*args: Any, **kwargs: Any) -> Any:
+                """Invoke the method and wrap googleapiclient results.
 
-                return wrapped_method
+                Returns:
+                    The method result, wrapped in a RetryWrapper if it is a
+                    Resource, HttpRequest or BatchHttpRequest.
+                """
+                result = attr(*args, **kwargs)
+                if isinstance(result, _WRAPPABLE_TYPES):
+                    return self._wrap(result)
+                return result
+
+            return wrapped_method
 
         return attr
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Public attribute writes (e.g. ``request.uri = ...`` in
+        # ``list_next``) go to the wrapped object; private names stay on the
+        # wrapper.
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._wrapped_obj, name, value)
+
+    def __copy__(self) -> RetryWrapper:
+        """Copy the wrapped object too, as ``list_next`` expects."""
+        return self._wrap(copy.copy(self._wrapped_obj))
 
     def _build_request_log_context(
         self, execute_method: Any
@@ -138,125 +358,117 @@ class RetryWrapper:
 
         return channel_context, log_kwargs, request_details
 
-    def _handle_retryable_error(
-        self,
-        error: Exception,
-        attempt: int,
-        max_retries: int,
-        delay: float,
-        backoff_factor: float,
-        max_delay: float,
-        log_kwargs: dict[str, str],
+    def _log_retry(
+        self, error: BaseException, delay: float, log_kwargs: dict[str, str]
     ) -> None:
-        """Log a retryable error and sleep, or re-raise on final attempt."""
+        """Log a retryable error and the upcoming sleep."""
         if isinstance(error, HttpError):
+            reasons = ", ".join(sorted(http_error_reasons(error)))
+            detail = f" ({reasons})" if reasons else ""
             log_with_context(
                 logging.WARNING,
-                f"Encountered {error.resp.status} {error.resp.reason}",
+                f"Encountered {error.resp.status} {error.resp.reason}{detail}",
                 **log_kwargs,
             )
         else:
             log_with_context(
                 logging.WARNING,
-                f"API client error: {error}",
+                f"Network error: {type(error).__name__}: {error}",
                 **log_kwargs,
             )
+        log_with_context(
+            logging.INFO,
+            f"Retrying in {delay:.1f} seconds...",
+            **log_kwargs,
+        )
 
-        if attempt < max_retries:
-            sleep_time = min(delay * (backoff_factor**attempt), max_delay)
-            log_with_context(
-                logging.INFO,
-                f"Retrying in {sleep_time:.1f} seconds...",
-                **log_kwargs,
-            )
-            time.sleep(sleep_time)
-        else:
-            log_with_context(
-                logging.ERROR,
-                f"Max retries reached. Last error: {error}",
-                **log_kwargs,
-            )
-            raise
+    def _retry_delay_for(
+        self, error: BaseException, attempt: int, rate_limit_attempt: int
+    ) -> float:
+        """Return how long to wait before retrying *error*."""
+        retry_after = (
+            retry_after_seconds(error) if isinstance(error, HttpError) else None
+        )
+        if is_rate_limit_error(error):
+            if retry_after is not None:
+                return retry_after
+            base = max(self._retry_delay, _RATE_LIMIT_MIN_DELAY_SECONDS)
+            return backoff_seconds(base, rate_limit_attempt)
+        if retry_after is not None:
+            return min(retry_after, MAX_BACKOFF_SECONDS)
+        return backoff_seconds(self._retry_delay, attempt)
 
     def _wrap_execute(self, execute_method: Any) -> Any:
         """Wrap an execute method with retry logic and automatic API logging."""
 
         @functools.wraps(execute_method)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            """Execute the API call with exponential-backoff retry.
+            """Execute the API call, retrying transient failures.
 
             Returns:
                 The result of the underlying ``execute()`` call.
             """
-            max_retries = self._max_retries
-            delay = self._retry_delay
-            max_delay = 60
-            backoff_factor = 2.0
-
             channel_context, log_kwargs, request_details = (
                 self._build_request_log_context(execute_method)
             )
 
-            last_exception = None
-            request_logged = False
+            attempt = 0  # retries of non-rate-limit errors
+            rate_limit_attempt = 0
+            rate_limit_waited = 0.0
 
-            for attempt in range(max_retries + 1):
+            while True:
                 try:
                     result = execute_method(*args, **kwargs)
-
-                    if request_details and not request_logged:
+                    if request_details:
                         status_code = self._extract_status_code(execute_method, result)
                         self._log_api_response(
                             status_code, request_details, result, channel_context
                         )
-                        request_logged = True
-
                     return result
                 except HttpError as e:
-                    last_exception = e
-                    if (
-                        request_details
-                        and not request_logged
-                        and attempt == max_retries
-                    ):
-                        self._log_api_response(
-                            e.resp.status, request_details, None, channel_context
-                        )
-                        request_logged = True
-                    # Don't retry client errors (4xx) except rate limits (429)
-                    if e.resp.status // 100 == 4 and e.resp.status != HTTP_RATE_LIMIT:
-                        if e.resp.status == 401:
+                    if not is_retryable_http_error(e):
+                        if e.resp.status == HTTP_UNAUTHORIZED:
                             clear_service_cache()
+                        if request_details:
+                            self._log_api_response(
+                                e.resp.status, request_details, None, channel_context
+                            )
                         log_with_context(
                             logging.WARNING,
                             f"Client error ({e.resp.status}) not retried: {e}",
                             **log_kwargs,
                         )
                         raise
-                    self._handle_retryable_error(
-                        e,
-                        attempt,
-                        max_retries,
-                        delay,
-                        backoff_factor,
-                        max_delay,
-                        log_kwargs,
-                    )
-                except (TransportError, OSError) as e:
-                    last_exception = e
-                    self._handle_retryable_error(
-                        e,
-                        attempt,
-                        max_retries,
-                        delay,
-                        backoff_factor,
-                        max_delay,
-                        log_kwargs,
-                    )
+                    error: BaseException = e
+                except RETRYABLE_NETWORK_ERRORS as e:
+                    error = e
 
-            if last_exception:
-                raise last_exception
-            raise RuntimeError("Exited retry loop unexpectedly.")
+                delay = self._retry_delay_for(error, attempt, rate_limit_attempt)
+                if is_rate_limit_error(error):
+                    exhausted = (
+                        rate_limit_waited + delay > RATE_LIMIT_BUDGET_SECONDS
+                        or rate_limit_attempt >= RATE_LIMIT_MAX_ATTEMPTS
+                    )
+                    rate_limit_attempt += 1
+                    rate_limit_waited += delay
+                else:
+                    exhausted = attempt >= self._max_retries
+                    attempt += 1
+
+                if exhausted:
+                    if request_details and isinstance(error, HttpError):
+                        self._log_api_response(
+                            error.resp.status, request_details, None, channel_context
+                        )
+                    log_with_context(
+                        logging.ERROR,
+                        f"Max retries reached. Last error: {error}",
+                        **log_kwargs,
+                    )
+                    raise error
+
+                self._log_retry(error, delay, log_kwargs)
+                time.sleep(delay)
 
         return wrapper
 
