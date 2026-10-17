@@ -68,6 +68,10 @@ MARKUP_SYNTAX = "MARKUP_SYNTAX_CHAT"
 # reader; there is no "editor".
 DRIVE_ROLE_WRITER = "writer"
 DRIVE_ROLE_READER = "reader"
+# appProperties keys that tag uploads with their Slack origin, so a re-run
+# can find an already-uploaded file without downloading it again.
+DRIVE_APP_PROPERTY_SLACK_FILE_ID = "slackFileId"
+DRIVE_APP_PROPERTY_SLACK_CHANNEL = "slackChannel"
 
 # --- Membership Time Offsets ---
 DEFAULT_FALLBACK_JOIN_TIME = "2020-01-01T00:00:00Z"

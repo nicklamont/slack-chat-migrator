@@ -282,3 +282,158 @@ class TestContentType:
         media = handler.chat_service.upload_media.call_args.kwargs["media_body"]
         assert media.mimetype() == "image/png"
         assert fake.count("files.create") == 0
+
+
+# ---------------------------------------------------------------------------
+# Dedup scoping (I11) and re-runs (P3)
+# ---------------------------------------------------------------------------
+
+
+def folder_of(handler, channel):
+    """Drive folder ID FileHandler uses for *channel*."""
+    return handler._resolve_upload_folder(channel, "lookup")
+
+
+class TestDedupScope:
+    def test_identical_bytes_get_one_file_per_channel_folder(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+
+        f1 = upload(
+            handler,
+            downloads,
+            "private-hr",
+            "F1",
+            "UA",
+            b"salary bands",
+            name="bands.pdf",
+        )
+        f2 = upload(
+            handler,
+            downloads,
+            "private-hr",
+            "F2",
+            "UA",
+            b"salary bands",
+            name="bands-v2.pdf",
+        )
+        f3 = upload(
+            handler,
+            downloads,
+            "general",
+            "F3",
+            "UB",
+            b"salary bands",
+            name="handbook.pdf",
+        )
+
+        assert f1.drive_id == f2.drive_id  # same-folder dedup still works
+        assert f3.drive_id != f1.drive_id
+        assert fake.files_db[f3.drive_id]["parents"] == [folder_of(handler, "general")]
+        assert fake.files_db[f3.drive_id]["name"] == "handbook.pdf"
+
+    def test_same_slack_file_in_two_channels(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+
+        a = upload(handler, downloads, "chan-a", "F1", "UA", b"shared")
+        b = upload(handler, downloads, "chan-b", "F1", "UB", b"shared")
+
+        assert b.cached is False
+        assert a.drive_id != b.drive_id
+        assert fake.files_db[b.drive_id]["parents"] == [folder_of(handler, "chan-b")]
+        again = upload(handler, downloads, "chan-b", "F1", "UB", b"shared")
+        assert again.cached is True
+        assert again.drive_id == b.drive_id
+
+    def test_direct_upload_ref_is_not_reused_across_spaces(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        handler.chat_service.upload_media.side_effect = [
+            {"attachmentDataRef": {"resourceName": "AAA-ref"}},
+            {"attachmentDataRef": {"resourceName": "BBB-ref"}},
+        ]
+
+        a = upload(
+            handler,
+            downloads,
+            "c",
+            "F1",
+            "UA",
+            b"\x89PNG",
+            name="p.png",
+            mime="image/png",
+            space="spaces/AAA",
+        )
+        b = upload(
+            handler,
+            downloads,
+            "c",
+            "F1",
+            "UA",
+            b"\x89PNG",
+            name="p.png",
+            mime="image/png",
+            space="spaces/BBB",
+        )
+
+        assert handler.chat_service.upload_media.call_count == 2
+        assert a.attachment_ref["attachmentDataRef"]["resourceName"] == "AAA-ref"
+        assert b.attachment_ref["attachmentDataRef"]["resourceName"] == "BBB-ref"
+
+    def test_rerun_never_links_across_folders(self, tmp_path, downloads):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        offer = upload(
+            run1, downloads, "private", "F1", "UA", b"offer letter", name="offer.pdf"
+        )
+
+        run2 = make_handler(fake, tmp_path)
+        handbook = upload(
+            run2, downloads, "general", "F2", "UB", b"offer letter", name="handbook.pdf"
+        )
+
+        assert handbook.drive_id != offer.drive_id
+        assert fake.files_db[handbook.drive_id]["parents"] == [
+            folder_of(run2, "general")
+        ]
+
+    def test_new_uploads_feed_the_hash_cache(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F6", "UA", b"bytes")
+        fake.calls.clear()
+
+        dup = upload(handler, downloads, "c", "F7", "UA", b"bytes")
+
+        assert dup.metadata["reused"] is True
+        md5_searches = [
+            kw
+            for name, kw in fake.calls
+            if name == "files.list" and "md5Checksum" in kw.get("q", "")
+        ]
+        assert md5_searches == []
+        assert fake.count("files.create") == 0
+
+
+class TestRerun:
+    def test_unchanged_export_needs_no_downloads(self, tmp_path, downloads):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        first = upload(run1, downloads, "general", "F1", "UA", b"report body")
+        assert downloads.calls == ["F1"]
+        record = fake.files_db[first.drive_id]
+        assert record["appProperties"] == {
+            "slackFileId": "F1",
+            "slackChannel": "general",
+        }
+
+        run2 = make_handler(fake, tmp_path)
+        fake.calls.clear()
+        again = upload(run2, downloads, "general", "F1", "UA", b"report body")
+
+        assert downloads.calls == ["F1"]  # nothing downloaded in run 2
+        assert again.drive_id == first.drive_id
+        assert again.metadata["source"] == "slack_id"
+        assert fake.count("files.create") == 0
+        assert fake.count("permissions.create") == 0

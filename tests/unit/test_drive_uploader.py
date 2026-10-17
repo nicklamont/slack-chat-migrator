@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from googleapiclient.errors import HttpError
-from httplib2 import Response
 
 from slack_chat_migrator.constants import DRIVE_UPLOAD_CHUNK_BYTES
 from slack_chat_migrator.services.drive.drive_uploader import (
@@ -140,15 +139,18 @@ class TestPreCacheFolderFileHashes:
         count = uploader.pre_cache_folder_file_hashes("folder1")
 
         assert count == 2
-        assert uploader.file_hash_cache["abc123"] == (
+        assert uploader.file_hash_cache[("folder1", "abc123")] == (
             "file1",
             "https://link1",
         )
-        assert uploader.file_hash_cache["def456"] == (
+        assert uploader.file_hash_cache[("folder1", "def456")] == (
             "file2",
             "https://link2",
         )
         assert "folder1" in uploader.folders_pre_cached
+        kwargs = uploader.drive_service.list_files.call_args.kwargs
+        assert "appProperties" in kwargs["fields"]
+        assert "trashed=false" in kwargs["q"]
 
     def test_handles_pagination(self):
         """Handles nextPageToken for multi-page results."""
@@ -233,23 +235,39 @@ class TestFindFileByHash:
     """Tests for _find_file_by_hash."""
 
     def test_file_found_in_cache(self):
-        """File found in cache returns (file_id, web_link)."""
+        """A cache hit is trusted: no files.get round trip (P3)."""
         uploader = _make_uploader()
-        uploader.file_hash_cache["abc123"] = (
+        uploader.file_hash_cache[("folder1", "abc123")] = (
             "cached_id",
             "https://cached_link",
         )
 
-        # Mock the verification call
-        uploader.drive_service.get_file.return_value = {
-            "id": "cached_id",
-            "webViewLink": "https://verified_link",
-        }
-
         file_id, link = uploader._find_file_by_hash("abc123", "test.txt", "folder1")
 
         assert file_id == "cached_id"
-        assert link == "https://verified_link"
+        assert link == "https://cached_link"
+        uploader.drive_service.get_file.assert_not_called()
+        uploader.drive_service.list_files.assert_not_called()
+
+    def test_cache_hit_in_other_folder_is_ignored(self):
+        """Identical content in another channel's folder is never linked (I11)."""
+        uploader = _make_uploader()
+        uploader.file_hash_cache[("private_folder", "abc123")] = ("f1", "l1")
+        uploader.folders_pre_cached.update({"private_folder", "general_folder"})
+
+        assert uploader._find_file_by_hash("abc123", "a", "general_folder") == (
+            None,
+            None,
+        )
+        uploader.drive_service.list_files.assert_not_called()
+
+    def test_pre_cached_folder_needs_no_search(self):
+        """Once a folder is pre-cached, a miss costs no md5 files.list (P3)."""
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+
+        assert uploader._find_file_by_hash("h", "a", "folder1") == (None, None)
+        uploader.drive_service.list_files.assert_not_called()
 
     def test_file_not_in_cache_or_drive(self):
         """File not in cache and not found returns (None, None)."""
@@ -282,11 +300,14 @@ class TestFindFileByHash:
 
         assert file_id == "found_id"
         assert link == "https://found_link"
-        # Verify it was cached
-        assert uploader.file_hash_cache["new_hash"] == (
+        # Verify it was cached for this folder only
+        assert uploader.file_hash_cache[("folder1", "new_hash")] == (
             "found_id",
             "https://found_link",
         )
+        query = uploader.drive_service.list_files.call_args.kwargs["q"]
+        assert "'folder1' in parents" in query
+        assert "trashed=false" in query
 
     def test_http_error_returns_none(self):
         """HttpError during search returns (None, None)."""
@@ -363,21 +384,15 @@ class TestUploadFileToDrive:
         file_hash = hashlib.md5(content).hexdigest()  # noqa: S324
 
         # Pre-populate cache with matching hash
-        uploader.file_hash_cache[file_hash] = (
+        uploader.file_hash_cache[("folder1", file_hash)] = (
             "existing_id",
             "https://existing_link",
         )
 
-        # Verification call for _find_file_by_hash
-        uploader.drive_service.get_file.return_value = {
-            "id": "existing_id",
-            "webViewLink": "https://existing_link",
-        }
-
         upload = uploader.upload_file_to_drive(str(test_file), "dup.txt", "folder1")
 
         assert upload == DriveUpload(
-            "existing_id", "https://existing_link", reused=True
+            "existing_id", "https://existing_link", reused=True, source="hash"
         )
         # create should NOT have been called
         uploader.drive_service.create_file.assert_not_called()
@@ -489,52 +504,7 @@ class TestPreCacheFolderFileHashesSharedDrive:
         count = uploader.pre_cache_folder_file_hashes("folder1")
 
         assert count == 1
-        assert "hash2" in uploader.file_hash_cache
-
-
-class TestFindFileByHashCacheMiss:
-    """Tests for _find_file_by_hash when cached file no longer exists."""
-
-    def test_cached_file_deleted_falls_back_to_search(self):
-        """When cached file verification fails, falls back to API search."""
-        uploader = _make_uploader()
-        uploader.file_hash_cache["hash1"] = ("old_id", "https://old_link")
-
-        # Verification fails (file deleted)
-        uploader.drive_service.get_file.side_effect = HttpError(
-            Response({"status": "404"}), b"File not found"
-        )
-
-        # API search finds the file with new ID
-        uploader.drive_service.list_files.return_value = {
-            "files": [
-                {
-                    "id": "new_id",
-                    "name": "test.txt",
-                    "webViewLink": "https://new_link",
-                }
-            ]
-        }
-
-        file_id, link = uploader._find_file_by_hash("hash1", "test.txt", "folder1")
-
-        assert file_id == "new_id"
-        assert link == "https://new_link"
-        # Old cache entry replaced
-        assert uploader.file_hash_cache["hash1"] == ("new_id", "https://new_link")
-
-    def test_shared_drive_search_params(self):
-        """Shared drive params passed to file search."""
-        uploader = _make_uploader()
-
-        uploader.drive_service.list_files.return_value = {"files": []}
-
-        uploader._find_file_by_hash(
-            "hash1", "test.txt", "folder1", shared_drive_id="sd1"
-        )
-
-        call_kwargs = uploader.drive_service.list_files.call_args
-        assert call_kwargs.kwargs.get("drive_id") == "sd1"
+        assert ("folder1", "hash2") in uploader.file_hash_cache
 
 
 class TestUploadFileToDriveAdditional:
@@ -640,10 +610,7 @@ class TestResumableUpload:
             fh.truncate(size)  # sparse: no disk or memory cost
 
         chunk = DRIVE_UPLOAD_CHUNK_BYTES
-        responses = [
-            ({"status": "200"}, b'{"files": []}'),  # md5 duplicate search
-            ({"status": "200", "location": "https://upload.example/s"}, b""),
-        ]
+        responses = [({"status": "200", "location": "https://upload.example/s"}, b"")]
         for end in range(chunk, size, chunk):
             responses.append(({"status": "308", "range": f"bytes=0-{end - 1}"}, b""))
         responses.append(
@@ -671,3 +638,67 @@ class TestResumableUpload:
         assert upload.file_id == "BIG"
         assert http._iterable == []  # every chunk was sent
         assert peak < 64 * 1024 * 1024
+
+
+class TestSlackFileIndex:
+    """Uploads are tagged with their Slack file ID and found again (P3)."""
+
+    def test_pre_cache_indexes_app_properties(self):
+        uploader = _make_uploader()
+        uploader.drive_service.list_files.return_value = {
+            "files": [
+                {
+                    "id": "doc1",
+                    "webViewLink": "https://doc",
+                    "appProperties": {"slackFileId": "F1", "slackChannel": "c"},
+                },
+            ]
+        }
+
+        assert uploader.pre_cache_folder_file_hashes("folder1") == 1
+        found = uploader.find_uploaded_slack_file("folder1", "F1")
+        assert found == DriveUpload(
+            "doc1", "https://doc", reused=True, source="slack_id"
+        )
+        assert uploader.find_uploaded_slack_file("other_folder", "F1") is None
+
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_upload_is_tagged_and_remembered(self, mock_media_cls, tmp_path):
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        test_file = tmp_path / "a.pdf"
+        test_file.write_bytes(b"pdf")
+        uploader.drive_service.create_file.return_value = {
+            "id": "new",
+            "webViewLink": "l",
+        }
+
+        uploader.upload_file_to_drive(
+            str(test_file),
+            "a.pdf",
+            "folder1",
+            file_hash="h1",
+            slack_file_id="F9",
+            channel="general",
+        )
+
+        body = uploader.drive_service.create_file.call_args.kwargs["body"]
+        assert body["appProperties"] == {"slackFileId": "F9", "slackChannel": "general"}
+        assert uploader.file_hash_cache[("folder1", "h1")] == ("new", "l")
+        assert uploader.find_uploaded_slack_file("folder1", "F9").file_id == "new"
+
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_known_slack_file_is_not_uploaded_again(self, mock_media_cls, tmp_path):
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        uploader.remember_file("folder1", "old", "l", slack_file_id="F9")
+        test_file = tmp_path / "a.pdf"
+        test_file.write_bytes(b"pdf")
+
+        upload = uploader.upload_file_to_drive(
+            str(test_file), "a.pdf", "folder1", file_hash="h1", slack_file_id="F9"
+        )
+
+        assert upload.file_id == "old"
+        assert upload.source == "slack_id"
+        uploader.drive_service.create_file.assert_not_called()

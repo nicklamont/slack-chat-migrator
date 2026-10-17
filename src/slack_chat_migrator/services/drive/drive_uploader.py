@@ -8,7 +8,7 @@ import hashlib
 import logging
 import mimetypes
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from slack_chat_migrator.services.drive_adapter import DriveAdapter
@@ -19,6 +19,9 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from slack_chat_migrator.constants import (
+    DRIVE_APP_PROPERTY_SLACK_CHANNEL,
+    DRIVE_APP_PROPERTY_SLACK_FILE_ID,
+    DRIVE_FILES_PAGE_SIZE,
     DRIVE_ROLE_WRITER,
     DRIVE_UPLOAD_CHUNK_BYTES,
     FILE_READ_CHUNK_BYTES,
@@ -31,6 +34,12 @@ from slack_chat_migrator.utils.logging import (
 logger = logging.getLogger("slack_chat_migrator")
 
 
+#: Where a DriveUpload came from.
+SOURCE_NEW = "new"  # uploaded now
+SOURCE_HASH = "hash"  # identical content already in the folder
+SOURCE_SLACK_ID = "slack_id"  # this Slack file, uploaded by an earlier run
+
+
 @dataclass
 class DriveUpload:
     """A Drive file holding an attachment.
@@ -41,11 +50,17 @@ class DriveUpload:
         reused: True when an existing Drive file was linked instead of
             uploading a new one.  Ownership is never transferred for
             reused files.
+        source: One of ``SOURCE_NEW``, ``SOURCE_HASH`` or ``SOURCE_SLACK_ID``.
     """
 
     file_id: str
     url: str | None = None
     reused: bool = False
+    source: str = SOURCE_NEW
+
+
+#: Cached Drive file: (file_id, webViewLink).
+_CachedFile = tuple[str, Optional[str]]
 
 
 class DriveFileUploader:
@@ -64,7 +79,12 @@ class DriveFileUploader:
         """
         self.drive_service = drive_service
         self.workspace_domain = workspace_domain
-        self.file_hash_cache: dict[str, tuple[str | None, str | None]] = {}
+        # Every cache is scoped to a folder: content found in one channel's
+        # folder is never linked from another channel.
+        # (folder_id, md5) -> file
+        self.file_hash_cache: dict[tuple[str, str], _CachedFile] = {}
+        # (folder_id, Slack file ID) -> file, from the appProperties tag
+        self.slack_file_cache: dict[tuple[str, str], _CachedFile] = {}
         self.folders_pre_cached: set[str] = set()
         # Set by FileHandler before each channel is processed
         self.current_channel: str | None = None
@@ -88,14 +108,38 @@ class DriveFileUploader:
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
 
+    def remember_file(
+        self,
+        folder_id: str,
+        file_id: str,
+        url: str | None,
+        *,
+        md5: str | None = None,
+        slack_file_id: str | None = None,
+    ) -> None:
+        """Record a Drive file in the folder-scoped caches.
+
+        Args:
+            folder_id: Folder holding the file.
+            file_id: Drive file ID.
+            url: The file's ``webViewLink``.
+            md5: Content MD5, if known (converted Google files have none).
+            slack_file_id: Slack file ID the upload was tagged with.
+        """
+        entry: _CachedFile = (file_id, url)
+        if md5:
+            self.file_hash_cache.setdefault((folder_id, md5), entry)
+        if slack_file_id:
+            self.slack_file_cache.setdefault((folder_id, slack_file_id), entry)
+
     def pre_cache_folder_file_hashes(
         self, folder_id: str, shared_drive_id: str | None = None
     ) -> int:
-        """Pre-cache MD5 hashes of all files in a folder.
+        """Load a folder's files into the folder-scoped caches.
 
-        This method queries all files in the specified folder and caches their
-        MD5 hashes to avoid duplicate uploads later. This is especially useful
-        for large migrations with many potential duplicate files.
+        Indexes each file by MD5 and by the Slack file ID in its
+        ``appProperties``, so later uploads into the folder need no search
+        and re-runs can link files without downloading them again.
 
         Args:
             folder_id: ID of the folder to cache files from
@@ -106,11 +150,6 @@ class DriveFileUploader:
         """
         # Skip if already pre-cached this folder
         if folder_id in self.folders_pre_cached:
-            log_with_context(
-                logging.DEBUG,
-                f"Folder {folder_id} already pre-cached, skipping",
-                channel=self._get_current_channel(),
-            )
             return 0
 
         try:
@@ -129,8 +168,9 @@ class DriveFileUploader:
                 # Build list_files call with explicit keyword args
                 list_kwargs: dict[str, Any] = {
                     "q": query,
-                    "fields": "nextPageToken, files(id, name, md5Checksum, webViewLink)",
-                    "page_size": 1000,  # Maximum allowed page size
+                    "fields": "nextPageToken, files(id, name, md5Checksum,"
+                    " webViewLink, appProperties)",
+                    "page_size": DRIVE_FILES_PAGE_SIZE,
                 }
 
                 if page_token:
@@ -149,15 +189,22 @@ class DriveFileUploader:
                     )
 
                 response = self.drive_service.list_files(**list_kwargs)
-                files = response.get("files", [])
 
-                for file in files:
+                for file in response.get("files", []):
                     file_id = file.get("id")
-                    file_hash = file.get("md5Checksum")
-                    web_view_link = file.get("webViewLink")
-
-                    if file_hash and file_id and web_view_link:
-                        self.file_hash_cache[file_hash] = (file_id, web_view_link)
+                    if not file_id:
+                        continue
+                    app_properties = file.get("appProperties") or {}
+                    slack_file_id = app_properties.get(DRIVE_APP_PROPERTY_SLACK_FILE_ID)
+                    md5 = file.get("md5Checksum")
+                    if md5 or slack_file_id:
+                        self.remember_file(
+                            folder_id,
+                            file_id,
+                            file.get("webViewLink"),
+                            md5=md5,
+                            slack_file_id=slack_file_id,
+                        )
                         files_cached += 1
 
                 page_token = response.get("nextPageToken")
@@ -180,6 +227,25 @@ class DriveFileUploader:
             )
             return 0
 
+    def find_uploaded_slack_file(
+        self, folder_id: str, slack_file_id: str
+    ) -> DriveUpload | None:
+        """Find a Slack file that an earlier run uploaded into *folder_id*.
+
+        Only the folder cache is consulted, so pre-cache the folder first.
+
+        Args:
+            folder_id: Target folder.
+            slack_file_id: Slack file ID.
+
+        Returns:
+            The existing upload (``source == SOURCE_SLACK_ID``), or None.
+        """
+        cached = self.slack_file_cache.get((folder_id, slack_file_id))
+        if cached is None:
+            return None
+        return DriveUpload(cached[0], cached[1], reused=True, source=SOURCE_SLACK_ID)
+
     def _find_file_by_hash(
         self,
         file_hash: str,
@@ -187,7 +253,10 @@ class DriveFileUploader:
         folder_id: str,
         shared_drive_id: str | None = None,
     ) -> tuple[str | None, str | None]:
-        """Find a file in Drive by its MD5 hash.
+        """Find a file with this MD5 in *folder_id*.
+
+        The folder cache is trusted.  Drive is searched only when the folder
+        could not be pre-cached.
 
         Args:
             file_hash: MD5 hash of the file
@@ -198,45 +267,24 @@ class DriveFileUploader:
         Returns:
             Tuple of (file_id, webViewLink) if found, (None, None) otherwise
         """
+        cached = self.file_hash_cache.get((folder_id, file_hash))
+        if cached is not None:
+            log_with_context(
+                logging.DEBUG,
+                f"Found cached file ID for hash {file_hash}: {cached[0]}",
+                channel=self._get_current_channel(),
+            )
+            return cached
+        if folder_id in self.folders_pre_cached:
+            return None, None
+
         try:
-            # Check if we've seen this hash before in our cache
-            if file_hash in self.file_hash_cache:
-                cached_id, _cached_url = self.file_hash_cache[file_hash]
-
-                if cached_id is None:
-                    self.file_hash_cache.pop(file_hash, None)
-                else:
-                    log_with_context(
-                        logging.DEBUG,
-                        f"Found cached file ID for hash {file_hash}: {cached_id}",
-                        channel=self._get_current_channel(),
-                    )
-
-                    # Verify the file still exists
-                    try:
-                        file = self.drive_service.get_file(
-                            file_id=cached_id,
-                            fields="id,webViewLink",
-                            supports_all_drives=bool(shared_drive_id),
-                        )
-                        return cached_id, file.get("webViewLink")
-                    except HttpError:
-                        logger.debug(
-                            "Cached file %s may have been deleted",
-                            cached_id,
-                            exc_info=True,
-                        )
-                        # File might have been deleted, continue with search
-                        self.file_hash_cache.pop(file_hash, None)
-
-            # Search for files with matching MD5 hash in the folder
             safe_hash = escape_drive_query_value(file_hash)
-            query = f"md5Checksum='{safe_hash}' and trashed=false"
-
-            # Add folder constraint if specified
-            if folder_id:
-                safe_folder_id = escape_drive_query_value(folder_id)
-                query += f" and '{safe_folder_id}' in parents"
+            safe_folder_id = escape_drive_query_value(folder_id)
+            query = (
+                f"md5Checksum='{safe_hash}' and '{safe_folder_id}' in parents"
+                " and trashed=false"
+            )
 
             log_with_context(
                 logging.DEBUG,
@@ -265,12 +313,10 @@ class DriveFileUploader:
             response = self.drive_service.list_files(**search_kwargs)
 
             files = response.get("files", [])
-            if files:
-                file_id = files[0].get("id")
+            if files and files[0].get("id"):
+                file_id = files[0]["id"]
                 web_view_link = files[0].get("webViewLink")
-
-                # Cache the result for future lookups
-                self.file_hash_cache[file_hash] = (file_id, web_view_link)
+                self.remember_file(folder_id, file_id, web_view_link, md5=file_hash)
 
                 log_with_context(
                     logging.DEBUG,
@@ -298,6 +344,8 @@ class DriveFileUploader:
         *,
         mime_type: str | None = None,
         file_hash: str | None = None,
+        slack_file_id: str | None = None,
+        channel: str | None = None,
     ) -> DriveUpload | None:
         """Upload a file to Google Drive, or reuse an identical one.
 
@@ -317,6 +365,9 @@ class DriveFileUploader:
                 file name when omitted
             file_hash: MD5 of the content, if already known; computed from
                 the file otherwise
+            slack_file_id: Slack file ID, stored in ``appProperties`` so a
+                re-run can find the upload without downloading the file
+            channel: Slack channel, stored in ``appProperties`` for reference
 
         Returns:
             The DriveUpload, or None if the upload failed
@@ -340,19 +391,26 @@ class DriveFileUploader:
             if folder_id not in self.folders_pre_cached:
                 self.pre_cache_folder_file_hashes(folder_id, shared_drive_id)
 
-            # Check if this file already exists in Drive by its hash
+            if slack_file_id:
+                existing = self.find_uploaded_slack_file(folder_id, slack_file_id)
+                if existing is not None:
+                    return existing
+
+            # Check if this file already exists in the folder by its hash
             existing_file_id, existing_url = self._find_file_by_hash(
                 file_hash, filename, folder_id, shared_drive_id
             )
 
             # If the file already exists, reuse it instead of uploading again
-            if existing_file_id and existing_url:
+            if existing_file_id:
                 log_with_context(
                     logging.DEBUG,
                     f"Reusing existing file with same hash: {filename} (ID: {existing_file_id})",
                     channel=self._get_current_channel(),
                 )
-                return DriveUpload(existing_file_id, existing_url, reused=True)
+                return DriveUpload(
+                    existing_file_id, existing_url, reused=True, source=SOURCE_HASH
+                )
 
             # File doesn't exist yet, proceed with upload
             log_with_context(
@@ -361,7 +419,12 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            file_metadata = {"name": filename, "parents": [folder_id]}
+            file_metadata: dict[str, Any] = {"name": filename, "parents": [folder_id]}
+            if slack_file_id:
+                app_properties = {DRIVE_APP_PROPERTY_SLACK_FILE_ID: slack_file_id}
+                if channel:
+                    app_properties[DRIVE_APP_PROPERTY_SLACK_CHANNEL] = channel
+                file_metadata["appProperties"] = app_properties
 
             media = MediaFileUpload(
                 file_path,
@@ -381,6 +444,10 @@ class DriveFileUploader:
             file_id = file.get("id")
             if not file_id:
                 return None
+            url = file.get("webViewLink")
+            self.remember_file(
+                folder_id, file_id, url, md5=file_hash, slack_file_id=slack_file_id
+            )
 
             log_with_context(
                 logging.DEBUG,
@@ -388,7 +455,7 @@ class DriveFileUploader:
                 channel=self._get_current_channel(),
             )
 
-            return DriveUpload(file_id, file.get("webViewLink"))
+            return DriveUpload(file_id, url)
 
         except HttpError as e:
             log_with_context(

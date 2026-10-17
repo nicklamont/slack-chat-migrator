@@ -21,11 +21,13 @@ from slack_chat_migrator.services.drive import (
     FolderManager,
     SharedDriveManager,
 )
+from slack_chat_migrator.services.drive.drive_uploader import SOURCE_SLACK_ID
 from slack_chat_migrator.services.files.file_download import (
     DownloadResult,
     DownloadStatus,
     create_drive_reference,
     download_file,
+    expected_size,
     google_link_status,
     unavailable_reason,
 )
@@ -102,8 +104,10 @@ class FileHandler:
         self.state = state
         self.dry_run = dry_run
 
-        # Initialize the dictionary to track processed files
-        self.processed_files: dict[str, Any] = {}
+        # Results by (Slack file ID, channel, space).  A file shared to
+        # several channels gets its own upload in each channel's folder, and
+        # a direct Chat upload (bound to one space) is never reused elsewhere.
+        self.processed_files: dict[tuple[str, str, str], UploadResult] = {}
 
         # (drive_file_id, email) pairs that already received writer access
         self._granted_posters: set[tuple[str, str]] = set()
@@ -353,14 +357,15 @@ class FileHandler:
                 file_id=file_id,
             )
 
-            found, cached = self._check_attachment_cache(file_id, name, channel)
-            if found and cached is not None:
+            cache_key = self._processed_key(file_id, channel, space)
+            cached = self._check_attachment_cache(cache_key, name, channel)
+            if cached is not None:
                 return dataclasses.replace(cached, cached=True)
 
             result = self.process_file(
                 file_obj, channel, space, user_service, sender_email
             )
-            self._record_result(file_id, result)
+            self._record_result(cache_key, result)
             return result
 
         except (HttpError, requests.RequestException, OSError) as e:
@@ -401,6 +406,15 @@ class FileHandler:
         file_id = file_obj.get("id") or "unknown"
         name = file_obj.get("name") or f"file_{file_id}"
 
+        # A Drive-bound file that an earlier run already uploaded into this
+        # channel's folder is linked again without downloading it.
+        folder_id: str | None = None
+        if self._is_drive_bound(file_obj, space):
+            folder_id = self._resolve_upload_folder(channel, file_id)
+            existing = self._find_existing_upload(file_obj, folder_id, name)
+            if existing is not None:
+                return existing
+
         download = self._download_file(file_obj)
         try:
             outcome = self._handle_download_outcome(
@@ -436,6 +450,7 @@ class FileHandler:
                 file_id,
                 name,
                 file_hash=download.md5,
+                folder_id=folder_id,
             )
             if drive_result:
                 return drive_result
@@ -467,13 +482,65 @@ class FileHandler:
             if user_email and self.user_resolver.is_external_user(user_email):
                 self._increment_stat("external_user_files")
 
-    def _record_result(self, file_id: str, result: UploadResult) -> None:
+    @staticmethod
+    def _processed_key(
+        file_id: str, channel: str | None, space: str | None
+    ) -> tuple[str, str, str]:
+        """Key for :attr:`processed_files`: the file in this channel and space."""
+        return (file_id, channel or "", space or "")
+
+    def _is_drive_bound(self, file_obj: dict[str, Any], space: str | None) -> bool:
+        """Whether the file will go to Drive (judged from Slack's metadata).
+
+        Small images may go straight to Chat; everything else, including
+        files whose download would be skipped, is Drive-bound only if it
+        needs downloading.
+        """
+        if google_link_status(file_obj) or unavailable_reason(file_obj):
+            return False
+        mime_type = file_obj.get("mimetype")
+        size = expected_size(file_obj)
+        direct_candidate = (
+            space is not None
+            and mime_type in self.DIRECT_UPLOAD_MIME_TYPES
+            and (size is None or size <= DIRECT_UPLOAD_MAX_BYTES)
+        )
+        return not direct_candidate
+
+    def _find_existing_upload(
+        self, file_obj: dict[str, Any], folder_id: str | None, name: str
+    ) -> UploadResult | None:
+        """Return the Drive upload of this Slack file made by an earlier run."""
+        file_id = file_obj.get("id")
+        if not folder_id or not file_id:
+            return None
+        existing = self.drive_uploader.find_uploaded_slack_file(folder_id, file_id)
+        if existing is None:
+            return None
+        log_with_context(
+            logging.DEBUG,
+            f"File {name} was uploaded by an earlier run; linking it without"
+            " downloading",
+            file_id=file_id,
+            drive_file_id=existing.file_id,
+        )
+        return UploadResult(
+            upload_type="drive",
+            url=existing.url
+            or f"https://drive.google.com/file/d/{existing.file_id}/view",
+            drive_id=existing.file_id,
+            name=name,
+            mime_type=file_obj.get("mimetype"),
+            metadata={"reused": True, "source": existing.source},
+        )
+
+    def _record_result(self, key: tuple[str, str, str], result: UploadResult) -> None:
         """Count a fresh result and cache it unless it is a retryable error."""
         if result.success:
-            key = (
+            stat = (
                 "direct_uploads" if result.upload_type == "direct" else "drive_uploads"
             )
-            self._increment_stat(key)
+            self._increment_stat(stat)
         elif result.skipped:
             if result.skip_reason == SKIP_REASON_UNAVAILABLE:
                 self._increment_stat("unavailable_files")
@@ -482,25 +549,21 @@ class FileHandler:
         else:
             self._increment_stat("failed_uploads")
             return
-        self.processed_files[file_id] = result
+        self.processed_files[key] = result
 
     def _check_attachment_cache(
-        self, file_id: str, name: str, channel: str | None
-    ) -> tuple[bool, UploadResult | None]:
-        """Check if this file was already processed.
-
-        Returns (found, cached_result). If found is False, cached_result is None.
-        """
-        if file_id in self.processed_files:
-            cached_result: UploadResult | None = self.processed_files[file_id]
+        self, key: tuple[str, str, str], name: str, channel: str | None
+    ) -> UploadResult | None:
+        """Return the result of processing this file here before, if any."""
+        cached_result = self.processed_files.get(key)
+        if cached_result is not None:
             log_with_context(
                 logging.DEBUG,
                 f"File {name} already processed, using cached result",
                 channel=channel,
-                file_id=file_id,
+                file_id=key[0],
             )
-            return True, cached_result
-        return False, None
+        return cached_result
 
     def _handle_download_outcome(
         self,
@@ -641,6 +704,7 @@ class FileHandler:
         file_id: str,
         name: str,
         file_hash: str | None = None,
+        folder_id: str | None = None,
     ) -> UploadResult | None:
         """Upload file to Google Drive."""
         log_with_context(
@@ -651,7 +715,12 @@ class FileHandler:
         )
 
         drive_result = self._upload_to_drive(
-            file_obj, file_path, channel, sender_email, file_hash=file_hash
+            file_obj,
+            file_path,
+            channel,
+            sender_email,
+            file_hash=file_hash,
+            folder_id=folder_id,
         )
         if drive_result:
             log_with_context(
@@ -753,6 +822,7 @@ class FileHandler:
         channel: str | None = None,
         sender_email: str | None = None,
         file_hash: str | None = None,
+        folder_id: str | None = None,
     ) -> UploadResult | None:
         """Upload a downloaded file to Google Drive.
 
@@ -763,6 +833,7 @@ class FileHandler:
             sender_email: Email address of the message sender (for permissions handling)
             file_hash: MD5 computed while downloading, so the file isn't
                 read again just to hash it
+            folder_id: Target folder, if already resolved
 
         Returns:
             UploadResult with drive upload details if successful, None otherwise
@@ -783,7 +854,7 @@ class FileHandler:
 
             user_email = self.user_map.get(user_id) if user_id else None
 
-            folder_id = self._resolve_upload_folder(channel, file_id)
+            folder_id = folder_id or self._resolve_upload_folder(channel, file_id)
             if not folder_id:
                 return None
 
@@ -877,6 +948,8 @@ class FileHandler:
             self._shared_drive_id,
             mime_type=mime_type,
             file_hash=file_hash,
+            slack_file_id=None if file_id == "unknown" else file_id,
+            channel=channel,
         )
 
         if upload is None:
@@ -888,9 +961,16 @@ class FileHandler:
             )
             return None
 
-        self._apply_file_permissions(
-            upload.file_id, upload.reused, sender_email, user_email, channel, file_id
-        )
+        if upload.source != SOURCE_SLACK_ID:
+            # An earlier run uploaded this very file and set its permissions.
+            self._apply_file_permissions(
+                upload.file_id,
+                upload.reused,
+                sender_email,
+                user_email,
+                channel,
+                file_id,
+            )
 
         log_with_context(
             logging.DEBUG,
@@ -906,7 +986,7 @@ class FileHandler:
             drive_id=upload.file_id,
             name=name,
             mime_type=mime_type,
-            metadata={"reused": upload.reused},
+            metadata={"reused": upload.reused, "source": upload.source},
         )
 
     def _is_internal_email(self, email: str | None) -> bool:

@@ -283,7 +283,7 @@ class TestUploadStrategy:
         cached = UploadResult(
             upload_type="drive", url="https://example.com", name="a.txt"
         )
-        handler.processed_files["F123"] = cached
+        handler.processed_files[("F123", "", "")] = cached
 
         result = handler.upload_attachment({"id": "F123", "name": "a.txt"})
         assert result.cached is True
@@ -598,7 +598,7 @@ class TestCreateDriveReference:
         result = handler.upload_attachment(file_obj, channel="general")
         assert result.drive_id == "id1"
         assert handler.file_stats["drive_uploads"] == 1
-        assert "F1" in handler.processed_files
+        assert ("F1", "general", "") in handler.processed_files
 
     def test_empty_drive_id_returns_none(self):
         handler = _make_handler()
@@ -1681,7 +1681,7 @@ class TestTempFileLifecycle:
         handler._download_file = MagicMock(return_value=download)
         seen = {}
 
-        def fake_upload(file_obj, path, channel, sender_email, file_hash=None):
+        def fake_upload(file_obj, path, channel, sender_email, **kwargs):
             seen["exists"] = os.path.exists(path)
             return UploadResult(upload_type="drive", drive_id="d1", name="a.pdf")
 
