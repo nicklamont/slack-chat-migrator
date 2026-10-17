@@ -917,6 +917,27 @@ SLACK_FILE_URL = (
 
 
 XOXE_TAIL = "tail9f8e7d"
+
+
+def _console_handler() -> logging.StreamHandler:
+    """The console handler setup_logger added (a StreamHandler, not a file)."""
+    return next(
+        h
+        for h in logging.getLogger("slack_chat_migrator").handlers
+        if type(h) is logging.StreamHandler
+    )
+
+
+def _main_log_handler() -> logging.FileHandler:
+    return next(
+        h
+        for h in logging.getLogger("slack_chat_migrator").handlers
+        if isinstance(h, logging.FileHandler)
+        and h.baseFilename.endswith("migration.log")
+        and "channel_logs" not in h.baseFilename
+    )
+
+
 XOXE_URL = f"https://files.slack.com/files-pri/T1-F1/a.pdf?t=xoxe-1-{XOXE_TAIL}"
 
 
@@ -996,7 +1017,7 @@ class TestSlackTokenRedaction:
 
         setup_logger(output_dir=str(tmp_path))
         stream = io.StringIO()
-        logging.getLogger("slack_chat_migrator").handlers[0].setStream(stream)
+        _console_handler().setStream(stream)
         channel_handler = setup_channel_logger(str(tmp_path), "general")
         log_with_context(
             logging.ERROR,
@@ -1066,7 +1087,8 @@ class TestSlackTokenRedaction:
         message = self._filtered("download failed for %s", (XOXE_URL, "extra"), 42)
         assert XOXE_TAIL not in message
         assert "download failed for https://files.slack.com/" in message
-        assert "?t=[REDACTED] [" in message  # the marker's bracket survives
+        # The redacted value ends at the space before the marker.
+        assert "?t=[REDACTED] [" in message
         assert f"[TypeError at {__file__}:42: not all arguments converted" in message
         assert message.endswith("; unused arguments: <str>]")
         assert "extra" not in message
@@ -1147,6 +1169,15 @@ class TestSlackTokenRedaction:
         assert "SECRETSTAR" not in message
         assert message.endswith("; unused arguments: <str>]")
 
+    def test_percent_escapes_with_mapping_args(self):
+        message = self._filtered("100%% of %(n)s %(missing)s", ({"n": "files"},))
+        assert message.startswith("100% of files %(missing)s [KeyError at ")
+
+    def test_star_precision_takes_its_own_argument(self):
+        message = self._filtered("%.*s and token=%s", (3, "abcdef", "SECRETP", "x"))
+        assert message.startswith("abcdef and token=[REDACTED] [TypeError at ")
+        assert "SECRETP" not in message
+
     def test_percent_escapes_and_missing_args(self):
         message = self._filtered("100%% of %s and %d", ("files",))
         assert message.startswith("100% of files and %d [TypeError at ")
@@ -1167,11 +1198,11 @@ class TestSlackTokenRedaction:
 
         setup_logger(output_dir=str(tmp_path))
         stream = io.StringIO()
-        logging.getLogger("slack_chat_migrator").handlers[0].setStream(stream)
+        _console_handler().setStream(stream)
         logging.getLogger("slack_chat_migrator").warning(
             "download failed for %s", XOXE_URL, "extra"
         )
-        logging.getLogger("slack_chat_migrator").handlers[1].flush()
+        _main_log_handler().flush()
         err = capsys.readouterr().err
         assert XOXE_TAIL not in err
         assert "--- Logging error ---" not in err
@@ -1185,7 +1216,7 @@ class TestSlackTokenRedaction:
 
         setup_logger(output_dir=str(tmp_path), debug_api=True)
         stream = io.StringIO()
-        console = logging.getLogger("slack_chat_migrator").handlers[0]
+        console = _console_handler()
         console.setStream(stream)
         channel_handler = setup_channel_logger(str(tmp_path), "general", debug_api=True)
         log_with_context(logging.ERROR, f"Failed to download {SLACK_FILE_URL}")
