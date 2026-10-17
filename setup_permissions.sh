@@ -250,6 +250,10 @@ verify_existing_key() {
       fail "Key file '${KEY_FILE}' holds key ${key_id} of ${SERVICE_ACCOUNT_EMAIL}, which is disabled. Enable the key again, or remove the file and run this script again to create a new key."
       ;;
   esac
+  # An expiry that can't be read says nothing about the key: keep the file.
+  if [ -n "${valid_before}" ] && ! [[ "${valid_before}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2} ]]; then
+    fail "Couldn't read the expiry time '${valid_before}' of key ${key_id} of ${SERVICE_ACCOUNT_EMAIL}, so '${KEY_FILE}' couldn't be checked. The file was left unchanged."
+  fi
   # ISO 8601 UTC timestamps compare correctly as strings.
   now=$(date -u +%Y-%m-%dT%H:%M:%S)
   if [ -n "${valid_before}" ] && [[ "${valid_before:0:19}" < "${now}" ]]; then
