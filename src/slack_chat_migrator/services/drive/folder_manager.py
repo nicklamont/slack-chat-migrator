@@ -21,6 +21,7 @@ from slack_chat_migrator.constants import (
 from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_CANDIDATES,
     PermissionChange,
+    http_status,
     is_drive_call_error,
 )
 from slack_chat_migrator.utils.api import escape_drive_query_value
@@ -505,7 +506,7 @@ class FolderManager:
                 supports_all_drives=supports_all_drives,
             )
         except HttpError as e:
-            if not restricted or e.resp.status != HTTP_BAD_REQUEST:
+            if not restricted or http_status(e) != HTTP_BAD_REQUEST:
                 raise
             # Create it open, then restrict it with an update.
             folder_metadata.pop("inheritedPermissionsDisabled")

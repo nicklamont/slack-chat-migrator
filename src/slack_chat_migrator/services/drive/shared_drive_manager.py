@@ -19,6 +19,7 @@ from slack_chat_migrator.core.config import MigrationConfig
 from slack_chat_migrator.exceptions import APIError, ConfigError
 from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_CANDIDATES,
+    http_status,
     is_drive_call_error,
 )
 from slack_chat_migrator.utils.api import escape_drive_query_value, is_rate_limit_error
@@ -40,7 +41,7 @@ def shared_drives_unavailable(error: BaseException) -> bool:
     """
     if not isinstance(error, HttpError) or is_rate_limit_error(error):
         return False
-    return int(getattr(error.resp, "status", 0) or 0) in (
+    return http_status(error) in (
         HTTP_FORBIDDEN,
         HTTP_NOT_FOUND,
     )
@@ -98,7 +99,7 @@ class SharedDriveManager:
             except HttpError as e:
                 raise ConfigError(
                     f"The shared drive configured as shared_drive.id"
-                    f" ({shared_drive_id}) is not accessible (HTTP {e.resp.status})."
+                    f" ({shared_drive_id}) is not accessible (HTTP {http_status(e)})."
                     " Check the ID and that the workspace admin is a member of"
                     " the drive, or remove shared_drive.id to use a drive found"
                     " or created by name."

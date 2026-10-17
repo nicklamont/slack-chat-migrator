@@ -17,6 +17,7 @@ from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_CANDIDATES,
     DRIVE_CALL_ERRORS,
     PermissionChange,
+    http_status,
     is_drive_call_error,
     is_fatal_local_error,
 )
@@ -584,7 +585,7 @@ class DriveFileUploader:
             )
 
         except HttpError as e:
-            status = int(getattr(e.resp, "status", 0) or 0)
+            status = http_status(e)
             return DriveUploadFailure(
                 f"Drive refused the upload: {e}",
                 conversion_failed=bool(target_mime_type)

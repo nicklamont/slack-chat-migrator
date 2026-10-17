@@ -95,6 +95,20 @@ FATAL_LOCAL_ERRNOS: frozenset[int] = frozenset(
 DRIVE_CALL_CANDIDATES: tuple[type[BaseException], ...] = (*DRIVE_CALL_ERRORS, OSError)
 
 
+def http_status(error: BaseException) -> int | None:
+    """The HTTP status of an API error, or None when it has none.
+
+    A ``BatchError`` may have no ``resp``.  Note: stands in for
+    ``utils.api.http_status``, which arrives with the CLI branch; swap the
+    callers over when it does.
+    """
+    status = getattr(getattr(error, "resp", None), "status", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def is_network_error(error: BaseException) -> bool:
     """Whether *error* means the network failed, not the local machine."""
     if isinstance(error, _NETWORK_ERRORS):
@@ -152,7 +166,7 @@ def _retry_individually(error: BaseException) -> bool:
     See :meth:`DriveAdapter.apply_permission_changes` for the rule.
     """
     if isinstance(error, HttpError):
-        status = int(getattr(error.resp, "status", 0) or 0)
+        status = http_status(error) or 0
         return (
             status in (HTTP_FORBIDDEN, HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
             or status >= HTTP_SERVER_ERROR_MIN

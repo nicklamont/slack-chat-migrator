@@ -610,3 +610,21 @@ class TestErrorClassification:
             DriveAdapter(failing).apply_permission_changes(
                 [PermissionChange("F", body={"role": "reader"})]
             )
+
+
+class TestHttpStatus:
+    def test_reads_the_status(self):
+        from googleapiclient.errors import HttpError
+        from httplib2 import Response
+
+        from slack_chat_migrator.services.drive_adapter import http_status
+
+        assert http_status(HttpError(Response({"status": "503"}), b"x")) == 503
+
+    def test_none_without_a_response(self):
+        from googleapiclient.errors import BatchError
+
+        from slack_chat_migrator.services.drive_adapter import http_status
+
+        assert http_status(BatchError("bad batch")) is None
+        assert http_status(ValueError("x")) is None
