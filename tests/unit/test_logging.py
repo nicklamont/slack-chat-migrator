@@ -1033,7 +1033,7 @@ class TestSlackTokenRedaction:
             assert message.startswith(
                 "fetch https://files.slack.com/f/y.png?key=[REDACTED] [TypeError at "
             ), (name, message)
-            assert message.endswith("; unused arguments: extra]"), (name, message)
+            assert message.endswith("; unused arguments: <str>]"), (name, message)
 
     def test_filter_redacts_message_args_and_extras(self):
         record = logging.LogRecord(
@@ -1068,7 +1068,8 @@ class TestSlackTokenRedaction:
         assert "download failed for https://files.slack.com/" in message
         assert "?t=[REDACTED] [" in message  # the marker's bracket survives
         assert f"[TypeError at {__file__}:42: not all arguments converted" in message
-        assert message.endswith("; unused arguments: extra]")
+        assert message.endswith("; unused arguments: <str>]")
+        assert "extra" not in message
 
     @pytest.mark.parametrize(
         ("msg", "args", "secret", "kept"),
@@ -1119,9 +1120,32 @@ class TestSlackTokenRedaction:
         )
         assert XOXE_TAIL not in message
         assert message.startswith("https://files.slack.com/")
-        assert f"[KeyError at {__file__}:7: 'missing'; unused arguments: spare=x]" in (
-            message
+        assert (
+            f"[KeyError at {__file__}:7: 'missing'; unused arguments: spare=<str>]"
+            in message
         )
+
+    @pytest.mark.parametrize(
+        ("msg", "args"),
+        [
+            # A forgotten placeholder separates the value from its prefix.
+            ("Authorization: Bearer", ("ya29.a0SECRETBEARER",)),
+            ("refreshing token=", ("SECRETTOKEN1",)),
+            ("Using API key", ("AIzaSyD-SECRETAPIKEY",)),
+            ("token=%(tok)s", ({"access": "SECRETMAPVAL"},)),
+        ],
+    )
+    def test_unused_arguments_are_shown_by_type_only(self, msg, args):
+        message = self._filtered(msg, args)
+        assert "SECRET" not in message
+        assert "unused arguments: " in message
+        assert "<str>" in message
+
+    def test_star_width_takes_its_own_argument(self):
+        message = self._filtered("%*d items for token=%s", (5, 3, "SECRETSTAR", "x"))
+        assert message.startswith("3 items for token=[REDACTED] [TypeError at ")
+        assert "SECRETSTAR" not in message
+        assert message.endswith("; unused arguments: <str>]")
 
     def test_percent_escapes_and_missing_args(self):
         message = self._filtered("100%% of %s and %d", ("files",))

@@ -83,9 +83,9 @@ def _safe_str(value: Any) -> str:
 
 
 #: One ``%`` placeholder: optional ``(key)``, flags, width, precision, length
-#: modifier and conversion (``%%`` included).
+#: modifier and conversion (``%%`` included).  Groups: key, width, precision.
 _PLACEHOLDER_RE = re.compile(
-    r"%(?:\(([^)]*)\))?[#0 +\-]*(?:\*|\d+)?(?:\.(?:\*|\d+))?[hlL]?"
+    r"%(?:\(([^)]*)\))?[#0 +\-]*(\*|\d+)?(?:\.(\*|\d+))?[hlL]?"
     r"[diouxXeEfFgGcrsa%]"
 )
 
@@ -98,8 +98,11 @@ def _unformattable_message(record: logging.LogRecord, error: Exception) -> str:
     args are put into the format one placeholder at a time, whatever their
     types, *before* sanitising, so a secret that is only recognisable next
     to its prefix (``Bearer %s``, ``token=%s``, ``?t=%s``) is still redacted.
-    Arguments without a placeholder, the exception and the call site go in
-    a trailing marker.
+    The trailing marker names the exception and the call site, and lists
+    arguments without a placeholder by type only (``<str>``, or
+    ``key=<str>`` for mapping arguments): a value with no placeholder has
+    lost its prefix, so a forgotten ``%s`` after ``Bearer`` must not print
+    the token.
 
     Args:
         record: The record whose ``getMessage()`` failed.
@@ -125,7 +128,7 @@ def _unformattable_message(record: logging.LogRecord, error: Exception) -> str:
 
         text = _PLACEHOLDER_RE.sub(substitute, _safe_str(record.msg))
         leftover = [
-            f"{_safe_str(k)}={_safe_str(v)}"
+            f"{_safe_str(k)}=<{type(v).__name__}>"
             for k, v in mapping.items()
             if k not in used
         ]
@@ -135,10 +138,14 @@ def _unformattable_message(record: logging.LogRecord, error: Exception) -> str:
         def substitute(match: re.Match[str]) -> str:
             if match.group(0) == "%%":
                 return "%"
+            # A "*" width or precision takes its own argument first.
+            for _ in range((match.group(2) == "*") + (match.group(3) == "*")):
+                if pending:
+                    pending.pop(0)
             return _safe_str(pending.pop(0)) if pending else match.group(0)
 
         text = _PLACEHOLDER_RE.sub(substitute, _safe_str(record.msg))
-        leftover = [_safe_str(arg) for arg in pending]
+        leftover = [f"<{type(arg).__name__}>" for arg in pending]
 
     marker = f"{type(error).__name__} at {record.pathname}:{record.lineno}"
     detail = _safe_str(error)
