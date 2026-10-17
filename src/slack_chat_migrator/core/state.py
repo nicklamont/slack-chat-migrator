@@ -56,6 +56,9 @@ class MessageState:
     message_id_map: dict[str, str] = field(default_factory=dict)
     failed_messages: list[FailedMessage] = field(default_factory=list)
     failed_messages_by_channel: dict[str, list[str]] = field(default_factory=dict)
+    # channel -> Chat message resource names of messages pinned in Slack;
+    # pins are created after the space leaves import mode.
+    pinned_messages: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -154,6 +157,7 @@ class MigrationState:
         """
         self.spaces.channel_handlers = {}
         self.messages.thread_map = {}
+        self.messages.pinned_messages = {}
         self.progress.migration_summary = _default_migration_summary()
         self.progress.channel_stats = {}
         self.progress.active_users_by_channel = {}
