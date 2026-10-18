@@ -375,6 +375,11 @@ class FileHandler:
             ConfigError: If the configured ``shared_drive.id`` can't be
                 opened.
             DriveQuotaError: If a Drive quota is used up.
+            PermissionCheckError: If the admin can't add files to the
+                shared drive.
+
+        Those three carry their own advice and propagate as they are; only
+        the APIError adds the generic hint.
         """
         self._initialize_drive()
         if not self._drive_status.ready:
@@ -396,6 +401,8 @@ class FileHandler:
                 opened; :attr:`drive_status` stays ``not_initialized``.  (A
                 live run's preflight raises it first.)
             DriveQuotaError: If a Drive quota is used up (likewise).
+            PermissionCheckError: If the admin can't add files to the
+                shared drive (likewise).
         """
         if not self._drive_initialized:
             log_with_context(
@@ -468,6 +475,8 @@ class FileHandler:
             ConfigError: If the configured ``shared_drive.id`` can't be
                 opened.
             DriveQuotaError: If a Drive quota is used up.
+            PermissionCheckError: If the admin can't add files to the
+                shared drive.
         """
         fallback_name = "Imported Slack Attachments"
         try:

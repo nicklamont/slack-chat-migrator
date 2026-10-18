@@ -8,7 +8,12 @@ from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
-from slack_chat_migrator.exceptions import APIError, ConfigError, DriveQuotaError
+from slack_chat_migrator.exceptions import (
+    APIError,
+    ConfigError,
+    DriveQuotaError,
+    PermissionCheckError,
+)
 from slack_chat_migrator.services.drive.shared_drive_manager import (
     SharedDriveManager,
 )
@@ -413,7 +418,9 @@ class TestDriveCapabilities:
         )
         manager = self._manager(fake, name="Att", id="SD1" if configured else None)
 
-        with pytest.raises(APIError, match=r"can't add files to shared drive 'Att'"):
+        with pytest.raises(
+            PermissionCheckError, match=r"can't add files to shared drive 'Att'"
+        ):
             manager.get_or_create_shared_drive()
 
         assert fake.count("drives.create") == 0

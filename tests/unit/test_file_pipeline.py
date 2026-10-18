@@ -17,7 +17,11 @@ from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
-from slack_chat_migrator.exceptions import APIError, DriveQuotaError
+from slack_chat_migrator.exceptions import (
+    APIError,
+    DriveQuotaError,
+    PermissionCheckError,
+)
 from slack_chat_migrator.services.drive.folder_manager import FolderLookup
 from slack_chat_migrator.services.drive.pending import FIXED_APP_PROPERTIES, grant_key
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
@@ -327,7 +331,7 @@ class TestDriveSetup:
         assert fake.count("files.create") == 0  # no My Drive folder made
 
     def test_read_only_shared_drive_stops_the_run(self, tmp_path):
-        """A drive the admin can't add files to is not "ready" (SF-N7)."""
+        """A drive the admin can't add files to is not "ready" (#118)."""
         fake = FakeDrive(
             drives=[
                 {
@@ -340,10 +344,15 @@ class TestDriveSetup:
         handler = make_handler(fake, tmp_path, shared=False)
         handler._drive_status = file_mod.DriveStatus("not_initialized")
 
-        with pytest.raises(APIError, match="can't add files to shared drive"):
+        with pytest.raises(PermissionCheckError) as excinfo:
             handler.ensure_drive_initialized()
 
-        assert handler.drive_status.mode == "none"
+        # Its own advice, without the generic network hint stacked on.
+        message = str(excinfo.value)
+        assert "can't add files to shared drive" in message
+        assert "Make them a Manager or Content manager" in message
+        assert "Check network access" not in message
+        assert handler.drive_status.mode == "not_initialized"
         assert fake.count("files.create") == 0  # no My Drive folder made
 
     def test_account_without_shared_drives_uses_my_drive(self, tmp_path):

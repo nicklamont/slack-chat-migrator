@@ -17,7 +17,12 @@ from slack_chat_migrator.constants import (
     HTTP_NOT_FOUND,
 )
 from slack_chat_migrator.core.config import MigrationConfig
-from slack_chat_migrator.exceptions import APIError, ConfigError, DriveQuotaError
+from slack_chat_migrator.exceptions import (
+    APIError,
+    ConfigError,
+    DriveQuotaError,
+    PermissionCheckError,
+)
 from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_CANDIDATES,
     drive_quota_error,
@@ -106,12 +111,13 @@ class SharedDriveManager:
                 never created in its place.
             DriveQuotaError: For a used-up Drive quota, naming it and the
                 fix.
+            PermissionCheckError: If Drive says the admin can't add files to
+                the drive found or configured (``capabilities.canAddChildren``
+                is false).
             APIError: For any other failure: a network error, credentials
                 that can't be refreshed, a rate limit, a 5xx, or another HTTP
                 error.  The caller must not fall back to another location
-                for these.  Also raised when
-                Drive says the admin can't add files to the drive found or
-                configured (``capabilities.canAddChildren`` is false).
+                for these.
         """
         self.last_error = None
         # Get shared drive configuration
@@ -168,7 +174,7 @@ class SharedDriveManager:
             drive_id: Its ID, for the messages.
 
         Raises:
-            APIError: If ``capabilities.canAddChildren`` is false.
+            PermissionCheckError: If ``capabilities.canAddChildren`` is false.
         """
         capabilities = drive.get("capabilities")
         if not isinstance(capabilities, Mapping):
@@ -181,7 +187,7 @@ class SharedDriveManager:
         name = drive.get("name")
         label = f"{name!r} ({drive_id})" if name else drive_id
         if capabilities.get("canAddChildren") is False:
-            raise APIError(
+            raise PermissionCheckError(
                 f"The workspace admin can't add files to shared drive {label}."
                 " Make them a Manager or Content manager of the drive, or set"
                 " shared_drive.id or shared_drive.name to a drive they can add"
@@ -195,7 +201,8 @@ class SharedDriveManager:
                 logging.WARNING,
                 f"The workspace admin isn't a Manager of shared drive {label},"
                 " and only a Manager can make a folder limited-access: the files"
-                " of private channels, group DMs and DMs will fail to upload."
+                " of private channels, group DMs and DMs whose folder isn't"
+                " limited-access yet will fail to upload."
                 " Make the admin a Manager, or set"
                 " restrict_private_channel_folders: false to accept drive-wide"
                 " visibility.",
