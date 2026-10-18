@@ -563,8 +563,18 @@ class TestErrorClassification:
             ConnectionResetError(errno.ECONNRESET, "reset"),
             TimeoutError("timed out"),
             socket.gaierror(-2, "Name or service not known"),
+            OSError(errno.ENOTCONN, "Transport endpoint is not connected"),
+            OSError(errno.ENOBUFS, "No buffer space available"),
         ],
-        ids=["enetunreach", "ehostunreach", "reset", "timeout", "dns"],
+        ids=[
+            "enetunreach",
+            "ehostunreach",
+            "reset",
+            "timeout",
+            "dns",
+            "enotconn",
+            "enobufs",
+        ],
     )
     def test_network_errors_are_drive_call_errors(self, error):
         from slack_chat_migrator.services.drive_adapter import (
@@ -578,7 +588,14 @@ class TestErrorClassification:
         assert not is_fatal_local_error(error)
 
     @pytest.mark.parametrize(
-        "code", [errno.ENOSPC, errno.EROFS, errno.EMFILE, errno.ENFILE]
+        "code",
+        [
+            errno.ENOSPC,
+            errno.EROFS,
+            errno.EMFILE,
+            errno.ENFILE,
+            *([errno.EDQUOT] if hasattr(errno, "EDQUOT") else []),
+        ],
     )
     def test_local_faults_are_fatal_not_call_errors(self, code):
         from slack_chat_migrator.services.drive_adapter import (
@@ -634,3 +651,72 @@ class TestHttpStatus:
 
         assert http_status(BatchError("bad batch")) is None
         assert http_status(ValueError("x")) is None
+
+
+def _http_error(status, reason=None):
+    from googleapiclient.errors import HttpError
+    from httplib2 import Response
+
+    body = (
+        b'{"error": {"errors": [{"reason": "%s"}]}}' % reason.encode()
+        if reason
+        else b"error"
+    )
+    return HttpError(Response({"status": str(status)}), body)
+
+
+class TestIsTransientError:
+    """is_transient_error decides UploadResult.retryable for Drive failures."""
+
+    @pytest.mark.parametrize(
+        ("error", "transient"),
+        [
+            (_http_error(408), True),
+            (_http_error(429), True),
+            (_http_error(500), True),
+            (_http_error(503), True),
+            (_http_error(403, "userRateLimitExceeded"), True),
+            (_http_error(403, "rateLimitExceeded"), True),
+            (_http_error(403, "insufficientFilePermissions"), False),
+            (_http_error(403), False),
+            (_http_error(404), False),
+            (_http_error(400), False),
+            ("refresh", True),
+            (ConnectionResetError("reset"), True),
+            (OSError(errno.ENETUNREACH, "Network is unreachable"), True),
+            (PermissionError(errno.EACCES, "Permission denied"), False),
+            (OSError(errno.ENOSPC, "No space left on device"), False),
+        ],
+        ids=[
+            "408",
+            "429",
+            "500",
+            "503",
+            "403-user-rate",
+            "403-rate",
+            "403-refused",
+            "403-plain",
+            "404",
+            "400",
+            "refresh",
+            "reset",
+            "enetunreach",
+            "eacces",
+            "enospc",
+        ],
+    )
+    def test_table(self, error, transient):
+        from google.auth.exceptions import RefreshError
+
+        from slack_chat_migrator.services.drive_adapter import is_transient_error
+
+        if error == "refresh":
+            error = RefreshError("invalid_grant")
+        assert is_transient_error(error) is transient
+
+    def test_batch_error_without_a_response_is_permanent(self):
+        from googleapiclient.errors import BatchError
+
+        from slack_chat_migrator.services.drive_adapter import is_transient_error
+
+        assert is_transient_error(BatchError("too many calls")) is False

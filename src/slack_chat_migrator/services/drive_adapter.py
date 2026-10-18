@@ -70,6 +70,8 @@ NETWORK_ERRNOS: frozenset[int] = frozenset(
         errno.ECONNREFUSED,
         errno.ECONNRESET,
         errno.ECONNABORTED,
+        errno.ENOTCONN,
+        errno.ENOBUFS,
         errno.ETIMEDOUT,
         errno.EPIPE,
     }
@@ -132,10 +134,14 @@ def is_transient_error(error: BaseException) -> bool:
     True for network errors (including network-down OSErrors), credentials
     that couldn't be refreshed (a later run with working credentials can
     succeed), and HTTP 408, 429, 5xx and rate-limit 403s.  False for other
-    HTTP errors (400, 404, a 403 that isn't a rate limit) and local errors.
+    HTTP errors (400, 404, a 403 that isn't a rate limit), an HttpError
+    without a response (a ``BatchError`` raised while building a batch) and
+    local errors.
     """
     if isinstance(error, HttpError):
-        status = http_status(error) or 0
+        status = http_status(error)
+        if status is None:
+            return False
         return (
             status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
             or status >= HTTP_SERVER_ERROR_MIN
