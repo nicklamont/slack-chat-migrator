@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -16,7 +17,7 @@ from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
-from slack_chat_migrator.exceptions import APIError
+from slack_chat_migrator.exceptions import APIError, DriveQuotaError
 from slack_chat_migrator.services.drive.folder_manager import FolderLookup
 from slack_chat_migrator.services.drive.pending import FIXED_APP_PROPERTIES, grant_key
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
@@ -34,6 +35,12 @@ USERS = {
     "UX": "ext@other.org",
 }
 DRIVE_NAME = "Imported Slack Attachments"
+
+
+def quota_error(reason: str) -> HttpError:
+    """A Drive 403 whose JSON body names *reason*."""
+    body = json.dumps({"error": {"errors": [{"reason": reason}]}})
+    return HttpError(Response({"status": "403"}), body.encode())
 
 
 class Downloads:
@@ -304,17 +311,16 @@ class TestDriveSetup:
     def test_daily_limit_stops_the_run_without_my_drive(self, tmp_path):
         """dailyLimitExceeded is a project quota, not "no shared drives"."""
         fake = FakeDrive()
-        fake.failing["drives.create"] = HttpError(
-            Response({"status": "403"}),
-            b'{"error": {"errors": [{"reason": "dailyLimitExceeded"}]}}',
-        )
+        fake.failing["drives.create"] = quota_error("dailyLimitExceeded")
         handler = make_handler(fake, tmp_path, shared=False)
         handler._drive_status = file_mod.DriveStatus("not_initialized")
 
-        with pytest.raises(APIError, match=r"quota reached \(dailyLimitExceeded\)"):
+        with pytest.raises(
+            DriveQuotaError, match=r"quota reached \(dailyLimitExceeded\)"
+        ):
             handler.ensure_drive_initialized()
 
-        assert handler.drive_status.mode == "none"
+        assert handler.drive_status.mode == "not_initialized"
         assert fake.count("files.create") == 0  # no My Drive folder made
 
     def test_read_only_shared_drive_stops_the_run(self, tmp_path):
@@ -595,6 +601,89 @@ class TestRetryableFailures:
 
         assert not result.success
         assert result.retryable is retryable
+
+
+class TestQuotaStopsTheRun:
+    """A used-up Drive quota stops the run instead of failing each file (#118)."""
+
+    @pytest.mark.parametrize(
+        ("reason", "fix"),
+        [
+            ("dailyLimitExceeded", "Wait for it to reset"),
+            ("quotaExceeded", "Wait for it to reset"),
+            ("storageQuotaExceeded", "Free space or add storage"),
+            ("teamDriveFileLimitExceeded", "another shared drive"),
+        ],
+    )
+    def test_quota_on_the_upload(self, tmp_path, downloads, reason, fix):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        assert upload(handler, downloads, "c", "F1", "UA", b"one").success
+        fake.failing["files.create"] = quota_error(reason)
+
+        with pytest.raises(DriveQuotaError) as excinfo:
+            upload(handler, downloads, "c", "F2", "UA", b"two")
+
+        assert excinfo.value.reason == reason
+        assert fix in str(excinfo.value)
+        assert "migrate --resume" in str(excinfo.value)
+        # The file in flight isn't marked as failed (or cached as a result).
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 0
+        assert not any(key[0] == "F2" for key in handler.processed_files)
+
+    def test_quota_on_the_channel_folder(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.fail_query = lambda q: (
+            quota_error("dailyLimitExceeded") if "mimeType" in q else None
+        )
+
+        with pytest.raises(DriveQuotaError, match="dailyLimitExceeded"):
+            upload(handler, downloads, "new-channel", "F1", "UA", b"one")
+
+        assert handler.get_file_statistics()["channel_folder_failures"] == 0
+
+    def test_quota_on_the_poster_grant(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = quota_error("dailyLimitExceeded")
+
+        with pytest.raises(DriveQuotaError, match="dailyLimitExceeded"):
+            upload(handler, downloads, "c", "F1", "UA", b"one")
+
+    def test_rate_limit_still_fails_one_file_as_retryable(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        assert upload(handler, downloads, "c", "F1", "UA", b"one").success
+        fake.failing["files.create"] = quota_error("userRateLimitExceeded")
+
+        result = upload(handler, downloads, "c", "F2", "UA", b"two")
+
+        assert not result.success
+        assert result.retryable is True
+
+    def test_quota_ends_the_sweep_and_keeps_the_flags(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        first = upload(handler, downloads, "c", "F1", "UA", b"one")
+        upload(handler, downloads, "c", "F2", "UA", b"two")
+        fake.failing["permissions.create"] = quota_error("dailyLimitExceeded")
+
+        handler.retry_pending_permissions()  # must not raise
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_sweep_failures"] == 1
+        assert stats["pending_retried"] == 0
+        props = fake.files_db[first.drive_id]["appProperties"]
+        assert props["slackGrantPending"] == "true"
+        errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert any(
+            "Stopped retrying" in m and "dailyLimitExceeded" in m for m in errors
+        )
 
 
 class TestUploadErrorsAreCounted:

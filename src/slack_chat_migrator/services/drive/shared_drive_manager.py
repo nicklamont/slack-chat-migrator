@@ -17,15 +17,16 @@ from slack_chat_migrator.constants import (
     HTTP_NOT_FOUND,
 )
 from slack_chat_migrator.core.config import MigrationConfig
-from slack_chat_migrator.exceptions import APIError, ConfigError
+from slack_chat_migrator.exceptions import APIError, ConfigError, DriveQuotaError
 from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_CANDIDATES,
+    drive_quota_error,
     http_status,
     is_drive_call_error,
+    quota_reason,
 )
 from slack_chat_migrator.utils.api import (
     escape_drive_query_value,
-    http_error_reasons,
     is_rate_limit_error,
 )
 from slack_chat_migrator.utils.logging import (
@@ -36,31 +37,11 @@ if TYPE_CHECKING:
     from slack_chat_migrator.services.drive_adapter import DriveAdapter
 
 
-#: 403 reasons that mean the project or storage hit a quota.  They say
-#: nothing about shared drives and stop the run with a quota message.
-QUOTA_REASONS = frozenset(
-    {
-        "dailyLimitExceeded",
-        "quotaExceeded",
-        "storageQuotaExceeded",
-        "teamDriveFileLimitExceeded",
-    }
-)
-
-
-def quota_reason(error: BaseException) -> str | None:
-    """The quota reason of *error* (see :data:`QUOTA_REASONS`), if any."""
-    if not isinstance(error, HttpError):
-        return None
-    reasons = sorted(http_error_reasons(error) & QUOTA_REASONS)
-    return reasons[0] if reasons else None
-
-
 def shared_drives_unavailable(error: BaseException) -> bool:
     """Whether *error* says this account can't use or create shared drives.
 
     Only a definitive refusal counts: a 403 without a rate-limit or quota
-    reason (:data:`QUOTA_REASONS`), or a 404.  Network errors, credentials
+    reason (``drive_adapter.QUOTA_REASONS``), or a 404.  Network errors, credentials
     that can't be refreshed, rate limits, quotas, 5xx and other statuses say
     nothing about shared drives, so they never justify storing attachments
     somewhere else.
@@ -82,16 +63,13 @@ def shared_drives_unavailable(error: BaseException) -> bool:
 _CAPABILITY_FIELDS = "capabilities(canAddChildren, canManageMembers)"
 
 
-def _api_error(action: str, error: BaseException) -> APIError:
-    """The APIError for a failed *action*, naming a quota when that's the cause."""
-    reason = quota_reason(error)
-    if reason:
-        return APIError(
-            f"Drive quota reached ({reason}) while trying to {action}: {error}."
-            " Wait for the quota to reset, or raise it (Google Cloud console"
-            " quotas, or Drive storage), then run again."
-        )
-    return APIError(f"Could not {action}: {error}")
+def _api_error(action: str, error: BaseException) -> APIError | DriveQuotaError:
+    """The error for a failed *action*: DriveQuotaError for a used-up quota.
+
+    The adapter raises quota errors as DriveQuotaError itself; this covers a
+    Drive service that doesn't.
+    """
+    return drive_quota_error(error, action) or APIError(f"Could not {action}: {error}")
 
 
 class SharedDriveManager:
@@ -126,10 +104,12 @@ class SharedDriveManager:
                 answers 404, or 403 without a rate-limit or quota reason:
                 the ID is wrong or the admin isn't a member.  A new drive is
                 never created in its place.
+            DriveQuotaError: For a used-up Drive quota, naming it and the
+                fix.
             APIError: For any other failure: a network error, credentials
-                that can't be refreshed, a rate limit or quota (named in the
-                message), a 5xx, or another HTTP error.  The caller must not
-                fall back to another location for these.  Also raised when
+                that can't be refreshed, a rate limit, a 5xx, or another HTTP
+                error.  The caller must not fall back to another location
+                for these.  Also raised when
                 Drive says the admin can't add files to the drive found or
                 configured (``capabilities.canAddChildren`` is false).
         """

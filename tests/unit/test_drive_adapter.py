@@ -720,3 +720,88 @@ class TestIsTransientError:
         from slack_chat_migrator.services.drive_adapter import is_transient_error
 
         assert is_transient_error(BatchError("too many calls")) is False
+
+
+class TestQuotaErrors:
+    """A used-up quota is raised as DriveQuotaError by every call (#118)."""
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            "dailyLimitExceeded",
+            "quotaExceeded",
+            "storageQuotaExceeded",
+            "teamDriveFileLimitExceeded",
+        ],
+    )
+    def test_quota_403_is_transient(self, reason):
+        from slack_chat_migrator.services.drive_adapter import is_transient_error
+
+        assert is_transient_error(_http_error(403, reason)) is True
+
+    @pytest.mark.parametrize(
+        ("call", "resource", "method"),
+        [
+            (lambda a: a.create_file({"name": "x"}), "files", "create"),
+            (lambda a: a.list_files("trashed=false"), "files", "list"),
+            (lambda a: a.update_file("F", {}), "files", "update"),
+            (lambda a: a.create_permission("F", {}), "permissions", "create"),
+            (lambda a: a.list_permissions("F"), "permissions", "list"),
+            (lambda a: a.list_drives(), "drives", "list"),
+        ],
+        ids=["create", "list", "update", "grant", "permissions", "drives"],
+    )
+    def test_every_call_raises_drive_quota_error(
+        self, adapter, mock_service, call, resource, method
+    ):
+        from slack_chat_migrator.exceptions import DriveQuotaError
+
+        error = _http_error(403, "storageQuotaExceeded")
+        request = getattr(getattr(mock_service, resource)(), method).return_value
+        request.execute.side_effect = error
+
+        with pytest.raises(DriveQuotaError) as excinfo:
+            call(adapter)
+
+        assert excinfo.value.reason == "storageQuotaExceeded"
+        assert excinfo.value.__cause__ is error
+        assert "Free space or add storage" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _http_error(403, "userRateLimitExceeded"),
+            _http_error(403, "insufficientFilePermissions"),
+            _http_error(500),
+        ],
+        ids=["rate-limit", "refused", "500"],
+    )
+    def test_other_errors_are_raised_as_they_are(self, adapter, mock_service, error):
+        from googleapiclient.errors import HttpError
+
+        mock_service.files().create.return_value.execute.side_effect = error
+
+        with pytest.raises(HttpError) as excinfo:
+            adapter.create_file({"name": "x"})
+
+        assert excinfo.value is error
+
+    def test_permission_changes_raise_after_every_change_was_tried(self):
+        from slack_chat_migrator.exceptions import DriveQuotaError
+        from slack_chat_migrator.services.drive_adapter import PermissionChange
+
+        service = MagicMock(spec=["permissions"])  # no batches: one by one
+        service.permissions.return_value.create.return_value.execute.side_effect = [
+            _http_error(403, "dailyLimitExceeded"),
+            {"id": "p2"},
+        ]
+        changes = [
+            PermissionChange("A", body={"role": "writer"}),
+            PermissionChange("B", body={"role": "writer"}),
+        ]
+
+        with pytest.raises(DriveQuotaError, match="dailyLimitExceeded"):
+            DriveAdapter(service).apply_permission_changes(changes)
+
+        execute = service.permissions.return_value.create.return_value.execute
+        assert execute.call_count == 2

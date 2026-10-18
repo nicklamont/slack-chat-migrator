@@ -14,13 +14,20 @@ or a network error.  :data:`DRIVE_CALL_ERRORS` names them all.  Callers that
 handle a failed call catch :data:`DRIVE_CALL_CANDIDATES` and re-raise what
 :func:`is_drive_call_error` rejects, so a network-down ``OSError`` fails the
 call while a local fault (a full disk) still stops the run.
+
+A 403 that says a Drive quota is used up (:data:`QUOTA_REASONS`) is raised
+as :class:`~slack_chat_migrator.exceptions.DriveQuotaError` instead, by
+every method: it isn't a Drive call error, so it passes those handlers and
+stops the run.
 """
 
 from __future__ import annotations
 
 import errno
 import socket
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from google.auth.exceptions import RefreshError
@@ -32,9 +39,11 @@ from slack_chat_migrator.constants import (
     HTTP_RATE_LIMIT,
     HTTP_SERVER_ERROR_MIN,
 )
+from slack_chat_migrator.exceptions import DriveQuotaError
 from slack_chat_migrator.utils.api import (
     HTTP_REQUEST_TIMEOUT,
     RETRYABLE_NETWORK_ERRORS,
+    http_error_reasons,
     is_rate_limit_error,
 )
 
@@ -98,6 +107,80 @@ FATAL_LOCAL_ERRNOS: frozenset[int] = frozenset(
 DRIVE_CALL_CANDIDATES: tuple[type[BaseException], ...] = (*DRIVE_CALL_ERRORS, OSError)
 
 
+#: 403 reasons that mean a Drive quota is used up: the project's API limits,
+#: the storage the attachments count against, or a shared drive's item
+#: limit.  Every later Drive call would fail the same way, so they stop the
+#: run (:func:`drive_quota_error`).  Rate limits (``userRateLimitExceeded``,
+#: ``rateLimitExceeded``) aren't among them: the retry wrapper waits them
+#: out.  ``quotaExceeded`` is waited out first too, then stops the run.
+QUOTA_REASONS = frozenset(
+    {
+        "dailyLimitExceeded",
+        "quotaExceeded",
+        "storageQuotaExceeded",
+        "teamDriveFileLimitExceeded",
+    }
+)
+
+#: What to do about each of :data:`QUOTA_REASONS`.
+QUOTA_FIXES: Mapping[str, str] = MappingProxyType(
+    {
+        "dailyLimitExceeded": (
+            "the project's daily Drive API limit is used up. Wait for it to"
+            " reset, or raise it in the Google Cloud console (IAM & Admin >"
+            " Quotas)"
+        ),
+        "quotaExceeded": (
+            "a Drive API quota of the project is used up. Wait for it to"
+            " reset, or raise it in the Google Cloud console (IAM & Admin >"
+            " Quotas)"
+        ),
+        "storageQuotaExceeded": (
+            "the Drive storage the attachments count against is full (in My"
+            " Drive, the workspace admin's own storage). Free space or add"
+            " storage, or store the attachments on a shared drive"
+        ),
+        "teamDriveFileLimitExceeded": (
+            "the shared drive has reached Drive's limit on the number of"
+            " items, which can't be raised. Set shared_drive.id or"
+            " shared_drive.name to another shared drive"
+        ),
+    }
+)
+
+
+def quota_reason(error: BaseException | None) -> str | None:
+    """The quota reason of *error* (see :data:`QUOTA_REASONS`), if any."""
+    if not isinstance(error, HttpError):
+        return None
+    reasons = sorted(http_error_reasons(error) & QUOTA_REASONS)
+    return reasons[0] if reasons else None
+
+
+def drive_quota_error(
+    error: BaseException | None, action: str | None = None
+) -> DriveQuotaError | None:
+    """The DriveQuotaError for *error*, or None if it isn't a quota error.
+
+    Args:
+        error: Any exception (or None).
+        action: What was being done, e.g. ``"upload a file"``.
+
+    Returns:
+        An error naming the quota and the fix.
+    """
+    reason = quota_reason(error)
+    if reason is None:
+        return None
+    during = f" while trying to {action}" if action else ""
+    return DriveQuotaError(
+        f"Drive quota reached ({reason}){during}: {QUOTA_FIXES[reason]}."
+        " Then run the migration again: `migrate --resume` continues where"
+        " this run stopped.",
+        reason,
+    )
+
+
 def http_status(error: BaseException) -> int | None:
     """The HTTP status of an API error, or None when it has none.
 
@@ -133,7 +216,8 @@ def is_transient_error(error: BaseException) -> bool:
 
     True for network errors (including network-down OSErrors), credentials
     that couldn't be refreshed (a later run with working credentials can
-    succeed), and HTTP 408, 429, 5xx and rate-limit 403s.  False for other
+    succeed), and HTTP 408, 429, 5xx, rate-limit 403s and quota 403s (which
+    the adapter raises as DriveQuotaError, stopping the run).  False for other
     HTTP errors (400, 404, a 403 that isn't a rate limit), an HttpError
     without a response (a ``BatchError`` raised while building a batch) and
     local errors.
@@ -146,6 +230,7 @@ def is_transient_error(error: BaseException) -> bool:
             status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
             or status >= HTTP_SERVER_ERROR_MIN
             or is_rate_limit_error(error)
+            or quota_reason(error) is not None
         )
     return isinstance(error, RefreshError) or is_network_error(error)
 
@@ -206,6 +291,17 @@ class DriveAdapter:
     def __init__(self, service: Any) -> None:
         self._svc = service
 
+    @staticmethod
+    def _execute(request: Any, action: str) -> Any:
+        """Run *request*; a quota 403 is raised as DriveQuotaError."""
+        try:
+            return request.execute()
+        except HttpError as e:
+            quota = drive_quota_error(e, action)
+            if quota is not None:
+                raise quota from e
+            raise
+
     # -- Files ----------------------------------------------------------------
 
     def list_files(
@@ -258,7 +354,9 @@ class DriveAdapter:
             kwargs["supportsAllDrives"] = True
         if order_by is not None:
             kwargs["orderBy"] = order_by
-        result: dict[str, Any] = self._svc.files().list(**kwargs).execute()
+        result: dict[str, Any] = self._execute(
+            self._svc.files().list(**kwargs), "list or search files"
+        )
         return result
 
     def create_file(
@@ -285,7 +383,9 @@ class DriveAdapter:
             kwargs["media_body"] = media_body
         if supports_all_drives:
             kwargs["supportsAllDrives"] = True
-        result: dict[str, Any] = self._svc.files().create(**kwargs).execute()
+        result: dict[str, Any] = self._execute(
+            self._svc.files().create(**kwargs), "create a file"
+        )
         return result
 
     def get_file(
@@ -310,7 +410,9 @@ class DriveAdapter:
             kwargs["fields"] = fields
         if supports_all_drives:
             kwargs["supportsAllDrives"] = True
-        result: dict[str, Any] = self._svc.files().get(**kwargs).execute()
+        result: dict[str, Any] = self._execute(
+            self._svc.files().get(**kwargs), "read a file"
+        )
         return result
 
     def update_file(
@@ -335,7 +437,9 @@ class DriveAdapter:
         kwargs: dict[str, Any] = {"fileId": file_id, "body": body, "fields": fields}
         if supports_all_drives:
             kwargs["supportsAllDrives"] = True
-        result: dict[str, Any] = self._svc.files().update(**kwargs).execute()
+        result: dict[str, Any] = self._execute(
+            self._svc.files().update(**kwargs), "update a file"
+        )
         return result
 
     def delete_file(self, file_id: str) -> dict[str, Any]:
@@ -347,7 +451,9 @@ class DriveAdapter:
         Returns:
             API response dict (typically empty on success).
         """
-        result: dict[str, Any] = self._svc.files().delete(fileId=file_id).execute()
+        result: dict[str, Any] = self._execute(
+            self._svc.files().delete(fileId=file_id), "delete a file"
+        )
         return result
 
     # -- Permissions ----------------------------------------------------------
@@ -385,7 +491,9 @@ class DriveAdapter:
             kwargs["sendNotificationEmail"] = send_notification_email
         if supports_all_drives:
             kwargs["supportsAllDrives"] = True
-        result: dict[str, Any] = self._svc.permissions().create(**kwargs).execute()
+        result: dict[str, Any] = self._execute(
+            self._svc.permissions().create(**kwargs), "share a file"
+        )
         return result
 
     def list_permissions(
@@ -414,7 +522,9 @@ class DriveAdapter:
                 kwargs["supportsAllDrives"] = True
             if page_token:
                 kwargs["pageToken"] = page_token
-            result: dict[str, Any] = self._svc.permissions().list(**kwargs).execute()
+            result: dict[str, Any] = self._execute(
+                self._svc.permissions().list(**kwargs), "list permissions"
+            )
             permissions.extend(result.get("permissions", []))
             page_token = result.get("nextPageToken")
             if not page_token:
@@ -440,7 +550,9 @@ class DriveAdapter:
         kwargs: dict[str, Any] = {"fileId": file_id, "permissionId": permission_id}
         if supports_all_drives:
             kwargs["supportsAllDrives"] = True
-        result: dict[str, Any] = self._svc.permissions().delete(**kwargs).execute()
+        result: dict[str, Any] = self._execute(
+            self._svc.permissions().delete(**kwargs), "remove a permission"
+        )
         return result or {}
 
     def _permission_request(self, change: PermissionChange) -> Any:
@@ -484,7 +596,8 @@ class DriveAdapter:
             One entry per change, in order: None on success, else the error.
             ``HttpError``, ``RefreshError`` and network errors (including
             network-down OSErrors) that outlast the retries are returned,
-            never raised; a local fault such as a full disk is raised.
+            never raised; a local fault such as a full disk is raised, and so
+            is a used-up quota (DriveQuotaError, once every change was tried).
         """
         requests = [self._permission_request(change) for change in changes]
         results: list[BaseException | None] = [None] * len(requests)
@@ -536,6 +649,10 @@ class DriveAdapter:
                 if not is_drive_call_error(e):
                     raise
                 results[index] = e
+        for error in results:
+            quota = drive_quota_error(error, "change permissions")
+            if quota is not None:
+                raise quota from error
         return results
 
     def update_permission(
@@ -568,7 +685,9 @@ class DriveAdapter:
             kwargs["supportsAllDrives"] = True
         if transfer_ownership:
             kwargs["transferOwnership"] = True
-        result: dict[str, Any] = self._svc.permissions().update(**kwargs).execute()
+        result: dict[str, Any] = self._execute(
+            self._svc.permissions().update(**kwargs), "change a permission"
+        )
         return result
 
     # -- Shared Drives --------------------------------------------------------
@@ -587,7 +706,9 @@ class DriveAdapter:
         kwargs: dict[str, Any] = {"driveId": drive_id}
         if fields is not None:
             kwargs["fields"] = fields
-        result: dict[str, Any] = self._svc.drives().get(**kwargs).execute()
+        result: dict[str, Any] = self._execute(
+            self._svc.drives().get(**kwargs), "open a shared drive"
+        )
         return result
 
     def list_drives(
@@ -617,7 +738,9 @@ class DriveAdapter:
             kwargs["q"] = q
         if fields is not None:
             kwargs["fields"] = fields
-        result: dict[str, Any] = self._svc.drives().list(**kwargs).execute()
+        result: dict[str, Any] = self._execute(
+            self._svc.drives().list(**kwargs), "list shared drives"
+        )
         return result
 
     def create_drive(
@@ -634,7 +757,8 @@ class DriveAdapter:
         Returns:
             Created drive resource dict.
         """
-        result: dict[str, Any] = (
-            self._svc.drives().create(body=body, requestId=request_id).execute()
+        result: dict[str, Any] = self._execute(
+            self._svc.drives().create(body=body, requestId=request_id),
+            "create a shared drive",
         )
         return result

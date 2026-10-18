@@ -7,6 +7,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import mimetypes
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, get_args
@@ -22,7 +23,7 @@ from slack_chat_migrator.constants import (
 )
 from slack_chat_migrator.core.config import ConversationType, MigrationConfig
 from slack_chat_migrator.core.state import MigrationState
-from slack_chat_migrator.exceptions import APIError
+from slack_chat_migrator.exceptions import APIError, DriveQuotaError
 from slack_chat_migrator.services.chat import ChatFileUploader
 from slack_chat_migrator.services.drive import (
     DriveFileUploader,
@@ -372,6 +373,7 @@ class FileHandler:
                 gives the cause from :attr:`drive_status`.
             ConfigError: If the configured ``shared_drive.id`` can't be
                 opened.
+            DriveQuotaError: If a Drive quota is used up.
         """
         self._initialize_drive()
         if not self._drive_status.ready:
@@ -392,6 +394,7 @@ class FileHandler:
             ConfigError: If the configured ``shared_drive.id`` can't be
                 opened; :attr:`drive_status` stays ``not_initialized``.  (A
                 live run's preflight raises it first.)
+            DriveQuotaError: If a Drive quota is used up (likewise).
         """
         if not self._drive_initialized:
             log_with_context(
@@ -463,6 +466,7 @@ class FileHandler:
         Raises:
             ConfigError: If the configured ``shared_drive.id`` can't be
                 opened.
+            DriveQuotaError: If a Drive quota is used up.
         """
         fallback_name = "Imported Slack Attachments"
         try:
@@ -581,6 +585,12 @@ class FileHandler:
             UploadResult with upload details. Check ``.success``, ``.skipped``,
             or ``.error`` to determine outcome.  Files that can't be fetched
             are skipped with ``skip_reason == "unavailable"``.
+
+        Raises:
+            DriveQuotaError: If a Drive quota is used up (every later file
+                would fail the same way); the file gets no result.
+            OSError: For a local fault in ``FATAL_LOCAL_ERRNOS`` (a full
+                disk), likewise.
         """
         self._sync_channel_context()
         file_id = file_obj.get("id") or "unknown"
@@ -1855,15 +1865,50 @@ class FileHandler:
 
         Never raises a Drive error: a failed search is logged at ERROR and
         counted in ``pending_sweep_failures``, and this run's own flags are
-        still retried.
+        still retried.  A used-up Drive quota (DriveQuotaError) ends the
+        sweep, logged and counted the same way; the flags still pending stay
+        on their files.
         """
         root = self._root_folder_id
         if not root:
             return
-        pending = self.drive_uploader.pending
+        skipped: dict[str, list[str]] = {
+            "unknown": [],
+            "unmapped": [],
+            "external": [],
+        }
+        tally: Counter[str] = Counter()
+        try:
+            self._find_flagged_files()
+            self._retry_flagged_grants(skipped, tally)
+            self._retry_flagged_transfers(skipped, tally)
+        except DriveQuotaError as e:
+            self._increment_stat("pending_sweep_failures")
+            log_with_context(
+                logging.ERROR,
+                f"Stopped retrying pending Drive grants and transfers: {e} The"
+                " flags still pending stay on their files for the next run.",
+            )
+        self._report_sweep_skips(skipped)
+        retried, failed = tally["retried"], tally["failed"]
+        if retried or failed:
+            log_with_context(
+                logging.WARNING if failed else logging.INFO,
+                f"Retried {retried + failed} pending Drive grant(s) and"
+                f" transfer(s): {retried} succeeded, {failed} still failing"
+                " (their flags are kept, and the next run retries them)",
+            )
+
+    def _find_flagged_files(self) -> None:
+        """Read the flags earlier runs left on this migration's Drive files.
+
+        A failed search is logged at ERROR and counted in
+        ``pending_sweep_failures``; the sweep then retries the flags this
+        run already knows about.
+        """
         try:
             folder_ids = set() if self._shared_drive_id else self._migration_folders()
-            pending.find_flagged(self._shared_drive_id, folder_ids)
+            self.drive_uploader.pending.find_flagged(self._shared_drive_id, folder_ids)
         except DRIVE_CALL_CANDIDATES as e:
             if not is_drive_call_error(e):
                 raise
@@ -1874,12 +1919,18 @@ class FileHandler:
                 f" transfers ({e}); retrying only the ones this run already"
                 " knows about. The next run looks again.",
             )
-        skipped: dict[str, list[str]] = {
-            "unknown": [],
-            "unmapped": [],
-            "external": [],
-        }
-        retried = failed = 0
+
+    def _count_retry(self, succeeded: bool, tally: Counter[str]) -> None:
+        """Count one sweep attempt as it happens."""
+        kind = "retried" if succeeded else "failed"
+        tally[kind] += 1
+        self._increment_stat("pending_retried" if succeeded else "pending_retry_failed")
+
+    def _retry_flagged_grants(
+        self, skipped: dict[str, list[str]], tally: Counter[str]
+    ) -> None:
+        """Retry every flagged poster grant (see :meth:`retry_pending_permissions`)."""
+        pending = self.drive_uploader.pending
         for drive_file_id, targets in list(pending.grants.items()):
             for key, target in list(targets.items()):
                 email = self._sweep_recipient(drive_file_id, target, skipped)
@@ -1891,9 +1942,13 @@ class FileHandler:
                 if granted:
                     self._mark_granted(drive_file_id, email)
                     pending.clear_grant(drive_file_id, key, self._shared_drive_id)
-                    retried += 1
-                else:
-                    failed += 1
+                self._count_retry(granted, tally)
+
+    def _retry_flagged_transfers(
+        self, skipped: dict[str, list[str]], tally: Counter[str]
+    ) -> None:
+        """Retry every flagged ownership transfer, while transfers are on."""
+        pending = self.drive_uploader.pending
         owners = list(pending.owners.items())
         if owners and not (
             self.config.transfer_file_ownership and not self._shared_drive_id
@@ -1905,27 +1960,16 @@ class FileHandler:
                 " transfer_file_ownership is off or the files are on a shared"
                 " drive. Their flags are kept for a run with it on.",
             )
-            owners = []
+            return
         for drive_file_id, target in owners:
             email = self._sweep_recipient(drive_file_id, target, skipped)
             if email is None:
                 continue
-            if self._transfer_file_ownership(drive_file_id, email):
+            transferred = self._transfer_file_ownership(drive_file_id, email)
+            if transferred:
                 self._mark_granted(drive_file_id, email)
                 pending.set_owner(drive_file_id, email, False)
-                retried += 1
-            else:
-                failed += 1
-        self._report_sweep_skips(skipped)
-        self._increment_stat("pending_retried", retried)
-        self._increment_stat("pending_retry_failed", failed)
-        if retried or failed:
-            log_with_context(
-                logging.WARNING if failed else logging.INFO,
-                f"Retried {retried + failed} pending Drive grant(s) and"
-                f" transfer(s): {retried} succeeded, {failed} still failing"
-                " (their flags are kept, and the next run retries them)",
-            )
+            self._count_retry(transferred, tally)
 
     def _sweep_recipient(
         self, drive_file_id: str, target: Target, skipped: dict[str, list[str]]

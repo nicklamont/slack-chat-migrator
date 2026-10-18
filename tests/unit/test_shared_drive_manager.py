@@ -8,7 +8,7 @@ from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
-from slack_chat_migrator.exceptions import APIError, ConfigError
+from slack_chat_migrator.exceptions import APIError, ConfigError, DriveQuotaError
 from slack_chat_migrator.services.drive.shared_drive_manager import (
     SharedDriveManager,
 )
@@ -172,27 +172,35 @@ class TestGetOrCreateSharedDrive:
         assert manager.last_error and "Test Drive" in manager.last_error
 
     @pytest.mark.parametrize(
-        "reason",
+        ("reason", "fix"),
         [
-            "dailyLimitExceeded",
-            "quotaExceeded",
-            "storageQuotaExceeded",
-            "teamDriveFileLimitExceeded",
+            ("dailyLimitExceeded", "Wait for it to reset"),
+            ("quotaExceeded", "Wait for it to reset"),
+            ("storageQuotaExceeded", "Free space or add storage"),
+            ("teamDriveFileLimitExceeded", "another shared drive"),
         ],
     )
     @pytest.mark.parametrize("call", ["list_drives", "create_drive"])
-    def test_quota_errors_stop_with_a_quota_message(self, reason, call):
+    def test_quota_errors_stop_with_a_quota_message(self, reason, fix, call):
         """A quota 403 is not "can't use shared drives": no My Drive fallback."""
         manager, drive_service = _make_manager(
             shared_drive_id=None, shared_drive_name="Test Drive"
         )
         drive_service.list_drives.return_value = {"drives": []}
         body = b'{"error": {"errors": [{"reason": "%s"}]}}' % reason.encode()
-        getattr(drive_service, call).side_effect = _make_http_error(403, body)
+        error = _make_http_error(403, body)
+        getattr(drive_service, call).side_effect = error
 
-        with pytest.raises(APIError, match=f"quota reached \\({reason}\\)"):
+        with pytest.raises(DriveQuotaError) as excinfo:
             manager.get_or_create_shared_drive()
 
+        message = str(excinfo.value)
+        assert f"quota reached ({reason})" in message
+        assert "'Test Drive'" in message
+        assert fix in message
+        assert "migrate --resume" in message
+        assert excinfo.value.reason == reason
+        assert excinfo.value.__cause__ is error
         assert manager.last_error is None
 
     @pytest.mark.parametrize(
@@ -203,13 +211,10 @@ class TestGetOrCreateSharedDrive:
             _make_http_error(
                 403, b'{"error": {"errors": [{"reason": "rateLimitExceeded"}]}}'
             ),
-            _make_http_error(
-                403, b'{"error": {"errors": [{"reason": "dailyLimitExceeded"}]}}'
-            ),
             OSError(101, "Network is unreachable"),
             RefreshError("invalid_grant"),
         ],
-        ids=["503", "429", "403-rate-limit", "403-quota", "network", "refresh"],
+        ids=["503", "429", "403-rate-limit", "network", "refresh"],
     )
     def test_configured_drive_failure_that_is_not_a_refusal_is_an_api_error(
         self, error
@@ -225,6 +230,15 @@ class TestGetOrCreateSharedDrive:
         assert excinfo.value.__cause__ is error
         drive_service.list_drives.assert_not_called()
         drive_service.create_drive.assert_not_called()
+
+    def test_configured_drive_quota_is_a_drive_quota_error(self):
+        manager, drive_service = _make_manager(shared_drive_id="SD9")
+        drive_service.get_drive.side_effect = _make_http_error(
+            403, b'{"error": {"errors": [{"reason": "dailyLimitExceeded"}]}}'
+        )
+
+        with pytest.raises(DriveQuotaError, match=r"SD9.*Wait for it to reset"):
+            manager.get_or_create_shared_drive()
 
     @pytest.mark.parametrize("status", [403, 404])
     def test_configured_drive_refusal_is_a_config_error(self, status):
