@@ -89,11 +89,11 @@ class _CtrlCInput(io.BytesIO):
         raise KeyboardInterrupt
 
 
-#: What a cancel at the --complete or cleanup prompt says on the console,
-#: and in the log.
-COMPLETION_CANCELLED = (
-    "\nCancelled. No spaces were changed.\n",
-    "Cancelled at a prompt (Ctrl-C or end of input). No spaces were changed.",
+#: What a cancel at the --complete or cleanup prompt says on the console
+#: (once), and what it logs to the log files only.
+COMPLETION_CANCELLED = "\nCancelled. No spaces were changed.\n"
+COMPLETION_CANCELLED_LOG = (
+    "Cancelled at a prompt (Ctrl-C or end of input). No spaces were changed."
 )
 
 
@@ -195,8 +195,8 @@ class TestMigrateComplete:
             stdin=_CtrlCInput() if stdin == "ctrl-c" else stdin,
         )
         assert result.exit_code == 130, result.output
-        for said in COMPLETION_CANCELLED:
-            assert said in result.output
+        assert result.output.count(COMPLETION_CANCELLED) == 1
+        assert COMPLETION_CANCELLED_LOG not in result.output
         assert "Interrupted." not in result.output
         assert fake.completed == []
 
@@ -230,8 +230,8 @@ class TestMigrateComplete:
             stdin=_CtrlCInput() if stdin == "ctrl-c" else stdin,
         )
         assert result.exit_code == 130, result.output
-        for said in COMPLETION_CANCELLED:
-            assert said in result.output
+        assert result.output.count(COMPLETION_CANCELLED) == 1
+        assert COMPLETION_CANCELLED_LOG not in result.output
         assert "Interrupted." not in result.output
         assert fake.completed == []
 
@@ -372,6 +372,7 @@ class TestRunOrchestratorPromptCancel:
         log.assert_called_once_with(
             logging.WARNING,
             f"Cancelled at a prompt (Ctrl-C or end of input). {unchanged}",
+            console=False,
         )
         # Cleanup still runs; a cancel isn't an interrupted migration
         cleanup.assert_called_once()

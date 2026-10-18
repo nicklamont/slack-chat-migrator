@@ -172,12 +172,12 @@ class TestLivePrompts:
             stdin=_CtrlCInput() if stdin == "ctrl-c" else stdin,
         )
         assert result.exit_code == 130, result.output
-        # Said on the console, and logged as a warning
-        assert "\nCancelled. Nothing was migrated.\n" in result.output
-        assert (
-            "Cancelled at a prompt (Ctrl-C or end of input). Nothing was migrated."
-            in result.output
-        )
+        # Said once on the console, and logged as a warning in migration.log
+        assert result.output.count("\nCancelled. Nothing was migrated.\n") == 1
+        logged = "Cancelled at a prompt (Ctrl-C or end of input). Nothing was migrated."
+        assert logged not in result.output
+        (main_log,) = Path("migration_logs").glob("run_*/migration.log")
+        assert logged in main_log.read_text()
         assert "Migration cancelled" not in result.output
         assert "Migration interrupted" not in result.output
 

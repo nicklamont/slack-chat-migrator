@@ -102,7 +102,9 @@ class TestCtrlCAtAPrompt:
         assert "Run init now?" in result.output
         assert "\nCancelled.\n" in result.output
         log.assert_called_once_with(
-            logging.WARNING, "Cancelled at a prompt (Ctrl-C or end of input)."
+            logging.WARNING,
+            "Cancelled at a prompt (Ctrl-C or end of input).",
+            console=False,
         )
 
     def test_ctrl_c_outside_a_prompt(self) -> None:

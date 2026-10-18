@@ -228,6 +228,17 @@ class TestSetupLogger:
         handler = result.handlers[0]
         assert isinstance(handler.formatter, EnhancedFormatter)
 
+    def test_console_false_reaches_the_log_file_only(self, tmp_path, capsys):
+        setup_logger(output_dir=str(tmp_path))
+        log_module.log_with_context(logging.WARNING, "file only", console=False)
+        log_module.log_with_context(logging.WARNING, "everywhere")
+        err = capsys.readouterr().err
+        assert "file only" not in err
+        assert "everywhere" in err
+        text = (tmp_path / "migration.log").read_text()
+        assert "file only" in text
+        assert "everywhere" in text
+
 
 # --- log_with_context tests ---
 

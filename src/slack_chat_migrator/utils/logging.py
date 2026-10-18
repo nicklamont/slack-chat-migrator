@@ -177,6 +177,26 @@ def _unformattable_message(record: logging.LogRecord, error: Exception) -> str:
     return sanitize_for_log(f"{text} [{marker}]")
 
 
+class FileOnlyFilter(logging.Filter):
+    """Filter for the console handler that drops records meant for files only.
+
+    A record logged with ``console=False`` (``log_with_context(...,
+    console=False)``) still reaches the log files, but not the console,
+    for messages the CLI has already printed in its own words.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Return False for a record logged with ``console=False``.
+
+        Args:
+            record: The log record to check.
+
+        Returns:
+            Whether the console should show *record*.
+        """
+        return getattr(record, "console", True) is not False
+
+
 class RedactingFilter(logging.Filter):
     """Filter that redacts secrets from every record a handler emits.
 
@@ -494,6 +514,7 @@ def setup_logger(
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
     console_handler.addFilter(RedactingFilter())
+    console_handler.addFilter(FileOnlyFilter())
 
     # Create the enhanced formatter that handles both verbose and API details
     formatter = EnhancedFormatter(verbose=verbose, include_api_details=debug_api)
