@@ -1,4 +1,4 @@
-"""FakeDrive answers shared-drive calls the way Drive does (TA S19/S5b)."""
+"""FakeDrive answers shared-drive calls the way Drive does."""
 
 import pytest
 from googleapiclient.errors import HttpError

@@ -1202,7 +1202,7 @@ class TestPendingSweep:
 
     @pytest.mark.parametrize("shared", [True, False], ids=["shared", "my_drive"])
     def test_sweep_reads_every_page(self, tmp_path, downloads, shared):
-        """Every page of flagged files is retried, not only the first (TA S3)."""
+        """Every page of flagged files is retried, not only the first."""
         fake = FakeDrive(file_page_cap=2)
         run1 = make_handler(fake, tmp_path, shared=shared)
         fake.failing["permissions.create"] = ConnectionResetError("reset")
@@ -1407,7 +1407,7 @@ class TestPendingSweep:
     def test_recipient_that_is_now_external_is_never_retried(
         self, tmp_path, downloads, caplog
     ):
-        """A flag an earlier run left, whose domains differed (TA S17)."""
+        """A flag an earlier run left, whose domains differed."""
         fake = FakeDrive()
         run1 = make_handler(fake, tmp_path)
         result = upload(run1, downloads, "c", "F1", "UA", b"body")
@@ -1430,7 +1430,7 @@ class TestPendingSweep:
     def test_grant_whose_flag_could_not_be_stored_is_still_retried(
         self, tmp_path, downloads
     ):
-        """README: "that run's sweep still retries it" (TA P18)."""
+        """README: "that run's sweep still retries it"."""
         fake = FakeDrive()
         handler = make_handler(fake, tmp_path)
         fake.failing["permissions.create"] = ConnectionResetError("reset")
@@ -2441,7 +2441,7 @@ class TestCanvasConversion:
 
         assert not result.success
         assert "earlier upload" in (result.error or "")
-        assert doc_downloads.calls == []  # failed before downloading (TA PD4)
+        assert doc_downloads.calls == []  # failed before downloading
         assert len(fake.files_db) == docs_before
         assert rerun.get_file_statistics()["failed_uploads"] == 1
 

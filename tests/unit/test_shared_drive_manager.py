@@ -396,7 +396,7 @@ CONTENT_MANAGER = {"canAddChildren": True, "canManageMembers": False}
 
 
 class TestDriveCapabilities:
-    """The admin must be able to add files to the drive used (SF-N7)."""
+    """The admin must be able to add files to the drive used (#118)."""
 
     def _manager(self, fake, *, restrict=True, **drive_config):
         from slack_chat_migrator.services.drive_adapter import DriveAdapter

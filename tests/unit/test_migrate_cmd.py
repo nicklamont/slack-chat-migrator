@@ -356,7 +356,7 @@ class TestConfigForGating:
 
 
 class TestDrivePreflight:
-    """The preflight stops when Drive can't be set up (TA FC11)."""
+    """The preflight stops when Drive can't be set up (#118)."""
 
     def test_preflight_stops_when_drive_cannot_be_set_up(self) -> None:
         orch = _orchestrator()

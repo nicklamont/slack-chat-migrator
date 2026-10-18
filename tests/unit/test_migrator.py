@@ -2043,7 +2043,7 @@ class TestMigrate:
 @patch("slack_chat_migrator.core.migrator.log_space_mapping_conflicts")
 @patch("slack_chat_migrator.core.migrator.ChannelProcessor")
 class TestPendingSweepNeverFailsTheRun:
-    """The end-of-run sweep can't change the run's outcome (SF-N1, TA S9)."""
+    """The end-of-run sweep can't change the run's outcome (#98)."""
 
     @staticmethod
     def _migrator(tmp_path, mock_cp_cls, **result):

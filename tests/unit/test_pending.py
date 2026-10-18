@@ -74,7 +74,7 @@ class TestGrantFlags:
         assert _last_props(pending) == {grant_key("y@example.com"): None}
 
     def test_a_set_flag_learns_what_it_lacked_without_a_write(self):
-        """SF-N4: a flag read back as "-" keeps the email this run knows."""
+        """A flag read back as "-" keeps the email this run knows."""
         pending = _pending()
         key = grant_key("bob@example.com")
         pending.read("f1", {"slackGrantPending": "true", key: UNKNOWN_TARGET})
@@ -111,7 +111,7 @@ class TestGrantFlags:
         assert "later runs won't know about it" in warning
 
     def test_failure_to_clear_is_reported_as_a_clear(self, caplog):
-        """SF-N5: a flag left after a success means a harmless second grant."""
+        """A flag left after a success means a harmless second grant."""
         failures = []
         pending = _pending(failures)
         pending.set_grant("f1", "bob@example.com", True)
@@ -127,7 +127,7 @@ class TestGrantFlags:
 
 
 class TestEncoding:
-    """Drive limits an entry to 124 bytes of key plus value (TA P2-P8)."""
+    """Drive limits an entry to 124 bytes of key plus value."""
 
     def test_entry_of_exactly_124_bytes_is_stored_and_125_is_not(self):
         key = grant_key("probe@example.com")  # every grant key is 19 bytes

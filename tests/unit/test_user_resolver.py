@@ -541,7 +541,7 @@ class TestIsExternalUser:
         assert resolver.is_external_user("x@sub.corp.example.net") is True
 
     def test_workspace_domains_without_an_admin_domain(self, caplog):
-        """A dry run without an admin can't tell: nobody is external (SF-N9)."""
+        """A dry run without an admin can't tell: nobody is external (#89)."""
         resolver = _make_resolver(
             workspace_domain="",
             config=MigrationConfig(workspace_domains=["corp.example.net"]),

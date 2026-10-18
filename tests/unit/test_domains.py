@@ -33,7 +33,7 @@ def test_internal_domains_joins_admin_and_listed_domains():
 
 @pytest.mark.parametrize("admin_domain", [None, "", " "])
 def test_internal_domains_without_admin_domain(admin_domain):
-    """Without the primary domain nobody is external (SF-N9)."""
+    """Without the primary domain nobody is external (#89)."""
     domains = internal_domains(admin_domain, ["corp.example.net"])
 
     assert domains == frozenset()
