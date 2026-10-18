@@ -2108,6 +2108,27 @@ class TestPendingSweepNeverFailsTheRun:
 
         m.file_handler.retry_pending_permissions.assert_called_once_with()
 
+    def test_ctrl_c_during_the_sweep_stops_the_run(
+        self,
+        mock_cp_cls,
+        mock_conflicts,
+        mock_load_cp,
+        mock_save_cp,
+        mock_clear_cp,
+        mock_log_success,
+        mock_cleanup,
+        tmp_path,
+    ):
+        """The guard logs Exceptions only: Ctrl-C must not end as a success."""
+        m, _ = self._migrator(tmp_path, mock_cp_cls)
+        m.file_handler.retry_pending_permissions.side_effect = KeyboardInterrupt()
+
+        with pytest.raises(KeyboardInterrupt):
+            m.migrate()
+
+        mock_clear_cp.assert_not_called()
+        mock_log_success.assert_not_called()
+
     def test_ctrl_c_skips_the_sweep(
         self,
         mock_cp_cls,

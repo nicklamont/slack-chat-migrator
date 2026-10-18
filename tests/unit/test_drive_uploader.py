@@ -417,6 +417,24 @@ class TestUploadFileToDrive:
         assert failure.conversion_failed is conversion
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_local_read_error_is_permanent(self, mock_media_cls, tmp_path):
+        """EACCES on the temp file won't go away on a retry."""
+        import errno
+
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        test_file = tmp_path / "a.txt"
+        test_file.write_bytes(b"data")
+        uploader.drive_service.create_file.side_effect = PermissionError(
+            errno.EACCES, "Permission denied"
+        )
+
+        failure = uploader.upload_file_to_drive(str(test_file), "a.txt", "folder1")
+
+        assert isinstance(failure, DriveUploadFailure)
+        assert failure.retryable is False
+
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_network_error_is_a_failure_with_its_cause(self, mock_media_cls, tmp_path):
         uploader = _make_uploader()
         uploader.folders_pre_cached.add("folder1")

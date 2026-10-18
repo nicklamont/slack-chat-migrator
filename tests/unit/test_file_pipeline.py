@@ -540,6 +540,41 @@ class TestOwnershipTransfer:
 class TestRetryableFailures:
     """Each failed file says whether a later attempt may fix it (#118)."""
 
+    @pytest.mark.parametrize(
+        ("error", "retryable"),
+        [
+            (http_error(503), True),
+            (quota_error("userRateLimitExceeded"), True),
+            (http_error(403, "forbidden"), False),
+        ],
+        ids=["503", "403-rate-limit", "403-refused"],
+    )
+    def test_failed_drive_upload_carries_retryable(
+        self, tmp_path, downloads, error, retryable
+    ):
+        """UploadResult.retryable is what MESSAGES reads to hold a message back."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        assert upload(handler, downloads, "c", "F1", "UA", b"one").success
+        fake.failing["files.create"] = error
+
+        result = upload(handler, downloads, "c", "F2", "UA", b"two")
+
+        assert not result.success
+        assert result.retryable is retryable
+        assert handler.get_file_statistics()["failed_uploads"] == 1
+
+    def test_file_without_drive_is_retryable(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False)
+        handler.folder_id = None  # Drive couldn't be set up
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"x")
+
+        assert not result.success
+        assert "drive_unavailable" in (result.error or "")
+        assert result.retryable is True
+
     def test_folder_unavailable_for_a_server_error_is_retryable(
         self, tmp_path, downloads, caplog
     ):
@@ -693,6 +728,61 @@ class TestUploadErrorsAreCounted:
     """Every upload error comes back as a counted failure (#118)."""
 
     UNREACHABLE = OSError(errno.ENETUNREACH, "Network is unreachable")
+
+    @pytest.mark.parametrize(
+        "code", [errno.EMFILE, errno.ENOSPC], ids=["emfile", "enospc"]
+    )
+    def test_local_fault_in_the_drive_upload_stops_the_run(
+        self, tmp_path, downloads, code
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        assert upload(handler, downloads, "c", "F1", "UA", b"one").success
+        fake.failing["files.create"] = OSError(code, "local fault")
+
+        with pytest.raises(OSError) as raised:
+            upload(handler, downloads, "c", "F2", "UA", b"two")
+
+        assert raised.value.errno == code
+        assert handler.get_file_statistics()["failed_uploads"] == 0
+
+    def test_unreachable_network_on_the_transfer_keeps_the_upload(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.failing["permissions.create"] = self.UNREACHABLE
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        assert result.success
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 0
+        assert stats["ownership_transfer_failed"] == 1
+
+        handler.retry_pending_permissions()  # must not raise
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 0
+        assert stats["pending_retry_failed"] == 2  # the grant and the transfer
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackOwnerPending"] == "true"
+
+    def test_unreachable_network_storing_the_flag_keeps_the_upload(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        fake.failing["files.update"] = self.UNREACHABLE
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        assert result.success
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 0
+        assert stats["poster_grant_failures"] == 1
+        assert stats["pending_flag_failures"] == 1
 
     def test_unreachable_network_on_the_grant_keeps_the_upload(
         self, tmp_path, downloads
@@ -2152,6 +2242,17 @@ def post_document(handler, file_obj, channel="general"):
 
 
 class TestCanvasConversion:
+    def test_converted_canvas_has_no_md5_tag(self, tmp_path, doc_downloads):
+        """A Doc's content isn't the uploaded HTML, so it carries no slackMd5."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+
+        result = post_document(handler, CANVAS)
+
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackFileId"] == CANVAS["id"]
+        assert "slackMd5" not in props
+
     def test_canvas_becomes_a_google_doc(self, tmp_path, doc_downloads):
         fake = FakeDrive()
         handler = make_handler(fake, tmp_path)

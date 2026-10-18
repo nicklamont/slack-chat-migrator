@@ -221,6 +221,26 @@ class TestEncoding:
         assert pending.owner("f1") == Target("UC", "carol@example.com")
 
 
+class TestUserIdFirst:
+    @pytest.mark.parametrize(
+        ("key", "email_bytes"),
+        [(grant_key("x@example.com"), 100), ("slackOwner", 110)],
+        ids=["grant", "owner"],
+    )
+    def test_user_id_alone_when_both_dont_fit(self, key, email_bytes):
+        """The email would fit alone, but the user ID is what a later run needs."""
+        email = "a" * (email_bytes - len("@example.com")) + "@example.com"
+        uid = "U0123456789"
+        assert len(key) + len(email) <= 124 < len(key) + len(uid) + 1 + len(email)
+
+        assert encode_target(key, Target(uid, email)) == uid
+
+    def test_same_slack_user_matches_across_an_email_change(self):
+        assert Target("UA", "old@example.com").is_for("UA", "new@example.com")
+        assert not Target("UA", "a@example.com").is_for("UB", "a@example.com")
+        assert Target(email="A@Example.com").is_for(None, "a@example.com")
+
+
 class TestPropertyCap:
     """Drive allows 30 private properties per file and app."""
 
