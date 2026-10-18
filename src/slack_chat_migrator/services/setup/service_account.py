@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import base64
 import codecs
-import http.client
 import json
 import logging
 import os
@@ -33,9 +32,20 @@ from typing import Any
 
 from google.auth.exceptions import GoogleAuthError
 from googleapiclient.errors import HttpError
-from httplib2 import HttpLib2Error
 
-from slack_chat_migrator.utils.api import RETRYABLE_NETWORK_ERRORS, http_status
+from slack_chat_migrator.constants import (
+    HTTP_BAD_REQUEST,
+    HTTP_FORBIDDEN,
+    HTTP_NOT_FOUND,
+    HTTP_RATE_LIMIT,
+    HTTP_SERVER_ERROR_MIN,
+    HTTP_UNAUTHORIZED,
+)
+from slack_chat_migrator.utils.api import (
+    HTTP_REQUEST_TIMEOUT,
+    RETRYABLE_NETWORK_ERRORS,
+    http_status,
+)
 from slack_chat_migrator.utils.logging import log_with_context
 
 
@@ -202,14 +212,13 @@ class KeyCheck:
 
 
 #: Errors that mean "the keys couldn't be listed", not "the key is bad":
-#: HTTP errors, credential errors and network failures.  Anything else (a
-#: bug) propagates.
+#: HTTP errors, credential errors and network failures (the network errors
+#: include httplib2's and ``http.client``'s own).  Anything else (a bug)
+#: propagates.
 _LIST_ERRORS: tuple[type[BaseException], ...] = (
     HttpError,
     GoogleAuthError,
-    HttpLib2Error,
     OSError,
-    http.client.HTTPException,
     *RETRYABLE_NETWORK_ERRORS,
 )
 
@@ -312,12 +321,12 @@ def _describe_list_error(error: BaseException, service_account_email: str) -> st
         detail = getattr(error, "reason", "") or ""
         # keys.list addresses the account as projects/-/serviceAccounts/...,
         # so a missing account is a 403; 404 is only a fallback.
-        if status == 404:
+        if status == HTTP_NOT_FOUND:
             hint = (
                 f" The service account {service_account_email} doesn't exist;"
                 f" check the email chosen in the service account step{_RESUME_HINT}."
             )
-        elif status in (400, 401, 403):
+        elif status in (HTTP_BAD_REQUEST, HTTP_UNAUTHORIZED, HTTP_FORBIDDEN):
             hint = (
                 " Check that the IAM API is enabled, that your account may list"
                 " the service account's keys (iam.serviceAccountKeys.list), and"
@@ -648,19 +657,29 @@ _ALLOW_KEY_CREATION_URL = (
 #: ``projects/-/serviceAccounts/<email>``, and with ``-`` IAM answers 403,
 #: not 404, for an account that doesn't exist; 404 is only a fallback.
 _CREATE_REFUSED_ADVICE = {
-    400: "If {email} already has 10 keys (the most IAM allows), delete one you"
-    " know is no longer used: list them with '{list}', then run 'gcloud iam"
-    " service-accounts keys delete <KEY_ID> --iam-account={email}'. Otherwise"
-    " see the HTTP error for the cause.",
-    401: "Your Google credentials were rejected: run 'gcloud auth"
-    " application-default login' and try again.",
-    403: "Your account may not create keys for {email} (it needs"
-    " iam.serviceAccountKeys.create, for example through the Service Account"
-    " Key Admin role), or {email} doesn't exist (IAM answers 403, not 404, for"
-    " a missing account here){resume}.",
-    404: "The service account {email} doesn't exist; check the email chosen in"
-    " the service account step{resume}.",
-    429: "IAM's quota or rate limit was hit: wait a minute and try again.",
+    HTTP_BAD_REQUEST: (
+        "If {email} already has 10 keys (the most IAM allows), delete one you"
+        " know is no longer used: list them with '{list}', then run 'gcloud iam"
+        " service-accounts keys delete <KEY_ID> --iam-account={email}'."
+        " Otherwise see the HTTP error for the cause."
+    ),
+    HTTP_UNAUTHORIZED: (
+        "Your Google credentials were rejected: run 'gcloud auth"
+        " application-default login' and try again."
+    ),
+    HTTP_FORBIDDEN: (
+        "Your account may not create keys for {email} (it needs"
+        " iam.serviceAccountKeys.create, for example through the Service"
+        " Account Key Admin role), or {email} doesn't exist (IAM answers 403,"
+        " not 404, for a missing account here){resume}."
+    ),
+    HTTP_NOT_FOUND: (
+        "The service account {email} doesn't exist; check the email chosen in"
+        " the service account step{resume}."
+    ),
+    HTTP_RATE_LIMIT: (
+        "IAM's quota or rate limit was hit: wait a minute and try again."
+    ),
 }
 
 
@@ -754,13 +773,17 @@ def _create_failure(
             f": {error.reason}" if getattr(error, "reason", "") else ""
         )
         # Without a status nothing says IAM refused, so a key may exist.
-        if status is None or status == 408 or status >= 500:
+        if (
+            status is None
+            or status == HTTP_REQUEST_TIMEOUT
+            or status >= HTTP_SERVER_ERROR_MIN
+        ):
             return KeyCreateError(
                 f"Creating a key failed ({detail}). {_maybe_created_advice(email, requested_at)}",
                 maybe_created=True,
                 status=status,
             )
-        constraint = _key_creation_policy(error) if status == 400 else None
+        constraint = _key_creation_policy(error) if status == HTTP_BAD_REQUEST else None
         if constraint is not None:
             advice = _policy_advice(constraint, email)
         else:
