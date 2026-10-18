@@ -146,11 +146,12 @@ class DryRunDrives:
     def __init__(self) -> None:
         self._counter = 0
 
-    def get(self, *, driveId: str = "") -> DryRunRequest:
+    def get(self, *, driveId: str = "", fields: str | None = None) -> DryRunRequest:
         return DryRunRequest(
             {
                 "id": driveId,
                 "name": "dry-run-drive",
+                "capabilities": {"canAddChildren": True, "canManageMembers": True},
             }
         )
 

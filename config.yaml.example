@@ -104,6 +104,13 @@ import_completion_strategy: "skip_on_error"
 # import manually with 'slack-chat-migrator migrate --complete')
 cleanup_on_error: false
 
+# Attachment ownership (regular My Drive folder only; ignored on shared drives)
+
+# Hand each new attachment to the Slack user who uploaded it (internal users
+# only). Off by default: Drive emails the new owner once per transferred
+# file, and that notification can't be turned off.
+transfer_file_ownership: false
+
 # Advanced options
 
 # Maximum number of retry attempts for API calls

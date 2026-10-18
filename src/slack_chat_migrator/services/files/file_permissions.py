@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from slack_chat_migrator.services.drive_adapter import DriveAdapter
 
-from googleapiclient.errors import HttpError
-
-from slack_chat_migrator.services.drive_adapter import PermissionChange
+from slack_chat_migrator.services.drive_adapter import (
+    DRIVE_CALL_CANDIDATES,
+    PermissionChange,
+    is_drive_call_error,
+)
 from slack_chat_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_chat_migrator")
@@ -46,7 +48,9 @@ def transfer_file_ownership(
         new_owner_email: Email of the new owner.
 
     Returns:
-        True if successful, False otherwise.
+        True if successful; False if Drive refused it or the call failed
+        (an HttpError, a network error or credentials that can't be
+        refreshed, logged here).
     """
     try:
         permission = {
@@ -54,11 +58,11 @@ def transfer_file_ownership(
             "role": "owner",
             "emailAddress": new_owner_email,
         }
+        # Drive emails the new owner; that can't be turned off for transfers.
         drive_service.create_permission(
             file_id=file_id,
             body=permission,
             transfer_ownership=True,
-            send_notification_email=False,
         )
 
         log_with_context(
@@ -68,6 +72,11 @@ def transfer_file_ownership(
 
         return True
 
-    except HttpError as e:
-        log_with_context(logging.WARNING, f"Failed to transfer file ownership: {e}")
+    except DRIVE_CALL_CANDIDATES as e:
+        if not is_drive_call_error(e):
+            raise
+        log_with_context(
+            logging.WARNING,
+            f"Failed to transfer ownership of {file_id} to {new_owner_email}: {e}",
+        )
         return False

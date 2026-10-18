@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from googleapiclient.errors import HttpError
@@ -17,14 +18,109 @@ from slack_chat_migrator.constants import (
     DRIVE_ROLE_READER,
     HTTP_BAD_REQUEST,
 )
-from slack_chat_migrator.services.drive_adapter import PermissionChange
+from slack_chat_migrator.services.drive_adapter import (
+    DRIVE_CALL_CANDIDATES,
+    PermissionChange,
+    http_status,
+    is_drive_call_error,
+    is_transient_error,
+)
 from slack_chat_migrator.utils.api import escape_drive_query_value
+from slack_chat_migrator.utils.domains import (
+    internal_domains,
+    is_external_email,
+)
 from slack_chat_migrator.utils.logging import (
     log_with_context,
 )
 
 if TYPE_CHECKING:
     from slack_chat_migrator.services.drive_adapter import DriveAdapter
+
+
+@dataclass(frozen=True)
+class FolderLookup:
+    """Outcome of finding (or creating) a channel folder.
+
+    Attributes:
+        folder_id: The folder, or None when there is none or it can't be used.
+        error: Why the folder couldn't be found, created or used; None when
+            the lookup worked (a read-only lookup may then still find no
+            folder).
+        restriction_failed: The folder exists but couldn't be made
+            limited-access, so a private conversation's files must not go in.
+        retryable: The failure may go away (a network or server error, a
+            rate limit); False for a refusal such as a 403 or 404.
+    """
+
+    folder_id: str | None
+    error: str | None = None
+    restriction_failed: bool = False
+    retryable: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject a folder with an error, and failure flags without one."""
+        if self.folder_id is not None and self.error is not None:
+            raise ValueError("a FolderLookup with a folder has no error")
+        if (self.restriction_failed or self.retryable) and not self.error:
+            raise ValueError(
+                "a failed restriction or a retryable failure needs an error"
+            )
+
+
+@dataclass(frozen=True)
+class FolderSyncResult:
+    """Outcome of syncing a channel folder's members (check :attr:`ok`).
+
+    Attributes:
+        folder_id: The channel folder; None when there is none (no files were
+            uploaded for the channel) or the lookup failed.
+        granted: Members given ``reader`` access.
+        removed: Former members whose access was removed.
+        failed_grants: Internal members whose grant failed.
+        failed_removals: Former members (email, or permission ID) whose
+            access couldn't be removed.
+        external_failures: External members whose grant failed.  Outside the
+            migration's control (sharing policy, no Google account), so they
+            don't make the sync fail.
+        lookup_error: Why the folder couldn't be looked up.
+        listing_error: Why the folder's permissions couldn't be listed.
+            Members were still granted access, but no one was removed.
+    """
+
+    folder_id: str | None = None
+    granted: int = 0
+    removed: int = 0
+    failed_grants: tuple[str, ...] = ()
+    failed_removals: tuple[str, ...] = ()
+    external_failures: tuple[str, ...] = ()
+    lookup_error: str | None = None
+    listing_error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """True when every change succeeded, except grants to external members."""
+        return not (
+            self.lookup_error
+            or self.listing_error
+            or self.failed_grants
+            or self.failed_removals
+        )
+
+    def describe(self) -> str:
+        """One-line summary of what went wrong (empty when :attr:`ok`)."""
+        problems: list[str] = []
+        if self.lookup_error:
+            problems.append(f"folder lookup failed: {self.lookup_error}")
+        if self.listing_error:
+            problems.append(
+                f"permissions not listed, former members kept: {self.listing_error}"
+            )
+        if self.failed_grants:
+            problems.append(f"{len(self.failed_grants)} member grant(s) failed")
+        if self.failed_removals:
+            problems.append(f"{len(self.failed_removals)} removal(s) failed")
+        return "; ".join(problems)
 
 
 class FolderManager:
@@ -35,44 +131,48 @@ class FolderManager:
         drive_service: DriveAdapter,
         workspace_domain: str | None = None,
         *,
+        workspace_domains: Iterable[str] = (),
         is_external: Callable[[str], bool] | None = None,
         protected_emails: Callable[[], Iterable[str]] | None = None,
-        on_external_grant_failure: Callable[[str], None] | None = None,
+        on_sync_result: Callable[[str, FolderSyncResult], None] | None = None,
     ) -> None:
         """Initialize the FolderManager.
 
         Args:
             drive_service: DriveAdapter instance for Google Drive API calls
-            workspace_domain: The workspace domain for permissions
+            workspace_domain: The workspace admin's domain.
+            workspace_domains: Further internal domains
+                (``config.workspace_domains``).
             is_external: Tells whether an email belongs to a user outside the
-                workspace (e.g. a Slack Connect member).  Defaults to
-                comparing the email's domain with *workspace_domain*.
+                workspace (e.g. a Slack Connect member); pass
+                ``UserResolver.is_external_user``.  Defaults to checking the
+                email's domain against *workspace_domain* and
+                *workspace_domains*, as the resolver does.
             protected_emails: Returns accounts whose folder access a
                 permission sync must never remove (the workspace admin).
-            on_external_grant_failure: Called with the email when granting
-                folder access to an external member fails, so the caller
-                can count it.
+            on_sync_result: Called with the channel and the result of every
+                folder permission sync, including failed lookups, so the
+                caller can count failures.
         """
         self.drive_service = drive_service
         self.workspace_domain = workspace_domain
-        self._is_external = is_external or self._is_outside_workspace_domain
+        self._internal_domains = internal_domains(workspace_domain, workspace_domains)
+        self._is_external = is_external or self._is_outside_workspace_domains
         self._protected_emails = protected_emails or (lambda: ())
-        self._on_external_grant_failure = on_external_grant_failure or (
-            lambda _email: None
-        )
+        self._on_sync_result = on_sync_result or (lambda _channel, _result: None)
         # (parent_folder_id, folder name) -> folder ID, shared by every lookup.
         # Folders are created or found once per run; the cache is trusted.
         self.folder_cache: dict[tuple[str, str], str] = {}
-        # Folders known to have inherited permissions disabled, and folders
-        # Drive refused to restrict (so it isn't retried for every file).
+        # Folders known to have inherited permissions disabled, and how often
+        # restricting each other folder has failed (it is retried each time).
         self.restricted_folders: set[str] = set()
-        self._restriction_failed: set[str] = set()
+        self.restriction_failures: dict[str, int] = {}
+        # Whether each folder's last failed restriction may go away.
+        self.restriction_retryable: dict[str, bool] = {}
 
-    def _is_outside_workspace_domain(self, email: str) -> bool:
-        """Default external check: the email's domain isn't the workspace's."""
-        if not self.workspace_domain:
-            return False
-        return email.rsplit("@", 1)[-1].lower() != self.workspace_domain.lower()
+    def _is_outside_workspace_domains(self, email: str) -> bool:
+        """Default external check: the email is on no internal domain."""
+        return is_external_email(email, self._internal_domains)
 
     def remember_folder(
         self,
@@ -105,7 +205,9 @@ class FolderManager:
 
         A limited-access folder (``inheritedPermissionsDisabled``) is open
         only to people with direct access, plus shared drive managers, not
-        to every member of the shared drive.
+        to every member of the shared drive.  A failure isn't cached: the
+        next call (the next file, or the next run) tries again.  Only a
+        response that confirms ``inheritedPermissionsDisabled`` counts.
 
         Args:
             folder_id: Folder to restrict.
@@ -117,8 +219,6 @@ class FolderManager:
         """
         if folder_id in self.restricted_folders:
             return True
-        if folder_id in self._restriction_failed:
-            return False
         try:
             response = self.drive_service.update_file(
                 folder_id,
@@ -126,27 +226,22 @@ class FolderManager:
                 fields="id, inheritedPermissionsDisabled",
                 supports_all_drives=bool(shared_drive_id),
             )
-        except HttpError as e:
-            self._restriction_failed.add(folder_id)
-            log_with_context(
-                logging.WARNING,
-                f"Could not limit access to the {channel} folder ({e}); its files"
-                " are visible to every member of the shared drive",
-                channel=channel,
-                folder_id=folder_id,
-            )
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
+            self.restriction_retryable[folder_id] = is_transient_error(e)
+            self._log_restriction_failure(folder_id, channel, str(e))
             return False
-        if response.get("inheritedPermissionsDisabled") is False:
-            self._restriction_failed.add(folder_id)
-            log_with_context(
-                logging.WARNING,
-                f"Drive did not limit access to the {channel} folder; its files"
-                " are visible to every member of the shared drive",
-                channel=channel,
-                folder_id=folder_id,
+        if response.get("inheritedPermissionsDisabled") is not True:
+            # Fail closed: a response that doesn't confirm it isn't proof.
+            self.restriction_retryable[folder_id] = False
+            self._log_restriction_failure(
+                folder_id, channel, "Drive didn't confirm inherited permissions off"
             )
             return False
         self.restricted_folders.add(folder_id)
+        self.restriction_failures.pop(folder_id, None)
+        self.restriction_retryable.pop(folder_id, None)
         log_with_context(
             logging.INFO,
             f"Limited access to the {channel} folder to its members",
@@ -154,6 +249,23 @@ class FolderManager:
             folder_id=folder_id,
         )
         return True
+
+    def _log_restriction_failure(
+        self, folder_id: str, channel: str, cause: str
+    ) -> None:
+        """Count a failed restriction; log it at ERROR the first time."""
+        count = self.restriction_failures.get(folder_id, 0) + 1
+        self.restriction_failures[folder_id] = count
+        log_with_context(
+            logging.ERROR if count == 1 else logging.DEBUG,
+            f"Not uploading files of private conversation {channel}: its Drive"
+            f" folder could not be made limited-access ({cause}). Make the"
+            " workspace admin a Manager of the shared drive, or set"
+            " restrict_private_channel_folders: false to accept drive-wide"
+            " visibility. Tried again with the next file.",
+            channel=channel,
+            folder_id=folder_id,
+        )
 
     def list_child_folders(
         self, parent_folder_id: str, shared_drive_id: str | None = None
@@ -171,7 +283,8 @@ class FolderManager:
             ``inheritedPermissionsDisabled``.
 
         Raises:
-            HttpError: If a page can't be listed.
+            A Drive call error (see ``is_drive_call_error``) if a page can't
+            be listed, or DriveQuotaError.
         """
         safe_parent = escape_drive_query_value(parent_folder_id)
         query = (
@@ -204,66 +317,68 @@ class FolderManager:
             if not page_token:
                 return folders
 
-    def create_regular_drive_folder(self, folder_name: str) -> str | None:
-        """Create a regular Drive folder with domain permissions as fallback.
+    def find_or_create_root_folder(self, folder_name: str) -> FolderLookup:
+        """Find or create a regular Drive folder, used when there is no shared drive.
+
+        No domain-wide permission is set, to avoid org-wide access: each
+        channel folder gets its members' permissions.
 
         Args:
-            folder_name: Name of the folder to create
+            folder_name: Name of the folder.
 
         Returns:
-            Folder ID if successful, None otherwise
+            The folder, or why it couldn't be found or created.
         """
         try:
-            # Search for existing folder
             safe_name = escape_drive_query_value(folder_name)
-            query = f"name = '{safe_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-
+            query = (
+                f"name = '{safe_name}' and mimeType = '{DRIVE_FOLDER_MIME_TYPE}'"
+                " and trashed = false"
+            )
             log_with_context(
                 logging.DEBUG,
                 f"Searching for existing regular Drive folder: {folder_name}",
             )
-
-            results = self.drive_service.list_files(q=query, fields="files(id, name)")
-
-            files = results.get("files", [])
-            if files:
-                existing_folder_id: str | None = files[0]["id"]
+            files = self.drive_service.list_files(
+                q=query, fields="files(id, name)"
+            ).get("files", [])
+            if files and files[0].get("id"):
+                existing_folder_id: str = files[0]["id"]
                 log_with_context(
                     logging.INFO,
-                    f"Found existing regular Drive folder: {folder_name} (ID: {existing_folder_id})",
+                    f"Found existing regular Drive folder: {folder_name}"
+                    f" (ID: {existing_folder_id})",
                 )
+                return FolderLookup(existing_folder_id)
 
-                # Note: No domain-wide permissions set to avoid org-wide access
-                # Individual channel folders will have their own space-specific permissions
-                return existing_folder_id
-
-            # Create new folder
             log_with_context(
                 logging.INFO, f"Creating regular Drive folder: {folder_name}"
             )
-
-            folder_metadata = {
-                "name": folder_name,
-                "mimeType": "application/vnd.google-apps.folder",
-            }
-            folder = self.drive_service.create_file(body=folder_metadata, fields="id")
-
+            folder = self.drive_service.create_file(
+                body={"name": folder_name, "mimeType": DRIVE_FOLDER_MIME_TYPE},
+                fields="id",
+            )
             new_folder_id: str | None = folder.get("id")
-            # Note: No domain-wide permissions set to avoid org-wide access
-            # Individual channel folders will have their own space-specific permissions
-
+            if not new_folder_id:
+                return FolderLookup(None, "Drive returned no folder ID", retryable=True)
             log_with_context(
                 logging.INFO,
-                f"Successfully created regular Drive folder: {folder_name} (ID: {new_folder_id})",
+                f"Successfully created regular Drive folder: {folder_name}"
+                f" (ID: {new_folder_id})",
             )
+            return FolderLookup(new_folder_id)
 
-            return new_folder_id
-
-        except HttpError as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             log_with_context(
                 logging.ERROR, f"Failed to create regular Drive folder: {e}"
             )
-            return None
+            return FolderLookup(
+                None,
+                f"could not find or create folder {folder_name!r}: {e}",
+                retryable=is_transient_error(e),
+            )
 
     def _folder_query(self, name: str, parent_folder_id: str) -> str:
         """Drive query for a non-trashed folder named *name* in a parent."""
@@ -280,7 +395,8 @@ class FolderManager:
         """Find a non-trashed folder by name; cache and return its ID.
 
         Raises:
-            HttpError: If the search fails.
+            A Drive call error (see ``is_drive_call_error``) if the search
+            fails, or DriveQuotaError.
         """
         query = self._folder_query(name, parent_folder_id)
         fields = "files(id, name, inheritedPermissionsDisabled)"
@@ -306,14 +422,14 @@ class FolderManager:
             )
         return found
 
-    def get_or_create_channel_folder(
+    def find_or_create_channel_folder(
         self,
         channel: str,
         parent_folder_id: str,
         shared_drive_id: str | None = None,
         *,
         restricted: bool = False,
-    ) -> str | None:
+    ) -> FolderLookup:
         """Get or create a channel-specific folder.
 
         Args:
@@ -322,10 +438,12 @@ class FolderManager:
             shared_drive_id: ID of the shared drive (if applicable)
             restricted: Make it a limited-access folder
                 (``inheritedPermissionsDisabled``), for private channels and
-                DMs.  An existing folder is restricted too.
+                DMs.  An existing folder is restricted too.  If that fails,
+                no folder is returned (fail closed), so the conversation's
+                files are never stored in an open folder.
 
         Returns:
-            The folder ID if successful, None otherwise
+            The folder, or the reason there is none.
         """
         name = self._sanitize_folder_name(channel)
         folder_id = self.folder_cache.get((parent_folder_id, name))
@@ -349,19 +467,34 @@ class FolderManager:
                     channel, name, parent_folder_id, shared_drive_id, restricted
                 )
                 if not folder_id:
-                    return None
-        except HttpError as e:
+                    return FolderLookup(
+                        None, "Drive returned no folder ID", retryable=True
+                    )
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             log_with_context(
                 logging.WARNING,
                 f"Failed to get or create channel folder {channel}: {e}",
                 channel=channel,
                 error=str(e),
             )
-            return None
+            return FolderLookup(
+                None,
+                f"could not find or create the folder: {e}",
+                retryable=is_transient_error(e),
+            )
 
-        if restricted:
-            self.ensure_restricted(folder_id, channel, shared_drive_id)
-        return folder_id
+        if restricted and not self.ensure_restricted(
+            folder_id, channel, shared_drive_id
+        ):
+            return FolderLookup(
+                None,
+                "the private conversation's folder could not be made limited-access",
+                restriction_failed=True,
+                retryable=self.restriction_retryable.get(folder_id, False),
+            )
+        return FolderLookup(folder_id)
 
     def _create_channel_folder(
         self,
@@ -374,7 +507,8 @@ class FolderManager:
         """Create a channel folder, limited-access when *restricted*.
 
         Raises:
-            HttpError: If the folder can't be created.
+            A Drive call error (see ``is_drive_call_error``) if the folder
+            can't be created, or DriveQuotaError.
         """
         log_with_context(
             logging.INFO, f"Creating channel folder: {channel}", channel=channel
@@ -395,7 +529,7 @@ class FolderManager:
                 supports_all_drives=supports_all_drives,
             )
         except HttpError as e:
-            if not restricted or e.resp.status != HTTP_BAD_REQUEST:
+            if not restricted or http_status(e) != HTTP_BAD_REQUEST:
                 raise
             # Create it open, then restrict it with an update.
             folder_metadata.pop("inheritedPermissionsDisabled")
@@ -444,7 +578,12 @@ class FolderManager:
             shared_drive_id: ID of the shared drive (if applicable)
 
         Returns:
-            Folder ID if found, None otherwise
+            Folder ID if found, None if there is no such folder.
+
+        Raises:
+            A Drive call error (see ``is_drive_call_error``) if the search
+            fails (it never means "no folder"), or DriveQuotaError.
+            :meth:`find_channel_folder` returns the call error instead.
         """
         name = self._sanitize_folder_name(channel)
         cached = self.folder_cache.get((parent_folder_id, name))
@@ -456,33 +595,84 @@ class FolderManager:
             )
             return cached
 
-        try:
-            found_folder_id = self._search_folder(
-                name, parent_folder_id, shared_drive_id
+        found_folder_id = self._search_folder(name, parent_folder_id, shared_drive_id)
+        if found_folder_id:
+            log_with_context(
+                logging.DEBUG,
+                f"Found existing channel folder: {channel} (ID: {found_folder_id})",
+                channel=channel,
             )
-            if found_folder_id:
-                log_with_context(
-                    logging.DEBUG,
-                    f"Found existing channel folder: {channel} (ID: {found_folder_id})",
-                    channel=channel,
-                )
-                return found_folder_id
-
+        else:
             log_with_context(
                 logging.DEBUG,
                 f"No existing channel folder found for {channel}",
                 channel=channel,
             )
-            return None
+        return found_folder_id
 
-        except HttpError as e:
+    def find_channel_folder(
+        self, channel: str, parent_folder_id: str, shared_drive_id: str | None = None
+    ) -> FolderLookup:
+        """Look up a channel folder without creating it.
+
+        Like :meth:`get_channel_folder_id`, but a failed search is returned
+        as ``FolderLookup(None, error)`` rather than raised, so it can't be
+        mistaken for "no folder".
+        """
+        try:
+            return FolderLookup(
+                self.get_channel_folder_id(channel, parent_folder_id, shared_drive_id)
+            )
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             log_with_context(
                 logging.WARNING,
-                f"Failed to get channel folder ID for {channel}: {e}",
+                f"Failed to look up the Drive folder of {channel}: {e}",
                 channel=channel,
                 error=str(e),
             )
-            return None
+            return FolderLookup(
+                None,
+                f"could not look up the folder: {e}",
+                retryable=is_transient_error(e),
+            )
+
+    def sync_channel_folder(
+        self,
+        channel: str,
+        parent_folder_id: str,
+        user_emails: list[str],
+        shared_drive_id: str | None = None,
+    ) -> FolderSyncResult:
+        """Find a channel's folder and make its members match *user_emails*.
+
+        A channel without a folder (no files were uploaded) needs no sync and
+        gives an ``ok`` result with no ``folder_id``.  A failed lookup gives
+        a result with ``lookup_error``.  Every result, including those two,
+        is passed to *on_sync_result*.
+
+        Args:
+            channel: Channel name.
+            parent_folder_id: ID of the folder that holds the channel folders.
+            user_emails: Emails of the people who should have access.
+            shared_drive_id: ID of the shared drive (if applicable).
+
+        Returns:
+            What changed and what failed; see :class:`FolderSyncResult`.
+        """
+        lookup = self.find_channel_folder(channel, parent_folder_id, shared_drive_id)
+        if lookup.error:
+            result = FolderSyncResult(lookup_error=lookup.error)
+            self._report_sync(channel, result)
+            return result
+        if not lookup.folder_id:
+            result = FolderSyncResult()
+            self._report_sync(channel, result)
+            return result
+        return self.set_channel_folder_permissions(
+            lookup.folder_id, channel, user_emails, shared_drive_id
+        )
 
     def set_channel_folder_permissions(
         self,
@@ -490,7 +680,7 @@ class FolderManager:
         channel: str,
         user_emails: list[str],
         shared_drive_id: str | None = None,
-    ) -> bool:
+    ) -> FolderSyncResult:
         """Make the folder's member list match *user_emails*.
 
         Every member with an email without access gets ``reader``, internal
@@ -503,8 +693,10 @@ class FolderManager:
 
         A grant to an external address can fail for reasons outside the
         migration (domain sharing policy, no Google account).  Such failures
-        are logged as warnings, reported through *on_external_grant_failure*
-        and don't make the sync fail.
+        are logged as warnings and don't make the sync fail.  If the
+        folder's permissions can't be listed, members are still granted
+        access but no one is removed, and the sync fails.  The result is
+        also passed to *on_sync_result*.
 
         Args:
             folder_id: ID of the channel folder
@@ -513,8 +705,8 @@ class FolderManager:
             shared_drive_id: ID of the shared drive (if applicable)
 
         Returns:
-            True if every change succeeded, except grants to external
-            members; False otherwise
+            What changed and what failed; :attr:`FolderSyncResult.ok` if
+            every change succeeded, except grants to external members.
         """
         supports_all_drives = bool(shared_drive_id)
         protected = {email.lower() for email in self._protected_emails() if email}
@@ -524,22 +716,27 @@ class FolderManager:
             if email:
                 wanted.setdefault(email.lower(), email)
 
+        listing_error: str | None = None
         try:
             existing = self.drive_service.list_permissions(
                 folder_id, supports_all_drives=supports_all_drives
             )
-        except HttpError as e:
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
             log_with_context(
                 logging.WARNING,
                 f"Could not list permissions of the {channel} folder ({e});"
-                " only adding members",
+                " only adding members, former members keep their access",
                 channel=channel,
                 folder_id=folder_id,
             )
             existing = []
+            listing_error = str(e)
 
         changes: list[PermissionChange] = []
         has_access: set[str] = set()
+        removed_emails: dict[str, str] = {}  # permission ID -> email
         for perm in existing:
             email = (perm.get("emailAddress") or "").lower()
             if perm.get("type") != "user" or not email:
@@ -547,6 +744,7 @@ class FolderManager:
             if email in wanted:
                 has_access.add(email)
             elif not self._is_protected(perm, email, protected):
+                removed_emails[perm["id"]] = email
                 changes.append(
                     PermissionChange(
                         folder_id,
@@ -571,16 +769,16 @@ class FolderManager:
                 )
 
         errors = self.drive_service.apply_permission_changes(changes) if changes else []
-        failed_count = 0
-        external_failed = 0
+        failed_grants: list[str] = []
+        failed_removals: list[str] = []
+        external_failures: list[str] = []
         for change, error in zip(changes, errors, strict=True):
             if error is None:
                 continue
             grantee = (change.body or {}).get("emailAddress")
             if grantee and self._is_external(grantee):
                 # Outside our control (sharing policy, no Google account).
-                external_failed += 1
-                self._on_external_grant_failure(grantee)
+                external_failures.append(grantee)
                 log_with_context(
                     logging.WARNING,
                     f"Could not give external member {grantee} access to the"
@@ -589,29 +787,59 @@ class FolderManager:
                     folder_id=folder_id,
                 )
                 continue
-            failed_count += 1
-            target = grantee or change.permission_id
-            action = "remove" if change.permission_id else "grant"
+            if grantee:
+                failed_grants.append(grantee)
+                action, target = "grant", grantee
+            else:
+                permission_id = change.permission_id or ""
+                target = removed_emails.get(permission_id) or permission_id
+                failed_removals.append(target)
+                action = "remove"
             log_with_context(
                 logging.WARNING,
-                f"Failed to {action} access for {target} on channel folder {channel}: {error}",
+                f"Failed to {action} access for {target} on channel folder"
+                f" {channel}: {error}",
                 channel=channel,
                 folder_id=folder_id,
             )
 
+        grants = len(changes) - removals
+        result = FolderSyncResult(
+            folder_id=folder_id,
+            granted=grants - len(failed_grants) - len(external_failures),
+            removed=removals - len(failed_removals),
+            failed_grants=tuple(failed_grants),
+            failed_removals=tuple(failed_removals),
+            external_failures=tuple(external_failures),
+            listing_error=listing_error,
+        )
         log_with_context(
             logging.INFO,
             f"Synced channel folder permissions for {channel}:"
-            f" {len(changes) - removals} added, {removals} removed,"
-            f" {failed_count} failed, {external_failed} external grants failed",
+            f" {result.granted} added, {result.removed} removed,"
+            f" {len(failed_grants) + len(failed_removals)} failed,"
+            f" {len(external_failures)} external grants failed",
             channel=channel,
             folder_id=folder_id,
-            success_count=len(changes) - failed_count - external_failed,
-            failed_count=failed_count,
-            external_failed_count=external_failed,
+            success_count=result.granted + result.removed,
+            failed_count=len(failed_grants) + len(failed_removals),
+            external_failed_count=len(external_failures),
         )
+        self._report_sync(channel, result)
+        return result
 
-        return failed_count == 0
+    def _report_sync(self, channel: str, result: FolderSyncResult) -> None:
+        """Log a failed sync and pass every result to *on_sync_result*."""
+        if not result.ok:
+            log_with_context(
+                logging.ERROR,
+                f"Channel folder permissions of {channel} are not in sync"
+                f" ({result.describe()}); members may not be able to open its"
+                " files, or former members may keep access.",
+                channel=channel,
+                folder_id=result.folder_id or "",
+            )
+        self._on_sync_result(channel, result)
 
     @staticmethod
     def _is_protected(perm: dict[str, Any], email: str, protected: set[str]) -> bool:

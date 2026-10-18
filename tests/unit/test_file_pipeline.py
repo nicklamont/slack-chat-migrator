@@ -3,22 +3,35 @@ over an in-memory Drive fake (tests/unit/drive_fakes.py)."""
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import json
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
+from google.auth.exceptions import RefreshError
+from googleapiclient.errors import HttpError
+from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
+from slack_chat_migrator.exceptions import (
+    APIError,
+    DriveQuotaError,
+    PermissionCheckError,
+)
+from slack_chat_migrator.services.drive.folder_manager import FolderLookup
+from slack_chat_migrator.services.drive.pending import FIXED_APP_PROPERTIES, grant_key
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
 from slack_chat_migrator.services.files import file as file_mod
 from slack_chat_migrator.services.files.file_download import (
     DownloadResult,
     DownloadStatus,
 )
-from tests.unit.drive_fakes import FakeDrive
+from slack_chat_migrator.services.user_resolver import UserResolver
+from tests.unit.drive_fakes import FakeDrive, http_error
 
 USERS = {
     "UA": "alice@example.com",
@@ -26,6 +39,12 @@ USERS = {
     "UX": "ext@other.org",
 }
 DRIVE_NAME = "Imported Slack Attachments"
+
+
+def quota_error(reason: str) -> HttpError:
+    """A Drive 403 whose JSON body names *reason*."""
+    body = json.dumps({"error": {"errors": [{"reason": reason}]}})
+    return HttpError(Response({"status": "403"}), body.encode())
 
 
 class Downloads:
@@ -56,8 +75,13 @@ def downloads():
         yield fake
 
 
-def make_handler(fake: FakeDrive, tmp_path, *, shared=True, config=None):
-    """Build a real FileHandler over *fake*, initialised like a live run."""
+def make_handler(
+    fake: FakeDrive, tmp_path, *, shared=True, config=None, transfer=False
+):
+    """Build a real FileHandler over *fake*, initialised like a live run.
+
+    *transfer* turns on ``transfer_file_ownership`` (when no *config* is given).
+    """
     state = MigrationState()
     state.context.output_dir = str(tmp_path)
     resolver = MagicMock()
@@ -68,7 +92,11 @@ def make_handler(fake: FakeDrive, tmp_path, *, shared=True, config=None):
         DriveAdapter(fake),
         MagicMock(),
         None,
-        config or MigrationConfig(shared_drive=SharedDriveConfig(name=DRIVE_NAME)),
+        config
+        or MigrationConfig(
+            shared_drive=SharedDriveConfig(name=DRIVE_NAME),
+            transfer_file_ownership=transfer,
+        ),
         "example.com",
         dict(USERS),
         resolver,
@@ -80,9 +108,7 @@ def make_handler(fake: FakeDrive, tmp_path, *, shared=True, config=None):
         handler.ensure_drive_initialized()
     else:
         fake.add_folder("ROOT", "Imported Slack Attachments", "root")
-        handler._shared_drive_id = None
-        handler._root_folder_id = "ROOT"
-        handler._drive_initialized = True
+        handler.folder_id = "ROOT"  # a regular Drive folder, no shared drive
     return handler
 
 
@@ -98,6 +124,7 @@ def upload(
     mime="application/pdf",
     space="spaces/S",
     sender=None,
+    sender_user_id=None,
 ):
     """Post one Slack file from *user* in *channel*."""
     downloads.content[file_id] = content
@@ -113,7 +140,9 @@ def upload(
     sender_email = sender if sender is not None else USERS.get(user)
     if sender_email and not sender_email.endswith("@example.com"):
         sender_email = None  # message_builder passes None for externals
-    return handler.upload_attachment(file_obj, channel, space, None, sender_email)
+    return handler.upload_attachment(
+        file_obj, channel, space, None, sender_email, sender_user_id=sender_user_id
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +153,7 @@ def upload(
 class TestGrants:
     def test_no_request_uses_editor_role(self, tmp_path, downloads):
         fake = FakeDrive()
-        handler = make_handler(fake, tmp_path, shared=False)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
 
         result = upload(
             handler, downloads, "c", "F1", "UA", b"one", sender="bob@example.com"
@@ -137,7 +166,7 @@ class TestGrants:
 
     def test_failed_transfer_is_counted(self, tmp_path, downloads):
         fake = FakeDrive(fail_transfer=True)
-        handler = make_handler(fake, tmp_path, shared=False)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
 
         result = upload(handler, downloads, "c", "F1", "UA", b"two")
 
@@ -154,7 +183,7 @@ class TestGrants:
 
     def test_reused_file_is_not_transferred_again(self, tmp_path, downloads):
         fake = FakeDrive()
-        handler = make_handler(fake, tmp_path, shared=False)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
 
         first = upload(handler, downloads, "c", "F1", "UA", b"same")
         second = upload(handler, downloads, "c", "F2", "UB", b"same")
@@ -206,7 +235,7 @@ class TestGrants:
 
     def test_poster_who_becomes_owner_needs_no_writer_grant(self, tmp_path, downloads):
         fake = FakeDrive()
-        handler = make_handler(fake, tmp_path, shared=False)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
 
         upload(handler, downloads, "c", "F1", "UA", b"mine")
 
@@ -221,7 +250,7 @@ class TestGrants:
 
     def test_shared_drive_grants_writer_to_poster_only(self, tmp_path, downloads):
         fake = FakeDrive()
-        handler = make_handler(fake, tmp_path)
+        handler = make_handler(fake, tmp_path, transfer=True)  # still no transfer
 
         upload(handler, downloads, "c", "F1", "UA", b"doc")
 
@@ -230,6 +259,1454 @@ class TestGrants:
             ("alice@example.com", "writer")
         ]
         assert not any(kw.get("transferOwnership") for kw in calls)
+
+
+class TestTransferGuards:
+    """With transfers on, only internal uploaders in regular Drive get ownership."""
+
+    @staticmethod
+    def _transfers(fake):
+        return [kw for kw in fake.permission_calls() if kw.get("transferOwnership")]
+
+    def test_no_transfer_to_an_external_uploader(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        upload(handler, downloads, "c", "F1", "UX", b"ext")
+
+        assert self._transfers(fake) == []
+
+    def test_no_transfer_on_a_shared_drive(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=True, transfer=True)
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        assert self._transfers(fake) == []
+
+    def test_internal_uploader_in_regular_drive_gets_ownership(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        assert len(self._transfers(fake)) == 1
+
+
+class TestDriveSetup:
+    """Drive setup stops the run on transient errors (#118)."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [ConnectionResetError("connection reset"), RefreshError("unauthorized_client")],
+        ids=["network", "refresh"],
+    )
+    def test_existing_shared_drive_is_never_replaced_by_my_drive(self, tmp_path, error):
+        fake = FakeDrive(drives=[{"id": "SD1", "name": DRIVE_NAME}])
+        fake.failing["drives.list"] = error
+        handler = make_handler(fake, tmp_path, shared=False)
+        handler._drive_status = file_mod.DriveStatus("not_initialized")
+
+        with pytest.raises(APIError, match=DRIVE_NAME):
+            handler.ensure_drive_initialized()
+
+        assert handler.drive_status.mode == "none"
+        assert fake.count("files.create") == 0  # no My Drive folder made
+
+    def test_daily_limit_stops_the_run_without_my_drive(self, tmp_path):
+        """dailyLimitExceeded is a project quota, not "no shared drives"."""
+        fake = FakeDrive()
+        fake.failing["drives.create"] = quota_error("dailyLimitExceeded")
+        handler = make_handler(fake, tmp_path, shared=False)
+        handler._drive_status = file_mod.DriveStatus("not_initialized")
+
+        with pytest.raises(
+            DriveQuotaError, match=r"quota reached \(dailyLimitExceeded\)"
+        ):
+            handler.ensure_drive_initialized()
+
+        assert handler.drive_status.mode == "not_initialized"
+        assert fake.count("files.create") == 0  # no My Drive folder made
+
+    def test_read_only_shared_drive_stops_the_run(self, tmp_path):
+        """A drive the admin can't add files to is not "ready" (#118)."""
+        fake = FakeDrive(
+            drives=[
+                {
+                    "id": "SD1",
+                    "name": DRIVE_NAME,
+                    "capabilities": {"canAddChildren": False},
+                }
+            ]
+        )
+        handler = make_handler(fake, tmp_path, shared=False)
+        handler._drive_status = file_mod.DriveStatus("not_initialized")
+
+        with pytest.raises(PermissionCheckError) as excinfo:
+            handler.ensure_drive_initialized()
+
+        # Its own advice, without the generic network hint stacked on.
+        message = str(excinfo.value)
+        assert "can't add files to shared drive" in message
+        assert "Make them a Manager or Content manager" in message
+        assert "Check network access" not in message
+        assert handler.drive_status.mode == "not_initialized"
+        assert fake.count("files.create") == 0  # no My Drive folder made
+
+    def test_account_without_shared_drives_uses_my_drive(self, tmp_path):
+        fake = FakeDrive()
+        fake.failing["drives.create"] = http_error(403, "insufficient permissions")
+        handler = make_handler(fake, tmp_path, shared=False)
+        handler._drive_status = file_mod.DriveStatus("not_initialized")
+
+        handler.ensure_drive_initialized()
+
+        assert handler.drive_status.mode == "my_drive"
+        assert "insufficient permissions" in handler.drive_status.detail
+
+
+class TestWorkspaceDomains:
+    """Users on any internal domain count as internal (Refs #89)."""
+
+    CORP = "carol@corp.example.net"
+
+    def _handler(self, fake, tmp_path, *, resolver=None, domains=()):
+        config = MigrationConfig(
+            shared_drive=SharedDriveConfig(name=DRIVE_NAME),
+            workspace_domains=list(domains),
+        )
+        handler = make_handler(fake, tmp_path, config=config)
+        handler.user_resolver = resolver
+        return handler
+
+    @staticmethod
+    def _post(handler, downloads, sender):
+        downloads.content["F1"] = b"x"
+        handler.state.context.current_channel = "c"
+        return handler.upload_attachment(
+            {
+                "id": "F1",
+                "name": "a.pdf",
+                "user": "UC",
+                "url_private": "https://files.slack.com/files-pri/T-F1/a.pdf",
+            },
+            "c",
+            "spaces/S",
+            None,
+            sender,
+        )
+
+    @staticmethod
+    def _grants(fake):
+        return [
+            (kw["body"]["emailAddress"], kw["body"]["role"])
+            for kw in fake.permission_calls()
+        ]
+
+    def test_secondary_domain_poster_gets_writer_grant(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = self._handler(fake, tmp_path, domains=[" Corp.Example.NET "])
+
+        result = self._post(handler, downloads, self.CORP)
+
+        assert result.success
+        assert self._grants(fake) == [(self.CORP, "writer")]
+
+    def test_unlisted_domain_poster_gets_no_grant(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = self._handler(fake, tmp_path, domains=["corp.example.net"])
+
+        assert self._post(handler, downloads, "ext@other.org").success
+
+        assert self._grants(fake) == []
+
+    def test_production_wiring_honours_workspace_domains(self, tmp_path, downloads):
+        """A real UserResolver, as the migrator passes it (#89)."""
+        fake = FakeDrive()
+        config = MigrationConfig(
+            shared_drive=SharedDriveConfig(name=DRIVE_NAME),
+            workspace_domains=["corp.example.net"],
+        )
+        users = {**USERS, "UC": self.CORP}
+        resolver = UserResolver(
+            config=config,
+            state=MigrationState(),
+            chat=MagicMock(),
+            creds_path=None,
+            user_map=users,
+            unmapped_user_tracker=MagicMock(),
+            export_root=str(tmp_path),
+            workspace_admin="admin@example.com",
+            workspace_domain="example.com",
+        )
+        handler = make_handler(fake, tmp_path, config=config)
+        handler.user_resolver = resolver
+        handler.user_map = users
+
+        result = self._post(handler, downloads, self.CORP)
+
+        assert result.success
+        assert self._grants(fake) == [(self.CORP, "writer")]
+        assert handler.get_file_statistics()["external_user_files"] == 0
+
+    def test_the_resolver_decides_when_there_is_one(self, tmp_path, downloads):
+        """The resolver's answer wins, so the whole tool agrees on who is internal."""
+        fake = FakeDrive()
+        resolver = MagicMock()
+        resolver.workspace_admin = "admin@example.com"
+        resolver.is_external_user = lambda email: (
+            not email.endswith(("@example.com", "@corp.example.net"))
+        )
+        handler = self._handler(fake, tmp_path, resolver=resolver)  # no domains
+
+        assert self._post(handler, downloads, self.CORP).success
+
+        assert self._grants(fake) == [(self.CORP, "writer")]
+
+
+class TestOwnershipTransfer:
+    """Transfers are opt-in and never disable Drive's notification (#98)."""
+
+    def test_off_by_default_poster_gets_writer(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False)
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        calls = fake.permission_calls()
+        assert [(kw["body"]["emailAddress"], kw["body"]["role"]) for kw in calls] == [
+            ("alice@example.com", "writer")
+        ]
+        assert not any(kw.get("transferOwnership") for kw in calls)
+        stats = handler.get_file_statistics()
+        assert stats["ownership_transferred"] == 0
+        assert stats["ownership_transfer_failed"] == 0
+
+    @pytest.mark.parametrize(
+        "sender", [None, "bob@example.com"], ids=["single", "batched"]
+    )
+    def test_transfer_requests_keep_the_notification(self, tmp_path, downloads, sender):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine", sender=sender)
+
+        transfers = [
+            kw for kw in fake.permission_calls() if kw.get("transferOwnership")
+        ]
+        assert len(transfers) == 1
+        assert "sendNotificationEmail" not in transfers[0]
+        assert handler.get_file_statistics()["ownership_transferred"] == 1
+
+    def test_failed_batched_transfer_is_counted_and_logged(
+        self, tmp_path, downloads, caplog
+    ):
+        """Poster != owner: writer grant and transfer share a batch (#98)."""
+        fake = FakeDrive(fail_transfer=True)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        result = upload(
+            handler, downloads, "c", "F1", "UA", b"shared", sender="bob@example.com"
+        )
+
+        assert result.success
+        assert fake.batch_sizes == [2]
+        stats = handler.get_file_statistics()
+        assert stats["ownership_transfer_failed"] == 1
+        assert stats["ownership_transferred"] == 0
+        bob = [
+            kw
+            for kw in fake.permission_calls()
+            if kw["body"]["emailAddress"] == "bob@example.com"
+        ]
+        assert [kw["body"]["role"] for kw in bob] == ["writer"]
+        assert (
+            fake.permissions_db[result.drive_id][0]["emailAddress"] == "bob@example.com"
+        )
+        assert any(
+            "alice@example.com" in r.getMessage() and "forbidden" in r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING"
+        )
+
+    def test_failed_batched_writer_grant_is_not_marked_granted(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive(reject_grants_to={"bob@example.com"})
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        result = upload(
+            handler, downloads, "c", "F1", "UA", b"shared", sender="bob@example.com"
+        )
+
+        assert result.success
+        assert not handler._already_granted(result.drive_id, "bob@example.com")
+        assert handler.get_file_statistics()["ownership_transferred"] == 1
+
+
+class TestRetryableFailures:
+    """Each failed file says whether a later attempt may fix it (#118)."""
+
+    @pytest.mark.parametrize(
+        ("error", "retryable"),
+        [
+            (http_error(503), True),
+            (quota_error("userRateLimitExceeded"), True),
+            (http_error(403, "forbidden"), False),
+        ],
+        ids=["503", "403-rate-limit", "403-refused"],
+    )
+    def test_failed_drive_upload_carries_retryable(
+        self, tmp_path, downloads, error, retryable
+    ):
+        """UploadResult.retryable is what MESSAGES reads to hold a message back."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        assert upload(handler, downloads, "c", "F1", "UA", b"one").success
+        fake.failing["files.create"] = error
+
+        result = upload(handler, downloads, "c", "F2", "UA", b"two")
+
+        assert not result.success
+        assert result.retryable is retryable
+        assert handler.get_file_statistics()["failed_uploads"] == 1
+
+    @pytest.mark.parametrize("shared", [True, False], ids=["shared", "my_drive"])
+    def test_retry_after_a_lost_create_response_makes_no_second_copy(
+        self, tmp_path, downloads, shared
+    ):
+        """Drive created the file but the reply was lost: the retry finds it."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=shared, transfer=not shared)
+        assert upload(handler, downloads, "c", "F0", "UA", b"zero").success
+        fake.lose_create_responses = 1
+
+        first = upload(handler, downloads, "c", "F1", "UA", b"one")
+        assert not first.success and first.retryable
+        fake.calls.clear()
+        retry = upload(handler, downloads, "c", "F1", "UA", b"one")
+
+        assert retry.success
+        copies = [
+            f
+            for f in fake.files_db.values()
+            if (f.get("appProperties") or {}).get("slackFileId") == "F1"
+        ]
+        assert len(copies) == 1
+        assert retry.drive_id == copies[0]["id"]
+        assert fake.count("files.create") == 0
+        # It gets what a new upload gets: the poster's grant, or the transfer.
+        assert fake.permission_calls()
+
+    def test_lost_upload_found_again_is_transferred_as_a_new_one(
+        self, tmp_path, downloads
+    ):
+        """Adopting it as an earlier run's file would skip its transfer."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        assert upload(handler, downloads, "c", "F0", "UA", b"0").success
+        fake.lose_create_responses = 1
+        assert not upload(handler, downloads, "c", "F1", "UA", b"1").success
+
+        retry = upload(handler, downloads, "c", "F1", "UA", b"1")
+
+        assert retry.success
+        assert fake.owners_of(retry.drive_id) == ["alice@example.com"]
+
+    def test_file_without_drive_is_retryable(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False)
+        handler.folder_id = None  # Drive couldn't be set up
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"x")
+
+        assert not result.success
+        assert "drive_unavailable" in (result.error or "")
+        assert result.retryable is True
+
+    def test_folder_unavailable_for_a_server_error_is_retryable(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path)
+        handler.folder_manager.folder_cache.clear()
+        fake.fail_query = lambda q: http_error(503) if "mimeType" in q else None
+
+        first = upload(handler, downloads, "general", "F1", "UA", b"x", space=None)
+        second = upload(handler, downloads, "general", "F2", "UA", b"y", space=None)
+
+        assert first.retryable and second.retryable
+        errors = [
+            r
+            for r in caplog.records
+            if r.levelname == "ERROR" and "general" in r.getMessage()
+        ]
+        assert len(errors) == 1  # once per channel
+
+    def test_folder_refused_with_a_403_is_permanent(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path)
+        handler.folder_manager.folder_cache.clear()
+        fake.fail_query = lambda q: http_error(403) if "mimeType" in q else None
+
+        result = upload(handler, downloads, "general", "F1", "UA", b"x", space=None)
+
+        assert not result.success
+        assert result.retryable is False
+
+    def test_failed_dedup_search_is_retryable(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F0", "UA", b"zero")
+        folder = next(iter(handler.drive_uploader.folders_pre_cached - {"SD1"}))
+        handler.drive_uploader.folders_pre_cached.discard(folder)
+        fake.fail_query = lambda q: (
+            http_error(500)
+            if q.startswith(f"'{folder}'") or q.startswith("appProperties")
+            else None
+        )
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"one")
+
+        assert not result.success
+        assert result.retryable
+
+    @pytest.mark.parametrize(
+        ("reason", "status", "retryable"),
+        [
+            ("network_error:ConnectionError", None, True),
+            ("http_503", 503, True),
+            ("auth", 403, False),
+        ],
+    )
+    def test_download_failures_carry_the_flag(
+        self, tmp_path, reason, status, retryable
+    ):
+        handler = make_handler(FakeDrive(), tmp_path)
+        handler._download_file = MagicMock(
+            return_value=DownloadResult(
+                DownloadStatus.FAILED, reason=reason, http_status=status
+            )
+        )
+
+        result = handler.upload_attachment(
+            {"id": "F1", "name": "a.pdf", "url_private": "https://files.slack.com/x"},
+            "c",
+        )
+
+        assert not result.success
+        assert result.retryable is retryable
+
+
+class TestQuotaStopsTheRun:
+    """A used-up Drive quota stops the run instead of failing each file (#118)."""
+
+    @pytest.mark.parametrize(
+        ("reason", "fix"),
+        [
+            ("dailyLimitExceeded", "Wait for it to reset"),
+            ("quotaExceeded", "Wait for it to reset"),
+            ("storageQuotaExceeded", "Free space or add storage"),
+            ("teamDriveFileLimitExceeded", "another shared drive"),
+        ],
+    )
+    def test_quota_on_the_upload(self, tmp_path, downloads, reason, fix):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        assert upload(handler, downloads, "c", "F1", "UA", b"one").success
+        fake.failing["files.create"] = quota_error(reason)
+
+        with pytest.raises(DriveQuotaError) as excinfo:
+            upload(handler, downloads, "c", "F2", "UA", b"two")
+
+        assert excinfo.value.reason == reason
+        assert fix in str(excinfo.value)
+        assert "migrate --resume" in str(excinfo.value)
+        # The file in flight isn't marked as failed (or cached as a result).
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 0
+        assert not any(key[0] == "F2" for key in handler.processed_files)
+
+    def test_quota_on_the_channel_folder(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.fail_query = lambda q: (
+            quota_error("dailyLimitExceeded") if "mimeType" in q else None
+        )
+
+        with pytest.raises(DriveQuotaError, match="dailyLimitExceeded"):
+            upload(handler, downloads, "new-channel", "F1", "UA", b"one")
+
+        assert handler.get_file_statistics()["channel_folder_failures"] == 0
+
+    @staticmethod
+    def _file(fake, slack_id):
+        return next(
+            f
+            for f in fake.files_db.values()
+            if (f.get("appProperties") or {}).get("slackFileId") == slack_id
+        )
+
+    @staticmethod
+    def _writers(fake, drive_id):
+        return {
+            p["emailAddress"]
+            for p in fake.permissions_db.get(drive_id, [])
+            if p["role"] == "writer"
+        }
+
+    def test_quota_on_the_grant_flags_it_for_the_next_run(
+        self, tmp_path, downloads, caplog
+    ):
+        """The run stops after the upload; the grant isn't lost with it."""
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = quota_error("dailyLimitExceeded")
+
+        with pytest.raises(DriveQuotaError, match="dailyLimitExceeded"):
+            upload(run1, downloads, "c", "F1", "UA", b"1", sender="bob@example.com")
+
+        record = self._file(fake, "F1")
+        assert record["appProperties"]["slackGrantPending"] == "true"
+        assert run1.get_file_statistics()["permissions_lost_on_quota_stop"] == 0
+        (error,) = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert record["id"] in error and "bob@example.com" in error
+        assert f"https://drive.google.com/file/d/{record['id']}/view" in error
+        assert "the next run's sweep makes them" in error
+
+        del fake.failing["permissions.create"]
+        run2 = make_handler(fake, tmp_path)  # migrate --resume
+        again = upload(run2, downloads, "c", "F1", "UA", b"1", sender="bob@example.com")
+        run2.retry_pending_permissions()
+
+        assert again.drive_id == record["id"]
+        assert "bob@example.com" in self._writers(fake, record["id"])
+
+    def test_quota_on_the_transfer_flags_it_for_the_next_run(self, tmp_path, downloads):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.failing["permissions.create"] = quota_error("dailyLimitExceeded")
+
+        with pytest.raises(DriveQuotaError):
+            upload(run1, downloads, "c", "F1", "UA", b"mine")
+
+        record = self._file(fake, "F1")
+        assert record["appProperties"]["slackOwnerPending"] == "true"
+
+        del fake.failing["permissions.create"]
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(run2, downloads, "c", "F1", "UA", b"mine")
+        run2.retry_pending_permissions()
+
+        assert fake.owners_of(record["id"]) == ["alice@example.com"]
+
+    def test_quota_on_a_grant_and_transfer_batch_flags_both(self, tmp_path, downloads):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.failing["permissions.create"] = quota_error("dailyLimitExceeded")
+
+        with pytest.raises(DriveQuotaError):
+            upload(run1, downloads, "c", "F1", "UA", b"1", sender="bob@example.com")
+
+        props = self._file(fake, "F1")["appProperties"]
+        assert props["slackGrantPending"] == "true"
+        assert props["slackOwnerPending"] == "true"
+
+        del fake.failing["permissions.create"]
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        run2.retry_pending_permissions()
+
+        drive_id = self._file(fake, "F1")["id"]
+        assert fake.owners_of(drive_id) == ["alice@example.com"]
+        assert "bob@example.com" in self._writers(fake, drive_id)
+
+    def test_unflagged_loss_is_logged_and_listed_for_a_manual_fix(
+        self, tmp_path, downloads, caplog
+    ):
+        """The daily limit refuses the flag write too."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.failing["permissions.create"] = quota_error("dailyLimitExceeded")
+        fake.failing["files.update"] = quota_error("dailyLimitExceeded")
+
+        with pytest.raises(DriveQuotaError):
+            upload(handler, downloads, "c", "F1", "UA", b"1", sender="bob@example.com")
+
+        record = self._file(fake, "F1")
+        assert "slackGrantPending" not in record["appProperties"]
+        stats = handler.get_file_statistics()
+        assert stats["permissions_lost_on_quota_stop"] == 1
+        assert stats["permissions_lost_details"] == [
+            {
+                "drive_file_id": record["id"],
+                "url": f"https://drive.google.com/file/d/{record['id']}/view",
+                "slack_file_id": "F1",
+                "channel": "c",
+                "grant_to": ["bob@example.com"],
+                "transfer_to": "alice@example.com",
+            }
+        ]
+        (error,) = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert "make them by hand" in error
+        assert "writer access for bob@example.com" in error
+        assert "ownership transfer to alice@example.com" in error
+
+    def test_rate_limit_still_fails_one_file_as_retryable(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        assert upload(handler, downloads, "c", "F1", "UA", b"one").success
+        fake.failing["files.create"] = quota_error("userRateLimitExceeded")
+
+        result = upload(handler, downloads, "c", "F2", "UA", b"two")
+
+        assert not result.success
+        assert result.retryable is True
+
+    def test_quota_ends_the_sweep_and_keeps_the_flags(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        first = upload(handler, downloads, "c", "F1", "UA", b"one")
+        upload(handler, downloads, "c", "F2", "UA", b"two")
+        fake.failing["permissions.create"] = quota_error("dailyLimitExceeded")
+
+        handler.retry_pending_permissions()  # must not raise
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_sweep_failures"] == 1
+        assert stats["pending_retried"] == 0
+        props = fake.files_db[first.drive_id]["appProperties"]
+        assert props["slackGrantPending"] == "true"
+        errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert any(
+            "Stopped retrying" in m and "dailyLimitExceeded" in m for m in errors
+        )
+
+
+class TestUploadErrorsAreCounted:
+    """Every upload error comes back as a counted failure (#118)."""
+
+    UNREACHABLE = OSError(errno.ENETUNREACH, "Network is unreachable")
+
+    @pytest.mark.parametrize(
+        "code", [errno.EMFILE, errno.ENOSPC], ids=["emfile", "enospc"]
+    )
+    def test_local_fault_in_the_drive_upload_stops_the_run(
+        self, tmp_path, downloads, code
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        assert upload(handler, downloads, "c", "F1", "UA", b"one").success
+        fake.failing["files.create"] = OSError(code, "local fault")
+
+        with pytest.raises(OSError) as raised:
+            upload(handler, downloads, "c", "F2", "UA", b"two")
+
+        assert raised.value.errno == code
+        assert handler.get_file_statistics()["failed_uploads"] == 0
+
+    def test_unreachable_network_on_the_transfer_keeps_the_upload(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.failing["permissions.create"] = self.UNREACHABLE
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        assert result.success
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 0
+        assert stats["ownership_transfer_failed"] == 1
+
+        handler.retry_pending_permissions()  # must not raise
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 0
+        assert stats["pending_retry_failed"] == 2  # the grant and the transfer
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackOwnerPending"] == "true"
+
+    def test_unreachable_network_storing_the_flag_keeps_the_upload(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        fake.failing["files.update"] = self.UNREACHABLE
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        assert result.success
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 0
+        assert stats["poster_grant_failures"] == 1
+        assert stats["pending_flag_failures"] == 1
+
+    def test_unreachable_network_on_the_grant_keeps_the_upload(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = self.UNREACHABLE
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"one")
+
+        assert result.success
+        stats = handler.get_file_statistics()
+        assert stats["poster_grant_failures"] == 1
+        assert stats["failed_uploads"] == 0
+
+    def test_unreachable_network_on_the_folder_sync_is_counted(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"x")
+        handler.folder_manager.folder_cache.clear()
+        fake.failing["files.list"] = self.UNREACHABLE
+
+        result = handler.sync_channel_folder_permissions("c", ["alice@example.com"])
+
+        assert result.lookup_error
+        assert handler.get_file_statistics()["folder_sync_failures"] == 1
+
+    def test_full_disk_stops_the_run(self, tmp_path):
+        handler = make_handler(FakeDrive(), tmp_path)
+        handler._download_file = MagicMock(
+            side_effect=OSError(errno.ENOSPC, "No space left on device")
+        )
+
+        with pytest.raises(OSError, match="No space"):
+            handler.upload_attachment(
+                {
+                    "id": "F1",
+                    "name": "a.pdf",
+                    "url_private": "https://files.slack.com/x",
+                },
+                "c",
+            )
+        assert handler.get_file_statistics()["failed_uploads"] == 0
+
+    def test_refresh_error_during_upload_is_counted(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        assert upload(handler, downloads, "c", "F1", "UA", b"one").success
+        fake.failing["files.create"] = RefreshError("invalid_grant: not authorized")
+
+        result = upload(handler, downloads, "c", "F2", "UA", b"two")
+
+        assert not result.success
+        assert "RefreshError" in (result.error or "")
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 1
+        assert stats["success_rate"] == 50.0
+
+
+class TestGrantFailures:
+    """A failed grant never fails the upload, and is retried (#98)."""
+
+    @staticmethod
+    def _writer_grants(fake, email="alice@example.com"):
+        return [
+            kw
+            for kw in fake.permission_calls()
+            if kw["body"]["emailAddress"] == email and kw["body"]["role"] == "writer"
+        ]
+
+    def test_network_error_on_grant_keeps_the_upload(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        assert result.success
+        stats = handler.get_file_statistics()
+        assert stats["poster_grant_failures"] == 1
+        assert stats["failed_uploads"] == 0
+        assert fake.files_db[result.drive_id]["appProperties"]["slackGrantPending"]
+        assert not handler._already_granted(result.drive_id, "alice@example.com")
+
+    def test_failed_grant_on_a_canvas_makes_no_second_copy(
+        self, tmp_path, doc_downloads
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = TimeoutError("timed out")
+
+        result = post_document(handler, CANVAS)
+
+        assert result.success
+        uploads = [
+            kw
+            for name, kw in fake.calls
+            if name == "files.create" and kw.get("media_body") is not None
+        ]
+        assert len(uploads) == 1
+
+    def test_grant_is_retried_when_the_file_is_linked_again(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        first = upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+
+        # The same Slack file again, for another space: linked by Slack ID.
+        again = upload(handler, downloads, "c", "F1", "UA", b"body", space="spaces/T")
+
+        assert again.drive_id == first.drive_id
+        assert again.metadata["source"] == "slack_id"
+        assert len(self._writer_grants(fake)) == 2  # the failed one and the retry
+        assert handler._already_granted(first.drive_id, "alice@example.com")
+        assert "slackGrantPending" not in fake.files_db[first.drive_id]["appProperties"]
+
+    def test_rerun_retries_a_flagged_grant_only(self, tmp_path, downloads):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        failed = upload(run1, downloads, "c", "F1", "UA", b"one")
+        del fake.failing["permissions.create"]
+        granted = upload(run1, downloads, "c", "F2", "UA", b"two")
+
+        run2 = make_handler(fake, tmp_path)
+        fake.calls.clear()
+        downloads.calls.clear()
+        upload(run2, downloads, "c", "F1", "UA", b"one")
+        upload(run2, downloads, "c", "F2", "UA", b"two")
+
+        assert downloads.calls == []
+        grants = [kw["fileId"] for kw in fake.permission_calls()]
+        assert grants == [failed.drive_id]
+        assert granted.drive_id not in grants
+        assert run2.get_file_statistics()["poster_grant_failures"] == 0
+        assert (
+            "slackGrantPending" not in fake.files_db[failed.drive_id]["appProperties"]
+        )
+
+    def test_rerun_retries_a_failed_transfer(self, tmp_path, downloads):
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        first = upload(run1, downloads, "c", "F1", "UA", b"mine")
+        assert run1.get_file_statistics()["ownership_transfer_failed"] == 1
+        assert fake.files_db[first.drive_id]["appProperties"]["slackOwnerPending"]
+
+        fake.fail_transfer = False
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.calls.clear()
+        upload(run2, downloads, "c", "F1", "UA", b"mine")
+
+        transfers = [
+            kw for kw in fake.permission_calls() if kw.get("transferOwnership")
+        ]
+        assert [kw["fileId"] for kw in transfers] == [first.drive_id]
+        assert run2.get_file_statistics()["ownership_transferred"] == 1
+        assert "slackOwnerPending" not in fake.files_db[first.drive_id]["appProperties"]
+
+    def test_failed_batched_writer_grant_is_counted_and_flagged(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive(reject_grants_to={"bob@example.com"})
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+
+        result = upload(
+            handler, downloads, "c", "F1", "UA", b"shared", sender="bob@example.com"
+        )
+
+        assert fake.batch_sizes == [2]
+        assert handler.get_file_statistics()["poster_grant_failures"] == 1
+        assert handler.drive_uploader.pending.has_grant(
+            result.drive_id, "bob@example.com"
+        )
+        assert fake.files_db[result.drive_id]["appProperties"]["slackGrantPending"]
+
+    def test_second_poster_in_the_same_run_gets_a_grant(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        upload(
+            handler,
+            downloads,
+            "c",
+            "F1",
+            "UA",
+            b"body",
+            space="spaces/T",
+            sender="bob@example.com",
+        )
+
+        assert self._writer_grants(fake, "bob@example.com")
+
+    def test_network_error_storing_the_flag_keeps_the_upload(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        fake.failing["files.update"] = ConnectionResetError("reset")
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        assert result.success
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 0
+        assert stats["poster_grant_failures"] == 1
+        assert stats["pending_flag_failures"] == 1
+        assert any(
+            r.levelname == "WARNING" and result.drive_id in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_new_owner_gets_no_writer_grant_on_relink(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine", space="spaces/T")
+
+        assert self._writer_grants(fake, "alice@example.com") == []
+
+    def test_transfer_is_not_retried_on_relink_in_the_same_run(
+        self, tmp_path, downloads
+    ):
+        """In-run retries of transfers are left to the end-of-run sweep."""
+        fake = FakeDrive(fail_transfer=True)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(handler, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+
+        upload(handler, downloads, "c", "F1", "UA", b"mine", space="spaces/T")
+
+        transfers = [
+            kw for kw in fake.permission_calls() if kw.get("transferOwnership")
+        ]
+        assert len(transfers) == 1
+
+    def test_rerun_after_a_transfer_sends_nothing(self, tmp_path, downloads):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(run1, downloads, "c", "F1", "UA", b"mine")
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.calls.clear()
+        upload(run2, downloads, "c", "F1", "UA", b"mine")
+
+        assert fake.permission_calls() == []
+        assert fake.count("files.update") == 0
+
+
+class TestPendingSweep:
+    """The end-of-run sweep retries every flagged grant and transfer (#98)."""
+
+    @staticmethod
+    def _writer_grants(fake, email="alice@example.com"):
+        return TestGrantFailures._writer_grants(fake, email)
+
+    def test_sweep_retries_a_grant_from_this_run(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+        # The same file in a later message: answered from the in-run cache.
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+
+        handler.retry_pending_permissions()
+
+        assert len(self._writer_grants(fake)) == 2  # the failure and the retry
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 1
+        assert stats["pending_retry_failed"] == 0
+        assert (
+            "slackGrantPending" not in fake.files_db[result.drive_id]["appProperties"]
+        )
+
+    @pytest.mark.parametrize("shared", [True, False], ids=["shared", "my_drive"])
+    def test_resume_retries_files_it_never_links(self, tmp_path, downloads, shared):
+        """--resume skips sent messages, so the sweep finds the flagged file."""
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path, shared=shared)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(run1, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+
+        run2 = make_handler(fake, tmp_path, shared=shared)  # links nothing
+        run2.retry_pending_permissions()
+
+        assert len(self._writer_grants(fake)) == 2
+        assert run2.get_file_statistics()["pending_retried"] == 1
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert not any(key.startswith("slackGrant") for key in props)
+
+    def test_one_posters_success_keeps_anothers_flag(self, tmp_path, downloads):
+        fake = FakeDrive(reject_grants_to={"alice@example.com"})
+        run1 = make_handler(fake, tmp_path)
+        first = upload(run1, downloads, "c", "F1", "UA", b"body")
+        upload(
+            run1,
+            downloads,
+            "c",
+            "F1",
+            "UA",
+            b"body",
+            space="spaces/T",
+            sender="bob@example.com",
+        )  # Bob's grant works
+
+        fake.reject_grants_to = set()
+        run2 = make_handler(fake, tmp_path)
+        run2.retry_pending_permissions()
+
+        assert len(self._writer_grants(fake, "alice@example.com")) == 2
+        assert run2.get_file_statistics()["pending_retried"] == 1
+        props = fake.files_db[first.drive_id]["appProperties"]
+        assert "slackGrantPending" not in props
+
+    def test_sweep_retries_a_failed_transfer(self, tmp_path, downloads):
+        fake = FakeDrive(fail_transfer=True)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        result = upload(handler, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+
+        handler.retry_pending_permissions()
+
+        transfers = [
+            kw for kw in fake.permission_calls() if kw.get("transferOwnership")
+        ]
+        assert len(transfers) == 2
+        assert handler.get_file_statistics()["pending_retried"] == 1
+        assert (
+            "slackOwnerPending" not in fake.files_db[result.drive_id]["appProperties"]
+        )
+
+    def test_transfer_is_not_retried_once_the_option_is_off(self, tmp_path, downloads):
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(run1, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+
+        run2 = make_handler(fake, tmp_path, shared=False)  # transfers now off
+        run2.retry_pending_permissions()
+
+        transfers = [
+            kw for kw in fake.permission_calls() if kw.get("transferOwnership")
+        ]
+        assert len(transfers) == 1
+        stats = run2.get_file_statistics()
+        assert stats["pending_retried"] == 0
+        assert stats["pending_skipped_transfers_off"] == 1
+
+    def test_still_failing_retry_is_counted_and_kept(self, tmp_path, downloads):
+        fake = FakeDrive(reject_grants_to={"alice@example.com"})
+        handler = make_handler(fake, tmp_path)
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        handler.retry_pending_permissions()
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 0
+        assert stats["pending_retry_failed"] == 1
+        assert handler.drive_uploader.pending.has_grant(
+            result.drive_id, "alice@example.com"
+        )
+
+    def test_unknown_recipient_is_skipped_with_a_warning(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        result = upload(run1, downloads, "c", "F1", "UA", b"body")
+        record = fake.files_db[result.drive_id]
+        record["appProperties"].update(
+            {"slackGrantPending": "true", "slackGrant.0123abcd": "-"}
+        )
+
+        run2 = make_handler(fake, tmp_path)
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        assert fake.permission_calls() == []
+        assert any("too long" in r.getMessage() for r in caplog.records)
+        assert run2.get_file_statistics()["pending_skipped_unknown"] == 1
+
+    def test_failed_search_still_retries_this_runs_flags(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+        fake.fail_query = lambda q: http_error(500) if "Pending" in q else None
+
+        handler.retry_pending_permissions()
+
+        assert handler.get_file_statistics()["pending_retried"] == 1
+
+    @pytest.mark.parametrize("shared", [True, False], ids=["shared", "my_drive"])
+    def test_sweep_reads_every_page(self, tmp_path, downloads, shared):
+        """Every page of flagged files is retried, not only the first."""
+        fake = FakeDrive(file_page_cap=2)
+        run1 = make_handler(fake, tmp_path, shared=shared)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        for i in range(5):
+            upload(run1, downloads, "c", f"F{i}", "UA", bytes([i]))
+        del fake.failing["permissions.create"]
+
+        run2 = make_handler(fake, tmp_path, shared=shared)  # a --resume run
+        run2.retry_pending_permissions()
+
+        assert run2.get_file_statistics()["pending_retried"] == 5
+        assert not any(
+            "slackGrantPending" in (f.get("appProperties") or {})
+            for f in fake.files_db.values()
+        )
+
+    def test_still_failing_transfer_is_counted_and_kept(self, tmp_path, downloads):
+        fake = FakeDrive(fail_transfer=True)
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        result = upload(handler, downloads, "c", "F1", "UA", b"mine")
+
+        handler.retry_pending_permissions()
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 0
+        assert stats["pending_retry_failed"] == 1
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackOwnerPending"] == "true"
+        assert props["slackOwner"].endswith("alice@example.com")
+
+    def test_shared_drive_retry_supports_all_drives(self, tmp_path, downloads):
+        """Without supportsAllDrives Drive answers 404 for a shared drive file."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)  # shared drive SD1
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+        fake.calls.clear()
+
+        handler.retry_pending_permissions()
+
+        (retry,) = fake.permission_calls()
+        assert retry["supportsAllDrives"] is True
+        clears = [kw for name, kw in fake.calls if name == "files.update"]
+        assert clears and all(kw["supportsAllDrives"] is True for kw in clears)
+        assert handler.get_file_statistics()["pending_retried"] == 1
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ConnectionResetError("reset"),
+            TimeoutError("slow"),
+            OSError(errno.ENETUNREACH, "Network is unreachable"),
+            RefreshError("revoked"),
+            http_error(500),
+        ],
+        ids=["reset", "timeout", "unreachable", "refresh", "500"],
+    )
+    @pytest.mark.parametrize("shared", [True, False], ids=["shared", "my_drive"])
+    def test_failed_search_never_escapes(
+        self, tmp_path, downloads, caplog, error, shared
+    ):
+        """The sweep runs after every channel migrated: it must not fail the run."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=shared)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+        # Fails the flag search and, in regular Drive, the folder listing.
+        fake.fail_query = lambda q: (
+            error if ("Pending" in q or "mimeType" in q) else None
+        )
+
+        handler.retry_pending_permissions()  # must not raise
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 1
+        assert stats["pending_sweep_failures"] == 1
+        errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert any("the ones this run already knows about" in m for m in errors)
+
+    def test_flag_stores_the_slack_user_id(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props[grant_key("alice@example.com")] == "UA alice@example.com"
+        # The upload's own tags plus the marker and grant fit Drive's budget.
+        tags = [k for k in props if not k.startswith(("slackGrant", "slackOwner"))]
+        assert len(tags) == FIXED_APP_PROPERTIES - 3
+
+    def test_flag_names_the_poster_when_users_share_an_address(
+        self, tmp_path, downloads
+    ):
+        """Bob is mapped to Alice's address by mistake; his flags name him."""
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        run1.user_map.update({"UA": "alice@example.com", "UB": "alice@example.com"})
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(
+            run1, downloads, "c", "F1", "UB", b"bob's", sender="alice@example.com"
+        )
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackOwner"] == "UB alice@example.com"
+        assert props[grant_key("alice@example.com")] == "UB alice@example.com"
+        del fake.failing["permissions.create"]
+        fake.fail_transfer = False
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        run2.user_map["UB"] = "bob@example.com"  # the mapping is fixed
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        emails = {kw["body"]["emailAddress"] for kw in fake.permission_calls()}
+        assert emails == {"bob@example.com"}
+
+    def test_sender_user_id_from_the_caller_wins(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        handler.user_map.update({"UB": "alice@example.com"})
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+
+        # Uploaded by UA, posted again by UB, who shares Alice's address.
+        result = upload(
+            handler,
+            downloads,
+            "c",
+            "F1",
+            "UA",
+            b"x",
+            sender="alice@example.com",
+            sender_user_id="UB",
+        )
+
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props[grant_key("alice@example.com")] == "UB alice@example.com"
+
+    def test_shared_address_without_the_sender_id_stores_the_email(
+        self, tmp_path, downloads
+    ):
+        """No guessing: a re-share by an unknown one of two users keeps no ID."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        handler.user_map.update({"UC": "carol@example.com", "UD": "carol@example.com"})
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+
+        result = upload(
+            handler, downloads, "c", "F1", "UA", b"x", sender="carol@example.com"
+        )
+
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props[grant_key("carol@example.com")] == "carol@example.com"
+
+    def test_recipient_is_mapped_again_by_slack_user_id(
+        self, tmp_path, downloads, caplog
+    ):
+        """A later run grants today's address for the user, and says so."""
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(run1, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+
+        run2 = make_handler(fake, tmp_path)
+        run2.user_map["UA"] = "alice.new@example.com"
+        fake.calls.clear()
+        with caplog.at_level("INFO"):
+            run2.retry_pending_permissions()
+
+        (grant,) = fake.permission_calls()
+        assert grant["body"]["emailAddress"] == "alice.new@example.com"
+        assert run2.get_file_statistics()["pending_retried"] == 1
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert not any(key.startswith("slackGrant") for key in props)
+        assert any(
+            "UA is now mapped to alice.new@example.com" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_unmapped_recipient_is_kept_and_counted(self, tmp_path, downloads, caplog):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(run1, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+
+        run2 = make_handler(fake, tmp_path)
+        del run2.user_map["UA"]
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        assert fake.permission_calls() == []
+        assert run2.get_file_statistics()["pending_skipped_unmapped"] == 1
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackGrantPending"] == "true"
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("no longer mapped" in m and "UA" in m for m in warnings)
+
+    def test_recipient_that_is_now_external_is_never_retried(
+        self, tmp_path, downloads, caplog
+    ):
+        """A flag an earlier run left, whose domains differed."""
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path)
+        result = upload(run1, downloads, "c", "F1", "UA", b"body")
+        fake.files_db[result.drive_id]["appProperties"].update(
+            {"slackGrantPending": "true", grant_key("ext@other.org"): "ext@other.org"}
+        )
+
+        run2 = make_handler(fake, tmp_path)
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        assert fake.permission_calls() == []
+        assert run2.get_file_statistics()["pending_skipped_external"] == 1
+        assert any(
+            "outside the workspace" in r.getMessage()
+            and "ext@other.org" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_grant_whose_flag_could_not_be_stored_is_still_retried(
+        self, tmp_path, downloads
+    ):
+        """README: "that run's sweep still retries it"."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        fake.failing["files.update"] = ConnectionResetError("reset")
+        upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+        del fake.failing["files.update"]
+
+        handler.retry_pending_permissions()
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_flag_failures"] == 1
+        assert stats["pending_retried"] == 1
+
+    def test_flag_that_could_not_be_cleared_is_counted_apart(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(handler, downloads, "c", "F1", "UA", b"body")
+        del fake.failing["permissions.create"]
+        fake.failing["files.update"] = ConnectionResetError("reset")
+
+        handler.retry_pending_permissions()
+
+        stats = handler.get_file_statistics()
+        assert stats["pending_retried"] == 1
+        assert stats["pending_clear_failures"] == 1
+        assert stats["pending_flag_failures"] == 0
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackGrantPending"] == "true"  # the next run grants again
+
+    def test_transfer_whose_flag_could_not_be_cleared_is_found_done(
+        self, tmp_path, downloads
+    ):
+        """After a transfer the admin is only a writer and can't transfer again."""
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        result = upload(run1, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+        fake.failing["files.update"] = ConnectionResetError("reset")
+        run1.retry_pending_permissions()  # transfers, but can't clear the flag
+        del fake.failing["files.update"]
+        assert fake.owners_of(result.drive_id) == ["alice@example.com"]
+        assert run1.get_file_statistics()["pending_clear_failures"] == 1
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        assert not [kw for kw in fake.permission_calls() if kw.get("transferOwnership")]
+        stats = run2.get_file_statistics()
+        assert stats["pending_retried"] == 1
+        assert stats["pending_retry_failed"] == 0
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert "slackOwnerPending" not in props
+
+    def test_transfer_of_a_file_someone_else_owns_is_kept_and_counted(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        result = upload(run1, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+        fake.files_db[result.drive_id]["owners_emails"] = ["carol@example.com"]
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        assert not [kw for kw in fake.permission_calls() if kw.get("transferOwnership")]
+        stats = run2.get_file_statistics()
+        assert stats["pending_skipped_not_owner"] == 1
+        assert stats["pending_retry_failed"] == 0
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackOwnerPending"] == "true"
+        assert any("no longer owns" in r.getMessage() for r in caplog.records)
+
+    def test_relink_does_not_repeat_a_transfer_that_went_through(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        result = upload(run1, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+        fake.failing["files.update"] = ConnectionResetError("reset")
+        run1.retry_pending_permissions()
+        del fake.failing["files.update"]
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.calls.clear()
+        relinked = upload(run2, downloads, "c", "F1", "UA", b"mine")
+
+        assert relinked.drive_id == result.drive_id
+        assert not [kw for kw in fake.permission_calls() if kw.get("transferOwnership")]
+        stats = run2.get_file_statistics()
+        assert stats["ownership_transfer_failed"] == 0
+        assert (
+            "slackOwnerPending" not in (fake.files_db[result.drive_id]["appProperties"])
+        )
+
+    def test_transfer_owner_is_mapped_again_by_slack_user_id(self, tmp_path, downloads):
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(run1, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        run2.user_map["UA"] = "alice.new@example.com"
+        run2.retry_pending_permissions()
+
+        (retry,) = [
+            kw for kw in fake.permission_calls()[1:] if kw.get("transferOwnership")
+        ]
+        assert retry["body"]["emailAddress"] == "alice.new@example.com"
+        assert run2.get_file_statistics()["pending_retried"] == 1
+
+    def test_a_crashed_sweep_is_counted(self, tmp_path):
+        handler = make_handler(FakeDrive(), tmp_path)
+
+        handler.count_sweep_failure()
+
+        assert handler.get_file_statistics()["pending_sweep_failures"] == 1
+
+    def test_nothing_to_do_without_drive(self, tmp_path):
+        handler = make_handler(FakeDrive(), tmp_path)
+        handler.folder_id = None
+
+        handler.retry_pending_permissions()  # no error, nothing counted
+
+        assert handler.get_file_statistics()["pending_retried"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +1768,7 @@ class TestContentType:
 
 def folder_of(handler, channel):
     """Drive folder ID FileHandler uses for *channel*."""
-    return handler._resolve_upload_folder(channel, "lookup")
+    return handler._choose_upload_folder(channel, "lookup").folder_id
 
 
 class TestDedupScope:
@@ -424,6 +1901,7 @@ class TestRerun:
         assert downloads.calls == ["F1"]
         record = fake.files_db[first.drive_id]
         assert record["appProperties"] == {
+            "slackMd5": hashlib.md5(b"report body").hexdigest(),  # noqa: S324
             "slackFileId": "F1",
             "slackChannel": "general",
         }
@@ -682,22 +2160,189 @@ class TestLimitedAccessFolders:
         result = upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
         folder_id = fake.files_db[result.drive_id]["parents"][0]
 
-        ok = handler.folder_manager.set_channel_folder_permissions(
+        sync = handler.folder_manager.set_channel_folder_permissions(
             folder_id,
             "hr",
             ["alice@example.com", "ext@other.org"],
             handler.shared_drive_id,
         )
 
-        assert ok is True
-        assert handler.get_file_statistics()["external_folder_grant_failures"] == 1
-        assert handler.get_file_statistics()["failed_uploads"] == 0
+        assert sync.ok  # external failures don't fail the sync
+        stats = handler.get_file_statistics()
+        assert stats["external_folder_grant_failures"] == 1
+        assert stats["folder_sync_failures"] == 0
+        assert stats["failed_uploads"] == 0
+
+    def test_failed_internal_folder_grants_are_counted(self, tmp_path, downloads):
+        fake = FakeDrive(reject_grants_to={"bob@example.com"})
+        handler = make_meta_handler(fake, tmp_path)
+        upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
+
+        result = handler.sync_channel_folder_permissions(
+            "hr", ["alice@example.com", "bob@example.com"]
+        )
+
+        assert not result.ok
+        assert result.failed_grants == ("bob@example.com",)
+        stats = handler.get_file_statistics()
+        assert stats["folder_sync_failures"] == 1
+        assert stats["folder_grant_failures"] == 1
+        assert stats["external_folder_grant_failures"] == 0
+
+    def test_failed_folder_lookup_is_counted(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path)
+        fake.failing["files.list"] = http_error(403)
+
+        result = handler.sync_channel_folder_permissions("hr", ["alice@example.com"])
+
+        assert result.lookup_error
+        assert handler.get_file_statistics()["folder_sync_failures"] == 1
+
+    def test_failed_removals_are_counted(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"x")
+        assert handler.sync_channel_folder_permissions("c", ["alice@example.com"]).ok
+        fake.failing["permissions.delete"] = http_error(403)
+
+        result = handler.sync_channel_folder_permissions("c", [])
+
+        assert result.failed_removals == ("alice@example.com",)
+        stats = handler.get_file_statistics()
+        assert stats["folder_removal_failures"] == 1
+        assert stats["folder_sync_failures"] == 1
+
+    def test_sync_without_drive_is_a_counted_failure(self, tmp_path):
+        handler = make_handler(FakeDrive(), tmp_path)
+        handler.folder_id = None  # Drive could not be set up
+
+        result = handler.sync_channel_folder_permissions("c", ["alice@example.com"])
+
+        assert not result.ok
+        assert result.lookup_error
+        assert handler.get_file_statistics()["folder_sync_failures"] == 1
+
+    @pytest.mark.parametrize(
+        "error",
+        [http_error(500), ConnectionResetError("reset"), RefreshError("revoked")],
+        ids=["http", "network", "refresh"],
+    )
+    def test_production_caller_counts_a_failed_lookup(self, tmp_path, downloads, error):
+        """regular_membership goes through the counting path (#118)."""
+        from slack_chat_migrator.services.spaces.regular_membership import (
+            _update_folder_permissions,
+        )
+
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"x")
+        handler.folder_manager.folder_cache.clear()
+        fake.failing["files.list"] = error
+
+        _update_folder_permissions(handler, "c", ["alice@example.com"])  # no raise
+
+        assert handler.get_file_statistics()["folder_sync_failures"] == 1
+
+    def test_step_6_is_logged_only_for_a_channel_with_a_folder(
+        self, tmp_path, downloads, caplog
+    ):
+        from slack_chat_migrator.services.spaces.regular_membership import (
+            _update_folder_permissions,
+        )
+
+        handler = make_handler(FakeDrive(), tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"x")
+
+        with caplog.at_level("INFO"):
+            _update_folder_permissions(handler, "c", ["alice@example.com"])
+            _update_folder_permissions(handler, "no-files", ["alice@example.com"])
+
+        steps = [r.getMessage() for r in caplog.records if "Step 6/6" in r.getMessage()]
+        assert len(steps) == 1
+        assert "Synced the c Drive folder with its 1 active members" in steps[0]
+
+    @pytest.mark.parametrize(
+        "method", ["permissions.list", "permissions.create"], ids=["list", "grant"]
+    )
+    def test_step_6_says_a_failed_sync_failed(
+        self, tmp_path, downloads, caplog, method
+    ):
+        from slack_chat_migrator.services.spaces.regular_membership import (
+            _update_folder_permissions,
+        )
+
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"x")
+        fake.failing[method] = http_error(500)
+
+        with caplog.at_level("INFO"):
+            _update_folder_permissions(handler, "c", ["bob@example.com"])
+
+        steps = [r for r in caplog.records if "Step 6/6" in r.getMessage()]
+        assert len(steps) == 1
+        assert steps[0].levelname == "WARNING"
+        assert "is not in sync" in steps[0].getMessage()
+        assert "Synced" not in steps[0].getMessage()
+
+    def test_channel_without_folder_needs_no_sync(self, tmp_path):
+        handler = make_meta_handler(FakeDrive(), tmp_path)
+
+        result = handler.sync_channel_folder_permissions("hr", ["alice@example.com"])
+
+        assert result.ok
+        assert result.folder_id is None
+        assert handler.get_file_statistics()["folder_sync_failures"] == 0
+
+    @pytest.mark.parametrize(
+        "error",
+        [http_error(503), http_error(403), ConnectionResetError("reset")],
+        ids=["503", "403", "network"],
+    )
+    @pytest.mark.parametrize("shared", [True, False], ids=["shared", "my_drive"])
+    def test_public_files_never_fall_back_to_the_root(
+        self, tmp_path, downloads, error, shared
+    ):
+        """The root's permissions don't include the channel's members (#118)."""
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path, shared=shared)
+        handler.folder_manager.folder_cache.clear()
+        fake.fail_query = lambda q: error if "mimeType" in q else None
+
+        result = upload(handler, downloads, "general", "F1", "UA", b"x", space=None)
+
+        assert not result.success
+        assert result.error and "folder_unavailable" in result.error
+        assert not [
+            kw for name, kw in fake.calls if name == "files.create"
+        ]  # nothing stored, in the root or anywhere
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 1
+        assert stats["channel_folder_failures"] == 1
+        assert downloads.calls == []  # failed before downloading
+
+    def test_file_without_a_channel_goes_into_the_root(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        downloads.content["F1"] = b"x"
+
+        result = handler.upload_attachment(
+            {
+                "id": "F1",
+                "name": "a.pdf",
+                "url_private": "https://files.slack.com/files-pri/T-F1/a.pdf",
+            }
+        )
+
+        assert result.success
+        assert fake.files_db[result.drive_id]["parents"] == ["SD1"]
 
     def test_private_files_never_fall_back_to_the_root(self, tmp_path, downloads):
         fake = FakeDrive()
         handler = make_meta_handler(fake, tmp_path)
-        handler.folder_manager.get_or_create_channel_folder = MagicMock(
-            return_value=None
+        handler.folder_manager.find_or_create_channel_folder = MagicMock(
+            return_value=FolderLookup(None, "boom")
         )
 
         result = upload(handler, downloads, "hr", "F1", "UA", b"x", space=None)
@@ -767,6 +2412,17 @@ def post_document(handler, file_obj, channel="general"):
 
 
 class TestCanvasConversion:
+    def test_converted_canvas_has_no_md5_tag(self, tmp_path, doc_downloads):
+        """A Doc's content isn't the uploaded HTML, so it carries no slackMd5."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+
+        result = post_document(handler, CANVAS)
+
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackFileId"] == CANVAS["id"]
+        assert "slackMd5" not in props
+
     def test_canvas_becomes_a_google_doc(self, tmp_path, doc_downloads):
         fake = FakeDrive()
         handler = make_handler(fake, tmp_path)
@@ -816,6 +2472,46 @@ class TestCanvasConversion:
         assert fake.files_db[sheet.drive_id]["mimeType"] == "text/csv"
         assert "converted_to" not in canvas.metadata
 
+    def test_other_upload_failures_are_not_blamed_on_conversion(
+        self, tmp_path, doc_downloads, caplog
+    ):
+        """One attempt, the real cause, no "could not convert" warning (#118)."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        fake.add_folder("CHF", "general", "SD1")  # only the upload fails
+        fake.failing["files.create"] = ConnectionResetError("connection reset")
+
+        result = post_document(handler, CANVAS)
+
+        assert not result.success
+        assert result.error == (
+            "Drive upload failed: ConnectionResetError: connection reset"
+        )
+        uploads = [
+            kw
+            for name, kw in fake.calls
+            if name == "files.create" and kw.get("media_body") is not None
+        ]
+        assert len(uploads) == 1
+        assert not any("Could not convert" in r.getMessage() for r in caplog.records)
+        assert handler.get_file_statistics()["failed_uploads"] == 1
+
+    def test_network_error_creating_the_folder_fails_the_file(
+        self, tmp_path, doc_downloads
+    ):
+        fake = FakeDrive()
+        handler = make_meta_handler(fake, tmp_path)  # "general" is public
+        fake.failing["files.create"] = ConnectionResetError("connection reset")
+
+        result = post_document(handler, CANVAS)
+
+        assert not result.success
+        assert result.error and result.error.startswith(
+            "No Drive folder (folder_unavailable):"
+        )
+        assert "connection reset" in result.error
+        assert handler.get_file_statistics()["channel_folder_failures"] == 1
+
     def test_conversion_can_be_turned_off(self, tmp_path, doc_downloads):
         fake = FakeDrive()
         config = MigrationConfig(
@@ -848,6 +2544,96 @@ class TestCanvasConversion:
         assert again.drive_id == first.drive_id
         assert doc_downloads.calls == []
 
+    def test_rerun_finds_the_canvas_when_its_folder_cannot_be_listed(
+        self, tmp_path, doc_downloads
+    ):
+        """A failed listing is counted and retried; dedup still works (#125)."""
+        fake = FakeDrive()
+        first = post_document(make_handler(fake, tmp_path), CANVAS)
+        folder = fake.files_db[first.drive_id]["parents"][0]
+        listing = f"'{folder}' in parents and trashed=false"
+        fake.fail_query = lambda q: http_error(500) if q == listing else None
+
+        fake.calls.clear()
+        rerun = make_handler(fake, tmp_path)
+        doc_downloads.calls.clear()
+        again = post_document(rerun, CANVAS)
+        post_document(rerun, SLACK_LIST)
+
+        assert again.drive_id == first.drive_id  # no second Google Doc
+        assert doc_downloads.calls == [SLACK_LIST["id"]]
+        listings = [kw for name, kw in fake.calls if kw.get("q") == listing]
+        assert len(listings) == 2  # tried again with the next upload
+        # Counted per folder, not per attempt.
+        assert rerun.get_file_statistics()["folder_listing_failures"] == 1
+
+    def test_failed_search_makes_no_second_canvas(self, tmp_path, doc_downloads):
+        """Listing and per-file search both fail: fail the file, no new copy."""
+        fake = FakeDrive()
+        first = post_document(make_handler(fake, tmp_path), CANVAS)
+        docs_before = len(fake.files_db)
+        folder = fake.files_db[first.drive_id]["parents"][0]
+        listing = f"'{folder}' in parents and trashed=false"
+
+        def fail_file_lookups(q):
+            looks_up_files = q == listing or q.startswith("appProperties")
+            return http_error(500) if looks_up_files else None
+
+        fake.fail_query = fail_file_lookups
+
+        rerun = make_handler(fake, tmp_path)
+        doc_downloads.calls.clear()
+        result = post_document(rerun, CANVAS)
+
+        assert not result.success
+        assert "earlier upload" in (result.error or "")
+        assert doc_downloads.calls == []  # failed before downloading
+        assert len(fake.files_db) == docs_before
+        assert rerun.get_file_statistics()["failed_uploads"] == 1
+
+    def test_failed_listing_means_one_search_per_file(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F0", "UA", b"zero")  # makes the folder
+        folder = next(iter(handler.drive_uploader.folders_pre_cached - {"SD1"}))
+        handler.drive_uploader.folders_pre_cached.discard(folder)
+        listing = f"'{folder}' in parents and trashed=false"
+        fake.fail_query = lambda q: http_error(500) if q == listing else None
+        fake.calls.clear()
+
+        result = upload(handler, downloads, "c", "F1", "UA", b"one")
+
+        assert result.success
+        queries = [kw.get("q", "") for name, kw in fake.calls if name == "files.list"]
+        assert sum("key='slackFileId'" in q for q in queries) == 1
+        assert sum("key='slackMd5'" in q for q in queries) == 1
+
+    @pytest.mark.parametrize("failures", [1, 3])
+    def test_failed_listing_still_uploads_and_dedups(
+        self, tmp_path, downloads, failures
+    ):
+        """The content search is valid, so a failed listing fails no file (#125)."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        first = upload(handler, downloads, "c", "F0", "UA", b"same")
+        folder = fake.files_db[first.drive_id]["parents"][0]
+        handler.drive_uploader.folders_pre_cached.discard(folder)
+        handler.drive_uploader.file_hash_cache.clear()
+        listing = f"'{folder}' in parents and trashed=false"
+        left = iter(range(failures))
+        fake.fail_query = lambda q: (
+            http_error(500) if q == listing and next(left, None) is not None else None
+        )
+
+        results = [
+            upload(handler, downloads, "c", f"F{i}", "UA", body)
+            for i, body in enumerate([b"same", b"new one", b"new two"], start=1)
+        ]
+
+        assert [r.success for r in results] == [True, True, True]
+        assert results[0].drive_id == first.drive_id  # found by its slackMd5 tag
+        assert handler.get_file_statistics()["failed_uploads"] == 0
+
     def test_plain_csv_attachment_is_not_converted(self, tmp_path, downloads):
         fake = FakeDrive()
         handler = make_handler(fake, tmp_path)
@@ -864,3 +2650,72 @@ class TestCanvasConversion:
         )
         assert fake.files_db[result.drive_id]["mimeType"] == "text/csv"
         assert fake.files_db[result.drive_id]["name"] == "data.csv"
+
+
+class TestTransferConfig:
+    def test_default_is_off(self):
+        assert MigrationConfig().transfer_file_ownership is False
+        assert MigrationConfig.from_dict({}).transfer_file_ownership is False
+
+    def test_from_dict(self):
+        config = MigrationConfig.from_dict({"transfer_file_ownership": True})
+        assert config.transfer_file_ownership is True
+
+    def test_rejects_non_booleans(self):
+        from slack_chat_migrator.exceptions import ConfigError
+
+        with pytest.raises(ConfigError, match="transfer_file_ownership"):
+            MigrationConfig.from_dict({"transfer_file_ownership": "yes"})
+
+
+# ---------------------------------------------------------------------------
+# Private folders fail closed (#137)
+# ---------------------------------------------------------------------------
+
+
+class TestPrivateFoldersFailClosed:
+    def _handler(self, fake, tmp_path):
+        return make_meta_handler(fake, tmp_path)
+
+    def test_no_file_goes_into_an_open_private_folder(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive(reject_inherited_flag_on_create=True, fail_restriction=True)
+        handler = self._handler(fake, tmp_path)
+
+        result = upload(handler, downloads, "hr", "F1", "UA", b"secret", space=None)
+
+        assert not result.success
+        assert "limited-access" in result.error
+        uploads = [
+            kw
+            for name, kw in fake.calls
+            if name == "files.create" and kw.get("media_body")
+        ]
+        assert uploads == []  # nothing was uploaded
+        assert downloads.calls == []  # nor downloaded
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 1
+        assert stats["restricted_folder_failures"] == 1
+        assert any(
+            r.levelname == "ERROR" and "hr" in r.getMessage() for r in caplog.records
+        )
+
+    def test_restriction_is_retried_with_the_next_file(self, tmp_path, downloads):
+        fake = FakeDrive(reject_inherited_flag_on_create=True, fail_restriction=True)
+        handler = self._handler(fake, tmp_path)
+
+        first = upload(handler, downloads, "hr", "F1", "UA", b"one", space=None)
+        fake.fail_restriction = False
+        second = upload(handler, downloads, "hr", "F2", "UA", b"two", space=None)
+
+        assert not first.success
+        assert second.success
+        folder_id = fake.files_db[second.drive_id]["parents"][0]
+        assert fake.files_db[folder_id]["inheritedPermissionsDisabled"] is True
+
+    def test_public_channel_is_unaffected(self, tmp_path, downloads):
+        fake = FakeDrive(reject_inherited_flag_on_create=True, fail_restriction=True)
+        handler = self._handler(fake, tmp_path)
+        result = upload(handler, downloads, "general", "F1", "UA", b"x", space=None)
+        assert result.success

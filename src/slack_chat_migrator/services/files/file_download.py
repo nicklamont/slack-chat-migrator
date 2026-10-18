@@ -1,15 +1,17 @@
 """File download and content retrieval from Slack exports.
 
 Downloads stream straight to a temp file through one pooled
-:class:`requests.Session` that retries 429 and 5xx responses.  While
-streaming, the MD5 and byte count are computed, so the content is never held
-in memory and is hashed only once.
+:class:`requests.Session` that retries connection errors and 429, 500, 502,
+503 and 504 responses.  While streaming, the MD5 and byte count are
+computed, so the content is never held in memory and is hashed only once.
 
 Each download returns a :class:`DownloadResult` whose status says whether the
-file was fetched (``OK``), cannot be fetched and should not count as a
-failure (``UNAVAILABLE``: deleted, hidden, external, sign-in page, 401/403/404,
-no URL), failed after retries (``FAILED``), or is a Google Docs/Drive link
-that needs no download.
+file was fetched (``OK``); can't be fetched by any retry or token and should
+not count as a failure (``UNAVAILABLE``: deleted, hidden by a plan limit,
+stored outside Slack, not readable by the exporting workspace, no URL, HTTP
+404/410); couldn't be fetched this time (``FAILED``: HTTP 401/403, a sign-in
+page, a host off the allow-list, the wrong length, or errors that outlast
+the retries); or is a Google Docs/Drive link that needs no download.
 """
 
 from __future__ import annotations
@@ -38,16 +40,21 @@ from slack_chat_migrator.constants import (
     DOWNLOAD_RETRY_STATUSES,
     DOWNLOAD_RETRY_TOTAL,
     FILE_READ_CHUNK_BYTES,
+    HTTP_FORBIDDEN,
+    HTTP_NOT_FOUND,
     HTTP_OK,
     HTTP_RATE_LIMIT,
     HTTP_SERVER_ERROR_MIN,
+    HTTP_UNAUTHORIZED,
     SLACK_FILE_HOST_SUFFIXES,
 )
+from slack_chat_migrator.services.drive_adapter import is_fatal_local_error
 from slack_chat_migrator.services.files.temp_files import (
     remove_temp_file,
     safe_temp_suffix,
 )
 from slack_chat_migrator.types import UploadResult
+from slack_chat_migrator.utils.api import HTTP_REQUEST_TIMEOUT
 from slack_chat_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_chat_migrator")
@@ -63,16 +70,34 @@ class DownloadStatus(str, enum.Enum):
     GOOGLE_DRIVE_FILE = "google_drive_file"
 
 
-# Reasons a file is UNAVAILABLE (not counted as a failed upload).
+# Reasons a file is UNAVAILABLE: no retry or token can fetch it (deleted,
+# hidden by the plan limit, stored outside Slack, not readable by the
+# exporting workspace, no URL), so it isn't counted as a failed upload.
+# HTTP 404/410 give ``http_404``/``http_410``.
 REASON_DELETED = "deleted"
 REASON_HIDDEN_BY_LIMIT = "hidden_by_limit"
 REASON_EXTERNAL = "external"
 REASON_NO_ACCESS = "no_access"
 REASON_NO_URL = "no_url"
-REASON_DISALLOWED_URL = "disallowed_url"
+
+# Reasons a download FAILED although the file exists.  Other failures are
+# ``http_<status>`` (429, 5xx and other 4xx; ``http_status`` is set),
+# ``network_error:<Type>`` and ``write_error``.
+REASON_AUTH = "auth"  # HTTP 401/403: missing, expired or wrong token
+REASON_HTML_PAGE = "html_page"  # a sign-in page instead of the file
+# Off SLACK_FILE_HOST_SUFFIXES, or a link (or redirect) that isn't HTTPS.
+REASON_DISALLOWED_HOST = "disallowed_host"
 REASON_TOO_MANY_REDIRECTS = "too_many_redirects"
-REASON_HTML_PAGE = "html_page"
 REASON_SIZE_MISMATCH = "size_mismatch"
+#: Prefix of the reason for a download that failed on the network.
+REASON_NETWORK_ERROR = "network_error"
+
+#: Failures that point at a missing or rejected Slack token.
+AUTH_FAILURE_REASONS = frozenset({REASON_AUTH, REASON_HTML_PAGE})
+
+#: HTTP statuses meaning the file is gone, not that we were refused.
+_GONE_STATUSES = frozenset({HTTP_NOT_FOUND, 410})
+_AUTH_STATUSES = frozenset({HTTP_UNAUTHORIZED, HTTP_FORBIDDEN})
 
 #: MIME types Slack uses for HTML content, including canvases.
 _HTML_MIME_TYPES = frozenset(
@@ -82,9 +107,12 @@ _HTML_FILETYPES = frozenset({"html", "quip", "canvas"})
 _HTML_EXTENSIONS = (".html", ".htm", ".xhtml")
 
 
-@dataclass
+@dataclass(frozen=True)
 class DownloadResult:
     """Result of :func:`download_file`.
+
+    ``path`` and ``md5`` are set exactly for an ``OK`` result; that is
+    checked when the result is built.
 
     Attributes:
         status: What happened (see :class:`DownloadStatus`).
@@ -97,6 +125,8 @@ class DownloadResult:
         url: The link to keep for files that are not downloaded (external
             files, Google links), else the URL that was fetched.
         http_status: Final HTTP status, when a response was received.
+        refused_host: For ``disallowed_host``, the host that was refused
+            (the export link's, or a redirect's).
     """
 
     status: DownloadStatus
@@ -107,11 +137,47 @@ class DownloadResult:
     reason: str | None = None
     url: str | None = None
     http_status: int | None = None
+    refused_host: str | None = None
+
+    def __post_init__(self) -> None:
+        """Check that exactly a successful download names its file and hash."""
+        if (self.status is DownloadStatus.OK) != bool(self.path and self.md5):
+            raise ValueError("path and md5 are set exactly for an OK DownloadResult")
 
     @property
     def ok(self) -> bool:
         """True when the content was downloaded to :attr:`path`."""
         return self.status is DownloadStatus.OK
+
+    @property
+    def retryable(self) -> bool:
+        """For ``FAILED``: whether a later attempt may succeed.
+
+        True for network errors and a final HTTP status of 408, 429 or 5xx
+        (read from :attr:`http_status`).  Refusals (401, 403, a sign-in
+        page, a host off the allow-list), a wrong length, too many
+        redirects, other 4xx and local write errors are permanent.
+        """
+        if self.status is not DownloadStatus.FAILED:
+            return False
+        if (self.reason or "").startswith(f"{REASON_NETWORK_ERROR}:"):
+            return True
+        status = self.http_status
+        return status is not None and (
+            status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
+            or status >= HTTP_SERVER_ERROR_MIN
+        )
+
+    @property
+    def file_path(self) -> str:
+        """The downloaded file of an ``OK`` result.
+
+        Raises:
+            ValueError: For any other status.
+        """
+        if self.path is None:
+            raise ValueError(f"a {self.status.value} download has no file")
+        return self.path
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +195,9 @@ def build_download_session(
 ) -> requests.Session:
     """Create a pooled session that retries transient download errors.
 
-    GETs are retried on connection errors and on 429/5xx responses, honouring
-    ``Retry-After``.  401, 403 and 404 are not retried.
+    GETs are retried on connection errors and on 429, 500, 502, 503 and 504
+    responses (:data:`DOWNLOAD_RETRY_STATUSES`), honouring ``Retry-After``.
+    401, 403 and 404 are not retried.
 
     Args:
         pool_size: Connections kept per host.
@@ -187,6 +254,22 @@ def _redact_error(error: BaseException) -> str:
     return _QUERY_IN_TEXT.sub("?<redacted>", str(error))
 
 
+def is_slack_file_host(host: str) -> bool:
+    """Whether *host* is, or is a subdomain of, a Slack file host.
+
+    Args:
+        host: A host name (case and a trailing dot don't matter).
+
+    Returns:
+        True for a host on :data:`SLACK_FILE_HOST_SUFFIXES`.
+    """
+    host = host.lower().rstrip(".")
+    return bool(host) and any(
+        host == suffix or host.endswith("." + suffix)
+        for suffix in SLACK_FILE_HOST_SUFFIXES
+    )
+
+
 def is_allowed_file_url(url: str) -> bool:
     """Check that *url* is an https URL on a Slack file host.
 
@@ -199,15 +282,10 @@ def is_allowed_file_url(url: str) -> bool:
     """
     try:
         parsed = urlparse(url)
-        host = (parsed.hostname or "").lower().rstrip(".")
+        host = parsed.hostname or ""
     except ValueError:
         return False
-    if parsed.scheme != "https" or not host:
-        return False
-    return any(
-        host == suffix or host.endswith("." + suffix)
-        for suffix in SLACK_FILE_HOST_SUFFIXES
-    )
+    return parsed.scheme == "https" and is_slack_file_host(host)
 
 
 def google_link_status(file_obj: dict[str, Any]) -> DownloadStatus | None:
@@ -338,20 +416,22 @@ def _get_following_redirects(
     session: requests.Session,
     url: str,
     slack_token: str,
-) -> tuple[requests.Response | None, str | None]:
+) -> tuple[requests.Response | None, str | None, str | None]:
     """GET *url*, following up to :data:`DOWNLOAD_MAX_REDIRECTS` redirects.
 
     Every hop is re-validated with :func:`is_allowed_file_url` before it is
     requested, so a redirect can't lead off Slack's file hosts.
 
     Returns:
-        ``(response, None)`` on a non-redirect response, or
-        ``(None, reason)`` when a hop is refused.
+        ``(response, None, None)`` on a non-redirect response,
+        ``(None, REASON_DISALLOWED_HOST, refused_url)`` when a hop is
+        refused, or ``(None, REASON_TOO_MANY_REDIRECTS, last_url)`` after
+        more than ``DOWNLOAD_MAX_REDIRECTS`` redirects.
     """
     current = url
     for _hop in range(DOWNLOAD_MAX_REDIRECTS + 1):
         if not is_allowed_file_url(current):
-            return None, REASON_DISALLOWED_URL
+            return None, REASON_DISALLOWED_HOST, current
         headers = {"Authorization": f"Bearer {slack_token}"} if slack_token else {}
         response = session.get(
             current,
@@ -361,11 +441,11 @@ def _get_following_redirects(
             timeout=(DOWNLOAD_CONNECT_TIMEOUT_SECONDS, DOWNLOAD_READ_TIMEOUT_SECONDS),
         )
         if not response.is_redirect:
-            return response, None
+            return response, None, None
         location = response.headers.get("Location", "")
         response.close()
         current = urljoin(current, location)
-    return None, REASON_TOO_MANY_REDIRECTS
+    return None, REASON_TOO_MANY_REDIRECTS, current
 
 
 def _stream_to_file(
@@ -406,14 +486,22 @@ def _stream_to_file(
 
 
 def _status_result(status_code: int, url: str) -> DownloadResult:
-    """Classify a non-200, non-redirect HTTP status."""
-    reason = f"http_{status_code}"
-    if status_code == HTTP_RATE_LIMIT or status_code >= HTTP_SERVER_ERROR_MIN:
+    """Classify a non-200, non-redirect HTTP status.
+
+    404 and 410 mean the file is gone (``UNAVAILABLE``).  401 and 403 mean
+    we were refused (``FAILED`` with reason ``auth``); every other status,
+    429 and 5xx after the retries included, is ``FAILED`` too.
+    """
+    if status_code in _GONE_STATUSES:
         return DownloadResult(
-            DownloadStatus.FAILED, reason=reason, url=url, http_status=status_code
+            DownloadStatus.UNAVAILABLE,
+            reason=f"http_{status_code}",
+            url=url,
+            http_status=status_code,
         )
+    reason = REASON_AUTH if status_code in _AUTH_STATUSES else f"http_{status_code}"
     return DownloadResult(
-        DownloadStatus.UNAVAILABLE, reason=reason, url=url, http_status=status_code
+        DownloadStatus.FAILED, reason=reason, url=url, http_status=status_code
     )
 
 
@@ -484,7 +572,9 @@ def download_file(
     )
 
     try:
-        response, refusal = _get_following_redirects(session, target, slack_token)
+        response, refusal, refused_url = _get_following_redirects(
+            session, target, slack_token
+        )
     except requests.RequestException as e:
         status_code = e.response.status_code if e.response is not None else None
         log_with_context(
@@ -496,7 +586,7 @@ def download_file(
         )
         return DownloadResult(
             DownloadStatus.FAILED,
-            reason=f"network_error:{type(e).__name__}",
+            reason=f"{REASON_NETWORK_ERROR}:{type(e).__name__}",
             url=target,
             http_status=status_code,
         )
@@ -504,11 +594,21 @@ def download_file(
     if response is None:
         log_with_context(
             logging.WARNING,
-            f"Refused to download file {name}: {refusal} ({redact_url(target)})",
+            f"Refused to download file {name}: {refusal}"
+            f" ({redact_url(refused_url or target)})",
             channel=channel,
             file_id=file_id,
         )
-        return DownloadResult(DownloadStatus.UNAVAILABLE, reason=refusal, url=target)
+        return DownloadResult(
+            DownloadStatus.FAILED,
+            reason=refusal,
+            url=target,
+            refused_host=(
+                (urlparse(refused_url).hostname or refused_url)
+                if refusal == REASON_DISALLOWED_HOST and refused_url
+                else None
+            ),
+        )
 
     with response:
         if response.status_code != HTTP_OK:
@@ -533,7 +633,7 @@ def download_file(
                 file_id=file_id,
             )
             return DownloadResult(
-                DownloadStatus.UNAVAILABLE,
+                DownloadStatus.FAILED,
                 reason=REASON_HTML_PAGE,
                 url=target,
                 content_type=content_type,
@@ -554,10 +654,12 @@ def download_file(
             )
             return DownloadResult(
                 DownloadStatus.FAILED,
-                reason=f"network_error:{type(e).__name__}",
+                reason=f"{REASON_NETWORK_ERROR}:{type(e).__name__}",
                 url=target,
             )
         except OSError as e:
+            if is_fatal_local_error(e):
+                raise  # no space, quota or file handles: every file would fail
             log_with_context(
                 logging.ERROR,
                 f"Could not write download of {name} to disk: {e}",
@@ -606,9 +708,7 @@ def _size_mismatch(
         channel=channel,
         file_id=file_id,
     )
-    return DownloadResult(
-        DownloadStatus.UNAVAILABLE, reason=REASON_SIZE_MISMATCH, url=url
-    )
+    return DownloadResult(DownloadStatus.FAILED, reason=REASON_SIZE_MISMATCH, url=url)
 
 
 def create_drive_reference(

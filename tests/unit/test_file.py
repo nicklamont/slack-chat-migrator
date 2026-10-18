@@ -1,5 +1,6 @@
 """Unit tests for the file handling module."""
 
+import dataclasses
 import hashlib
 import os
 import tempfile
@@ -12,8 +13,10 @@ from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
 from slack_chat_migrator.core.state import MigrationState
-from slack_chat_migrator.services.drive import DriveUpload
-from slack_chat_migrator.services.files.file import FileHandler
+from slack_chat_migrator.exceptions import APIError
+from slack_chat_migrator.services.drive import DriveUpload, DriveUploadFailure
+from slack_chat_migrator.services.drive.folder_manager import FolderLookup
+from slack_chat_migrator.services.files.file import DriveStatus, FileHandler
 from slack_chat_migrator.services.files.file_download import (
     DownloadResult,
     DownloadStatus,
@@ -23,6 +26,12 @@ from slack_chat_migrator.types import UploadResult
 
 #: Path handed to mocked uploaders, which never open it.
 FAKE_PATH = "/tmp/fake_upload.bin"
+
+#: Ownership transfers are opt-in.
+TRANSFER_CONFIG = MigrationConfig(
+    shared_drive=SharedDriveConfig(name="Test Drive", id=None),
+    transfer_file_ownership=True,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -78,6 +87,15 @@ def _failed_download(reason="network_error:ConnectionError"):
     return DownloadResult(DownloadStatus.FAILED, reason=reason)
 
 
+def _use_drive(handler, root="root_folder", shared_drive=None):
+    """Put *handler* in a set-up Drive state; the status is the only source."""
+    handler._drive_status = (
+        DriveStatus("shared_drive", shared_drive, f"shared drive {shared_drive}")
+        if shared_drive
+        else DriveStatus("folder", root, f"attachment folder {root}")
+    )
+
+
 def _make_handler(
     folder_id=None,
     dry_run=False,
@@ -104,6 +122,11 @@ def _make_handler(
         )
     # No Drive file from an earlier run unless a test says otherwise.
     handler.drive_uploader.find_uploaded_slack_file.return_value = None
+    # Every channel has a folder unless a test says otherwise.  Folder
+    # failures are tested against the real FolderManager (test_file_pipeline).
+    handler.folder_manager.find_or_create_channel_folder.return_value = FolderLookup(
+        "channel_folder"
+    )
 
     return handler
 
@@ -258,8 +281,7 @@ class TestFolderIdProperty:
 
     def test_getter_triggers_init(self):
         handler = _make_handler()
-        handler._drive_initialized = True
-        handler._root_folder_id = "abc"
+        _use_drive(handler, root="abc")
         assert handler.folder_id == "abc"
 
     def test_setter(self):
@@ -279,7 +301,6 @@ class TestUploadStrategy:
     def _make_ready_handler(self, dry_run=False):
         """Create a handler with drive already initialized."""
         handler = _make_handler(folder_id="root_folder", dry_run=dry_run)
-        handler._drive_initialized = True
         return handler
 
     def test_cached_file_returns_immediately(self):
@@ -439,8 +460,9 @@ class TestUploadStrategy:
     def test_large_image_goes_to_drive(self):
         """Images larger than 25MB should bypass direct upload."""
         handler = self._make_ready_handler()
-        download = _ok_download(b"\x89PNG")
-        download.size = 26 * 1024 * 1024  # as measured while streaming
+        download = dataclasses.replace(
+            _ok_download(b"\x89PNG"), size=26 * 1024 * 1024
+        )  # as measured while streaming
         handler._download_file = MagicMock(return_value=download)
         handler._upload_to_drive = MagicMock(
             return_value=UploadResult(
@@ -467,7 +489,9 @@ class TestUploadStrategy:
         handler = self._make_ready_handler()
         content = b"some data"
         handler._download_file = MagicMock(return_value=_ok_download(content))
-        handler._upload_to_drive = MagicMock(return_value=None)
+        handler._upload_to_drive = MagicMock(
+            return_value=UploadResult(error="Drive upload failed: quota", name="f")
+        )
 
         file_obj = {
             "id": "F1",
@@ -478,7 +502,7 @@ class TestUploadStrategy:
         result = handler.upload_attachment(file_obj, channel="general")
         assert isinstance(result, UploadResult)
         assert not result.success
-        assert result.error is not None
+        assert result.error == "Drive upload failed: quota"  # the real cause
         assert handler.file_stats["failed_uploads"] == 1
 
     def test_exception_in_upload_attachment_increments_failed(self):
@@ -502,7 +526,6 @@ class TestUploadStrategy:
             user_resolver=ext_resolver,
             user_map={"UEXT": "ext@other.com"},
         )
-        handler._drive_initialized = True
         handler._download_file = MagicMock(return_value=_failed_download())
 
         file_obj = {"id": "F1", "name": "ext.txt", "user": "UEXT"}
@@ -638,6 +661,14 @@ class TestTransferFileOwnership:
         result = handler._transfer_file_ownership("file1", "alice@example.com")
         assert result is False
 
+    def test_network_error_is_a_failed_transfer(self):
+        handler = _make_handler()
+        handler.drive_service.create_permission.side_effect = ConnectionResetError(
+            "reset"
+        )
+
+        assert handler._transfer_file_ownership("file1", "alice@example.com") is False
+
 
 # ===========================================================================
 # ensure_drive_initialized tests
@@ -649,7 +680,7 @@ class TestEnsureDriveInitialized:
 
     def test_skips_if_already_initialized(self):
         handler = _make_handler()
-        handler._drive_initialized = True
+        _use_drive(handler)
         handler._initialize_shared_drive_and_folder = MagicMock()
 
         handler.ensure_drive_initialized()
@@ -658,19 +689,46 @@ class TestEnsureDriveInitialized:
     def test_dry_run_delegates_to_init(self):
         """Dry run no longer short-circuits — DI stubs handle API calls."""
         handler = _make_handler(dry_run=True)
-        handler._initialize_shared_drive_and_folder = MagicMock()
+        handler._initialize_shared_drive_and_folder = MagicMock(
+            side_effect=lambda: _use_drive(handler)
+        )
 
         handler.ensure_drive_initialized()
         handler._initialize_shared_drive_and_folder.assert_called_once()
 
     def test_calls_init_when_needed(self):
         handler = _make_handler()
-        handler._drive_initialized = False
-        handler._initialize_shared_drive_and_folder = MagicMock()
+        handler._initialize_shared_drive_and_folder = MagicMock(
+            side_effect=lambda: _use_drive(handler)
+        )
 
         handler.ensure_drive_initialized()
         handler._initialize_shared_drive_and_folder.assert_called_once()
-        assert handler._drive_initialized is True
+
+    def test_unusable_drive_raises_with_the_cause(self):
+        """The preflight stops instead of migrating without attachments (#118)."""
+        handler = _make_handler()
+        handler.shared_drive_manager.get_or_create_shared_drive.side_effect = APIError(
+            "Could not find or create shared drive 'X': connection reset"
+        )
+
+        with pytest.raises(APIError, match="connection reset"):
+            handler.ensure_drive_initialized()
+        # Set up once: the next call reports the same status without retrying.
+        with pytest.raises(APIError, match="connection reset"):
+            handler.ensure_drive_initialized()
+        handler.shared_drive_manager.get_or_create_shared_drive.assert_called_once()
+
+    def test_upload_path_does_not_raise(self):
+        handler = _make_handler()
+        handler.shared_drive_manager.get_or_create_shared_drive.side_effect = APIError(
+            "reset"
+        )
+
+        handler._initialize_drive()
+
+        assert handler.drive_status.mode == "none"
+        assert handler.folder_id is None
 
 
 # ===========================================================================
@@ -751,7 +809,8 @@ class TestInitializeSharedDriveAndFolder:
         """When shared drive creation returns None, fall back to regular folder."""
         handler = _make_handler()
         handler.shared_drive_manager.get_or_create_shared_drive.return_value = None
-        handler.folder_manager.create_regular_drive_folder.return_value = (
+        handler.shared_drive_manager.last_error = "403 insufficient permissions"
+        handler.folder_manager.find_or_create_root_folder.return_value = FolderLookup(
             "regular_folder"
         )
         handler._pre_cache_root_folder = MagicMock()
@@ -760,27 +819,97 @@ class TestInitializeSharedDriveAndFolder:
 
         assert handler._shared_drive_id is None
         assert handler._root_folder_id == "regular_folder"
-        handler.folder_manager.create_regular_drive_folder.assert_called_once_with(
+        handler.folder_manager.find_or_create_root_folder.assert_called_once_with(
             "Imported Slack Attachments"
         )
         handler._pre_cache_root_folder.assert_called_once()
+        assert handler.drive_ready
+        assert handler.drive_status.mode == "my_drive"
+        assert "403 insufficient permissions" in handler.drive_status.detail
 
-    def test_http_error_falls_back_to_fallback_folder(self):
-        """When an HttpError occurs, fall back to 'Slack Attachments Fallback'."""
+    def test_transient_error_never_falls_back_to_my_drive(self):
+        """A network or auth error isn't a reason to store files elsewhere."""
         handler = _make_handler()
-        handler.shared_drive_manager.get_or_create_shared_drive.side_effect = HttpError(
-            Response({"status": "500"}), b"error"
-        )
-        handler.folder_manager.create_regular_drive_folder.return_value = (
-            "fallback_folder"
+        handler.shared_drive_manager.get_or_create_shared_drive.side_effect = APIError(
+            "Could not find or create shared drive 'X': connection reset"
         )
 
         handler._initialize_shared_drive_and_folder()
 
-        assert handler._root_folder_id == "fallback_folder"
-        handler.folder_manager.create_regular_drive_folder.assert_called_once_with(
-            "Slack Attachments Fallback"
+        assert handler.drive_status.mode == "none"
+        assert "connection reset" in handler.drive_status.detail
+        handler.folder_manager.find_or_create_root_folder.assert_not_called()
+
+    def test_no_shared_drive_and_no_folder_is_not_ready(self):
+        """The status says Drive isn't usable, and why (#118)."""
+        handler = _make_handler()
+        handler.shared_drive_manager.get_or_create_shared_drive.return_value = None
+        handler.shared_drive_manager.last_error = "quota exceeded"
+        handler.folder_manager.find_or_create_root_folder.return_value = FolderLookup(
+            None, "could not find or create folder: 403"
         )
+
+        handler._initialize_shared_drive_and_folder()
+
+        status = handler.drive_status
+        assert not handler.drive_ready
+        assert status.mode == "none"
+        assert status.root_folder_id is None
+        assert "quota exceeded" in status.detail
+        assert "403" in status.detail
+
+    def test_shared_drive_is_ready(self):
+        handler = _make_handler()
+        handler.shared_drive_manager.get_or_create_shared_drive.return_value = "SD"
+        handler._pre_cache_root_folder = MagicMock()
+
+        handler._initialize_shared_drive_and_folder()
+
+        assert handler.drive_status == DriveStatus(
+            "shared_drive", "SD", "shared drive SD"
+        )
+        assert handler.shared_drive_id == "SD"
+
+
+class TestDriveStatus:
+    """Drive readiness (#118)."""
+
+    def test_not_ready_before_initialization(self):
+        handler = _make_handler()
+        assert handler.drive_status.mode == "not_initialized"
+        assert handler.drive_ready is False
+
+    def test_given_folder_is_ready(self):
+        handler = _make_handler(folder_id="ROOT")
+        assert handler.drive_status == DriveStatus(
+            "folder", "ROOT", "attachment folder ROOT"
+        )
+        assert handler.drive_ready
+        assert handler.shared_drive_id is None
+
+    @pytest.mark.parametrize(
+        ("mode", "root"),
+        [
+            ("shared_drive", None),
+            ("my_drive", None),
+            ("folder", ""),
+            ("none", "F"),
+            ("not_initialized", "F"),
+        ],
+    )
+    def test_mode_and_root_folder_must_agree(self, mode, root):
+        with pytest.raises(ValueError, match="root folder"):
+            DriveStatus(mode, root)
+
+    def test_unknown_mode_is_rejected(self):
+        with pytest.raises(ValueError, match="unknown DriveStatus mode 'bogus'"):
+            DriveStatus("bogus", "F")  # type: ignore[arg-type]
+
+    def test_ready_and_shared_drive_are_derived(self):
+        assert DriveStatus("shared_drive", "SD").ready
+        assert DriveStatus("shared_drive", "SD").shared_drive_id == "SD"
+        assert DriveStatus("my_drive", "F").shared_drive_id is None
+        assert not DriveStatus("none").ready
 
     def test_default_drive_name_when_nothing_configured(self):
         """When name and ID are both empty, use default 'Imported Slack Attachments'."""
@@ -809,7 +938,6 @@ class TestPreCacheRootFolder:
     def test_skips_when_no_root_folder(self):
         """Returns early when _root_folder_id is None."""
         handler = _make_handler()
-        handler._root_folder_id = None
         handler.drive_uploader.pre_cache_folder_file_hashes = MagicMock()
 
         handler._pre_cache_root_folder()
@@ -819,7 +947,7 @@ class TestPreCacheRootFolder:
     def test_dry_run_delegates_to_pre_cache(self):
         """Dry run no longer short-circuits — DI stubs handle pre-caching."""
         handler = _make_handler(dry_run=True)
-        handler._root_folder_id = "some_folder"
+        _use_drive(handler, root="some_folder")
         handler.drive_uploader.pre_cache_folder_file_hashes = MagicMock(return_value=0)
         handler.drive_service.list_files.return_value = {"files": []}
 
@@ -830,22 +958,20 @@ class TestPreCacheRootFolder:
     def test_caches_root_folder_files(self):
         """Caches files from root folder."""
         handler = _make_handler()
-        handler._root_folder_id = "root123"
-        handler._shared_drive_id = "drive123"
+        _use_drive(handler, shared_drive="drive123")
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 5
         handler.drive_service.list_files.return_value = {"files": []}
 
         handler._pre_cache_root_folder()
 
         handler.drive_uploader.pre_cache_folder_file_hashes.assert_called_once_with(
-            "root123", "drive123"
+            "drive123", "drive123"
         )
 
     def test_seeds_folder_cache_from_every_subfolder(self):
         """Channel folders are learned up front; their files are cached lazily."""
         handler = _make_handler()
-        handler._root_folder_id = "root123"
-        handler._shared_drive_id = "drive123"
+        _use_drive(handler, shared_drive="drive123")
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 3
         handler.folder_manager.list_child_folders.return_value = [
             {"id": "folder_a", "name": "general"},
@@ -855,24 +981,23 @@ class TestPreCacheRootFolder:
         handler._pre_cache_root_folder()
 
         handler.folder_manager.list_child_folders.assert_called_once_with(
-            "root123", "drive123"
+            "drive123", "drive123"
         )
         handler.folder_manager.remember_folder.assert_any_call(
-            "root123", "general", "folder_a", restricted=False
+            "drive123", "general", "folder_a", restricted=False
         )
         handler.folder_manager.remember_folder.assert_any_call(
-            "root123", "random", "folder_b", restricted=False
+            "drive123", "random", "folder_b", restricted=False
         )
         # Only the root folder's files are listed at start-up.
         handler.drive_uploader.pre_cache_folder_file_hashes.assert_called_once_with(
-            "root123", "drive123"
+            "drive123", "drive123"
         )
 
     def test_subfolder_listing_http_error_continues(self):
         """HttpError when listing subfolders does not fail the process."""
         handler = _make_handler()
-        handler._root_folder_id = "root123"
-        handler._shared_drive_id = "drive123"
+        _use_drive(handler, shared_drive="drive123")
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 5
         handler.folder_manager.list_child_folders.side_effect = HttpError(
             Response({"status": "500"}), b"error"
@@ -882,17 +1007,20 @@ class TestPreCacheRootFolder:
         handler._pre_cache_root_folder()
         handler.folder_manager.remember_folder.assert_not_called()
 
-    def test_root_cache_http_error_continues(self):
-        """HttpError when caching root folder does not fail the process."""
+    def test_failed_root_listing_still_learns_channel_folders(self):
+        """The uploader handles a failed listing; folders are still learned."""
         handler = _make_handler()
-        handler._root_folder_id = "root123"
-        handler._shared_drive_id = None
-        handler.drive_uploader.pre_cache_folder_file_hashes.side_effect = HttpError(
-            Response({"status": "500"}), b"error"
-        )
+        _use_drive(handler, root="root123")
+        handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
+        handler.folder_manager.list_child_folders.return_value = [
+            {"id": "F", "name": "general"}
+        ]
 
-        # Should not raise
         handler._pre_cache_root_folder()
+
+        handler.folder_manager.remember_folder.assert_called_once_with(
+            "root123", "general", "F", restricted=False
+        )
 
 
 # ===========================================================================
@@ -905,7 +1033,6 @@ class TestUploadDirectToChat:
 
     def _make_ready_handler(self):
         handler = _make_handler(folder_id="root")
-        handler._drive_initialized = True
         return handler
 
     def test_successful_upload_with_default_service(self):
@@ -1032,17 +1159,14 @@ class TestUploadToDrive:
     """Tests for _upload_to_drive."""
 
     def _make_ready_handler(self, **kwargs):
-        handler = _make_handler(folder_id="root_folder", **kwargs)
-        handler._drive_initialized = True
-        handler._root_folder_id = "root_folder"
-        return handler
+        return _make_handler(folder_id="root_folder", **kwargs)
 
     def test_successful_upload_with_channel_folder(self):
         """Upload to drive with channel folder creation."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = "drive123"
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        _use_drive(handler, shared_drive="drive123")
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1068,25 +1192,28 @@ class TestUploadToDrive:
         assert result.drive_id == "drive_file_id"
         assert result.name == "report.pdf"
 
-    def test_upload_returns_none_when_drive_upload_fails(self):
-        """Returns None when drive_uploader returns (None, None)."""
+    def test_failed_drive_upload_returns_its_cause(self):
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
-        handler.drive_uploader.upload_file_to_drive.return_value = None
+        handler.drive_uploader.upload_file_to_drive.return_value = DriveUploadFailure(
+            "Drive refused the upload: 403 storageQuotaExceeded"
+        )
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
         result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
 
-        assert result is None
+        assert not result.success
+        assert result.error == (
+            "Drive upload failed: Drive refused the upload: 403 storageQuotaExceeded"
+        )
+        assert result.metadata == {"conversion_failed": False}
 
     def test_upload_without_channel_uses_root_folder(self):
         """When no channel is provided, uses root folder."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1099,28 +1226,33 @@ class TestUploadToDrive:
         assert result.upload_type == "drive"
         assert result.drive_id == "file_id"
         assert result.url == "https://drive.google.com/file/d/file_id/view"
-        handler.folder_manager.get_or_create_channel_folder.assert_not_called()
+        handler.folder_manager.find_or_create_channel_folder.assert_not_called()
 
-    def test_no_folder_id_returns_none(self):
-        """Returns None when no folder ID is available."""
+    def test_no_drive_fails_each_file_with_the_setup_cause(self):
+        """Each file's error says why Drive isn't available."""
         handler = self._make_ready_handler()
-        handler._root_folder_id = None
-        handler._shared_drive_id = None
+        handler._drive_status = DriveStatus(
+            "none", detail="could not find or create shared drive 'X': reset"
+        )
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
         result = handler._upload_to_drive(file_obj, FAKE_PATH)
 
-        assert result is None
+        assert not result.success
+        assert result.error == (
+            "No Drive folder (drive_unavailable): Drive is not available"
+            " (could not find or create shared drive 'X': reset)"
+        )
 
     def test_ownership_transfer_for_internal_user_no_shared_drive(self):
         """Transfers ownership for internal users on regular Drive folders."""
         handler = self._make_ready_handler(
             user_map={"U123": "alice@example.com"},
+            config=TRANSFER_CONFIG,
         )
-        handler._shared_drive_id = None
         handler.user_resolver.is_external_user.return_value = False
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1145,11 +1277,11 @@ class TestUploadToDrive:
         """Failed ownership transfer increments failure stat."""
         handler = self._make_ready_handler(
             user_map={"U123": "alice@example.com"},
+            config=TRANSFER_CONFIG,
         )
-        handler._shared_drive_id = None
         handler.user_resolver.is_external_user.return_value = False
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1175,14 +1307,13 @@ class TestUploadToDrive:
         assert handler.file_stats["ownership_transferred"] == 0
 
     def test_external_user_skips_ownership_transfer(self):
-        """External users should not have ownership transferred."""
+        """External users never get ownership, even with transfers on."""
         handler = self._make_ready_handler(
-            user_map={"UEXT": "ext@other.com"},
+            user_map={"UEXT": "ext@other.com"}, config=TRANSFER_CONFIG
         )
-        handler._shared_drive_id = None
         handler.user_resolver.is_external_user.return_value = True
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1201,16 +1332,17 @@ class TestUploadToDrive:
         assert result.upload_type == "drive"
         assert result.drive_id == "file_id"
         assert handler.file_stats["ownership_transferred"] == 0
+        handler.drive_service.create_permission.assert_not_called()
 
     def test_shared_drive_skips_ownership_transfer(self):
-        """Files on shared drives skip ownership transfer."""
+        """Files on shared drives are never transferred, even with transfers on."""
         handler = self._make_ready_handler(
-            user_map={"U123": "alice@example.com"},
+            user_map={"U123": "alice@example.com"}, config=TRANSFER_CONFIG
         )
-        handler._shared_drive_id = "drive123"
+        _use_drive(handler, shared_drive="drive123")
         handler.user_resolver.is_external_user.return_value = False
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1229,11 +1361,11 @@ class TestUploadToDrive:
         assert result.upload_type == "drive"
         assert result.drive_id == "file_id"
         assert handler.file_stats["ownership_transferred"] == 0
+        handler.drive_service.create_permission.assert_not_called()
 
     def test_google_docs_url_sets_mime_type(self):
         """Google Docs URLs should set appropriate MIME types."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1254,7 +1386,6 @@ class TestUploadToDrive:
     def test_google_sheets_url_sets_mime_type(self):
         """Google Sheets URLs should set spreadsheet MIME type."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1275,7 +1406,6 @@ class TestUploadToDrive:
     def test_google_presentation_url_sets_mime_type(self):
         """Google Slides URLs should set presentation MIME type."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1296,7 +1426,6 @@ class TestUploadToDrive:
     def test_sheets_google_url_sets_mime_type(self):
         """sheets.google.com URL should set spreadsheet MIME type."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1317,7 +1446,6 @@ class TestUploadToDrive:
     def test_drive_google_url_guesses_mime_type(self):
         """drive.google.com URL with octet-stream guesses from filename."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1338,7 +1466,6 @@ class TestUploadToDrive:
     def test_drive_google_url_no_extension_defaults_to_document(self):
         """drive.google.com URL with no guessable MIME defaults to document."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1359,7 +1486,6 @@ class TestUploadToDrive:
     def test_null_mime_type_guessed(self):
         """Regular files with null MIME type should be guessed from name."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1379,7 +1505,6 @@ class TestUploadToDrive:
     def test_empty_mime_type_guessed(self):
         """Regular files with empty MIME type should be guessed from name."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1396,25 +1521,28 @@ class TestUploadToDrive:
         assert result.drive_id == "file_id"
         assert result.mime_type == "text/plain"
 
-    def test_http_error_returns_none(self):
-        """HttpError during upload returns None."""
+    def test_missing_folder_fails_the_file_with_the_cause(self):
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
-        handler.folder_manager.get_or_create_channel_folder.side_effect = HttpError(
-            Response({"status": "500"}), b"error"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup(None, "could not find or create the folder: 500")
         )
 
         file_obj = {"id": "F1", "name": "file.txt", "mimetype": "text/plain"}
         result = handler._upload_to_drive(file_obj, FAKE_PATH, channel="general")
 
-        assert result is None
+        assert not result.success
+        assert result.error == (
+            "No Drive folder (folder_unavailable): could not find or create the"
+            " folder: 500"
+        )
+        handler.drive_uploader.upload_file_to_drive.assert_not_called()
+        assert handler.file_stats["channel_folder_failures"] == 1
 
     def test_channel_folder_already_processed(self):
         """Second upload to same channel folder uses cache."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.pre_cache_folder_file_hashes.return_value = 0
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
@@ -1432,7 +1560,6 @@ class TestUploadToDrive:
     def test_no_public_url_generates_default_link(self):
         """When drive_uploader returns None for public_url, generates a default link."""
         handler = self._make_ready_handler()
-        handler._shared_drive_id = None
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id"
         )
@@ -1448,11 +1575,11 @@ class TestUploadToDrive:
     def test_writer_grant_goes_to_sender_not_file_owner(self):
         """Only the message sender gets writer; the file owner is not granted."""
         handler = self._make_ready_handler(
-            user_map={"U123": "alice@example.com"},
+            user_map={"U123": "alice@example.com"}, config=TRANSFER_CONFIG
         )
-        handler._shared_drive_id = "drive123"
-        handler.folder_manager.get_or_create_channel_folder.return_value = (
-            "channel_folder"
+        _use_drive(handler, shared_drive="drive123")
+        handler.folder_manager.find_or_create_channel_folder.return_value = (
+            FolderLookup("channel_folder")
         )
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
@@ -1474,8 +1601,7 @@ class TestUploadToDrive:
 
     def test_no_user_email_logs_warning(self):
         """When no user email is available, no ownership transfer happens."""
-        handler = self._make_ready_handler(user_map={})
-        handler._shared_drive_id = None
+        handler = self._make_ready_handler(user_map={}, config=TRANSFER_CONFIG)
         handler.drive_uploader.upload_file_to_drive.return_value = DriveUpload(
             "file_id", "https://drive.google.com/file/d/file_id/view"
         )
@@ -1492,6 +1618,7 @@ class TestUploadToDrive:
         assert result.upload_type == "drive"
         assert result.drive_id == "file_id"
         assert handler.file_stats["ownership_transferred"] == 0
+        handler.drive_service.create_permission.assert_not_called()
 
 
 # ===========================================================================
@@ -1505,7 +1632,6 @@ class TestEnsureDriveInitializedDetailed:
     def test_initializes_and_sets_flag(self):
         """Full initialization path sets _drive_initialized to True."""
         handler = _make_handler()
-        handler._drive_initialized = False
         handler.shared_drive_manager.get_or_create_shared_drive.return_value = (
             "new_drive"
         )
@@ -1520,7 +1646,6 @@ class TestEnsureDriveInitializedDetailed:
     def test_second_call_is_noop(self):
         """Calling ensure_drive_initialized twice should only init once."""
         handler = _make_handler()
-        handler._drive_initialized = False
         handler.shared_drive_manager.get_or_create_shared_drive.return_value = (
             "new_drive"
         )
@@ -1620,7 +1745,7 @@ class TestUnavailableFiles:
     def test_unavailable_result_is_cached(self):
         handler = _make_handler(folder_id="root")
         handler._download_file = MagicMock(
-            return_value=DownloadResult(DownloadStatus.UNAVAILABLE, reason="html_page")
+            return_value=DownloadResult(DownloadStatus.UNAVAILABLE, reason="http_404")
         )
         handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
         second = handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
@@ -1654,7 +1779,6 @@ class TestTempFileLifecycle:
 
     def _handler(self):
         handler = _make_handler(folder_id="root")
-        handler._drive_initialized = True
         return handler
 
     def test_temp_file_removed_after_drive_upload(self):
@@ -1750,7 +1874,7 @@ def test_unavailable_slack_download_url_is_not_kept():
     signed_url = "https://files.slack.com/files-pri/T-F/a.png?t=xoxe-secret"
     handler._download_file = MagicMock(
         return_value=DownloadResult(
-            DownloadStatus.UNAVAILABLE, reason="html_page", url=signed_url
+            DownloadStatus.UNAVAILABLE, reason="http_404", url=signed_url
         )
     )
     result = handler.upload_attachment(
@@ -1758,3 +1882,130 @@ def test_unavailable_slack_download_url_is_not_kept():
     )
     assert result.skip_reason == "unavailable"
     assert result.url is None
+
+
+class TestRefusedDownloads:
+    """401/403 and sign-in pages are failures, with a slack_token hint (#96)."""
+
+    def test_disallowed_host_is_explained_once_per_host(self, caplog):
+        handler = self._handler()
+        hosts = iter(["cdn.example.org", "cdn.example.org", "files.other.net"])
+        handler._download_file = MagicMock(
+            side_effect=lambda *a, **k: DownloadResult(
+                DownloadStatus.FAILED,
+                reason="disallowed_host",
+                refused_host=next(hosts),
+            )
+        )
+
+        for i in range(3):
+            handler.upload_attachment({"id": f"F{i}", "name": "a.png"}, "general")
+
+        hints = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == "ERROR"
+            and "Refused to download attachments" in r.getMessage()
+        ]
+        assert len(hints) == 2
+        assert "cdn.example.org" in hints[0] and "slack.com" in hints[0]
+        assert handler.get_file_statistics()["failed_uploads"] == 3
+
+    def test_http_link_on_a_slack_host_names_the_scheme(self, caplog):
+        """files.slack.com is allowed: an http:// link is the problem."""
+        handler = self._handler()
+        handler._download_file = MagicMock(
+            return_value=DownloadResult(
+                DownloadStatus.FAILED,
+                reason="disallowed_host",
+                refused_host="files.slack.com",
+            )
+        )
+
+        handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
+
+        (hint,) = [
+            r.getMessage()
+            for r in caplog.records
+            if "Refused to download attachments" in r.getMessage()
+        ]
+        assert "isn't HTTPS" in hint
+        assert "report it" not in hint
+
+    def _handler(self, token=""):
+        config = MigrationConfig(
+            shared_drive=SharedDriveConfig(name="Test Drive"), slack_token=token
+        )
+        handler = _make_handler(folder_id="root", config=config)
+        return handler
+
+    @pytest.mark.parametrize("reason", ["auth", "html_page"])
+    def test_counted_as_failed_with_reason(self, reason):
+        handler = self._handler()
+        handler._download_file = MagicMock(
+            return_value=DownloadResult(DownloadStatus.FAILED, reason=reason)
+        )
+
+        result = handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
+
+        assert result.error == f"Download failed: {reason}"
+        stats = handler.get_file_statistics()
+        assert stats["failed_uploads"] == 1
+        assert stats["unavailable_files"] == 0
+        assert stats["download_auth_failures"] == 1
+
+    @pytest.mark.parametrize(
+        ("token", "hint"),
+        [("", "set slack_token"), ("xoxp-x", "slack_token is set but was refused")],
+    )
+    def test_hint_is_logged_once_then_every_100(self, caplog, token, hint):
+        handler = self._handler(token)
+        handler._download_file = MagicMock(
+            return_value=DownloadResult(DownloadStatus.FAILED, reason="auth")
+        )
+
+        for i in range(150):
+            handler.upload_attachment({"id": f"F{i}", "name": "a.png"}, "general")
+
+        hints = [
+            r
+            for r in caplog.records
+            if r.levelname == "ERROR" and hint in r.getMessage()
+        ]
+        assert len(hints) == 2  # the 1st and the 100th
+        assert handler.get_file_statistics()["download_auth_failures"] == 150
+
+    def test_other_failures_give_no_token_hint(self, caplog):
+        handler = self._handler()
+        handler._download_file = MagicMock(
+            return_value=DownloadResult(DownloadStatus.FAILED, reason="http_503")
+        )
+        handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
+        assert "slack_token" not in caplog.text
+        assert handler.get_file_statistics()["download_auth_failures"] == 0
+
+
+class TestUploadResultInvariants:
+    @pytest.mark.parametrize("upload_type", ["drive", "direct", "skip"])
+    def test_only_a_failure_can_be_retryable(self, upload_type):
+        with pytest.raises(ValueError, match="only a failed upload"):
+            UploadResult(upload_type=upload_type, retryable=True)
+
+    def test_a_failure_can_be_retryable(self):
+        assert UploadResult(error="boom", retryable=True).retryable
+
+
+class TestClosedSets:
+    """Literal types stay in step with the values they stand for (#118)."""
+
+    def test_conversation_types_are_defined_once(self):
+        from slack_chat_migrator.core import config
+        from slack_chat_migrator.services.files import file
+
+        assert config.CONVERSATION_TYPES == ("public", "private", "mpim", "dm")
+        assert file.ConversationType is config.ConversationType
+
+    def test_unavailable_is_defined_once(self):
+        from slack_chat_migrator.services.files.file import SKIP_REASON_UNAVAILABLE
+
+        assert DownloadStatus(SKIP_REASON_UNAVAILABLE) is DownloadStatus.UNAVAILABLE
