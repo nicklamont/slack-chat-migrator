@@ -661,12 +661,9 @@ class FolderManager:
             What changed and what failed; see :class:`FolderSyncResult`.
         """
         lookup = self.find_channel_folder(channel, parent_folder_id, shared_drive_id)
-        if lookup.error:
-            result = FolderSyncResult(lookup_error=lookup.error)
-            self._report_sync(channel, result)
-            return result
         if not lookup.folder_id:
-            result = FolderSyncResult()
+            # The lookup failed (its error is set), or there is no folder.
+            result = FolderSyncResult(lookup_error=lookup.error)
             self._report_sync(channel, result)
             return result
         return self.set_channel_folder_permissions(
