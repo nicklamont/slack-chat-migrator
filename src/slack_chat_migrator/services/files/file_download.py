@@ -247,6 +247,22 @@ def _redact_error(error: BaseException) -> str:
     return _QUERY_IN_TEXT.sub("?<redacted>", str(error))
 
 
+def is_slack_file_host(host: str) -> bool:
+    """Whether *host* is, or is a subdomain of, a Slack file host.
+
+    Args:
+        host: A host name (case and a trailing dot don't matter).
+
+    Returns:
+        True for a host on :data:`SLACK_FILE_HOST_SUFFIXES`.
+    """
+    host = host.lower().rstrip(".")
+    return bool(host) and any(
+        host == suffix or host.endswith("." + suffix)
+        for suffix in SLACK_FILE_HOST_SUFFIXES
+    )
+
+
 def is_allowed_file_url(url: str) -> bool:
     """Check that *url* is an https URL on a Slack file host.
 
@@ -259,15 +275,10 @@ def is_allowed_file_url(url: str) -> bool:
     """
     try:
         parsed = urlparse(url)
-        host = (parsed.hostname or "").lower().rstrip(".")
+        host = parsed.hostname or ""
     except ValueError:
         return False
-    if parsed.scheme != "https" or not host:
-        return False
-    return any(
-        host == suffix or host.endswith("." + suffix)
-        for suffix in SLACK_FILE_HOST_SUFFIXES
-    )
+    return parsed.scheme == "https" and is_slack_file_host(host)
 
 
 def google_link_status(file_obj: dict[str, Any]) -> DownloadStatus | None:
@@ -405,8 +416,10 @@ def _get_following_redirects(
     requested, so a redirect can't lead off Slack's file hosts.
 
     Returns:
-        ``(response, None, None)`` on a non-redirect response, or
-        ``(None, reason, refused_url)`` when a hop is refused.
+        ``(response, None, None)`` on a non-redirect response,
+        ``(None, REASON_DISALLOWED_HOST, refused_url)`` when a hop is
+        refused, or ``(None, REASON_TOO_MANY_REDIRECTS, last_url)`` after
+        more than ``DOWNLOAD_MAX_REDIRECTS`` redirects.
     """
     current = url
     for _hop in range(DOWNLOAD_MAX_REDIRECTS + 1):

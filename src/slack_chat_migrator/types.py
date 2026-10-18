@@ -135,20 +135,32 @@ class FileUploadStats(TypedDict):
     They appear as ``file_upload_details`` in the migration report.
     """
 
+    #: Attachments handled, one per ``upload_attachment`` call.
     total_files_processed: int
+    #: Files uploaded to Drive or Chat, or linked again from Drive.
     successful_uploads: int
+    #: Files that exist but couldn't be uploaded (see ``UploadResult.retryable``).
     failed_uploads: int
+    #: Files no retry or token can fetch: deleted, hidden, external, no
+    #: URL, or answering 404/410.
     unavailable_files: int
+    #: Files deliberately not uploaded (Google Docs and Sheets links).
     skipped_files: int
+    #: Successful uploads (and relinks) that went to Drive.
     drive_uploads: int
+    #: Successful uploads that went to Chat directly.
     direct_uploads: int
+    #: Attachments uploaded to Slack by users outside the workspace.
     external_user_files: int
+    #: Ownership transfers (``transfer_file_ownership``) that worked.
     ownership_transferred: int
+    #: Ownership transfers that failed (flagged for the end-of-run sweep).
     ownership_transfer_failed: int
     #: Poster writer grants that failed (flagged for the end-of-run sweep).
     poster_grant_failures: int
-    #: Sweep results: flagged grants/transfers that now worked or still fail.
+    #: Sweep attempts (grants and transfers) that now worked.
     pending_retried: int
+    #: Sweep attempts that still failed; their flags are kept.
     pending_retry_failed: int
     #: Pending flags that couldn't be stored on their Drive file.
     pending_flag_failures: int
@@ -167,17 +179,26 @@ class FileUploadStats(TypedDict):
     pending_skipped_transfers_off: int
     #: Drive folders whose file listing failed at least once.
     folder_listing_failures: int
+    #: Channel-folder grants to external members that Drive refused.
     external_folder_grant_failures: int
-    #: Channel-folder syncs that failed, and their failed grants/removals.
+    #: Channel-folder permission syncs that failed (one per channel).
     folder_sync_failures: int
+    #: Channel-folder grants to internal members that failed.
     folder_grant_failures: int
+    #: Channel-folder removals of former members that failed.
     folder_removal_failures: int
-    #: Files not uploaded: private folder not limited-access / no folder.
+    #: Files not uploaded because their private conversation's folder
+    #: couldn't be made limited-access.
     restricted_folder_failures: int
+    #: Files not uploaded because their channel folder couldn't be found or
+    #: created.
     channel_folder_failures: int
     #: Downloads refused with 401/403 or a sign-in page.
     download_auth_failures: int
+    #: Files per channel.
     files_by_channel: dict[str, int]
+    #: Share of uploads that succeeded, out of those that succeeded or
+    #: failed (unavailable and skipped files don't lower it).
     success_rate: float
 
 

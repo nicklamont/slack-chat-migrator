@@ -55,6 +55,7 @@ from slack_chat_migrator.services.files.file_download import (
     download_file,
     expected_size,
     google_link_status,
+    is_slack_file_host,
     unavailable_reason,
 )
 from slack_chat_migrator.services.files.file_permissions import (
@@ -387,6 +388,11 @@ class FileHandler:
 
         Unlike :meth:`ensure_drive_initialized` this doesn't raise when
         Drive can't be used: each upload then fails with the cause.
+
+        Raises:
+            ConfigError: If the configured ``shared_drive.id`` can't be
+                opened; :attr:`drive_status` stays ``not_initialized``.  (A
+                live run's preflight raises it first.)
         """
         if not self._drive_initialized:
             log_with_context(
@@ -424,8 +430,9 @@ class FileHandler:
     def drive_status(self) -> DriveStatus:
         """Where attachments go, or why they can't go anywhere.
 
-        Set by :meth:`ensure_drive_initialized` (and by setting
-        :attr:`folder_id`); reading it initializes nothing.
+        Set when Drive is first set up (by :meth:`ensure_drive_initialized`,
+        the first upload or the first read of :attr:`folder_id`) or when
+        :attr:`folder_id` is assigned; reading it initializes nothing.
         """
         return self._drive_status
 
@@ -637,8 +644,10 @@ class FileHandler:
         ``unavailable_files``, ``skipped_files``) and records it in
         :attr:`processed_files`.  What happens along the way is counted
         here: ``ownership_transferred``, ``ownership_transfer_failed``,
-        ``poster_grant_failures``, ``restricted_folder_failures``,
-        ``download_auth_failures`` and ``folder_listing_failures``.
+        ``poster_grant_failures``, ``pending_flag_failures``,
+        ``pending_clear_failures``, ``restricted_folder_failures``,
+        ``channel_folder_failures``, ``download_auth_failures`` and
+        ``folder_listing_failures``.
 
         Args:
             file_obj: The file object from Slack.
@@ -1030,10 +1039,23 @@ class FileHandler:
         )
 
     def _note_disallowed_host(self, host: str) -> None:
-        """Say once per host why its downloads are refused and what to do."""
+        """Say once per host why its downloads are refused and what to do.
+
+        A Slack file host is refused only for a link (or redirect) that
+        isn't HTTPS, so the message then names the scheme, not the host.
+        """
         if host in self._refused_hosts:
             return
         self._refused_hosts.add(host)
+        if is_slack_file_host(host):
+            log_with_context(
+                logging.ERROR,
+                f"Refused to download attachments from {host}: the link (or a"
+                " redirect) isn't HTTPS, and only HTTPS links are downloaded,"
+                " so a token is never sent unencrypted. These files are counted"
+                " as failed.",
+            )
+            return
         allowed = ", ".join(SLACK_FILE_HOST_SUFFIXES)
         log_with_context(
             logging.ERROR,

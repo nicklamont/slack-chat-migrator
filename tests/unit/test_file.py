@@ -1907,6 +1907,27 @@ class TestRefusedDownloads:
         assert "cdn.example.org" in hints[0] and "slack.com" in hints[0]
         assert handler.get_file_statistics()["failed_uploads"] == 3
 
+    def test_http_link_on_a_slack_host_names_the_scheme(self, caplog):
+        """files.slack.com is allowed: an http:// link is the problem."""
+        handler = self._handler()
+        handler._download_file = MagicMock(
+            return_value=DownloadResult(
+                DownloadStatus.FAILED,
+                reason="disallowed_host",
+                refused_host="files.slack.com",
+            )
+        )
+
+        handler.upload_attachment({"id": "F1", "name": "a.png"}, "general")
+
+        (hint,) = [
+            r.getMessage()
+            for r in caplog.records
+            if "Refused to download attachments" in r.getMessage()
+        ]
+        assert "isn't HTTPS" in hint
+        assert "report it" not in hint
+
     def _handler(self, token=""):
         config = MigrationConfig(
             shared_drive=SharedDriveConfig(name="Test Drive"), slack_token=token

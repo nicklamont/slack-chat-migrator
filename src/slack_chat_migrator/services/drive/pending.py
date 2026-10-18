@@ -25,7 +25,7 @@ the file again for the same poster).  Values written by earlier versions
 hold the email alone and are read as such.
 
 The markers have a fixed value so that one ``appProperties has {...}`` query
-finds every flagged file.  Drive also allows at most 30 private properties
+per kind (grants, transfers) finds every flagged file.  Drive also allows at most 30 private properties
 per file and app; with the upload's three tags and this module's three
 fixed keys, at most :data:`MAX_PENDING_GRANTS` poster grants can be flagged
 on one file.  A further one is kept for this run's sweep only.
