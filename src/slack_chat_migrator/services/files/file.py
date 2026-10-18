@@ -984,7 +984,11 @@ class FileHandler:
         )
 
     def _record_result(self, key: tuple[str, str, str], result: UploadResult) -> None:
-        """Count a fresh result and cache it unless it is a retryable error."""
+        """Count a fresh result, and cache it unless it failed.
+
+        No failure is cached, permanent ones included, so a later attempt
+        (the channel-end retry) uploads the file again.
+        """
         if result.success:
             stat = (
                 "direct_uploads" if result.upload_type == "direct" else "drive_uploads"
@@ -2232,7 +2236,8 @@ class FileHandler:
         """The attachment root and every channel folder in it (regular Drive).
 
         Raises:
-            Any of ``DRIVE_CALL_ERRORS`` if the folders can't be listed.
+            A Drive call error (see ``is_drive_call_error``) if the folders
+            can't be listed, or DriveQuotaError.
         """
         root = self._root_folder_id
         if not root:

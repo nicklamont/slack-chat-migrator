@@ -283,7 +283,8 @@ class FolderManager:
             ``inheritedPermissionsDisabled``.
 
         Raises:
-            Any of ``DRIVE_CALL_ERRORS`` if a page can't be listed.
+            A Drive call error (see ``is_drive_call_error``) if a page can't
+            be listed, or DriveQuotaError.
         """
         safe_parent = escape_drive_query_value(parent_folder_id)
         query = (
@@ -394,7 +395,8 @@ class FolderManager:
         """Find a non-trashed folder by name; cache and return its ID.
 
         Raises:
-            Any of ``DRIVE_CALL_ERRORS`` if the search fails.
+            A Drive call error (see ``is_drive_call_error``) if the search
+            fails, or DriveQuotaError.
         """
         query = self._folder_query(name, parent_folder_id)
         fields = "files(id, name, inheritedPermissionsDisabled)"
@@ -505,7 +507,8 @@ class FolderManager:
         """Create a channel folder, limited-access when *restricted*.
 
         Raises:
-            Any of ``DRIVE_CALL_ERRORS`` if the folder can't be created.
+            A Drive call error (see ``is_drive_call_error``) if the folder
+            can't be created, or DriveQuotaError.
         """
         log_with_context(
             logging.INFO, f"Creating channel folder: {channel}", channel=channel
@@ -578,9 +581,9 @@ class FolderManager:
             Folder ID if found, None if there is no such folder.
 
         Raises:
-            Any of ``DRIVE_CALL_ERRORS`` if the search fails (it never
-            means "no folder").  :meth:`find_channel_folder` returns the
-            error instead.
+            A Drive call error (see ``is_drive_call_error``) if the search
+            fails (it never means "no folder"), or DriveQuotaError.
+            :meth:`find_channel_folder` returns the call error instead.
         """
         name = self._sanitize_folder_name(channel)
         cached = self.folder_cache.get((parent_folder_id, name))

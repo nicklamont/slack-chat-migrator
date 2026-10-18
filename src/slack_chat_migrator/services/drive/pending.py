@@ -3,9 +3,10 @@
 A poster's ``writer`` grant or an ownership transfer can fail after the file
 was uploaded (a network error, a sharing policy).  The upload still counts.
 The failure is recorded here, and on the Drive file itself in its
-``appProperties``, so the sweep at the end of every run can retry it, also
-for files that a later run never links again (``--resume`` skips messages
-it already sent):
+``appProperties``, so the sweep that runs when the migration's channel loop
+ends (also after an abort, not after Ctrl-C) can retry it, also for files
+that a later run never links again (``--resume`` skips messages it already
+sent):
 
 - ``slackGrantPending = "true"`` while any poster's grant on the file is
   pending, plus one ``slackGrant.<hash> = <target>`` per such poster.  The
@@ -24,11 +25,12 @@ run still knows the recipient and retries it, a later run's sweep can't
 the file again for the same poster).  Values written by earlier versions
 hold the email alone and are read as such.
 
-The markers have a fixed value so that one ``appProperties has {...}`` query
-per kind (grants, transfers) finds every flagged file.  Drive also allows at most 30 private properties
-per file and app; with the upload's three tags and this module's three
-fixed keys, at most :data:`MAX_PENDING_GRANTS` poster grants can be flagged
-on one file.  A further one is kept for this run's sweep only.
+The markers have a fixed value so that one ``appProperties has {...}``
+query per kind (grants, transfers) finds every flagged file.  Drive also
+allows at most 30 private properties per file for one app; with the
+upload's three tags and this module's three fixed keys, at most
+:data:`MAX_PENDING_GRANTS` poster grants can be flagged on one file.  A
+further one is kept for this run's sweep only.
 """
 
 from __future__ import annotations
@@ -392,7 +394,8 @@ class PendingPermissions:
             grant and a pending transfer counts once.
 
         Raises:
-            Any of ``DRIVE_CALL_ERRORS`` if a page can't be listed.
+            A Drive call error (see ``drive_adapter.is_drive_call_error``)
+            if a page can't be listed, or DriveQuotaError.
         """
         found: set[str] = set()
         for marker in (GRANT_MARKER, OWNER_MARKER):

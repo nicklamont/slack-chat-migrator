@@ -4,9 +4,11 @@ The internal domains are the workspace admin's domain plus
 ``config.workspace_domains``.  Without the admin's domain (a dry run without
 ``--workspace_admin``) none are known and nobody counts as external:
 ``workspace_domains`` usually leaves out the primary domain, so using it
-alone would count the admin's own users as external.  :meth:`UserResolver.is_external_user` uses
-these helpers and makes the decision for the whole tool; FileHandler and
-FolderManager call them directly only when they have no resolver.
+alone would count the admin's own users as external.
+
+:meth:`UserResolver.is_external_user` uses these helpers and makes the
+decision for the whole tool; FileHandler and FolderManager call them
+directly only when they have no resolver.
 """
 
 from __future__ import annotations

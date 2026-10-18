@@ -368,8 +368,9 @@ class DriveFileUploader:
             The existing upload (``source == SOURCE_SLACK_ID``), or None.
 
         Raises:
-            Any of ``DRIVE_CALL_ERRORS`` if the search fails, so the caller
-            doesn't upload a second copy of a file that may already be there.
+            A Drive call error (see ``is_drive_call_error``) if the search
+            fails, so the caller doesn't upload a second copy of a file that
+            may already be there; DriveQuotaError for a used-up quota.
         """
         key = (folder_id, slack_file_id)
         cached = self.slack_file_cache.get(key)
@@ -389,7 +390,8 @@ class DriveFileUploader:
         """Search *folder_id* for a file tagged with *slack_file_id*.
 
         Raises:
-            Any of ``DRIVE_CALL_ERRORS`` (logged as a warning).
+            A Drive call error (see ``is_drive_call_error``), logged as a
+            warning; DriveQuotaError for a used-up quota.
         """
         safe_id = escape_drive_query_value(slack_file_id)
         safe_folder = escape_drive_query_value(folder_id)
@@ -457,7 +459,8 @@ class DriveFileUploader:
             Tuple of (file_id, webViewLink) if found, (None, None) otherwise
 
         Raises:
-            Any of ``DRIVE_CALL_ERRORS`` if the search fails.
+            A Drive call error (see ``is_drive_call_error``) if the search
+            fails, or DriveQuotaError.
         """
         cached = self.file_hash_cache.get((folder_id, file_hash))
         if cached is not None:
@@ -556,12 +559,18 @@ class DriveFileUploader:
                 so, so a folder whose listing failed isn't listed twice.
 
         Returns:
-            The DriveUpload, or why there is none: any of
-            ``DRIVE_CALL_ERRORS`` (an HttpError, a network error that
-            outlasted the retries, credentials that can't be refreshed) from
-            the dedup searches or the upload, an OSError reading the file,
-            or Drive returning no file ID.  Nothing is raised; the caller
-            logs and counts the failure.
+            The DriveUpload, or why there is none: a Drive call error (an
+            HttpError, a network error that outlasted the retries, including
+            a network-down OSError, or credentials that can't be refreshed)
+            from the dedup searches or the upload, an OSError reading the
+            file, or Drive returning no file ID.  The caller logs and counts
+            the failure.
+
+        Raises:
+            DriveQuotaError: If a Drive quota is used up.
+            OSError: For a local fault in ``FATAL_LOCAL_ERRNOS`` (a full
+                disk, too many open files); every later file would fail
+                the same way.
         """
         try:
             mime_type = (
