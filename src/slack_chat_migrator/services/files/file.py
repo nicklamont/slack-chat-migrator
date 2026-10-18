@@ -517,18 +517,16 @@ class FileHandler:
                 f" the regular Drive folder {fallback_name!r} instead",
             )
             lookup = self.folder_manager.find_or_create_root_folder(fallback_name)
-            self._drive_status = (
-                DriveStatus(
+            if lookup.folder_id:
+                self._drive_status = DriveStatus(
                     "my_drive",
                     lookup.folder_id,
                     f"regular Drive folder {fallback_name!r} ({why})",
                 )
-                if lookup.folder_id
-                else DriveStatus(
+            else:
+                self._drive_status = DriveStatus(
                     "none", detail=f"{why}; regular Drive folder: {lookup.error}"
                 )
-            )
-            if not lookup.folder_id:
                 log_with_context(
                     logging.ERROR,
                     "Drive is not available for attachments"
