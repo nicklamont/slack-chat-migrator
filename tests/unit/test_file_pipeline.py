@@ -120,6 +120,7 @@ def upload(
     mime="application/pdf",
     space="spaces/S",
     sender=None,
+    sender_user_id=None,
 ):
     """Post one Slack file from *user* in *channel*."""
     downloads.content[file_id] = content
@@ -135,7 +136,9 @@ def upload(
     sender_email = sender if sender is not None else USERS.get(user)
     if sender_email and not sender_email.endswith("@example.com"):
         sender_email = None  # message_builder passes None for externals
-    return handler.upload_attachment(file_obj, channel, space, None, sender_email)
+    return handler.upload_attachment(
+        file_obj, channel, space, None, sender_email, sender_user_id=sender_user_id
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1186,6 +1189,68 @@ class TestPendingSweep:
         # The upload's own tags plus the marker and grant fit Drive's budget.
         tags = [k for k in props if not k.startswith(("slackGrant", "slackOwner"))]
         assert len(tags) == FIXED_APP_PROPERTIES - 3
+
+    def test_flag_names_the_poster_when_users_share_an_address(
+        self, tmp_path, downloads
+    ):
+        """Bob is mapped to Alice's address by mistake; his flags name him."""
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        run1.user_map.update({"UA": "alice@example.com", "UB": "alice@example.com"})
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+        result = upload(
+            run1, downloads, "c", "F1", "UB", b"bob's", sender="alice@example.com"
+        )
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackOwner"] == "UB alice@example.com"
+        assert props[grant_key("alice@example.com")] == "UB alice@example.com"
+        del fake.failing["permissions.create"]
+        fake.fail_transfer = False
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        run2.user_map["UB"] = "bob@example.com"  # the mapping is fixed
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        emails = {kw["body"]["emailAddress"] for kw in fake.permission_calls()}
+        assert emails == {"bob@example.com"}
+
+    def test_sender_user_id_from_the_caller_wins(self, tmp_path, downloads):
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        handler.user_map.update({"UB": "alice@example.com"})
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+
+        # Uploaded by UA, posted again by UB, who shares Alice's address.
+        result = upload(
+            handler,
+            downloads,
+            "c",
+            "F1",
+            "UA",
+            b"x",
+            sender="alice@example.com",
+            sender_user_id="UB",
+        )
+
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props[grant_key("alice@example.com")] == "UB alice@example.com"
+
+    def test_shared_address_without_the_sender_id_stores_the_email(
+        self, tmp_path, downloads
+    ):
+        """No guessing: a re-share by an unknown one of two users keeps no ID."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        handler.user_map.update({"UC": "carol@example.com", "UD": "carol@example.com"})
+        fake.failing["permissions.create"] = ConnectionResetError("reset")
+
+        result = upload(
+            handler, downloads, "c", "F1", "UA", b"x", sender="carol@example.com"
+        )
+
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props[grant_key("carol@example.com")] == "carol@example.com"
 
     def test_recipient_is_mapped_again_by_slack_user_id(
         self, tmp_path, downloads, caplog

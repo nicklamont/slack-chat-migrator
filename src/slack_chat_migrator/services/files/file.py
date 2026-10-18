@@ -569,6 +569,8 @@ class FileHandler:
         space: str | None = None,
         user_service: ChatAdapter | None = None,
         sender_email: str | None = None,
+        *,
+        sender_user_id: str | None = None,
     ) -> UploadResult:
         """Upload a file using the most appropriate method based on file type.
 
@@ -581,6 +583,10 @@ class FileHandler:
             space: Optional space ID where the file will be used
             user_service: Optional user-specific Chat service to use for upload
             sender_email: Email address of the message sender (for permissions handling)
+            sender_user_id: Slack user ID of the message sender, stored with
+                a failed grant so a later run can map the poster again.
+                Without it, the file's uploader is used when it maps to
+                *sender_email*, else the one user mapped to that address.
 
         Returns:
             UploadResult with upload details. Check ``.success``, ``.skipped``,
@@ -615,7 +621,12 @@ class FileHandler:
                 return dataclasses.replace(cached, cached=True)
 
             result = self.process_file(
-                file_obj, channel, space, user_service, sender_email
+                file_obj,
+                channel,
+                space,
+                user_service,
+                sender_email,
+                sender_user_id=sender_user_id,
             )
             self._record_result(cache_key, result)
             return result
@@ -642,6 +653,8 @@ class FileHandler:
         space: str | None = None,
         user_service: ChatAdapter | None = None,
         sender_email: str | None = None,
+        *,
+        sender_user_id: str | None = None,
     ) -> UploadResult:
         """Fetch one Slack file and upload it: the per-file unit of work.
 
@@ -665,12 +678,15 @@ class FileHandler:
             space: Chat space for a direct upload, if any.
             user_service: Optional user-specific Chat service for uploads.
             sender_email: Email of the message sender.
+            sender_user_id: Slack user ID of the message sender (see
+                :meth:`upload_attachment`).
 
         Returns:
             The UploadResult (success, skip or error).
         """
         file_id = file_obj.get("id") or "unknown"
         name = file_obj.get("name") or f"file_{file_id}"
+        poster_id = self._poster_user_id(file_obj, sender_email, sender_user_id)
 
         # A Drive-bound file already uploaded into this channel's folder
         # (earlier in this run or by an earlier run) is linked again without
@@ -683,7 +699,7 @@ class FileHandler:
                 return self._folder_failure(lookup, name, channel)
             folder_id = lookup.folder_id
             existing = self._find_existing_upload(
-                file_obj, folder_id, name, channel, sender_email
+                file_obj, folder_id, name, channel, sender_email, poster_id=poster_id
             )
             if existing is not None:
                 return existing
@@ -710,7 +726,13 @@ class FileHandler:
 
             if document is not None:
                 return self._upload_document(
-                    file_obj, document, download, channel, sender_email, folder_id
+                    file_obj,
+                    document,
+                    download,
+                    channel,
+                    sender_email,
+                    folder_id,
+                    poster_id=poster_id,
                 )
 
             mime_type = self._resolve_mime_type(file_obj, name, channel, file_id)
@@ -740,6 +762,7 @@ class FileHandler:
                 name,
                 file_hash=download.md5,
                 folder_id=folder_id,
+                poster_id=poster_id,
             )
         finally:
             remove_temp_file(download.path)
@@ -787,6 +810,8 @@ class FileHandler:
         channel: str | None,
         sender_email: str | None,
         folder_id: str | None,
+        *,
+        poster_id: str | None = None,
     ) -> UploadResult:
         """Upload a downloaded canvas or list, converting it when planned.
 
@@ -812,6 +837,7 @@ class FileHandler:
                 name=drive_name,
                 mime_type=document.source_mime,
                 target_mime_type=target_mime,
+                poster_id=poster_id,
             )
             if not (target_mime and _conversion_failed(result)):
                 break
@@ -888,6 +914,8 @@ class FileHandler:
         name: str,
         channel: str | None = None,
         sender_email: str | None = None,
+        *,
+        poster_id: str | None = None,
     ) -> UploadResult | None:
         """Return this Slack file's Drive upload into *folder_id*, if any.
 
@@ -933,6 +961,8 @@ class FileHandler:
             self.user_map.get(user_id) if user_id else None,
             channel,
             file_id,
+            poster_id=poster_id,
+            owner_id=user_id,
         )
         return UploadResult(
             upload_type="drive",
@@ -1179,6 +1209,7 @@ class FileHandler:
         name: str,
         file_hash: str | None = None,
         folder_id: str | None = None,
+        poster_id: str | None = None,
     ) -> UploadResult:
         """Upload a file to Google Drive; a failure is logged with its cause."""
         log_with_context(
@@ -1195,6 +1226,7 @@ class FileHandler:
             sender_email,
             file_hash=file_hash,
             folder_id=folder_id,
+            poster_id=poster_id,
         )
         if drive_result.success:
             log_with_context(
@@ -1300,6 +1332,7 @@ class FileHandler:
         name: str | None = None,
         mime_type: str | None = None,
         target_mime_type: str | None = None,
+        poster_id: str | None = None,
     ) -> UploadResult:
         """Upload a downloaded file to Google Drive.
 
@@ -1314,6 +1347,7 @@ class FileHandler:
             name: Drive file name, if not the Slack name
             mime_type: Content type, if not resolved from the Slack file
             target_mime_type: Google type to convert the upload into
+            poster_id: Slack user ID of the message sender, if known
 
         Returns:
             The Drive upload, or an error result that says why it failed
@@ -1354,6 +1388,8 @@ class FileHandler:
                 sender_email,
                 file_hash=file_hash,
                 target_mime_type=target_mime_type,
+                poster_id=poster_id,
+                owner_id=user_id,
             )
 
         except _FILE_ERRORS as e:
@@ -1486,6 +1522,8 @@ class FileHandler:
         sender_email: str | None,
         file_hash: str | None = None,
         target_mime_type: str | None = None,
+        poster_id: str | None = None,
+        owner_id: str | None = None,
     ) -> UploadResult:
         """Upload a temp file to Drive and handle permissions.
 
@@ -1503,6 +1541,8 @@ class FileHandler:
                 access.  Callers pass None for external senders.
             file_hash: MD5 of the content, if known.
             target_mime_type: Google type to convert the upload into.
+            poster_id: Slack user ID of the message sender, if known.
+            owner_id: Slack user ID of the file's uploader, if known.
 
         Returns:
             The Drive upload, or an error result with the cause.
@@ -1530,7 +1570,14 @@ class FileHandler:
 
         # Never raises: a failed grant doesn't make the upload fail.
         self._apply_file_permissions(
-            upload.file_id, upload.source, sender_email, user_email, channel, file_id
+            upload.file_id,
+            upload.source,
+            sender_email,
+            user_email,
+            channel,
+            file_id,
+            poster_id=poster_id,
+            owner_id=owner_id,
         )
 
         log_with_context(
@@ -1626,6 +1673,9 @@ class FileHandler:
         owner_email: str | None,
         channel: str | None,
         file_id: str,
+        *,
+        poster_id: str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         """Grant the poster ``writer`` access and transfer ownership if allowed.
 
@@ -1646,7 +1696,9 @@ class FileHandler:
         flagged per poster on the file (see
         :class:`~slack_chat_migrator.services.drive.pending.PendingPermissions`),
         never raised: the upload stays a success.  :meth:`retry_pending_permissions`
-        retries the flagged ones at the end of the run.
+        retries the flagged ones at the end of the run.  A flag stores the
+        Slack user ID (*poster_id* for the poster, *owner_id* for the new
+        owner), so a later run can map that user again.
         """
         pending = self.drive_uploader.pending
         poster = sender_email if self._is_internal_email(sender_email) else None
@@ -1669,9 +1721,7 @@ class FileHandler:
                 or (
                     from_earlier_run
                     and pending_owner is not None
-                    and pending_owner.is_for(
-                        self._slack_user_id(owner_email), owner_email
-                    )
+                    and pending_owner.is_for(owner_id, owner_email)
                 )
             )
             else None
@@ -1718,7 +1768,9 @@ class FileHandler:
                     channel=channel,
                     file_id=file_id,
                 )
-            self._record_poster_grant(drive_file_id, poster, writer_error is None)
+            self._record_poster_grant(
+                drive_file_id, poster, writer_error is None, user_id=poster_id
+            )
             self._count_ownership_transfer(
                 transfer_error is None,
                 drive_file_id,
@@ -1726,29 +1778,37 @@ class FileHandler:
                 channel,
                 file_id,
                 error=transfer_error,
+                user_id=owner_id,
             )
             return
 
         if grant_poster and poster:
-            self._grant_poster(drive_file_id, poster)
+            self._grant_poster(drive_file_id, poster, user_id=poster_id)
 
         if owner:
             transferred = self._handle_ownership_transfer(
-                drive_file_id, owner, channel, file_id
+                drive_file_id, owner, channel, file_id, user_id=owner_id
             )
             if not transferred and poster == owner:
                 # Keep the poster able to edit their file.
-                self._grant_poster(drive_file_id, poster)
+                self._grant_poster(drive_file_id, poster, user_id=poster_id)
 
-    def _grant_poster(self, drive_file_id: str, poster: str) -> None:
+    def _grant_poster(
+        self, drive_file_id: str, poster: str, *, user_id: str | None = None
+    ) -> None:
         """Give the poster ``writer`` access (a failure is logged there)."""
         granted = self.drive_uploader.set_message_poster_permission(
             drive_file_id, poster, self._shared_drive_id
         )
-        self._record_poster_grant(drive_file_id, poster, granted)
+        self._record_poster_grant(drive_file_id, poster, granted, user_id=user_id)
 
     def _record_poster_grant(
-        self, drive_file_id: str, poster: str, granted: bool
+        self,
+        drive_file_id: str,
+        poster: str,
+        granted: bool,
+        *,
+        user_id: str | None = None,
     ) -> None:
         """Remember a poster grant, or count and flag it as failed.
 
@@ -1765,7 +1825,7 @@ class FileHandler:
             poster,
             not granted,
             self._shared_drive_id,
-            user_id=None if granted else self._slack_user_id(poster),
+            user_id=None if granted else user_id,
         )
 
     def _already_granted(self, drive_file_id: str, email: str) -> bool:
@@ -1782,6 +1842,8 @@ class FileHandler:
         new_owner_email: str,
         channel: str | None,
         file_id: str,
+        *,
+        user_id: str | None = None,
     ) -> bool:
         """Transfer ownership of a regular-Drive file to its Slack uploader.
 
@@ -1793,7 +1855,12 @@ class FileHandler:
         """
         transferred = self._transfer_file_ownership(drive_file_id, new_owner_email)
         self._count_ownership_transfer(
-            transferred, drive_file_id, new_owner_email, channel, file_id
+            transferred,
+            drive_file_id,
+            new_owner_email,
+            channel,
+            file_id,
+            user_id=user_id,
         )
         return transferred
 
@@ -1805,6 +1872,8 @@ class FileHandler:
         channel: str | None,
         file_id: str,
         error: BaseException | None = None,
+        *,
+        user_id: str | None = None,
     ) -> None:
         """Count and log one ownership transfer attempt.
 
@@ -1819,12 +1888,13 @@ class FileHandler:
             channel: Channel name for logging context.
             file_id: Slack file ID for logging context.
             error: Why the transfer failed, when known.
+            user_id: The new owner's Slack user ID, stored with the flag.
         """
         self.drive_uploader.pending.set_owner(
             drive_file_id,
             new_owner_email,
             not transferred,
-            user_id=None if transferred else self._slack_user_id(new_owner_email),
+            user_id=None if transferred else user_id,
         )
         if transferred:
             # The owner needs no writer grant when the file is linked again.
@@ -2116,17 +2186,34 @@ class FileHandler:
                 f" without retrying them: {reason} ({label}: {shown}).",
             )
 
-    def _slack_user_id(self, email: str | None) -> str | None:
-        """The Slack user mapped to *email* (the first by ID), if any."""
-        if not email:
+    def _poster_user_id(
+        self,
+        file_obj: Mapping[str, Any],
+        sender_email: str | None,
+        sender_user_id: str | None,
+    ) -> str | None:
+        """The message sender's Slack user ID, for a flag on a failed grant.
+
+        The ID the caller gives wins.  Otherwise the file's uploader, when
+        it maps to *sender_email*, and failing that the one user mapped to
+        that address.  When several users share it, None: the flag then
+        stores the email alone rather than maybe another user's ID.
+        """
+        if sender_user_id:
+            return sender_user_id
+        if not sender_email:
             return None
-        wanted = _normalize_email(email)
-        matches = sorted(
+        uploader = file_obj.get("user")
+        mapped = self.user_map.get(uploader) if isinstance(uploader, str) else None
+        if mapped and _normalize_email(mapped) == _normalize_email(sender_email):
+            return str(uploader)
+        wanted = _normalize_email(sender_email)
+        matches = [
             user_id
-            for user_id, mapped in self.user_map.items()
-            if isinstance(mapped, str) and _normalize_email(mapped) == wanted
-        )
-        return matches[0] if matches else None
+            for user_id, address in self.user_map.items()
+            if isinstance(address, str) and _normalize_email(address) == wanted
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def _migration_folders(self) -> set[str]:
         """The attachment root and every channel folder in it (regular Drive).
