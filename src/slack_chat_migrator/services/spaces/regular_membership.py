@@ -438,7 +438,8 @@ def _update_folder_permissions(
     Looks up the channel's Drive folder and syncs its permissions so only
     the given *active_user_emails* have access.  Failures (lookup, listing,
     grants, removals) are logged and counted in the file statistics by
-    :meth:`FileHandler.sync_channel_folder_permissions`; none are raised.
+    :meth:`FileHandler.sync_channel_folder_permissions` and not raised.  A
+    used-up Drive quota (DriveQuotaError) is raised: it stops the run.
 
     Args:
         file_handler: FileHandler instance (may be None).

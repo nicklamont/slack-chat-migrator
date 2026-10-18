@@ -264,7 +264,8 @@ class DriveFileUploader:
         upload into it lists it again, and until then each file is looked up
         with its own search (by Slack ID, then by MD5).  The first failure
         per folder is logged as a warning and reported to
-        *on_listing_failure*; nothing is raised.
+        *on_listing_failure*, not raised.  A used-up Drive quota
+        (DriveQuotaError) is raised: it stops the run.
 
         Args:
             folder_id: ID of the folder to cache files from
