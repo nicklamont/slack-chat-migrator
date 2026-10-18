@@ -600,6 +600,21 @@ class TestRetryableFailures:
         # It gets what a new upload gets: the poster's grant, or the transfer.
         assert fake.permission_calls()
 
+    def test_lost_upload_found_again_is_transferred_as_a_new_one(
+        self, tmp_path, downloads
+    ):
+        """Adopting it as an earlier run's file would skip its transfer."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        assert upload(handler, downloads, "c", "F0", "UA", b"0").success
+        fake.lose_create_responses = 1
+        assert not upload(handler, downloads, "c", "F1", "UA", b"1").success
+
+        retry = upload(handler, downloads, "c", "F1", "UA", b"1")
+
+        assert retry.success
+        assert fake.owners_of(retry.drive_id) == ["alice@example.com"]
+
     def test_file_without_drive_is_retryable(self, tmp_path, downloads):
         fake = FakeDrive()
         handler = make_handler(fake, tmp_path, shared=False)
