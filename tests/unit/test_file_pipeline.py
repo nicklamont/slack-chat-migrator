@@ -2046,10 +2046,12 @@ class TestCanvasConversion:
         fake.fail_query = fail_file_lookups
 
         rerun = make_handler(fake, tmp_path)
+        doc_downloads.calls.clear()
         result = post_document(rerun, CANVAS)
 
         assert not result.success
         assert "earlier upload" in (result.error or "")
+        assert doc_downloads.calls == []  # failed before downloading (TA PD4)
         assert len(fake.files_db) == docs_before
         assert rerun.get_file_statistics()["failed_uploads"] == 1
 
