@@ -20,7 +20,7 @@ from slack_chat_migrator.constants import (
     GOOGLE_SHEETS_MIME_TYPE,
     SLACK_FILE_HOST_SUFFIXES,
 )
-from slack_chat_migrator.core.config import MigrationConfig
+from slack_chat_migrator.core.config import ConversationType, MigrationConfig
 from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.exceptions import APIError
 from slack_chat_migrator.services.chat import ChatFileUploader
@@ -122,9 +122,6 @@ def _conversion_failed(result: UploadResult) -> bool:
 #: What a Slack canvas or list becomes; see :class:`SlackDocument`.
 DocumentKind = Literal["canvas", "list"]
 
-
-#: A Slack conversation's type (``config.CONVERSATION_TYPES``).
-ConversationType = Literal["public", "private", "mpim", "dm"]
 
 #: How attachments are stored; see :class:`DriveStatus`.
 DriveMode = Literal["not_initialized", "folder", "shared_drive", "my_drive", "none"]

@@ -15,15 +15,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 import yaml
 
 from slack_chat_migrator.exceptions import ConfigError
 from slack_chat_migrator.utils.logging import log_with_context
 
+#: A Slack conversation's type.
+ConversationType = Literal["public", "private", "mpim", "dm"]
 #: Slack conversation types, in the order they are listed in the export.
-CONVERSATION_TYPES = ("public", "private", "mpim", "dm")
+CONVERSATION_TYPES: tuple[ConversationType, ...] = get_args(ConversationType)
 
 #: Who becomes the space manager after ``completeImport``.
 SPACE_MANAGER_CHOICES = ("admin", "creator")

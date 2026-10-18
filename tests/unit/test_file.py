@@ -1988,13 +1988,12 @@ class TestRefusedDownloads:
 class TestClosedSets:
     """Literal types stay in step with the values they stand for (#118)."""
 
-    def test_conversation_type_matches_the_config_values(self):
-        from typing import get_args
+    def test_conversation_types_are_defined_once(self):
+        from slack_chat_migrator.core import config
+        from slack_chat_migrator.services.files import file
 
-        from slack_chat_migrator.core.config import CONVERSATION_TYPES
-        from slack_chat_migrator.services.files.file import ConversationType
-
-        assert set(get_args(ConversationType)) == set(CONVERSATION_TYPES)
+        assert config.CONVERSATION_TYPES == ("public", "private", "mpim", "dm")
+        assert file.ConversationType is config.ConversationType
 
     def test_unavailable_is_defined_once(self):
         from slack_chat_migrator.services.files.file import SKIP_REASON_UNAVAILABLE
