@@ -449,7 +449,14 @@ def _update_folder_permissions(
         return
 
     result = file_handler.sync_channel_folder_permissions(channel, active_user_emails)
-    if result.folder_id:
+    if not result.ok:
+        log_with_context(
+            logging.WARNING,
+            f"Step 6/6: The {channel} Drive folder is not in sync with its"
+            f" {len(active_user_emails)} active members: {result.describe()}",
+            channel=channel,
+        )
+    elif result.folder_id:
         log_with_context(
             logging.INFO,
             f"Step 6/6: Synced the {channel} Drive folder with its"
@@ -457,7 +464,7 @@ def _update_folder_permissions(
             f" granted, {result.removed} removed)",
             channel=channel,
         )
-    elif not result.lookup_error:
+    else:
         log_with_context(
             logging.DEBUG,
             f"No Drive folder for {channel}: no folder permissions to sync",

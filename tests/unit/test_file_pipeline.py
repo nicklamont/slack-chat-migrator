@@ -1937,6 +1937,30 @@ class TestLimitedAccessFolders:
         assert len(steps) == 1
         assert "Synced the c Drive folder with its 1 active members" in steps[0]
 
+    @pytest.mark.parametrize(
+        "method", ["permissions.list", "permissions.create"], ids=["list", "grant"]
+    )
+    def test_step_6_says_a_failed_sync_failed(
+        self, tmp_path, downloads, caplog, method
+    ):
+        from slack_chat_migrator.services.spaces.regular_membership import (
+            _update_folder_permissions,
+        )
+
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"x")
+        fake.failing[method] = http_error(500)
+
+        with caplog.at_level("INFO"):
+            _update_folder_permissions(handler, "c", ["bob@example.com"])
+
+        steps = [r for r in caplog.records if "Step 6/6" in r.getMessage()]
+        assert len(steps) == 1
+        assert steps[0].levelname == "WARNING"
+        assert "is not in sync" in steps[0].getMessage()
+        assert "Synced" not in steps[0].getMessage()
+
     def test_channel_without_folder_needs_no_sync(self, tmp_path):
         handler = make_meta_handler(FakeDrive(), tmp_path)
 
