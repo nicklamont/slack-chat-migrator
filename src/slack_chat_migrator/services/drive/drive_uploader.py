@@ -20,6 +20,7 @@ from slack_chat_migrator.services.drive_adapter import (
     http_status,
     is_drive_call_error,
     is_fatal_local_error,
+    is_network_error,
     is_transient_error,
 )
 
@@ -38,6 +39,7 @@ from slack_chat_migrator.constants import (
     DRIVE_ROLE_WRITER,
     DRIVE_UPLOAD_CHUNK_BYTES,
     FILE_READ_CHUNK_BYTES,
+    HTTP_SERVER_ERROR_MIN,
 )
 from slack_chat_migrator.utils.api import (
     escape_drive_query_value,
@@ -140,6 +142,18 @@ def _fit_app_property(key: str, value: str) -> str:
     return value.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
 
 
+def _may_have_been_created(error: BaseException) -> bool:
+    """Whether Drive may have carried out a call that failed with *error*.
+
+    True for a network error and a 5xx, where the response may just have
+    been lost; False for a 4xx refusal and credentials that can't be
+    refreshed (the request was never sent).
+    """
+    if isinstance(error, HttpError):
+        return (http_status(error) or 0) >= HTTP_SERVER_ERROR_MIN
+    return is_network_error(error)
+
+
 class DriveFileUploader:
     """Handles file uploads to Google Drive."""
 
@@ -182,6 +196,10 @@ class DriveFileUploader:
         self._slack_id_misses: set[tuple[str, str]] = set()
         # Drive files created by this run.
         self.created_this_run: set[str] = set()
+        # (folder_id, Slack file ID) whose files.create failed in a way that
+        # Drive may still have carried out (a network error or a 5xx): the
+        # next attempt searches Drive instead of trusting the caches.
+        self._uncertain_creates: set[tuple[str, str]] = set()
         #: Poster grants and transfers that failed, in this run or (read
         #: from the files' appProperties) an earlier one.
         self.pending = PendingPermissions(
@@ -364,8 +382,15 @@ class DriveFileUploader:
             slack_file_id: Slack file ID.
             shared_drive_id: ID of the shared drive (if applicable).
 
+        After an upload attempt whose ``files.create`` failed in a way Drive
+        may still have carried out (a lost response), Drive is searched even
+        for a pre-cached folder.  A file found that way is this run's upload
+        and comes back as ``DriveUploadSource.NEW``, so it gets the grants a
+        new upload gets.
+
         Returns:
-            The existing upload (``source == SOURCE_SLACK_ID``), or None.
+            The existing upload (``source == SOURCE_SLACK_ID``, or ``NEW``
+            as above), or None.
 
         Raises:
             A Drive call error (see ``is_drive_call_error``) if the search
@@ -373,6 +398,14 @@ class DriveFileUploader:
             may already be there; DriveQuotaError for a used-up quota.
         """
         key = (folder_id, slack_file_id)
+        if key in self._uncertain_creates:
+            self._slack_id_misses.discard(key)
+            found = self._search_slack_file(folder_id, slack_file_id, shared_drive_id)
+            self._uncertain_creates.discard(key)
+            if found is None:
+                return None
+            self.created_this_run.add(found[0])
+            return DriveUpload(found[0], found[1], source=DriveUploadSource.NEW)
         cached = self.slack_file_cache.get(key)
         if (
             cached is None
@@ -714,12 +747,18 @@ class DriveFileUploader:
             resumable=True,
             chunksize=DRIVE_UPLOAD_CHUNK_BYTES,
         )
-        file = self.drive_service.create_file(
-            body=file_metadata,
-            media_body=media,
-            fields="id,webViewLink",
-            supports_all_drives=bool(shared_drive_id),
-        )
+        try:
+            file = self.drive_service.create_file(
+                body=file_metadata,
+                media_body=media,
+                fields="id,webViewLink",
+                supports_all_drives=bool(shared_drive_id),
+            )
+        except DRIVE_CALL_CANDIDATES as e:
+            if slack_file_id and _may_have_been_created(e):
+                # The next attempt looks for this upload before making it.
+                self._uncertain_creates.add((folder_id, slack_file_id))
+            raise
 
         file_id = file.get("id")
         if not file_id:

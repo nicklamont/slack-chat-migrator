@@ -573,6 +573,33 @@ class TestRetryableFailures:
         assert result.retryable is retryable
         assert handler.get_file_statistics()["failed_uploads"] == 1
 
+    @pytest.mark.parametrize("shared", [True, False], ids=["shared", "my_drive"])
+    def test_retry_after_a_lost_create_response_makes_no_second_copy(
+        self, tmp_path, downloads, shared
+    ):
+        """Drive created the file but the reply was lost: the retry finds it."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=shared, transfer=not shared)
+        assert upload(handler, downloads, "c", "F0", "UA", b"zero").success
+        fake.lose_create_responses = 1
+
+        first = upload(handler, downloads, "c", "F1", "UA", b"one")
+        assert not first.success and first.retryable
+        fake.calls.clear()
+        retry = upload(handler, downloads, "c", "F1", "UA", b"one")
+
+        assert retry.success
+        copies = [
+            f
+            for f in fake.files_db.values()
+            if (f.get("appProperties") or {}).get("slackFileId") == "F1"
+        ]
+        assert len(copies) == 1
+        assert retry.drive_id == copies[0]["id"]
+        assert fake.count("files.create") == 0
+        # It gets what a new upload gets: the poster's grant, or the transfer.
+        assert fake.permission_calls()
+
     def test_file_without_drive_is_retryable(self, tmp_path, downloads):
         fake = FakeDrive()
         handler = make_handler(fake, tmp_path, shared=False)

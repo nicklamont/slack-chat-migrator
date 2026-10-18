@@ -115,6 +115,9 @@ class FakeDrive:
         self.admin = admin
         # (method, request) -> how often it was listed; see check_page_loop.
         self._page_requests: dict[tuple[str, str], int] = {}
+        # Uploads (not folders) whose files.create is carried out but whose
+        # response is lost, as with a dropped connection.
+        self.lose_create_responses = 0
 
     # -- helpers ------------------------------------------------------------
 
@@ -360,6 +363,9 @@ class _Files:
                         offset += len(chunk)
                     record["md5Checksum"] = md5.hexdigest()
             self.d.files_db[file_id] = record
+            if self.d.lose_create_responses and record["mimeType"] != FOLDER_MIME:
+                self.d.lose_create_responses -= 1
+                raise ConnectionResetError("connection reset; the file was created")
             return {k: v for k, v in record.items() if k != "media_mimetype"}
 
         return Req(run, "files.create", kw, self.d)
