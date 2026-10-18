@@ -157,3 +157,25 @@ def test_remove_temp_file_tolerates_missing(tmp_path):
     remove_temp_file(str(target))
     remove_temp_file(None)
     assert not target.exists()
+
+
+def test_temp_dir_sweeps_leftovers_of_an_output_dir_set_after_construction(
+    tmp_path,
+):
+    """Library use: the output dir is only known when the first file arrives."""
+    from slack_chat_migrator.constants import ATTACHMENT_TEMP_DIRNAME
+    from slack_chat_migrator.services.files.temp_files import AttachmentTempDir
+
+    old_run = tmp_path / "run_old" / ATTACHMENT_TEMP_DIRNAME / "run-1-dead"
+    old_run.mkdir(parents=True)
+    (old_run / ".lock").write_text("")  # unlocked: its process is gone
+    (old_run / "partial.bin").write_bytes(b"x")
+
+    output_dir: dict[str, str | None] = {"value": None}
+    temp_dir = AttachmentTempDir(lambda: output_dir["value"])
+    output_dir["value"] = str(tmp_path / "run_new")
+    try:
+        temp_dir.path()
+        assert not old_run.exists()
+    finally:
+        temp_dir.cleanup()

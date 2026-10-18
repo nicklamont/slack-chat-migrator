@@ -93,7 +93,8 @@ def scopes_for(config: MigrationConfig | None) -> list[str]:
 #: is a bounded LRU rather than one entry per user in the workspace.
 SERVICE_CACHE_MAX_ENTRIES = 256
 
-_ServiceKey = tuple[str, str, str, str, tuple[str, ...]]
+# (creds, user, api, version, scopes, max_retries, retry_delay)
+_ServiceKey = tuple[str, str, str, str, tuple[str, ...], int, float]
 
 # Cache for service instances: maps key → (service, created_at), LRU order
 _service_cache: OrderedDict[_ServiceKey, tuple[Any, float]] = OrderedDict()
@@ -151,14 +152,16 @@ RATE_LIMIT_REASONS = frozenset(
 
 #: Network-level failures worth retrying.  Deliberately not a bare
 #: ``OSError``: local errors such as ``PermissionError`` or
-#: ``FileNotFoundError`` won't go away on retry.
+#: ``FileNotFoundError`` won't go away on retry.  ``http.client``'s own
+#: errors (BadStatusLine, RemoteDisconnected, IncompleteRead,
+#: ResponseNotReady, CannotSendRequest) reach us through httplib2 when a
+#: connection breaks mid-request.
 RETRYABLE_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
     TransportError,
     ConnectionError,
     TimeoutError,  # also socket.timeout
     ssl.SSLError,
-    http.client.IncompleteRead,
-    http.client.RemoteDisconnected,
+    http.client.HTTPException,
     httplib2.ServerNotFoundError,
     httplib2.HttpLib2Error,
 )
@@ -207,6 +210,26 @@ def http_error_reasons(error: HttpError) -> set[str]:
     return reasons
 
 
+def http_status(error: BaseException) -> int | None:
+    """Return the HTTP status of *error*, or None when it has no response.
+
+    googleapiclient's ``BatchError`` (an ``HttpError``) can carry
+    ``resp=None``, for example when a batch response can't be parsed, so
+    ``error.resp.status`` isn't safe on every ``HttpError``.
+
+    Args:
+        error: Any exception.
+
+    Returns:
+        The status code, or None.
+    """
+    status = getattr(getattr(error, "resp", None), "status", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def is_rate_limit_error(error: BaseException) -> bool:
     """Return True for 429s and 403s whose reason is a rate limit or quota.
 
@@ -218,7 +241,7 @@ def is_rate_limit_error(error: BaseException) -> bool:
     """
     if not isinstance(error, HttpError):
         return False
-    status = error.resp.status
+    status = http_status(error)
     if status == HTTP_RATE_LIMIT:
         return True
     return status == HTTP_FORBIDDEN and bool(
@@ -226,8 +249,27 @@ def is_rate_limit_error(error: BaseException) -> bool:
     )
 
 
+def is_retryable_status(status: int) -> bool:
+    """Return True for HTTP 408, 429 and 5xx: a later attempt may succeed.
+
+    Args:
+        status: An HTTP status code.
+
+    Returns:
+        True if a request that got *status* is worth trying again.
+    """
+    return (
+        status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
+        or status >= HTTP_SERVER_ERROR_MIN
+    )
+
+
 def is_retryable_http_error(error: HttpError) -> bool:
     """Return True for 408, 429, 5xx and rate-limit 403 responses.
+
+    An error without a response (a ``BatchError`` whose batch reply couldn't
+    be parsed) has nothing that says a retry would help, so it isn't
+    retried.
 
     Args:
         error: The HTTP error to classify.
@@ -235,12 +277,10 @@ def is_retryable_http_error(error: HttpError) -> bool:
     Returns:
         True if the request is worth retrying.
     """
-    status = error.resp.status
-    return (
-        status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
-        or status >= HTTP_SERVER_ERROR_MIN
-        or is_rate_limit_error(error)
-    )
+    status = http_status(error)
+    if status is None:
+        return False
+    return is_retryable_status(status) or is_rate_limit_error(error)
 
 
 def retry_after_seconds(error: HttpError) -> float | None:
@@ -299,13 +339,19 @@ class RetryWrapper:
 
     - 408, 429, 5xx and 403 rate-limit/quota errors, and network errors
       (connection resets, timeouts, DNS failures, truncated responses) are
-      retried with full-jitter exponential backoff capped at
-      :data:`MAX_BACKOFF_SECONDS`, honouring ``Retry-After``.
-    - Rate-limit errors have their own budget of
-      :data:`RATE_LIMIT_BUDGET_SECONDS`; other errors are retried
-      ``max_retries`` times.
-    - Other 4xx errors are raised at once (a 401 also clears the service
-      cache).  409s are left to the callers.
+      retried.  Each wait is the server's ``Retry-After`` when it sends one,
+      otherwise full-jitter exponential backoff capped at
+      :data:`MAX_BACKOFF_SECONDS`.
+    - Rate-limit errors (429 and the rate-limit 403s) are retried until the
+      next wait would take the total past
+      :data:`RATE_LIMIT_BUDGET_SECONDS` (or after
+      :data:`RATE_LIMIT_MAX_ATTEMPTS`), whatever ``max_retries`` says.  Their
+      ``Retry-After`` is used as sent: only that budget limits it.
+    - Other retryable errors are retried ``max_retries`` times, and their
+      ``Retry-After`` is capped at :data:`MAX_BACKOFF_SECONDS`.
+    - Other 4xx errors, 409 conflicts included, and HTTP errors without a
+      response (a ``BatchError`` with ``resp=None``) are raised at once (a
+      401 also clears the service cache).
     """
 
     def __init__(
@@ -402,9 +448,11 @@ class RetryWrapper:
         if isinstance(error, HttpError):
             reasons = ", ".join(sorted(http_error_reasons(error)))
             detail = f" ({reasons})" if reasons else ""
+            status = http_status(error)
+            reason = getattr(getattr(error, "resp", None), "reason", "") or ""
             log_with_context(
                 logging.WARNING,
-                f"Encountered {error.resp.status} {error.resp.reason}{detail}",
+                f"Encountered {status} {reason}{detail}",
                 **log_kwargs,
             )
         else:
@@ -464,15 +512,17 @@ class RetryWrapper:
                     return result
                 except HttpError as e:
                     if not is_retryable_http_error(e):
-                        if e.resp.status == HTTP_UNAUTHORIZED:
+                        status = http_status(e)
+                        if status == HTTP_UNAUTHORIZED:
                             clear_service_cache()
                         if request_details:
                             self._log_api_response(
-                                e.resp.status, request_details, None, channel_context
+                                status or 0, request_details, None, channel_context
                             )
+                        shown = status if status is not None else "no response"
                         log_with_context(
                             logging.WARNING,
-                            f"Client error ({e.resp.status}) not retried: {e}",
+                            f"Client error ({shown}) not retried: {e}",
                             **log_kwargs,
                         )
                         raise
@@ -495,7 +545,10 @@ class RetryWrapper:
                 if exhausted:
                     if request_details and isinstance(error, HttpError):
                         self._log_api_response(
-                            error.resp.status, request_details, None, channel_context
+                            http_status(error) or 0,
+                            request_details,
+                            None,
+                            channel_context,
                         )
                     log_with_context(
                         logging.ERROR,
@@ -758,8 +811,9 @@ def get_gcp_service(
 ) -> Any:
     """Get a Google API client service using service account impersonation.
 
-    Clients are cached per (credentials, user, API, scopes) in a bounded LRU
-    cache with a 45-minute TTL; :func:`clear_service_cache` empties it.  The
+    Clients are cached per (credentials, user, API, scopes, retry settings)
+    in a bounded LRU cache with a 45-minute TTL; :func:`clear_service_cache`
+    empties it.  The
     service-account key file is parsed once and each user's credentials are
     derived with ``with_subject``.
 
@@ -782,7 +836,20 @@ def get_gcp_service(
         ValueError: If the credentials file has an invalid format.
     """
     scope_key = tuple(scopes) if scopes is not None else tuple(REQUIRED_SCOPES)
-    cache_key: _ServiceKey = (creds_path, user_email, api, version, scope_key)
+    # Retry settings are part of the key so callers never silently get a
+    # client configured by someone else.  The channel isn't: it only tags log
+    # lines, and keying on it would build one client per user per channel.
+    # So a cached client keeps tagging its log lines with the channel it was
+    # created for, which is stale once it is reused in another channel.
+    cache_key: _ServiceKey = (
+        creds_path,
+        user_email,
+        api,
+        version,
+        scope_key,
+        max_retries,
+        float(retry_delay),
+    )
     with _service_cache_lock:
         if cache_key in _service_cache:
             cached_service, created_at = _service_cache[cache_key]

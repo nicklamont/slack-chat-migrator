@@ -169,6 +169,8 @@ class AttachmentTempDir:
         self._output_dir_getter = output_dir_getter
         self._path: Path | None = None
         self._lock_fd: int | None = None
+        # Output dirs whose earlier runs' leftovers were already swept.
+        self._swept: set[str | None] = set()
 
     def path(self) -> str:
         """Return the directory, creating and locking it on first use.
@@ -179,7 +181,13 @@ class AttachmentTempDir:
         if self._path is not None and self._path.is_dir():
             return str(self._path)
 
-        base = _base_dir(self._output_dir_getter())
+        output_dir = self._output_dir_getter()
+        if output_dir not in self._swept:
+            # The output dir may only be known now (library use sets it after
+            # the handler is built), so sweep its leftovers before first use.
+            sweep_stale_temp_dirs(output_dir)
+            self._swept.add(output_dir)
+        base = _base_dir(output_dir)
         directory = base / f"run-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
 

@@ -205,6 +205,88 @@ class TestMigrationConfigValidation:
         with pytest.raises(ValueError, match="max_failure_percentage must be between"):
             MigrationConfig(max_failure_percentage=101)
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"max_retries": -1},
+            {"retry_delay": -1},
+            {"max_failure_percentage": 101},
+            {"file_workers": 0},
+            {"space_manager": "owner"},
+            {"conversation_types": ["threads"]},
+            {"conversation_types": []},
+            {"max_parallel_channels": 0},
+            # Wrong types fail like from_dict, not with TypeError or garbage.
+            {"import_completion_strategy": "bogus"},
+            {"max_retries": "3"},
+            {"retry_delay": "2"},
+            {"ignore_bots": "false"},
+            {"conversation_types": "dm"},
+            # A bare string is iterable: only the list check catches it.
+            {"exclude_channels": "general"},
+            {"exclude_channels": [1]},
+            {"email_domain_override": 5},
+            {"max_retries": True},
+            {"retry_delay": False},
+            {"ignore_bots": 1},
+            {"ignore_bots": 1.0},
+            {"user_mapping_overrides": {"U1": 5}},
+            {"user_mapping_overrides": {1: "a@example.com"}},
+            {"custom_emoji_map": {"tada": 5}},
+            {"custom_emoji_map": {"tada": "  "}},
+            {"shared_drive": {"name": "x"}},
+        ],
+    )
+    def test_direct_construction_raises_config_error(self, kwargs):
+        """Library callers get the same exception type as from_dict raises."""
+        with pytest.raises(ConfigError):
+            MigrationConfig(**kwargs)
+
+    def test_every_field_is_type_checked_or_exempt(self):
+        """A new field with an unlisted annotation must not go unchecked."""
+        from dataclasses import fields
+
+        from slack_chat_migrator.core.config import (
+            _FIELD_TYPE_CHECKS,
+            _TYPE_CHECK_EXEMPT,
+        )
+
+        unchecked = {
+            f.name
+            for f in fields(MigrationConfig)
+            if str(f.type) not in _FIELD_TYPE_CHECKS
+        }
+        assert unchecked == set(_TYPE_CHECK_EXEMPT) == {"import_completion_strategy"}
+
+    def test_unhandled_annotation_is_a_programming_error(self):
+        from dataclasses import dataclass
+
+        from slack_chat_migrator.core.config import _check_field_types
+
+        @dataclass
+        class Odd:
+            maybe: "int | None" = None
+
+        with pytest.raises(TypeError, match="add one to _FIELD_TYPE_CHECKS"):
+            _check_field_types(Odd())
+
+    def test_custom_emoji_map_empty_value_from_yaml(self, tmp_path):
+        with pytest.raises(ConfigError, match="'tada' has an empty value"):
+            _load(tmp_path, "custom_emoji_map:\n  tada: ''\n")
+
+    def test_completion_strategy_strings_are_coerced(self):
+        config = MigrationConfig(import_completion_strategy="force_complete")
+        assert config.import_completion_strategy is (
+            ImportCompletionStrategy.FORCE_COMPLETE
+        )
+
+    def test_slack_token_is_not_in_repr(self):
+        sample = "xoxe-1-reprcheck"  # pragma: allowlist secret
+        config = MigrationConfig(slack_token=sample)
+        assert sample not in repr(config)
+        assert "slack_token" not in repr(config)
+        assert config.slack_token == sample
+
     def test_invalid_config_from_yaml(self, tmp_path):
         """Invalid values in YAML are rejected at load time."""
         config_path = tmp_path / "config.yaml"
@@ -359,6 +441,14 @@ class TestListOptions:
         config = _load(tmp_path, "conversation_types: public\n")
         assert config.conversation_types == ["public"]
 
+    @pytest.mark.parametrize(
+        "text", ["conversation_types: []\n", "conversation_types: [~]\n"]
+    )
+    def test_empty_conversation_types_list_is_an_error(self, tmp_path, text):
+        """An empty list would read as "none"; leaving the option out means all."""
+        with pytest.raises(ConfigError, match="at least one"):
+            _load(tmp_path, text)
+
 
 class TestScalarOptions:
     """Booleans, integers, numbers and strings are type-checked."""
@@ -398,6 +488,11 @@ class TestScalarOptions:
     def test_retry_delay_accepts_floats(self, tmp_path):
         assert _load(tmp_path, "retry_delay: 1.5\n").retry_delay == 1.5
 
+    @pytest.mark.parametrize("value", [".nan", ".inf", "-.inf"])
+    def test_retry_delay_must_be_finite(self, tmp_path, value):
+        with pytest.raises(ConfigError, match="finite"):
+            _load(tmp_path, f"retry_delay: {value}\n")
+
     def test_retry_delay_rejects_strings(self, tmp_path):
         with pytest.raises(ConfigError, match="must be a number"):
             _load(tmp_path, "retry_delay: '2'\n")
@@ -434,6 +529,56 @@ class TestMappingOptions:
         config = _load(tmp_path, "custom_emoji_map: {100: ':hundred:'}\n")
         assert config.custom_emoji_map == {"100": ":hundred:"}
 
+    def test_custom_emoji_map_keys_lose_their_colons(self, tmp_path):
+        config = _load(
+            tmp_path,
+            "custom_emoji_map:\n"
+            "  ':partyparrot:': '\U0001f99c'\n"
+            "  ' :ShipIt: ': ':ship-it:'\n"
+            "  ':wave::skin-tone-2:': ':tada:'\n",
+        )
+        assert config.custom_emoji_map == {
+            "partyparrot": "\U0001f99c",
+            "shipit": ":ship-it:",
+            "wave::skin-tone-2": ":tada:",
+        }
+
+    def test_mixed_case_keys_are_found_by_the_emoji_lookup(self):
+        from slack_chat_migrator.utils.emoji import slack_emoji_to_unicode
+
+        config = MigrationConfig(custom_emoji_map={":PartyParrot:": "\U0001f99c"})
+        assert config.custom_emoji_map == {"partyparrot": "\U0001f99c"}
+        assert (
+            slack_emoji_to_unicode("partyparrot", config.custom_emoji_map)
+            == "\U0001f99c"
+        )
+
+    def test_colon_keys_are_found_by_the_emoji_lookup(self):
+        from slack_chat_migrator.utils.emoji import slack_emoji_to_unicode
+
+        config = MigrationConfig(custom_emoji_map={":partyparrot:": "\U0001f99c"})
+        assert config.custom_emoji_map == {"partyparrot": "\U0001f99c"}
+        assert (
+            slack_emoji_to_unicode("partyparrot", config.custom_emoji_map)
+            == "\U0001f99c"
+        )
+
+    @pytest.mark.parametrize(
+        ("mapping", "match"),
+        [
+            ({"::": "x"}, "not an emoji name"),
+            ({":tada:": "a", "tada": "b"}, "'tada' more than once"),
+            ({"Tada": "a", ":tada:": "b"}, "'tada' more than once"),
+            ({True: "a"}, "boolean True.*quote it"),
+            ({1.5: "a"}, "quote it"),
+        ],
+    )
+    def test_bad_custom_emoji_map_keys(self, mapping, match):
+        with pytest.raises(ConfigError, match=match):
+            MigrationConfig(custom_emoji_map=mapping)
+        with pytest.raises(ConfigError, match=match):
+            MigrationConfig.from_dict({"custom_emoji_map": mapping})
+
     def test_shared_drive_must_be_a_mapping(self, tmp_path):
         with pytest.raises(ConfigError, match="shared_drive"):
             _load(tmp_path, "shared_drive: My Drive\n")
@@ -448,6 +593,34 @@ class TestMappingOptions:
         assert config.shared_drive.name == "Imported Slack Attachments"
         assert config.shared_drive.id is None
 
+    @pytest.mark.parametrize("name", ["", "   "])
+    def test_shared_drive_blank_name_means_the_default(self, name):
+        from slack_chat_migrator.core.config import (
+            DEFAULT_SHARED_DRIVE_NAME,
+            SharedDriveConfig,
+        )
+
+        drive = SharedDriveConfig(name=name, id=name)
+        assert drive.name == DEFAULT_SHARED_DRIVE_NAME
+        assert drive.id is None
+        loaded = MigrationConfig.from_dict({"shared_drive": {"name": name}})
+        assert loaded.shared_drive.name == DEFAULT_SHARED_DRIVE_NAME
+
+    def test_shared_drive_id_is_stripped(self):
+        from slack_chat_migrator.core.config import SharedDriveConfig
+
+        assert SharedDriveConfig(id=" 0AB ").id == "0AB"
+        loaded = MigrationConfig.from_dict({"shared_drive": {"id": "   "}})
+        assert loaded.shared_drive.id is None
+
+    def test_shared_drive_fields_must_be_strings(self):
+        from slack_chat_migrator.core.config import SharedDriveConfig
+
+        with pytest.raises(ConfigError, match=r"shared_drive\.name"):
+            SharedDriveConfig(name=5)  # type: ignore[arg-type]
+        with pytest.raises(ConfigError, match=r"shared_drive\.id"):
+            SharedDriveConfig(id=5)  # type: ignore[arg-type]
+
     def test_space_mapping_must_be_a_mapping(self, tmp_path):
         with pytest.raises(ConfigError, match="space_mapping"):
             _load(tmp_path, "space_mapping: [general]\n")
@@ -456,7 +629,193 @@ class TestMappingOptions:
         path = tmp_path / "config.yaml"
         path.write_text("space_mapping:\n  123: spaces/X\n  '#general': AAA\n")
         load_config(path)  # valid
-        assert load_space_mapping(path) == {"123": "spaces/X", "general": "AAA"}
+        # The "spaces/" prefix is optional: discovery compares bare IDs.
+        assert load_space_mapping(path) == {"123": "X", "general": "AAA"}
+
+    def test_space_mapping_with_only_comments_is_empty(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("space_mapping:\n  # general: AAA\n")
+        load_config(path)
+        assert load_space_mapping(path) == {}
+
+    @pytest.mark.parametrize(
+        ("text", "match"),
+        [
+            ("space_mapping: general\n", "must be a mapping"),
+            ("space_mapping:\n  general:\n", "'general' must be a space ID"),
+            ("space_mapping:\n  general: ''\n", "'general' must be a space ID"),
+            ("space_mapping:\n  general: [AAA]\n", "'general' must be a space ID"),
+            ("space_mapping:\n  general: 12\n", "'general' must be a space ID"),
+            ("space_mapping:\n  true: AAA\n", "boolean True.*quote it"),
+            ("space_mapping:\n  on: AAA\n", "boolean True.*quote it"),
+            ("space_mapping:\n  2024-01-01: AAA\n", "date 2024-01-01; quote it"),
+            ("space_mapping:\n  1.5: AAA\n", "quote it"),
+            ("space_mapping:\n  ~: AAA\n", "read as null.*'null'"),
+            ("space_mapping:\n  1: AAA\n  true: BBB\n", "boolean True"),
+            ("space_mapping:\n  '#': AAA\n", "is not a channel name"),
+            ("space_mapping:\n  general: spaces/A/B\n", "invalid space ID"),
+            ("space_mapping:\n  general: AA AA\n", "invalid space ID"),
+            ("space_mapping:\n  general: 'spaces/'\n", "invalid space ID"),
+            (
+                "space_mapping:\n  general: AAA\n  '#general': BBB\n",
+                "'general' more than once",
+            ),
+        ],
+    )
+    def test_malformed_space_mapping_is_an_error(self, tmp_path, text, match):
+        path = tmp_path / "config.yaml"
+        path.write_text(text)
+        with pytest.raises(ConfigError, match=match):
+            load_config(path)
+        # A library caller that passes its own MigrationConfig still gets the
+        # error from the config file's space_mapping.
+        with pytest.raises(ConfigError, match=match):
+            load_space_mapping(path)
+
+    def test_load_space_mapping_reports_unreadable_files(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text("space_mapping: {general: AAA\n")
+        with pytest.raises(ConfigError, match="not valid YAML"):
+            load_space_mapping(path)
+        path.write_text("- general\n")
+        with pytest.raises(ConfigError, match="top level must be a mapping"):
+            load_space_mapping(path)
+
+    def test_load_space_mapping_without_file_or_option(self, tmp_path):
+        assert load_space_mapping(tmp_path / "missing.yaml") == {}
+        path = tmp_path / "config.yaml"
+        path.write_text("")
+        assert load_space_mapping(path) == {}
+        path.write_text("max_retries: 2\n")
+        assert load_space_mapping(path) == {}
+
+
+class TestIntegerLookingKeys:
+    """YAML 1.1 reads 007, 0x10, 1_000, +1 and 1:30 as numbers; keep the text."""
+
+    def test_space_mapping_keys_keep_their_text(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "space_mapping:\n  007: AAA\n  0x10: BBB\n  1_000: CCC\n"
+            "  1:30: DDD\n  123: EEE\n"
+        )
+        assert load_space_mapping(path) == {
+            "007": "AAA",
+            "0x10": "BBB",
+            "1_000": "CCC",
+            "1:30": "DDD",
+            "123": "EEE",
+        }
+
+    def test_plus_one_emoji_can_be_overridden(self, tmp_path):
+        from slack_chat_migrator.utils.emoji import slack_emoji_to_unicode
+
+        config = _load(tmp_path, "custom_emoji_map:\n  +1: ':tada:'\n  007: x\n")
+        assert config.custom_emoji_map == {"+1": ":tada:", "007": "x"}
+        assert slack_emoji_to_unicode("+1", config.custom_emoji_map) == "\U0001f389"
+
+    def test_numeric_values_are_unchanged(self, tmp_path):
+        config = _load(tmp_path, "max_retries: 0x3\nretry_delay: 1_0\n")
+        assert config.max_retries == 3
+        assert config.retry_delay == 10
+
+    def test_direct_mapping_with_colliding_keys(self):
+        with pytest.raises(ConfigError, match="'1' more than once"):
+            MigrationConfig.from_dict({"user_mapping_overrides": {1: "a", "1": "b"}})
+
+
+class TestDuplicateKeys:
+    """A key repeated in the same mapping is an error, not "last one wins"."""
+
+    def test_pasted_duplicate_space_block_is_an_error(self, tmp_path):
+        """The block discovery logs has one line per candidate space."""
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "space_mapping:\n"
+            "  # Slack #general (Members: 12, Created: 2024-01-01T00:00:00Z)\n"
+            '  "general": "AAAAold111"\n'
+            "  # Slack #general (Members: 0, Created: 2026-10-01T00:00:00Z)\n"
+            '  "general": "AAAAnew222"\n'
+        )
+        for load in (load_config, load_space_mapping):
+            with pytest.raises(ConfigError, match="duplicate key 'general'") as e:
+                load(path)
+            assert "first on line 3" in str(e.value)
+            assert "line 5" in str(e.value)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "exclude_channels: [a]\nmax_retries: 2\nexclude_channels: [b]\n",
+            "ignore_bots: true\nignore_bots: false\n",
+            "user_mapping_overrides:\n  U1: a@x.com\n  U1: b@x.com\n",
+            "custom_emoji_map:\n  tada: x\n  tada: y\n",
+            "shared_drive:\n  name: A\n  name: B\n",
+        ],
+    )
+    def test_repeated_options_are_errors(self, tmp_path, text):
+        with pytest.raises(ConfigError, match="duplicate key"):
+            _load(tmp_path, text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "custom_emoji_map:\n  1: a\n  '1': b\n",
+            "user_mapping_overrides:\n  123: a@x.com\n  '123': b@x.com\n",
+            "space_mapping:\n  007: AAA\n  '007': BBB\n",
+        ],
+    )
+    def test_number_and_quoted_text_are_the_same_key(self, tmp_path, text):
+        with pytest.raises(ConfigError, match="duplicate key"):
+            _load(tmp_path, text)
+
+    @pytest.mark.parametrize(
+        ("text", "hint"),
+        [
+            ("custom_emoji_map:\n  on: a\n  yes: b\n", "boolean True"),
+            ("space_mapping:\n  null: AAA\n  ~: BBB\n", "read as null"),
+            ("custom_emoji_map:\n  1.5: a\n  1.50: b\n", "number 1.5"),
+        ],
+    )
+    def test_retyped_keys_get_the_quoting_hint_not_a_duplicate(
+        self, tmp_path, text, hint
+    ):
+        with pytest.raises(ConfigError, match=hint) as raised:
+            _load(tmp_path, text)
+        assert "duplicate" not in str(raised.value)
+
+    def test_the_same_retyped_key_twice_is_a_duplicate(self, tmp_path):
+        with pytest.raises(ConfigError, match="duplicate key 'on'"):
+            _load(tmp_path, "custom_emoji_map:\n  on: a\n  on: b\n")
+
+    def test_merge_source_with_its_own_merge_is_not_a_duplicate(self, tmp_path):
+        config = _load(
+            tmp_path,
+            "x-defs:\n  inner: &b\n    <<: {name: A}\n    name: B\n"
+            "shared_drive:\n  <<: *b\n",
+        )
+        assert config.shared_drive.name == "B"
+
+    def test_duplicates_inside_an_inline_merge_source_are_caught(self, tmp_path):
+        with pytest.raises(ConfigError, match="duplicate key 'name'"):
+            _load(tmp_path, "shared_drive:\n  <<: {name: A, name: B}\n")
+
+    def test_equals_sign_key_still_loads(self, tmp_path, caplog):
+        with caplog.at_level(logging.WARNING, logger="slack_chat_migrator"):
+            _load(tmp_path, "=: x\nmax_retries: 2\n")
+        assert "Ignoring unknown config option(s): =" in caplog.text
+
+    def test_merge_keys_may_still_be_overridden(self, tmp_path):
+        config = _load(
+            tmp_path,
+            "base: &base {name: A, id: X}\nshared_drive:\n  <<: *base\n  name: B\n",
+        )
+        assert config.shared_drive.name == "B"
+        assert config.shared_drive.id == "X"
+
+    def test_unhashable_key_is_still_invalid_yaml(self, tmp_path):
+        with pytest.raises(ConfigError, match="not valid YAML"):
+            _load(tmp_path, "? [a, b]\n: 1\n")
 
 
 class TestUnknownKeys:

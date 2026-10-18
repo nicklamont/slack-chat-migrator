@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import click
+from rich.markup import escape
 
 from slack_chat_migrator.cli.common import cli
 from slack_chat_migrator.cli.renderers import (
@@ -92,6 +93,12 @@ def setup() -> None:
     service account setup, and delegation verification.
     Requires: pip install "slack-chat-migrator[setup]"
     """
+    # Ctrl-C, here or at a prompt, exits 130 (handled by the CLI group).
+    _run_setup()
+
+
+def _run_setup() -> None:
+    """Run the setup wizard's steps (see :func:`setup`)."""
     console = get_console()
 
     if not _check_setup_deps():
@@ -188,7 +195,9 @@ def setup() -> None:
         state = _step_download_key(credentials, state)
         save_state(state)
     else:
-        console.print(f"[green]\u2713[/green] [4/6] Key: [bold]{state.key_path}[/bold]")
+        console.print(
+            f"[green]\u2713[/green] [4/6] Key: [bold]{escape(str(state.key_path))}[/bold]"
+        )
 
     # Step 5: Configure Chat app (verified via API call)
     if state.step_status("chat_app") != StepStatus.COMPLETE:
@@ -210,7 +219,9 @@ def setup() -> None:
     if state.delegation_verified:
         lines = ["[bold]Setup complete![/bold]"]
         if state.key_path:
-            lines.append(f"\nCredentials file: [bold]{state.key_path}[/bold]")
+            lines.append(
+                f"\nCredentials file: [bold]{escape(str(state.key_path))}[/bold]"
+            )
         console.print(success_panel("GCP Setup", "\n".join(lines)))
         console.print(next_step_panel("slack-chat-migrator init --export_path <dir>"))
     else:
@@ -220,7 +231,9 @@ def setup() -> None:
             "Re-run [bold]slack-chat-migrator setup[/bold] after configuring delegation.",
         ]
         if state.key_path:
-            lines.insert(1, f"\nCredentials file: [bold]{state.key_path}[/bold]")
+            lines.insert(
+                1, f"\nCredentials file: [bold]{escape(str(state.key_path))}[/bold]"
+            )
         console.print(warning_panel("GCP Setup — Almost Done", "\n".join(lines)))
 
 
@@ -405,8 +418,12 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
     import os
 
     from slack_chat_migrator.services.setup.service_account import (
+        KeyCreateError,
+        KeyNotSavedError,
+        KeySetupInterrupted,
+        KeyStatus,
+        check_existing_key,
         download_key,
-        existing_key_is_valid,
     )
     from slack_chat_migrator.services.setup.setup_service import StepStatus
 
@@ -426,38 +443,87 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
     overwrite = False
     if key_path.exists():
         # Don't mint a new key (at most 10 per service account) when the
-        # file already holds an active key for this account.
-        if existing_key_is_valid(credentials, state.service_account_email, key_path):
+        # file already holds a usable key for this account.
+        check = check_existing_key(credentials, state.service_account_email, key_path)
+        if check.status is KeyStatus.ACTIVE:
             try:
                 os.chmod(key_path, 0o600)
             except OSError:
                 pass
             state.key_path = str(key_path)
             console.print(
-                f"[green]Reusing the existing key in {key_path}"
+                f"[green]Reusing the existing key in {escape(str(key_path))}"
                 " (no new key created).[/green]"
             )
             state.mark_step("key", StepStatus.COMPLETE)
             return state
-        if not click.confirm(
-            f"{key_path} exists but isn't an active key for"
-            f" {state.service_account_email}. Overwrite it with a new key?",
-            default=False,
-        ):
+        if check.status is KeyStatus.HAS_BOM:
+            return _offer_bom_rewrite(state, key_path)
+        if check.status is KeyStatus.INACTIVE:
+            question = (
+                f"{key_path} holds a key for {state.service_account_email} that"
+                f" can't be used ({check.reason}). Overwrite it with a new key?"
+            )
+        elif check.status is KeyStatus.NOT_A_KEY:
+            question = (
+                f"{key_path} can't be used as a key of"
+                f" {state.service_account_email} ({check.reason})."
+                " Overwrite it with a new key?"
+            )
+        else:
+            # UNKNOWN, UNREADABLE (and any status added later): the file may
+            # hold a working key.  Never offer to replace it, which would
+            # leave the old key active and untracked.
+            return _keep_unchecked_key_file(state, key_path, check)
+        if not click.confirm(question, default=False):
             console.print(
                 "[dim]Kept the existing file. Re-run setup and choose another"
                 " path to create a key.[/dim]"
             )
+            # A resumed session may still name it; the next steps can't use it.
+            _forget_failed_key_file(state, key_path)
             state.mark_step("key", StepStatus.SKIPPED)
             return state
         overwrite = True
 
+    from datetime import datetime, timezone
+
+    started_at = datetime.now(timezone.utc)
     try:
         path = download_key(
             credentials, state.service_account_email, key_path, overwrite=overwrite
         )
+    except KeySetupInterrupted as e:
+        # Say what Ctrl-C left behind, then stop like any Ctrl-C.
+        console.print(f"\n[red]{escape(str(e))}[/red]")
+        _forget_failed_key_file(state, key_path)
+        state.mark_step("key", StepStatus.SKIPPED)
+        raise
+    except KeyNotSavedError as e:
+        console.print(f"[red]Failed to save the new key: {escape(str(e))}[/red]")
+    except KeyCreateError as e:
+        # The message says whether a key may exist and what to do.
+        console.print(f"[red]{escape(str(e))}[/red]")
+    except OSError as e:
+        # Raised before any request: the output file or the IAM client.
+        console.print(
+            f"[red]Can't write the key to {escape(str(key_path))}:"
+            f" {escape(str(e))}[/red]"
+        )
+        console.print("[dim]No key was created. Choose another path.[/dim]")
+    except Exception as e:
+        console.print(f"[red]Failed to download key: {escape(str(e))}[/red]")
+        console.print(
+            "[dim]If IAM created a key anyway, it is listed by 'gcloud iam"
+            " service-accounts keys list"
+            f" --iam-account={escape(state.service_account_email)}"
+            " --managed-by=user' with a CREATED_AT of about"
+            f" {started_at:%Y-%m-%d %H:%M} UTC; delete only that key, not the"
+            " account's other keys, which may be in use elsewhere.[/dim]"
+        )
+    else:
         state.key_path = str(path)
-        console.print(f"[green]Key saved to: {path}[/green]")
+        console.print(f"[green]Key saved to: {escape(str(path))}[/green]")
         console.print(
             warning_panel(
                 "Security",
@@ -465,10 +531,138 @@ def _step_download_key(credentials, state):  # type: ignore[no-untyped-def]
             )
         )
         state.mark_step("key", StepStatus.COMPLETE)
-    except Exception as e:
-        console.print(f"[red]Failed to download key: {e}[/red]")
-        console.print("[dim]You can create a key manually in the GCP Console.[/dim]")
-        state.mark_step("key", StepStatus.SKIPPED)
+        return state
+    _forget_failed_key_file(state, key_path)
+    state.mark_step("key", StepStatus.SKIPPED)
+    return state
+
+
+def _forget_failed_key_file(state, key_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """Stop using *key_path*, which holds no key the next steps can use.
+
+    A resumed session may still name the file (kept as UNKNOWN earlier).
+    After a failed overwrite, or when the user declined to overwrite a key
+    that can't be used, later steps must not test delegation with it.
+    """
+    if state.key_path == str(key_path):
+        state.key_path = None
+
+
+def _offer_bom_rewrite(state, key_path: Path):  # type: ignore[no-untyped-def]
+    """Offer to rewrite an active key file without its UTF-8 byte order mark."""
+    from slack_chat_migrator.services.setup.setup_service import StepStatus
+
+    rewrote = _rewrite_bom_if_confirmed(
+        key_path,
+        f"{key_path} holds an active key of {state.service_account_email}, but"
+        " it starts with a UTF-8 byte order mark, which google-auth can't"
+        " read. Rewrite it without the byte order mark? (Same key; no new key"
+        " is created.)",
+    )
+    if rewrote is None:
+        return _keep_bom_file_unused(state, key_path)
+    state.key_path = str(key_path)
+    get_console().print(
+        f"[green]Rewrote {rewrote} without the byte order mark; reusing"
+        " the key (no new key created).[/green]"
+    )
+    state.mark_step("key", StepStatus.COMPLETE)
+    return state
+
+
+def _rewrite_bom_if_confirmed(key_path: Path, question: str) -> str | None:
+    """Ask *question*; on yes, rewrite *key_path* without its byte order mark.
+
+    Returns:
+        The rewritten file, escaped for Rich (for a symlink, its target and
+        the link), or None if the user declined or the rewrite failed (the
+        error is printed).
+    """
+    from slack_chat_migrator.services.setup.service_account import (
+        rewrite_without_bom,
+    )
+
+    console = get_console()
+    if not click.confirm(question, default=True):
+        return None
+    try:
+        rewritten = rewrite_without_bom(key_path)
+    except (OSError, ValueError) as e:
+        console.print(
+            f"[red]Couldn't rewrite {escape(str(key_path))}: {escape(str(e))}[/red]"
+        )
+        return None
+    # Name the file that changed: a symlink's target, not the link.
+    rewrote = escape(str(key_path))
+    if key_path.is_symlink():
+        rewrote = f"{escape(str(rewritten))} (the file {rewrote} links to)"
+    return rewrote
+
+
+def _keep_bom_file_unused(state, key_path: Path):  # type: ignore[no-untyped-def]
+    """Leave a key file with a byte order mark as it is, and don't use it."""
+    from slack_chat_migrator.services.setup.setup_service import StepStatus
+
+    get_console().print(
+        "[dim]Kept the file unchanged. google-auth can't read it as it is, so"
+        " re-save it as UTF-8 without a byte order mark and re-run setup, or"
+        " choose another path to create a new key.[/dim]"
+    )
+    _forget_failed_key_file(state, key_path)
+    state.mark_step("key", StepStatus.SKIPPED)
+    return state
+
+
+def _keep_unchecked_key_file(state, key_path: Path, check):  # type: ignore[no-untyped-def]
+    """Keep a key file that couldn't be checked, and say why.
+
+    A file with a byte order mark can't be used as it is, whatever IAM
+    would say about its key, so the user is offered to rewrite it first.
+    """
+    from slack_chat_migrator.services.setup.service_account import KeyStatus
+    from slack_chat_migrator.services.setup.setup_service import StepStatus
+
+    console = get_console()
+    if check.status is KeyStatus.UNKNOWN:
+        console.print(
+            f"[yellow]Couldn't check whether {escape(str(key_path))} is still an"
+            f" active key for {escape(state.service_account_email)}:"
+            f" {escape(check.reason)}[/yellow]"
+        )
+        if check.has_bom:
+            rewrote = _rewrite_bom_if_confirmed(
+                key_path,
+                f"{key_path} also starts with a UTF-8 byte order mark, which"
+                " google-auth can't read, so it can't be used as it is."
+                " Rewrite it without the byte order mark? (Only the mark is"
+                " removed; no new key is created.)",
+            )
+            if rewrote is None:
+                return _keep_bom_file_unused(state, key_path)
+            console.print(
+                f"[green]Rewrote {rewrote} without the byte order mark (no new"
+                " key created).[/green]"
+            )
+            kept = "Its key is still unchecked; the next steps use it as is."
+        else:
+            kept = "Kept the existing file unchanged; the next steps use it as is."
+        console.print(
+            f"[dim]{kept} Re-run setup once the problem is fixed to check it"
+            " again, or choose another path to create a new key.[/dim]"
+        )
+        state.key_path = str(key_path)
+    else:
+        # UNREADABLE, or a status added later: keep the file, don't use it.
+        console.print(
+            f"[yellow]Can't use {escape(str(key_path))}:"
+            f" {escape(check.reason)}[/yellow]"
+        )
+        console.print(
+            "[dim]Left it unchanged. Fix the file (or its permissions) and"
+            " re-run setup, or choose another path to create a new key.[/dim]"
+        )
+        _forget_failed_key_file(state, key_path)
+    state.mark_step("key", StepStatus.SKIPPED)
     return state
 
 
@@ -513,16 +707,27 @@ def _copy_to_clipboard(text: str) -> bool:
     return False
 
 
-def _read_client_id(key_path: str) -> str | None:
-    """Read the client_id (OAuth2 client ID) from a service account key file."""
+def _read_client_id(key_path: str) -> str:
+    """Read the client_id (OAuth2 client ID) from a service account key file.
+
+    The file is read the way google-auth reads it (strict UTF-8 JSON), so a
+    file google-auth can't decode (one with a byte order mark, UTF-16, or
+    invalid JSON) fails here too.
+
+    Raises:
+        ValueError: If the file can't be read or parsed, or has no
+            ``client_id``.
+    """
     import json
 
     try:
-        data = json.loads(Path(key_path).read_text())
-        result: str | None = data.get("client_id")
-        return result
-    except Exception:
-        return None
+        data = json.loads(Path(key_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ValueError(f"Can't read the key file {key_path}: {e}") from e
+    client_id = data.get("client_id") if isinstance(data, dict) else None
+    if not isinstance(client_id, str) or not client_id:
+        raise ValueError(f"The key file {key_path} has no client_id")
+    return client_id
 
 
 def _get_required_scopes() -> list[str]:
@@ -626,20 +831,29 @@ def _step_delegation(state):  # type: ignore[no-untyped-def]
         state.mark_step("delegation", StepStatus.SKIPPED)
         return state
 
-    client_id = _read_client_id(state.key_path)
+    try:
+        client_id = _read_client_id(state.key_path)
+    except ValueError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        console.print(
+            "[dim]Re-run setup: step 4 runs again. Enter"
+            f" {escape(state.key_path)} there to check the file again, or"
+            " another path to create a new key.[/dim]"
+        )
+        # Step 4 counted this file as a usable key, so a resumed run would
+        # skip it and fail here again: make the next run check it again.
+        state.key_path = None
+        state.mark_step("key", StepStatus.SKIPPED)
+        state.mark_step("delegation", StepStatus.SKIPPED)
+        return state
     scopes_csv = ",".join(_get_required_scopes())
 
     prereq_lines = [
         "In the [bold]Google Admin Console[/bold], authorize the service account:\n",
         "  1. Go to https://admin.google.com/ac/owl/domainwidedelegation",
         "  2. Click [bold]Add new[/bold] and enter:",
+        f"     Client ID: [bold]{escape(client_id)}[/bold]",
     ]
-    if client_id:
-        prereq_lines.append(f"     Client ID: [bold]{client_id}[/bold]")
-    else:
-        prereq_lines.append(
-            "     Client ID: [dim](find in your key file under 'client_id')[/dim]"
-        )
     # Try to copy scopes to clipboard
     copied = _copy_to_clipboard(scopes_csv)
 

@@ -980,13 +980,13 @@ class TestAddRegularMembers:
         ur.is_external_user.return_value = False
         chat.list_memberships.return_value = {"memberships": []}
 
-        # Set up file_handler with folder_manager
         file_handler = MagicMock()
-        file_handler.folder_manager.get_channel_folder_id.return_value = "folder123"
 
         add_regular_members(ctx, state, chat, ur, file_handler, "spaces/dev", "dev")
 
-        file_handler.folder_manager.set_channel_folder_permissions.assert_called_once()
+        file_handler.sync_channel_folder_permissions.assert_called_once_with(
+            "dev", ["alice@example.com"]
+        )
 
     @patch("slack_chat_migrator.services.spaces.regular_membership.time.sleep")
     def test_verification_failure_does_not_raise(self, mock_sleep):

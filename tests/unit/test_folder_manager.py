@@ -2,10 +2,13 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 from googleapiclient.errors import HttpError
 
 from slack_chat_migrator.services.drive.folder_manager import (
+    FolderLookup,
     FolderManager,
+    FolderSyncResult,
 )
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
 from tests.unit.drive_fakes import FakeDrive
@@ -26,12 +29,66 @@ def _make_drive_service():
 
 
 # -----------------------------------------------------------
-# get_or_create_channel_folder
+# find_or_create_channel_folder
 # -----------------------------------------------------------
 
 
-class TestGetOrCreateChannelFolder:
-    """Tests for get_or_create_channel_folder."""
+class TestFolderLookupInvariants:
+    def test_a_folder_has_no_error(self):
+        with pytest.raises(ValueError, match="no error"):
+            FolderLookup("F", "boom")
+
+    def test_a_failed_restriction_needs_an_error(self):
+        with pytest.raises(ValueError, match="needs an error"):
+            FolderLookup(None, restriction_failed=True)
+
+    def test_retryable_needs_an_error(self):
+        with pytest.raises(ValueError, match="needs an error"):
+            FolderLookup(None, retryable=True)
+
+    @pytest.mark.parametrize(
+        ("error", "retryable"),
+        [
+            (_make_http_error(503), True),
+            (_make_http_error(403), False),
+            (_make_http_error(404), False),
+            (TimeoutError("slow"), True),
+        ],
+        ids=["503", "403", "404", "timeout"],
+    )
+    def test_lookup_failures_say_whether_they_may_go_away(self, error, retryable):
+        svc = MagicMock()
+        svc.list_files.side_effect = error
+
+        lookup = FolderManager(svc).find_or_create_channel_folder("c", "ROOT")
+
+        assert lookup.retryable is retryable
+
+    @pytest.mark.parametrize(
+        ("error", "retryable"),
+        [(_make_http_error(403), False), (_make_http_error(503), True)],
+        ids=["403", "503"],
+    )
+    def test_restriction_failures_say_whether_they_may_go_away(self, error, retryable):
+        svc = MagicMock()
+        svc.list_files.return_value = {"files": [{"id": "F", "name": "hr"}]}
+        svc.update_file.side_effect = error
+
+        lookup = FolderManager(svc).find_or_create_channel_folder(
+            "hr", "ROOT", "SD", restricted=True
+        )
+
+        assert lookup.restriction_failed
+        assert lookup.retryable is retryable
+
+    def test_valid_states(self):
+        assert FolderLookup("F").folder_id == "F"
+        assert FolderLookup(None).error is None  # looked up, no folder
+        assert FolderLookup(None, "x", restriction_failed=True).restriction_failed
+
+
+class TestFindOrCreateChannelFolder:
+    """Tests for find_or_create_channel_folder."""
 
     def test_dry_run_delegates_to_drive_service(self):
         """Dry run no longer short-circuits — DI stubs handle API calls."""
@@ -40,7 +97,7 @@ class TestGetOrCreateChannelFolder:
         svc.create_file.return_value = {"id": "stub-chan-id"}
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result == "stub-chan-id"
         svc.list_files.assert_called_once()
@@ -54,7 +111,7 @@ class TestGetOrCreateChannelFolder:
         svc.create_file.return_value = {"id": "chan_folder_id"}
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result == "chan_folder_id"
         assert fm.folder_cache[("parent123", "general")] == "chan_folder_id"
@@ -66,9 +123,9 @@ class TestGetOrCreateChannelFolder:
         svc.create_file.return_value = {"id": "shared_chan_id"}
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder(
+        result = fm.find_or_create_channel_folder(
             "general", "parent123", shared_drive_id="drive456"
-        )
+        ).folder_id
 
         assert result == "shared_chan_id"
         create_kwargs = svc.create_file.call_args[1]
@@ -82,7 +139,7 @@ class TestGetOrCreateChannelFolder:
         }
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result == "existing_chan"
         svc.create_file.assert_not_called()
@@ -95,7 +152,7 @@ class TestGetOrCreateChannelFolder:
         fm = FolderManager(svc)
         fm.folder_cache[("parent123", "general")] = "cached_id"
 
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result == "cached_id"
         svc.get_file.assert_not_called()
@@ -107,7 +164,7 @@ class TestGetOrCreateChannelFolder:
         svc.list_files.side_effect = _make_http_error(403)
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result is None
 
@@ -118,18 +175,18 @@ class TestGetOrCreateChannelFolder:
         svc.create_file.return_value = {}
 
         fm = FolderManager(svc)
-        result = fm.get_or_create_channel_folder("general", "parent123")
+        result = fm.find_or_create_channel_folder("general", "parent123").folder_id
 
         assert result is None
 
 
 # -----------------------------------------------------------
-# create_regular_drive_folder
+# find_or_create_root_folder
 # -----------------------------------------------------------
 
 
 class TestCreateRegularDriveFolder:
-    """Tests for create_regular_drive_folder."""
+    """Tests for find_or_create_root_folder."""
 
     def test_dry_run_delegates_to_drive_service(self):
         """Dry run no longer short-circuits — DI stubs handle API calls."""
@@ -138,7 +195,7 @@ class TestCreateRegularDriveFolder:
         svc.create_file.return_value = {"id": "stub-regular-id"}
 
         fm = FolderManager(svc)
-        result = fm.create_regular_drive_folder("attachments")
+        result = fm.find_or_create_root_folder("attachments").folder_id
 
         assert result == "stub-regular-id"
         svc.list_files.assert_called_once()
@@ -150,7 +207,7 @@ class TestCreateRegularDriveFolder:
         svc.create_file.return_value = {"id": "regular_id"}
 
         fm = FolderManager(svc)
-        result = fm.create_regular_drive_folder("attachments")
+        result = fm.find_or_create_root_folder("attachments").folder_id
 
         assert result == "regular_id"
         body = svc.create_file.call_args[1]["body"]
@@ -166,7 +223,7 @@ class TestCreateRegularDriveFolder:
         }
 
         fm = FolderManager(svc)
-        result = fm.create_regular_drive_folder("attachments")
+        result = fm.find_or_create_root_folder("attachments").folder_id
 
         assert result == "existing_reg"
         svc.create_file.assert_not_called()
@@ -176,9 +233,21 @@ class TestCreateRegularDriveFolder:
         svc.list_files.side_effect = _make_http_error(500)
 
         fm = FolderManager(svc)
-        result = fm.create_regular_drive_folder("attachments")
+        result = fm.find_or_create_root_folder("attachments").folder_id
 
         assert result is None
+
+    @pytest.mark.parametrize(
+        "error", [_make_http_error(403), TimeoutError("slow")], ids=["http", "net"]
+    )
+    def test_root_folder_lookup_returns_the_reason(self, error):
+        svc = _make_drive_service()
+        svc.list_files.side_effect = error
+
+        lookup = FolderManager(svc).find_or_create_root_folder("attachments")
+
+        assert lookup.folder_id is None
+        assert lookup.error and "attachments" in lookup.error
 
 
 # -----------------------------------------------------------
@@ -220,14 +289,30 @@ class TestGetChannelFolderId:
 
         assert result is None
 
-    def test_http_error_returns_none(self):
+    def test_http_error_is_raised_not_read_as_no_folder(self):
         svc = _make_drive_service()
         svc.list_files.side_effect = _make_http_error(403)
 
         fm = FolderManager(svc)
-        result = fm.get_channel_folder_id("general", "parent123")
+        with pytest.raises(HttpError):
+            fm.get_channel_folder_id("general", "parent123")
 
-        assert result is None
+    def test_find_channel_folder_returns_the_error(self):
+        svc = _make_drive_service()
+        svc.list_files.side_effect = _make_http_error(403)
+
+        lookup = FolderManager(svc).find_channel_folder("general", "parent123")
+
+        assert lookup.folder_id is None
+        assert lookup.error and "could not look up the folder" in lookup.error
+
+    def test_find_channel_folder_without_folder_is_no_error(self):
+        svc = _make_drive_service()
+        svc.list_files.return_value = {"files": []}
+
+        lookup = FolderManager(svc).find_channel_folder("general", "parent123")
+
+        assert lookup == FolderLookup(None)
 
     def test_shared_drive_params_passed(self):
         svc = _make_drive_service()
@@ -275,7 +360,8 @@ class TestSetChannelFolderPermissions:
             "F", "general", ["a@example.com", "b@example.com"]
         )
 
-        assert result is True
+        assert result.ok
+        assert result == FolderSyncResult(folder_id="F", granted=2)
         assert self._members(fake) == [
             ("a@example.com", "reader"),
             ("b@example.com", "reader"),
@@ -291,7 +377,7 @@ class TestSetChannelFolderPermissions:
 
         result = fm.set_channel_folder_permissions("F", "general", ["b@example.com"])
 
-        assert result is True
+        assert result == FolderSyncResult(folder_id="F", removed=1)
         assert self._members(fake) == [("b@example.com", "reader")]
         assert fake.count("permissions.create") == 0
         assert fake.count("permissions.delete") == 1
@@ -350,7 +436,8 @@ class TestSetChannelFolderPermissions:
             "F", "general", ["a@example.com", "ext@other.org", "new@partner.io"]
         )
 
-        assert result is True
+        assert result.ok
+        assert result.granted == 2
         assert self._members(fake) == [
             ("a@example.com", "reader"),
             ("ext@other.org", "reader"),
@@ -372,46 +459,65 @@ class TestSetChannelFolderPermissions:
         assert self._members(fake) == [("a@example.com", "reader")]
 
     def test_failed_external_grant_is_a_warning_not_a_failure(self, caplog):
-        failures = []
-        fm, fake = self._fm(on_external_grant_failure=failures.append)
+        reported = []
+        fm, fake = self._fm(on_sync_result=lambda ch, r: reported.append((ch, r)))
         fake.reject_grants_to = {"ext@other.org"}
 
         result = fm.set_channel_folder_permissions(
             "F", "general", ["a@example.com", "ext@other.org"]
         )
 
-        assert result is True
-        assert failures == ["ext@other.org"]
+        assert result.ok  # external failures don't fail the sync
+        assert result.external_failures == ("ext@other.org",)
+        assert result.granted == 1
+        assert reported == [("general", result)]
         assert self._members(fake) == [("a@example.com", "reader")]
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert any("ext@other.org" in r.getMessage() for r in warnings)
 
-    def test_failed_internal_grant_still_fails_the_sync(self):
-        failures = []
-        fm, fake = self._fm(on_external_grant_failure=failures.append)
+    def test_failed_internal_grant_fails_the_sync(self, caplog):
+        reported = []
+        fm, fake = self._fm(on_sync_result=lambda ch, r: reported.append(r))
         fake.reject_grants_to = {"a@example.com"}
 
         result = fm.set_channel_folder_permissions(
             "F", "general", ["a@example.com", "ext@other.org"]
         )
 
-        assert result is False
-        assert failures == []
+        assert not result.ok
+        assert result.failed_grants == ("a@example.com",)
+        assert result.external_failures == ()
+        assert result.granted == 1
+        assert reported == [result]
+        assert "1 member grant(s) failed" in result.describe()
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert any("not in sync" in r.getMessage() for r in errors)
+
+    def test_failed_removal_fails_the_sync(self):
+        svc = MagicMock()
+        svc.list_permissions.return_value = [
+            {"id": "p", "type": "user", "role": "reader", "emailAddress": "g@x.com"}
+        ]
+        svc.apply_permission_changes.return_value = [_make_http_error(403)]
+        fm = FolderManager(svc, "example.com")
+
+        result = fm.set_channel_folder_permissions("F", "general", [])
+
+        assert not result.ok
+        assert result.failed_removals == ("g@x.com",)
+        assert result.removed == 0
 
     def test_custom_external_predicate(self):
-        failures = []
-        fm, fake = self._fm(
-            is_external=lambda email: email.startswith("x"),
-            on_external_grant_failure=failures.append,
-        )
+        fm, fake = self._fm(is_external=lambda email: email.startswith("x"))
         fake.reject_grants_to = {"x@example.com", "y@other.org"}
 
         result = fm.set_channel_folder_permissions(
             "F", "general", ["x@example.com", "y@other.org"]
         )
 
-        assert result is False  # y@other.org counts as internal here
-        assert failures == ["x@example.com"]
+        assert not result.ok  # y@other.org counts as internal here
+        assert result.external_failures == ("x@example.com",)
+        assert result.failed_grants == ("y@other.org",)
 
     def test_existing_member_is_not_granted_again(self):
         fm, fake = self._fm()
@@ -430,7 +536,7 @@ class TestSetChannelFolderPermissions:
         fm, fake = self._fm()
         emails = [f"user{i}@example.com" for i in range(150)]
 
-        assert fm.set_channel_folder_permissions("F", "general", emails) is True
+        assert fm.set_channel_folder_permissions("F", "general", emails).ok
 
         assert fake.batch_sizes == [100, 50]
         assert len(fake.permissions_db["F"]) == 150
@@ -445,15 +551,24 @@ class TestSetChannelFolderPermissions:
             "folder123", "general", ["a@example.com", "b@example.com"]
         )
 
-        assert result is False
+        assert not result.ok
+        assert result.failed_grants == ("b@example.com",)
 
-    def test_listing_failure_still_adds_members(self):
+    @pytest.mark.parametrize(
+        "error", [_make_http_error(500), ConnectionResetError("reset")]
+    )
+    def test_listing_failure_adds_members_but_fails_the_sync(self, error):
         svc = MagicMock()
-        svc.list_permissions.side_effect = _make_http_error(500)
+        svc.list_permissions.side_effect = error
         svc.apply_permission_changes.return_value = [None]
         fm = FolderManager(svc, "example.com")
 
-        assert fm.set_channel_folder_permissions("F", "general", ["a@example.com"])
+        result = fm.set_channel_folder_permissions("F", "general", ["a@example.com"])
+
+        assert not result.ok
+        assert result.listing_error
+        assert result.granted == 1
+        assert "former members kept" in result.describe()
         (changes,), _ = svc.apply_permission_changes.call_args
         assert [c.body["emailAddress"] for c in changes] == ["a@example.com"]
 
@@ -464,7 +579,7 @@ class TestSetChannelFolderPermissions:
             "F", "general", ["a@example.com"], shared_drive_id="drive789"
         )
 
-        assert result is True
+        assert result.ok
         listing = next(kw for name, kw in fake.calls if name == "permissions.list")
         create = next(kw for name, kw in fake.calls if name == "permissions.create")
         assert listing["supportsAllDrives"] is True
@@ -472,11 +587,77 @@ class TestSetChannelFolderPermissions:
         assert create["sendNotificationEmail"] is False
 
 
+class TestDefaultExternalCheck:
+    """Without is_external, the admin's domain and workspace_domains are internal."""
+
+    def test_secondary_domain_grant_failure_fails_the_sync(self):
+        fake = FakeDrive(reject_grants_to={"c@corp.example.net", "x@other.org"})
+        fake.add_folder("F", "general", "ROOT")
+        fm = FolderManager(
+            DriveAdapter(fake), "Example.com", workspace_domains=["@CORP.example.net "]
+        )
+
+        result = fm.set_channel_folder_permissions(
+            "F", "general", ["c@corp.example.net", "x@other.org"]
+        )
+
+        assert result.failed_grants == ("c@corp.example.net",)
+        assert result.external_failures == ("x@other.org",)
+
+
+class TestSyncChannelFolder:
+    """Lookup and sync in one call, with failures reported (#118)."""
+
+    def _fm(self, fake):
+        reported: list[tuple[str, FolderSyncResult]] = []
+        fm = FolderManager(
+            DriveAdapter(fake),
+            "example.com",
+            on_sync_result=lambda ch, r: reported.append((ch, r)),
+        )
+        return fm, reported
+
+    def test_syncs_an_existing_folder(self):
+        fake = FakeDrive()
+        fake.add_folder("F", "general", "ROOT")
+        fm, reported = self._fm(fake)
+
+        result = fm.sync_channel_folder("general", "ROOT", ["a@example.com"])
+
+        assert result == FolderSyncResult(folder_id="F", granted=1)
+        assert reported == [("general", result)]
+
+    def test_no_folder_needs_no_sync(self):
+        fm, reported = self._fm(FakeDrive())
+
+        result = fm.sync_channel_folder("general", "ROOT", ["a@example.com"])
+
+        assert result.ok
+        assert result.folder_id is None
+        assert reported == [("general", result)]
+
+    def test_failed_lookup_is_a_failed_sync(self, caplog):
+        svc = MagicMock()
+        svc.list_files.side_effect = _make_http_error(403)
+        reported = []
+        fm = FolderManager(svc, on_sync_result=lambda ch, r: reported.append(r))
+
+        result = fm.sync_channel_folder("general", "ROOT", ["a@example.com"])
+
+        assert not result.ok
+        assert result.lookup_error
+        assert reported == [result]
+        svc.apply_permission_changes.assert_not_called()
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert any("folder lookup failed" in r.getMessage() for r in errors)
+
+
 class TestTrashedFolders:
     """Folder lookups ignore trashed folders and share one cache (I37)."""
 
     def test_permission_lookup_skips_trashed_folder(self):
-        fake = FakeDrive()
+        fake = FakeDrive(drives=[{"id": "SD", "name": "Attachments"}])
+        fake.add_folder("ROOT", "root", "SD")
         fake.add_folder("T", "general", "ROOT", trashed=True)
         fake.add_folder("L", "general", "ROOT")
         fm = FolderManager(DriveAdapter(fake))
@@ -486,11 +667,14 @@ class TestTrashedFolders:
         assert "trashed = false" in query
 
     def test_upload_and_permission_paths_share_the_cache(self):
-        fake = FakeDrive()
+        fake = FakeDrive(drives=[{"id": "SD", "name": "Attachments"}])
+        fake.add_folder("ROOT", "root", "SD")
         fake.add_folder("L", "general", "ROOT")
         fm = FolderManager(DriveAdapter(fake))
 
-        assert fm.get_or_create_channel_folder("general", "ROOT", "SD") == "L"
+        assert (
+            fm.find_or_create_channel_folder("general", "ROOT", "SD").folder_id == "L"
+        )
         fake.calls.clear()
         assert fm.get_channel_folder_id("general", "ROOT", "SD") == "L"
         assert fake.calls == []
@@ -520,14 +704,54 @@ class TestSanitizeFolderName:
 class TestEnsureRestricted:
     """Limited-access folders (F10)."""
 
-    def test_failed_update_is_not_retried(self):
+    def test_failed_update_is_retried_next_time(self, caplog):
         svc = MagicMock()
         svc.update_file.side_effect = _make_http_error(403)
         fm = FolderManager(svc)
 
         assert fm.ensure_restricted("F", "hr", "SD") is False
         assert fm.ensure_restricted("F", "hr", "SD") is False
-        svc.update_file.assert_called_once()
+        assert svc.update_file.call_count == 2
+        assert fm.restriction_failures == {"F": 2}
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1  # said loudly once, then quietly
+
+    def test_response_without_the_field_is_not_restricted(self):
+        """Fail closed: no confirmation means not restricted (#137)."""
+        svc = MagicMock()
+        svc.update_file.return_value = {"id": "F"}
+        fm = FolderManager(svc)
+
+        assert fm.ensure_restricted("F", "hr", "SD") is False
+        assert "F" not in fm.restricted_folders
+
+    def test_network_error_fails_closed(self):
+        svc = MagicMock()
+        svc.update_file.side_effect = TimeoutError("timed out")
+        fm = FolderManager(svc)
+
+        assert fm.ensure_restricted("F", "hr", "SD") is False
+        assert fm.restriction_failures == {"F": 1}
+
+    def test_restricted_lookup_fails_closed(self):
+        svc = MagicMock()
+        svc.list_files.return_value = {"files": [{"id": "OPEN", "name": "hr"}]}
+        svc.update_file.side_effect = _make_http_error(403)
+        fm = FolderManager(svc)
+
+        lookup = fm.find_or_create_channel_folder("hr", "ROOT", "SD", restricted=True)
+
+        assert lookup.folder_id is None
+        assert lookup.restriction_failed is True
+        assert "limited-access" in lookup.error
+        assert (
+            fm.find_or_create_channel_folder(
+                "hr", "ROOT", "SD", restricted=True
+            ).folder_id
+            is None
+        )
+        # Unrestricted callers still get the folder.
+        assert fm.find_or_create_channel_folder("hr", "ROOT", "SD").folder_id == "OPEN"
 
     def test_update_sets_flag_and_supports_all_drives(self):
         svc = MagicMock()
@@ -555,7 +779,7 @@ class TestEnsureRestricted:
     def test_unrestricted_request_leaves_folder_alone(self):
         fake = FakeDrive()
         fm = FolderManager(DriveAdapter(fake))
-        fm.get_or_create_channel_folder("general", "ROOT", "SD")
+        assert fm.find_or_create_channel_folder("general", "ROOT", "SD").folder_id
         assert fake.count("files.update") == 0
         body = next(kw["body"] for name, kw in fake.calls if name == "files.create")
         assert "inheritedPermissionsDisabled" not in body

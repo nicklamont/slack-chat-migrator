@@ -1,12 +1,14 @@
 """CLI-level config handling: bad or missing config files fail loudly.
 
-These run the real ``migrate --dry_run`` command on a generated export, so
+These run the real ``migrate --dry_run`` command on a generated export (and
+``migrate --complete`` / ``cleanup`` with the API client patched out), so
 they need no Google credentials.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner, Result
@@ -92,3 +94,67 @@ class TestConfigWarningsVisible:
         assert "should be a list" in result.output
         assert "Skipping channel random based on configuration" in result.output
         assert "Skipping channel general based on configuration" not in result.output
+
+
+class TestCompleteModeConfigErrors:
+    """``migrate --complete`` and ``cleanup`` stop on a bad config before any API call."""
+
+    @staticmethod
+    def _invoke(args: list[str]) -> tuple[Result, MagicMock]:
+        get_service = MagicMock(side_effect=AssertionError("no API call expected"))
+        with (
+            patch("slack_chat_migrator.utils.api.get_gcp_service", get_service),
+            patch("slack_chat_migrator.cli.cleanup_cmd.get_gcp_service", get_service),
+        ):
+            result = CliRunner().invoke(cli, args)
+        return result, get_service
+
+    @pytest.mark.parametrize("command", ["migrate --complete", "cleanup"])
+    @pytest.mark.parametrize(
+        ("text", "message"),
+        [
+            ("exclude_channels: [general\n", "not valid YAML"),
+            ("max_retry: 5\n", "did you mean 'max_retries'"),
+            ("space_mapping: [general]\n", "space_mapping"),
+        ],
+    )
+    def test_invalid_config_exits_non_zero(
+        self, tmp_path: Path, command: str, text: str, message: str
+    ) -> None:
+        config = tmp_path / "config.yaml"
+        config.write_text(text)
+        result, get_service = self._invoke(
+            [
+                *command.split(),
+                "--creds_path",
+                "fake.json",
+                "--workspace_admin",
+                "admin@example.com",
+                "--config",
+                str(config),
+                "--yes",
+            ]
+        )
+        assert result.exit_code == 1, result.output
+        assert message in result.output
+        get_service.assert_not_called()
+
+    @pytest.mark.parametrize("command", ["migrate --complete", "cleanup"])
+    def test_explicit_missing_config_exits_non_zero(
+        self, tmp_path: Path, command: str
+    ) -> None:
+        result, get_service = self._invoke(
+            [
+                *command.split(),
+                "--creds_path",
+                "fake.json",
+                "--workspace_admin",
+                "admin@example.com",
+                "--config",
+                str(tmp_path / "missing.yaml"),
+                "--yes",
+            ]
+        )
+        assert result.exit_code == 1, result.output
+        assert "Config file not found" in result.output
+        get_service.assert_not_called()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import http.server
 import io
@@ -9,6 +10,7 @@ import os
 import threading
 import tracemalloc
 from typing import ClassVar
+from unittest.mock import patch
 
 import pytest
 import requests
@@ -191,7 +193,7 @@ class TestSuccessfulDownload:
 
 
 class TestValidation:
-    def test_html_sign_in_page_for_png_is_unavailable(self, dest):
+    def test_html_sign_in_page_for_png_is_a_failure(self, dest):
         session = FakeSession(
             {
                 SLACK_URL: make_response(
@@ -201,7 +203,7 @@ class TestValidation:
         )
         result = download_file(png_file(size=12345), str(dest), session=session)
 
-        assert result.status is DownloadStatus.UNAVAILABLE
+        assert result.status is DownloadStatus.FAILED
         assert result.reason == fd.REASON_HTML_PAGE
         assert result.path is None
         assert leftover_files(dest) == []
@@ -210,7 +212,7 @@ class TestValidation:
         session = FakeSession({SLACK_URL: make_response(body=b"short")})
         result = download_file(png_file(size=12345), str(dest), session=session)
 
-        assert result.status is DownloadStatus.UNAVAILABLE
+        assert result.status is DownloadStatus.FAILED
         assert result.reason == fd.REASON_SIZE_MISMATCH
         assert leftover_files(dest) == []
 
@@ -235,8 +237,8 @@ class TestValidation:
             result = download_file(png_file(size=size), str(dest), session=session)
             assert result.ok, size
 
-    @pytest.mark.parametrize("status", [401, 403, 404, 410])
-    def test_client_errors_are_unavailable(self, dest, status):
+    @pytest.mark.parametrize("status", [404, 410])
+    def test_gone_files_are_unavailable(self, dest, status):
         session = FakeSession({SLACK_URL: make_response(status=status)})
         result = download_file(png_file(), str(dest), session=session)
 
@@ -244,6 +246,23 @@ class TestValidation:
         assert result.reason == f"http_{status}"
         assert result.http_status == status
         assert len(session.calls) == 1
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_refused_downloads_are_auth_failures(self, dest, status):
+        session = FakeSession({SLACK_URL: make_response(status=status)})
+        result = download_file(png_file(), str(dest), session=session)
+
+        assert result.status is DownloadStatus.FAILED
+        assert result.reason == fd.REASON_AUTH
+        assert result.reason in fd.AUTH_FAILURE_REASONS
+        assert result.http_status == status
+        assert len(session.calls) == 1
+
+    def test_other_client_errors_are_failures(self, dest):
+        session = FakeSession({SLACK_URL: make_response(status=400)})
+        result = download_file(png_file(), str(dest), session=session)
+        assert result.status is DownloadStatus.FAILED
+        assert result.reason == "http_400"
 
     @pytest.mark.parametrize("status", [429, 500, 503])
     def test_server_errors_after_retries_are_failed(self, dest, status):
@@ -410,8 +429,8 @@ class TestHostAllowList:
         result = download_file(
             {"id": "F", "name": "n", "url_private": url}, str(dest), session=session
         )
-        assert result.status is DownloadStatus.UNAVAILABLE
-        assert result.reason == fd.REASON_DISALLOWED_URL
+        assert result.status is DownloadStatus.FAILED
+        assert result.reason == fd.REASON_DISALLOWED_HOST
         assert session.calls == []
 
     @pytest.mark.parametrize(
@@ -426,6 +445,37 @@ class TestHostAllowList:
     )
     def test_slack_hosts_allowed(self, url):
         assert is_allowed_file_url(url)
+
+    def test_refused_host_is_named(self, dest):
+        session = FakeSession(
+            {
+                SLACK_URL: make_response(
+                    status=302, headers={"Location": "https://cdn.example.org/x"}
+                )
+            }
+        )
+
+        result = download_file(png_file(), str(dest), session=session)
+
+        assert result.reason == fd.REASON_DISALLOWED_HOST
+        assert result.refused_host == "cdn.example.org"
+        assert result.url == SLACK_URL
+
+    def test_redirect_loop_is_a_failure(self, dest):
+        """Too many redirects is FAILED, not "unavailable" (#96)."""
+        session = FakeSession(
+            {
+                SLACK_URL: lambda: make_response(
+                    status=302, headers={"Location": SLACK_URL}
+                )
+            }
+        )
+
+        result = download_file(png_file(), str(dest), session=session)
+
+        assert result.status is DownloadStatus.FAILED
+        assert result.reason == fd.REASON_TOO_MANY_REDIRECTS
+        assert len(session.calls) == fd.DOWNLOAD_MAX_REDIRECTS + 1
 
     def test_redirect_within_slack_is_followed_with_token(self, dest):
         hop = "https://files-origin.slack.com/files-pri/T1-F1/photo.png"
@@ -473,8 +523,8 @@ class TestHostAllowList:
             png_file(), str(dest), slack_token="tok", session=session
         )
 
-        assert result.status is DownloadStatus.UNAVAILABLE
-        assert result.reason == fd.REASON_DISALLOWED_URL
+        assert result.status is DownloadStatus.FAILED
+        assert result.reason == fd.REASON_DISALLOWED_HOST
         assert [url for url, _ in session.calls] == [SLACK_URL]
 
     def test_redirect_loop_is_cut_off(self, dest):
@@ -737,3 +787,92 @@ def test_network_error_logs_do_not_leak_tokens(dest, caplog):
     assert "SECRET" not in caplog.text
     for record in caplog.records:
         assert "SECRET" not in str(getattr(record, "error", ""))
+
+
+class TestRetryable:
+    """Which failed downloads a later attempt may fix (#96)."""
+
+    @pytest.mark.parametrize(
+        ("reason", "status", "retryable"),
+        [
+            ("network_error:ConnectionError", None, True),
+            ("network_error:RetryError", 503, True),
+            ("http_500", 500, True),
+            ("http_503", 503, True),
+            ("http_429", 429, True),
+            ("http_408", 408, True),
+            ("http_400", 400, False),
+            ("auth", 403, False),
+            ("html_page", 200, False),
+            ("disallowed_host", None, False),
+            ("size_mismatch", None, False),
+            ("too_many_redirects", None, False),
+            ("write_error", 200, False),
+        ],
+    )
+    def test_failed_reasons(self, reason, status, retryable):
+        result = fd.DownloadResult(
+            DownloadStatus.FAILED, reason=reason, http_status=status
+        )
+        assert result.retryable is retryable
+
+    def test_the_status_decides_not_the_reason_text(self):
+        result = fd.DownloadResult(DownloadStatus.FAILED, reason="http_503")
+        assert result.retryable is False  # no status received
+
+    def test_unavailable_is_not_a_failure(self):
+        result = fd.DownloadResult(DownloadStatus.UNAVAILABLE, reason="http_500")
+        assert result.retryable is False
+
+
+class TestLocalWriteErrors:
+    """A full disk stops the run; other write errors fail one file (#96)."""
+
+    def _session(self):
+        return FakeSession({SLACK_URL: make_response(body=b"img")})
+
+    @pytest.mark.parametrize("code", [errno.ENOSPC, errno.EROFS, errno.EMFILE])
+    def test_fatal_disk_error_propagates(self, dest, code):
+        with (
+            patch.object(fd, "_stream_to_file", side_effect=OSError(code, "disk")),
+            pytest.raises(OSError),
+        ):
+            download_file(png_file(), str(dest), session=self._session())
+
+    def test_other_write_error_fails_the_file(self, dest):
+        with patch.object(
+            fd, "_stream_to_file", side_effect=OSError(errno.EIO, "I/O error")
+        ):
+            result = download_file(png_file(), str(dest), session=self._session())
+
+        assert result.status is DownloadStatus.FAILED
+        assert result.reason == "write_error"
+
+
+class TestDownloadResultInvariant:
+    """Exactly an OK result carries its file and hash (#96)."""
+
+    def test_ok_needs_path_and_md5(self):
+        with pytest.raises(ValueError, match="path and md5"):
+            fd.DownloadResult(DownloadStatus.OK)
+        with pytest.raises(ValueError, match="path and md5"):
+            fd.DownloadResult(DownloadStatus.OK, path="/tmp/x")
+        with pytest.raises(ValueError, match="path and md5"):
+            fd.DownloadResult(DownloadStatus.OK, path="", md5="m")
+
+    def test_only_ok_has_a_file(self):
+        with pytest.raises(ValueError, match="path and md5"):
+            fd.DownloadResult(DownloadStatus.FAILED, path="/tmp/x", md5="m")
+
+    def test_is_frozen(self):
+        import dataclasses
+
+        result = fd.DownloadResult(DownloadStatus.FAILED, reason="auth")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            result.size = 5  # type: ignore[misc]
+
+    def test_file_path(self):
+        ok = fd.DownloadResult(DownloadStatus.OK, path="/tmp/x", md5="abc")
+        assert ok.file_path == "/tmp/x"
+        with pytest.raises(ValueError, match="failed"):
+            _ = fd.DownloadResult(DownloadStatus.FAILED).file_path

@@ -33,14 +33,53 @@ logger = logging.getLogger("slack_chat_migrator")
 
 #: The run succeeded with no errors.
 EXIT_OK = 0
-#: The run failed, was aborted or cancelled, or completed with errors
-#: (channels with errors, incomplete imports, failed completions,
-#: unmapped users in validation).
+#: The run failed, was aborted, a ``migrate``/``cleanup`` confirmation was
+#: declined, or it completed with errors (channels with errors, incomplete
+#: imports, failed completions, unmapped users in validation).
 EXIT_FAILURE = 1
 #: Click usage errors (missing or invalid options) exit with 2.
 EXIT_USAGE = 2
-#: Interrupted with Ctrl-C (128 + SIGINT).
+#: Interrupted with Ctrl-C (128 + SIGINT), also at a prompt, or end of
+#: input at a prompt.
 EXIT_INTERRUPTED = 130
+
+
+class PromptCancelled(KeyboardInterrupt):
+    """Ctrl-C or end of input (Ctrl-D) at a prompt.
+
+    It is a :class:`KeyboardInterrupt`, so every command stops as it does
+    for Ctrl-C and exits with :data:`EXIT_INTERRUPTED`.  Whoever handles it
+    calls :func:`report_prompt_cancel` (``migrate`` and ``cleanup`` do, to
+    say what was left unchanged; the CLI group does for every other
+    command), so the console and the log say why the run ended.
+    """
+
+    def __init__(self, message: str = "Cancelled.") -> None:
+        super().__init__(message)
+
+
+def report_prompt_cancel(unchanged: str = "") -> None:
+    """Say that the run was cancelled at a prompt, on stderr and in the log.
+
+    The console gets the short line only; the WARNING goes to the log files
+    (``console=False``), so the console doesn't show it twice.
+
+    Args:
+        unchanged: What the cancel left untouched, as a sentence (for
+            example "Nothing was migrated."); empty to say nothing more.
+    """
+    suffix = f" {unchanged}" if unchanged else ""
+    click.echo(f"\nCancelled.{suffix}", err=True)
+    log_with_context(
+        logging.WARNING,
+        f"Cancelled at a prompt (Ctrl-C or end of input).{suffix}",
+        console=False,
+    )
+
+
+def _is_prompt_cancel(error: click.Abort) -> bool:
+    """True if click raised *error* for Ctrl-C or end of input at a prompt."""
+    return isinstance(error.__context__, (KeyboardInterrupt, EOFError))
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +127,32 @@ class DefaultGroup(click.Group):
             )
             args = ["migrate", *args]
         return super().parse_args(ctx, args)
+
+    def invoke(self, ctx: click.Context) -> Any:
+        """Run the command; Ctrl-C anywhere, even at a prompt, exits 130.
+
+        Click turns Ctrl-C (and end of input) at a prompt into
+        ``click.Abort``, and Ctrl-C elsewhere into the same "Aborted!" with
+        exit 1.  Handling both here gives every command one behaviour: a
+        short line on stderr (and, for a prompt, in the log) and exit
+        :data:`EXIT_INTERRUPTED`.  Commands that catch Ctrl-C themselves
+        (``migrate``, ``cleanup``) report it the same way and exit 130 too.
+        An Abort raised on purpose (a declined ``abort=True`` prompt) is
+        left alone.
+        """
+        try:
+            return super().invoke(ctx)
+        except click.Abort as e:
+            if not _is_prompt_cancel(e):
+                raise
+            report_prompt_cancel()
+            raise click.exceptions.Exit(EXIT_INTERRUPTED) from None
+        except PromptCancelled:
+            report_prompt_cancel()
+            raise click.exceptions.Exit(EXIT_INTERRUPTED) from None
+        except KeyboardInterrupt:
+            click.echo("\nInterrupted.", err=True)
+            raise click.exceptions.Exit(EXIT_INTERRUPTED) from None
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +303,11 @@ class InterruptHandler:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        if exc_type is not KeyboardInterrupt:
+        # A cancel at a prompt isn't an interrupted migration: no resume
+        # panel (whoever catches it reports it with report_prompt_cancel).
+        if exc_type is None or not issubclass(exc_type, KeyboardInterrupt):
+            return
+        if issubclass(exc_type, PromptCancelled):
             return
 
         # Stop the live renderer so its output doesn't conflict
@@ -348,12 +417,13 @@ def confirm_action(prompt: str, *, assume_yes: bool, default: bool = False) -> b
         default: The default answer at the prompt.
 
     Returns:
-        True to proceed, False if the user declined (or pressed Ctrl-D/Ctrl-C
-        at the prompt).
+        True to proceed, False if the user declined.
 
     Raises:
         ConfirmationRequiredError: If stdin isn't interactive and
             *assume_yes* is False, so nobody can answer.
+        PromptCancelled: On Ctrl-C or end of input at the prompt (a
+            KeyboardInterrupt: the command stops and exits 130).
     """
     if assume_yes:
         log_with_context(logging.INFO, f"{prompt} [yes: --yes given]")
@@ -366,8 +436,8 @@ def confirm_action(prompt: str, *, assume_yes: bool, default: bool = False) -> b
         )
     try:
         return click.confirm(prompt, default=default)
-    except click.Abort:
-        return False
+    except click.Abort as e:
+        raise PromptCancelled() from e
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +452,7 @@ def config_was_given() -> bool:
     may be missing (the defaults are then used, with a warning).
 
     Returns:
-        True if ``--config`` came from the command line or environment.
+        True if ``--config`` was given on the command line.
     """
     ctx = click.get_current_context(silent=True)
     if ctx is None:
@@ -469,8 +539,11 @@ def handle_http_error(e: HttpError) -> None:
     Args:
         e: The Google API HTTP error to handle.
     """
+    from slack_chat_migrator.utils.api import http_status
 
-    if e.resp.status == HTTP_FORBIDDEN and PERMISSION_DENIED_ERROR in str(e):
+    # A BatchError can have no response; treat it as a plain API error.
+    status = http_status(e) or 0
+    if status == HTTP_FORBIDDEN and PERMISSION_DENIED_ERROR in str(e):
         log_with_context(logging.ERROR, f"Permission denied error: {e}")
         log_with_context(
             logging.INFO,
@@ -494,13 +567,13 @@ def handle_http_error(e: HttpError) -> None:
             logging.INFO, "   - https://www.googleapis.com/auth/chat.spaces"
         )
         log_with_context(logging.INFO, "   - https://www.googleapis.com/auth/drive")
-    elif e.resp.status == HTTP_RATE_LIMIT:
+    elif status == HTTP_RATE_LIMIT:
         log_with_context(logging.ERROR, f"Rate limit exceeded: {e}")
         log_with_context(
             logging.INFO,
             "The migration hit API rate limits. Consider using --resume to continue.",
         )
-    elif e.resp.status >= HTTP_SERVER_ERROR_MIN:
+    elif status >= HTTP_SERVER_ERROR_MIN:
         log_with_context(logging.ERROR, f"Server error from Google API: {e}")
         log_with_context(
             logging.INFO, "This is likely a temporary issue. Please try again later."

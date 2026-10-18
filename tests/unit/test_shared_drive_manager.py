@@ -3,11 +3,17 @@
 from unittest.mock import MagicMock
 
 import pytest
+from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 from slack_chat_migrator.core.config import MigrationConfig, SharedDriveConfig
-from slack_chat_migrator.exceptions import ConfigError
+from slack_chat_migrator.exceptions import (
+    APIError,
+    ConfigError,
+    DriveQuotaError,
+    PermissionCheckError,
+)
 from slack_chat_migrator.services.drive.shared_drive_manager import (
     SharedDriveManager,
 )
@@ -136,20 +142,143 @@ class TestGetOrCreateSharedDrive:
 
         assert result == "default-id"
 
-    def test_http_error_during_get_returns_none(self):
-        """HttpError at the top-level try block returns None."""
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _make_http_error(500, b"Internal Server Error"),
+            _make_http_error(
+                403, b'{"error": {"errors": [{"reason": "userRateLimitExceeded"}]}}'
+            ),
+            _make_http_error(400, b"Bad Request"),
+            ConnectionResetError("reset"),
+            RefreshError("unauthorized_client"),
+        ],
+        ids=["500", "403-rate-limit", "400", "network", "refresh"],
+    )
+    def test_transient_errors_raise_instead_of_falling_back(self, error):
+        """Only a definitive "no shared drives" answer allows the fallback."""
         manager, drive_service = _make_manager(
-            shared_drive_id=None,
-            shared_drive_name="Test Drive",
+            shared_drive_id=None, shared_drive_name="Test Drive"
         )
-        # list_drives raises HttpError
-        drive_service.list_drives.side_effect = _make_http_error(
-            500, b"Internal Server Error"
+        drive_service.list_drives.side_effect = error
+
+        with pytest.raises(APIError, match="Test Drive"):
+            manager.get_or_create_shared_drive()
+
+    @pytest.mark.parametrize("status", [403, 404])
+    def test_definitive_refusal_returns_none_with_the_reason(self, status):
+        manager, drive_service = _make_manager(
+            shared_drive_id=None, shared_drive_name="Test Drive"
+        )
+        drive_service.list_drives.return_value = {"drives": []}
+        drive_service.create_drive.side_effect = _make_http_error(status, b"no")
+
+        assert manager.get_or_create_shared_drive() is None
+        assert manager.last_error and "Test Drive" in manager.last_error
+
+    @pytest.mark.parametrize(
+        ("reason", "fix"),
+        [
+            ("dailyLimitExceeded", "Wait for it to reset"),
+            ("quotaExceeded", "Wait for it to reset"),
+            ("storageQuotaExceeded", "Free space or add storage"),
+            ("teamDriveFileLimitExceeded", "another shared drive"),
+        ],
+    )
+    @pytest.mark.parametrize("call", ["list_drives", "create_drive"])
+    def test_quota_errors_stop_with_a_quota_message(self, reason, fix, call):
+        """A quota 403 is not "can't use shared drives": no My Drive fallback."""
+        manager, drive_service = _make_manager(
+            shared_drive_id=None, shared_drive_name="Test Drive"
+        )
+        drive_service.list_drives.return_value = {"drives": []}
+        body = b'{"error": {"errors": [{"reason": "%s"}]}}' % reason.encode()
+        error = _make_http_error(403, body)
+        getattr(drive_service, call).side_effect = error
+
+        with pytest.raises(DriveQuotaError) as excinfo:
+            manager.get_or_create_shared_drive()
+
+        message = str(excinfo.value)
+        assert f"quota reached ({reason})" in message
+        assert "'Test Drive'" in message
+        assert fix in message
+        assert "migrate --resume" in message
+        assert excinfo.value.reason == reason
+        assert excinfo.value.__cause__ is error
+        assert manager.last_error is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _make_http_error(503, b"Service Unavailable"),
+            _make_http_error(429, b"Too Many Requests"),
+            _make_http_error(
+                403, b'{"error": {"errors": [{"reason": "rateLimitExceeded"}]}}'
+            ),
+            OSError(101, "Network is unreachable"),
+            RefreshError("invalid_grant"),
+        ],
+        ids=["503", "429", "403-rate-limit", "network", "refresh"],
+    )
+    def test_configured_drive_failure_that_is_not_a_refusal_is_an_api_error(
+        self, error
+    ):
+        """Only a refusal gets the "check the ID and membership" ConfigError."""
+        manager, drive_service = _make_manager(shared_drive_id="SD9")
+        drive_service.get_drive.side_effect = error
+
+        with pytest.raises(APIError, match="SD9") as excinfo:
+            manager.get_or_create_shared_drive()
+
+        assert not isinstance(excinfo.value, ConfigError)
+        assert excinfo.value.__cause__ is error
+        drive_service.list_drives.assert_not_called()
+        drive_service.create_drive.assert_not_called()
+
+    def test_configured_drive_quota_is_a_drive_quota_error(self):
+        manager, drive_service = _make_manager(shared_drive_id="SD9")
+        drive_service.get_drive.side_effect = _make_http_error(
+            403, b'{"error": {"errors": [{"reason": "dailyLimitExceeded"}]}}'
         )
 
-        result = manager.get_or_create_shared_drive()
+        with pytest.raises(DriveQuotaError, match=r"SD9.*Wait for it to reset"):
+            manager.get_or_create_shared_drive()
 
-        assert result is None
+    @pytest.mark.parametrize("status", [403, 404])
+    def test_configured_drive_refusal_is_a_config_error(self, status):
+        manager, drive_service = _make_manager(shared_drive_id="SD9")
+        drive_service.get_drive.side_effect = _make_http_error(status, b"no")
+
+        with pytest.raises(ConfigError, match=f"SD9.*HTTP {status}"):
+            manager.get_or_create_shared_drive()
+
+    def test_configured_drive_network_error_is_an_api_error(self):
+        manager, drive_service = _make_manager(shared_drive_id="SD9")
+        drive_service.get_drive.side_effect = TimeoutError("timed out")
+
+        with pytest.raises(APIError, match="SD9"):
+            manager.get_or_create_shared_drive()
+
+    def test_new_drive_without_an_id_is_an_api_error(self):
+        manager, drive_service = _make_manager(shared_drive_name="Test Drive")
+        drive_service.list_drives.return_value = {"drives": []}
+        drive_service.create_drive.return_value = {}
+
+        with pytest.raises(APIError, match="no ID"):
+            manager.get_or_create_shared_drive()
+
+    def test_success_clears_the_last_error(self):
+        manager, drive_service = _make_manager(
+            shared_drive_id=None, shared_drive_name="Test Drive"
+        )
+        manager.last_error = "old"
+        drive_service.list_drives.return_value = {
+            "drives": [{"id": "d", "name": "Test Drive"}]
+        }
+
+        assert manager.get_or_create_shared_drive() == "d"
+        assert manager.last_error is None
 
 
 class TestFindOrCreateSharedDrive:
@@ -260,3 +389,85 @@ class TestSharedDrivePaging:
         ).get_or_create_shared_drive()
         assert result.startswith("NEWDRIVE")
         assert fake.count("drives.create") == 1
+
+
+READ_ONLY = {"canAddChildren": False, "canManageMembers": False}
+CONTENT_MANAGER = {"canAddChildren": True, "canManageMembers": False}
+
+
+class TestDriveCapabilities:
+    """The admin must be able to add files to the drive used (#118)."""
+
+    def _manager(self, fake, *, restrict=True, **drive_config):
+        from slack_chat_migrator.services.drive_adapter import DriveAdapter
+
+        return SharedDriveManager(
+            DriveAdapter(fake),
+            MigrationConfig(
+                shared_drive=SharedDriveConfig(**drive_config),
+                restrict_private_channel_folders=restrict,
+            ),
+        )
+
+    @pytest.mark.parametrize("configured", [True, False], ids=["by-id", "by-name"])
+    def test_read_only_drive_stops_the_run(self, configured):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive(
+            drives=[{"id": "SD1", "name": "Att", "capabilities": READ_ONLY}]
+        )
+        manager = self._manager(fake, name="Att", id="SD1" if configured else None)
+
+        with pytest.raises(
+            PermissionCheckError, match=r"can't add files to shared drive 'Att'"
+        ):
+            manager.get_or_create_shared_drive()
+
+        assert fake.count("drives.create") == 0
+
+    @pytest.mark.parametrize("configured", [True, False], ids=["by-id", "by-name"])
+    def test_capabilities_are_requested(self, configured):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive(drives=[{"id": "SD1", "name": "Att"}])
+        manager = self._manager(fake, name="Att", id="SD1" if configured else None)
+
+        assert manager.get_or_create_shared_drive() == "SD1"
+
+        method = "drives.get" if configured else "drives.list"
+        (kwargs,) = [kw for name, kw in fake.calls if name == method]
+        assert "capabilities(canAddChildren, canManageMembers)" in kwargs["fields"]
+
+    def test_content_manager_is_warned_about_limited_access(self, caplog):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive(
+            drives=[{"id": "SD1", "name": "Att", "capabilities": CONTENT_MANAGER}]
+        )
+
+        with caplog.at_level("WARNING"):
+            assert self._manager(fake, name="Att").get_or_create_shared_drive()
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "isn't a Manager of shared drive 'Att' (SD1)" in warnings[0]
+        assert "restrict_private_channel_folders: false" in warnings[0]
+
+    def test_no_warning_when_folders_are_not_restricted(self, caplog):
+        from tests.unit.drive_fakes import FakeDrive
+
+        fake = FakeDrive(
+            drives=[{"id": "SD1", "name": "Att", "capabilities": CONTENT_MANAGER}]
+        )
+
+        with caplog.at_level("WARNING"):
+            manager = self._manager(fake, restrict=False, name="Att")
+            assert manager.get_or_create_shared_drive() == "SD1"
+
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    def test_missing_capabilities_are_not_a_refusal(self):
+        manager, drive_service = _make_manager(shared_drive_id="SD1")
+        drive_service.get_drive.return_value = {"id": "SD1", "name": "Att"}
+
+        assert manager.get_or_create_shared_drive() == "SD1"

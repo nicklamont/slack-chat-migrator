@@ -7,9 +7,8 @@ Migrates Slack workspace JSON exports into Google Chat spaces via the [Google Ch
 - Imports all messages (including threaded replies)
 - Uploads attachments into per-channel Google Drive folders with MD5 deduplication, and converts Slack canvases and lists to Google Docs and Sheets
 - Migrates emoji reactions using per-user impersonation
-- Posts channel metadata (purpose/topic) from `channels.json`
+- Sets the space description from the channel's purpose and topic in `channels.json`
 - Retries API calls on transient errors with exponential backoff
-- Logs in structured JSON for easy Cloud Logging ingestion
 - Filters channels via `config.yaml`
 - Automatically generates user mapping from users.json
 - Maps external emails to internal workspace emails
@@ -187,9 +186,10 @@ retry_delay: 2
 
 The config file is validated before anything is migrated, so a typo can't silently change what gets imported:
 
-- If you pass `--config` and the file doesn't exist, the command fails. Without `--config`, a missing `config.yaml` means "use the defaults" (all channels, no user overrides), and a warning says so.
+- If you pass `--config` and the file doesn't exist, the command fails. Without `--config`, a missing `config.yaml` means "use the defaults" (all channels, no user overrides), and a warning says so. `validate` is stricter: when the config file is missing it shows an error and, in a terminal, offers to run `init`; accepting creates the file and continues the validation, while declining, or running without a terminal, exits with status 1.
 - A file that isn't valid YAML, or whose top level isn't a mapping, is an error.
 - Values are type-checked. Booleans must be YAML `true`/`false` (not the string `"false"`), counts must be whole numbers, and `retry_delay` must be a number. List options such as `include_channels` also accept a single name (`include_channels: general` means `[general]`, with a warning) or an empty value. Channel names may be numeric and may start with `#`.
+- A key written twice in the same mapping (an option, or the same channel in `space_mapping`) is an error that names both lines; YAML would otherwise silently keep the last one. Keys are kept as written, so number-like keys such as `007`, `+1` or `1_000` work unquoted (and `1` and `"1"` count as the same key). In `space_mapping`, `custom_emoji_map` and `user_mapping_overrides`, keys whose text YAML can't keep, such as unquoted `yes`, `no`, `on`, `off`, `null`, a date or a decimal number, are errors: quote them.
 - An unknown option that looks like a misspelling of a real one (for example `include_channel` or `max_retry`) is an error with a "did you mean" hint. Other unknown options are ignored with a warning.
 
 Config errors exit with status 1 and name the offending option.
@@ -203,6 +203,8 @@ space_mapping:
   "general": "AAAAAgcE123"  # Use this space ID for the general channel
   "random": "AAAABbTr456"   # Use this space ID for the random channel
 ```
+
+Keys are channel names (a leading `#` is ignored) and values are space IDs, with or without the `spaces/` prefix. A `space_mapping` that isn't a mapping, an entry without a space ID, or a channel listed twice (including two spellings of one channel, such as `general` and `"#general"`) is a config error. When you paste the block the tool logs for a duplicate, keep only the line for the space you want.
 
 When duplicate spaces are found, the tool will:
 1. Skip those specific channels (not abort the entire migration)
@@ -223,7 +225,7 @@ custom_emoji_map:
   shipit: ":ship-it:"               # the name of a Google Chat custom emoji
 ```
 
-The map is checked before the standard names, so it can also override them. A Slack skin tone (`approved::skin-tone-3`) is applied to the mapped emoji when that emoji supports one. A `:name:` value that isn't a standard emoji is taken as the name of a Google Chat custom emoji, and message text shows it as `:ship-it:`. The Slack export contains no emoji images, so create any custom emoji you want in Google Chat yourself before migrating.
+Keys can be written with or without their colons and in any case (`partyparrot`, `":PartyParrot:"`); two keys that differ only in that way are an error. The map is checked before the standard names, so it can also override them. A Slack skin tone (`approved::skin-tone-3`) is applied to the mapped emoji when that emoji supports one. A `:name:` value that isn't a standard emoji is taken as the name of a Google Chat custom emoji, and message text shows it as `:ship-it:`. The Slack export contains no emoji images, so create any custom emoji you want in Google Chat yourself before migrating.
 
 > **Note:** Debug and logging options are controlled via command-line flags (`--verbose` and `--debug_api`) rather than configuration file settings. This ensures consistent logging behavior across all migration runs.
 
@@ -247,9 +249,11 @@ slack-chat-migrator cleanup           # Complete import mode (deprecated — use
 | Exit code | Meaning |
 |-----------|---------|
 | `0` | Success with no errors |
-| `1` | Failed, aborted (`abort_on_error`), cancelled at a prompt, or completed with errors: a channel had errors, a space was left in import mode, an import completion failed, or `validate`/`--dry_run` found unmapped users |
+| `1` | Failed, aborted (`abort_on_error`), declined a confirmation (the `migrate`/`validate` prompts, `migrate --complete`, `cleanup`, `validate`'s "Run init now?", `init`'s "Continue anyway?" about export structure issues), or completed with errors: a channel had errors, a space was left in import mode, an import completion failed, or `validate`/`--dry_run` found unmapped users |
 | `2` | Usage error (missing or invalid options) |
-| `130` | Interrupted with Ctrl-C |
+| `130` | Interrupted with Ctrl-C, or cancelled at a prompt with Ctrl-C or end of input (Ctrl-D): the command prints and logs "Cancelled." |
+
+Declining `init`'s "Overwrite?" or `setup`'s "Continue anyway?" (no quota project) just stops the command, with status 0.
 
 A live `migrate` asks for confirmation before it starts. To run it unattended (cron, CI, `nohup`), pass `--yes` (or set `SLACK_CHAT_MIGRATOR_YES=1`), which answers yes to every prompt, including "proceed despite unmapped users". Without a terminal and without `--yes`, a live run exits with status 1 before doing anything, instead of silently doing nothing. Dry runs and `validate` never need `--yes`.
 
@@ -338,7 +342,7 @@ Complete import mode on this tool's spaces (named `Slack #…`) that are stuck i
 
 The migration tool provides two levels of debug logging:
 
-- **`--verbose` / `-v`**: Enables verbose console output showing DEBUG level messages. Useful for understanding the migration flow and troubleshooting issues. It doesn't change what is written to the log files.
+- **`--verbose` / `-v`**: Enables verbose console output showing DEBUG level messages. Useful for understanding the migration flow and troubleshooting issues. It doesn't change which records are written to the log files (channel logs do use a more detailed line format, with the logger name and source line).
 - **`--debug_api`**: Writes DEBUG detail to the log files: HTTP API request/response data and full message payloads (message text). This creates very large log files but is invaluable for diagnosing API-related issues or developing the tool. Only enable this when specifically needed. Without it, log files record INFO and above, and failure logs list message and file IDs instead of message content.
 
 Both options are independent and can be used together for maximum debugging information.
@@ -520,7 +524,7 @@ The tool provides several configurable options for handling errors during migrat
    - `max_retries: 3` (default): Maximum number of retry attempts for failed API calls
    - `retry_delay: 2` (default): Initial delay in seconds between retry attempts
 
-   Google API calls are retried on 408, 429 and 5xx responses, on 403 responses whose reason is a rate limit or quota (`rateLimitExceeded`, `userRateLimitExceeded`, `sharingRateLimitExceeded`, `quotaExceeded`, which is how Drive reports throttling), and on network errors (connection resets, timeouts, DNS failures, TLS errors, truncated responses). Other 4xx errors, and local errors such as a missing or unreadable file, are not retried. Each wait uses exponential backoff with full jitter (a random delay up to `retry_delay × 2ⁿ`, capped at 64 seconds), or the server's `Retry-After` header when it sends one. Rate-limit errors are retried for up to 5 minutes in total, whatever `max_retries` says, because Chat and Drive quotas are per-minute windows.
+   Google API calls are retried on 408, 429 and 5xx responses, on 403 responses whose reason is a rate limit or quota (`rateLimitExceeded`, `userRateLimitExceeded`, `sharingRateLimitExceeded`, `quotaExceeded`, which is how Drive reports throttling), and on network errors (connection resets, timeouts, DNS failures, TLS errors, truncated responses). Other 4xx errors, and local errors such as a missing or unreadable file, are not retried. Each wait is the server's `Retry-After` header when it sends one, and otherwise exponential backoff with full jitter (a random delay up to `retry_delay × 2ⁿ`, capped at 64 seconds; for rate limits the base delay is at least 1 second, even with `retry_delay: 0`). Rate-limit errors (429, and the rate-limit 403s above) are retried, whatever `max_retries` says, until the next wait would take the total past 5 minutes, because Chat and Drive quotas are per-minute windows; their `Retry-After` is followed as sent within that budget. For other errors, `max_retries` applies and a `Retry-After` longer than 64 seconds is cut to 64.
 
 These options can be configured in your `config.yaml` file:
 
@@ -564,14 +568,17 @@ If a migration is interrupted (e.g., by a crash or `Ctrl+C`), the checkpoint all
 
 Files attached to Slack messages, including files inside shared or forwarded messages, are migrated as follows:
 
-- **Where they go.** Small images (JPEG, PNG, GIF or WebP up to 25 MB) are attached to the Chat message directly. Everything else is uploaded to Google Drive, into one folder per channel, and linked from the message.
-- **Which shared drive.** The tool uses `shared_drive.id` if set, and stops with an error if that drive can't be opened. Otherwise it looks for a shared drive named `shared_drive.name` (default "Imported Slack Attachments") across all the admin's shared drives, and creates it only if none exists. If several drives have that name, the first is used and a warning lists them all; set `shared_drive.id` to pick one. If no shared drive can be used, the files go to a regular folder in the admin's My Drive, and each file's ownership is transferred to the Slack user who uploaded it.
-- **Access.** After a channel is imported, its folder is shared with the channel's members as readers. Re-running the sync removes people who have left the channel; the workspace admin, shared drive managers and inherited access are never removed. Channel members from outside your workspace (for example Slack Connect members) get the same reader access to the channel folder, if your domain's sharing settings allow it; a grant that Drive refuses is logged as a warning and counted as `external_folder_grant_failures` in the report, without marking the channel as failed. The person who posted a file also gets edit access to that file, but only if they are an internal user.
-- **Private conversations.** With `restrict_private_channel_folders: true` (the default) and a shared drive, the folders of private channels, group DMs and DMs are [limited-access folders](https://developers.google.com/workspace/drive/api/guides/limited-expansive-access): only the channel's members (external members included), shared drive managers and the admin can open them, not every member of the shared drive. A conversation counts as public when `channels.json` lists it and it isn't private.
+- **Where they go.** Small images (JPEG, PNG, GIF or WebP up to 25 MB) are attached to the Chat message directly. Everything else is uploaded to Google Drive, into one folder per channel, and linked from the message. A file only ever goes into its own channel's folder: if that folder can't be found or created, the file fails (counted in `channel_folder_failures`). It is never put in the drive's root folder, which the channel's members can't open.
+- **Which shared drive.** The tool uses `shared_drive.id` if set, and stops with an error if that drive can't be opened: a refusal (403 or 404) says to check the ID and the admin's membership, and any other failure gives its cause. Otherwise it looks for a shared drive named `shared_drive.name` (default "Imported Slack Attachments") across all the admin's shared drives, and creates it only if none exists. If several drives have that name, the first is used and a warning lists them all; set `shared_drive.id` to pick one. Before anything is migrated, the tool checks what the admin may do in the drive it uses: if Drive says they can't add files to it (a Viewer or Commenter), the run stops and says to make them a Manager or Content manager; if they aren't a Manager while `restrict_private_channel_folders` is on, a warning says that the files of private conversations whose folder isn't limited-access yet will fail (only a Manager can make a folder limited-access). If Drive says the admin can't use or create shared drives (a 404, or a 403 that isn't a rate limit or quota), the files go to a regular folder in the admin's My Drive and stay owned by the admin. A quota error stops the run (see Drive quotas below). Any other failure while setting up Drive (a network error, credentials that can't be refreshed, a server error) also stops the run before anything is migrated, with the cause, rather than storing the attachments somewhere else. Set `transfer_file_ownership: true` to hand each new file to the Slack user who uploaded it (internal users only). Drive then emails the new owner once per transferred file, and that notification can't be turned off.
+- **Access.** After a channel is imported, its folder is shared with the channel's members as readers. Re-running the sync removes people who have left the channel; the workspace admin, shared drive managers and inherited access are never removed. Channel members from outside your workspace (for example Slack Connect members) get the same reader access to the channel folder, if your domain's sharing settings allow it; a grant that Drive refuses is logged as a warning and counted as `external_folder_grant_failures` in the report, without making the sync fail. Any other failure (the folder can't be looked up, its permissions can't be listed so former members can't be removed, or a grant or removal for an internal member fails) is logged as an error and counted in `folder_sync_failures` (one per channel whose sync failed), with each failed grant or removal in `folder_grant_failures` or `folder_removal_failures`. A failed sync doesn't mark the channel as failed. The person who posted a file also gets edit access to that file, but only if they are an internal user (on the admin's domain or one listed in `workspace_domains`). A dry run without `--workspace_admin` doesn't know the admin's domain, so it counts nobody as external (and warns if `workspace_domains` is set). If that grant (or, with `transfer_file_ownership`, the transfer) fails, the upload still counts as migrated; the failure is counted in `poster_grant_failures` (or `ownership_transfer_failed`) and flagged on the Drive file, per poster. When the channel loop ends (also with `--resume` and after an abort with `abort_on_error`, but not after Ctrl-C or SIGTERM), a sweep finds the flagged files of the migration's shared drive (or its My Drive folders) and retries them. Each flag stores the recipient's Slack user ID (for a transfer, the file's uploader; for a grant, the message's sender, or else the file's uploader when it has the sender's address; when several users share an address and nothing says which one posted, only the email is stored), so the sweep looks the user up in today's user mapping: if their address changed, the new address gets the grant (and the log says so); if they are no longer mapped, or are now outside the workspace, the flag is kept without a retry and counted in `pending_skipped_unmapped` or `pending_skipped_external`. Transfers are retried only while `transfer_file_ownership` is on and in My Drive; otherwise they are kept and counted in `pending_skipped_transfers_off`. `pending_retried` and `pending_retry_failed` count grant and transfer attempts that now work or still fail; one that still fails keeps its flag, and the next run retries it. If a flag can't be stored on the file (a Drive error, or more than 24 pending poster grants on one file, the most Drive's limit of 30 private properties per file for one app leaves room for), a warning names it and `pending_flag_failures` counts it; that run's sweep still retries it, but later runs can't. A recipient whose email and user ID don't both fit in Drive's 124 bytes per entry is stored by user ID alone; one stored as `-` (no user ID known and the email too long) can't be retried by a later sweep and is counted in `pending_skipped_unknown`: a later run still makes such a grant when it links the file again for the same poster, but never such a transfer. If a flag can't be cleared after a success, `pending_clear_failures` counts it and the next run's sweep clears it: it makes a grant again, which is harmless, and finds that a transfer's recipient already owns the file. Only the owner can transfer a file, so before a repeat transfer the sweep (and a later run that links the file again) checks who owns it; a file that someone other than the admin now owns keeps its flag and is counted in `pending_skipped_not_owner`. A failed search for flagged files is logged as an error and counted in `pending_sweep_failures`, and the flags this run knows about are still retried. A used-up Drive quota or an unexpected error ends the sweep, logged and counted the same way; nothing the sweep does changes the run's outcome.
+- **Private conversations.** With `restrict_private_channel_folders: true` (the default) and a shared drive, the folders of private channels, group DMs and DMs are [limited-access folders](https://developers.google.com/workspace/drive/api/guides/limited-expansive-access): only the channel's members (external members included), shared drive managers and the admin can open them, not every member of the shared drive. A conversation counts as public when `channels.json` lists it and it isn't private. If Drive refuses to make a folder limited-access (for example because the admin isn't a Manager of the shared drive), that conversation's files are not uploaded at all: they are counted as failed (`restricted_folder_failures` in the report), an error explains the fix, and the next file tries again.
 - **Canvases and lists.** With `convert_canvases: true` (the default), Slack canvases are uploaded as Google Docs and Slack Lists (from their CSV export) as Google Sheets, named after their title. If a conversion fails, or the option is off, the HTML or CSV file is uploaded instead. Canvases that aren't attached to any message (`canvases.json`) and canvas comments (`FC:` folders) are not migrated.
-- **Downloads.** Files are downloaded from the export's `url_private_download` (or `url_private`) links, only over HTTPS from Slack's file hosts (`slack.com`, `slack-edge.com`, `slack-files.com` and their subdomains). Redirects elsewhere are refused. Rate limits (429) and server errors are retried with backoff. If the export's links have expired or your workspace requires authentication, set `slack_token` (or the `SLACK_TOKEN` environment variable) to a Slack token with `files:read`; it is sent as an `Authorization: Bearer` header to Slack's hosts only.
-- **Unavailable files.** Some files can't be migrated: deleted files, files hidden by the Slack plan's history limit, files stored outside Slack (Dropbox, Box and other external links), files the export can't read, and downloads that return a sign-in page or the wrong number of bytes. These are counted as *unavailable* (`unavailable_files` in the report), not as failed uploads, and the message keeps its text.
-- **Duplicates and re-runs.** Identical files posted in the same channel are stored once. Each upload is tagged with its Slack file ID, so a re-run links files that are already in Drive without downloading them again.
+- **Downloads.** Files are downloaded from the export's `url_private_download` (or `url_private`) links, only over HTTPS from Slack's file hosts (`slack.com`, `slack-edge.com`, `slack-files.com` and their subdomains). Links and redirects elsewhere are refused, and the log names each refused host once. Responses 429, 500, 502, 503 and 504, and dropped connections, are retried with backoff. If the export's links have expired or your workspace requires authentication, set `slack_token` (or the `SLACK_TOKEN` environment variable) to a Slack token with `files:read`; it is sent as an `Authorization: Bearer` header to Slack's hosts only.
+- **Failed files.** Each failed file is marked *retryable* when a later attempt may succeed: a network or server error (408 or 5xx), a rate limit (429, or a 403 such as `userRateLimitExceeded`), credentials that couldn't be refreshed, a folder or Drive that is unavailable for such a reason, or a duplicate check that couldn't be made. Its message is then held back and retried by the channel-end retry and by `migrate --resume`. Other failures are permanent: a refused, redirected-away or wrong-sized download, or a refusal from Drive (a 4xx such as a 403 that isn't a rate limit, or a 404, including a private folder that Drive refused to make limited-access). A used-up Drive quota fails no file: it stops the run (see Drive quotas).
+- **Drive quotas.** When Drive says a quota is used up (a 403 with `dailyLimitExceeded`, `quotaExceeded`, `storageQuotaExceeded` or `teamDriveFileLimitExceeded`), during setup or during the migration, the run stops with a message that names the quota and the fix: wait for a project quota to reset (or raise it in the Google Cloud console), free or add storage, or switch to another shared drive when one reaches Drive's item limit, which can't be raised. Every later file would fail the same way, so the run stops instead of failing them one by one, as it does for a full local disk. The file being handled isn't marked as failed, and `migrate --resume` continues where the run stopped. A quota can also stop the run between an upload and its poster's grant or ownership transfer. That grant or transfer is then flagged on the file if the write still succeeds, and the next run's sweep makes it; otherwise an error names the file (ID and link) and the recipients, and the report lists it in `permissions_lost_details` (counted in `permissions_lost_on_quota_stop`) so it can be made by hand. Rate limits (`userRateLimitExceeded`, `rateLimitExceeded`, 429) are waited out instead (see the retry settings above).
+- **Unavailable files.** Some files can't be migrated: deleted files, files hidden by the Slack plan's history limit, files stored outside Slack (Dropbox, Box and other external links), files the export can't read, files with no download link, and files Slack no longer has (404/410). These are counted as *unavailable* (`unavailable_files` in the report), not as failed uploads, and the message keeps its text.
+- **Refused downloads.** A download that Slack refuses (401/403), that returns a sign-in page instead of the file, whose link or redirect leads off Slack's file hosts, or that returns the wrong number of bytes counts as a *failed* upload, because the file exists. Such a failure is permanent, so neither the channel-end retry nor `migrate --resume` retries it: fix the cause (for example set `slack_token`) before migrating. Refusals and sign-in pages are also counted in `download_auth_failures`, and the log says to set `slack_token` (or that the token you set was refused).
+- **Duplicates and re-runs.** Identical files posted in the same channel are stored once. Each upload is tagged with its Slack file ID, so a re-run links files that are already in Drive without downloading them again. Each channel folder is listed once to find them; if that listing fails, a warning is logged and the folder is counted (once) in `folder_listing_failures`, each file is looked up with its own searches instead (by its Slack file ID, then by the content hash this tool stores on each upload as `slackMd5`; files uploaded by versions without that tag are found by their Slack file ID only), and the listing is tried again with the next upload. If a search fails too, the file fails as retryable rather than being uploaded a second time. When an upload fails in a way Drive may still have carried out (a dropped connection or a server error, which can lose the reply to a file Drive did create), the next attempt in the run searches Drive for the file's Slack ID before uploading it again.
 - **Large files.** Downloads are streamed to disk and uploads are sent in resumable 16 MiB chunks, so memory use doesn't grow with file size. Drive accepts files up to 5 TB; the 200 MB limit applies only to direct Chat uploads. Temporary files live in `<run output dir>/.attachment_tmp/` and are deleted after each upload; anything left behind by a killed run is removed at the next start.
 
 ```yaml
@@ -580,6 +587,7 @@ shared_drive:
 slack_token: ""                        # optional; or set SLACK_TOKEN
 convert_canvases: true                 # canvases -> Docs, lists -> Sheets
 restrict_private_channel_folders: true # limited-access folders for private conversations
+transfer_file_ownership: false         # My Drive mode only; Drive emails each new owner
 ```
 
 ### Output Directory and Log Files
@@ -836,13 +844,15 @@ src/slack_chat_migrator/
 │   │   ├── drive_uploader.py      # Drive file upload logic
 │   │   ├── dry_run_service.py     # No-op Drive API for dry-run mode
 │   │   ├── folder_manager.py      # Drive folder creation and management
+│   │   ├── pending.py             # Failed grants/transfers flagged on files for the sweep
 │   │   └── shared_drive_manager.py # Shared drive creation and management
 │   ├── drive_adapter.py           # Typed wrapper over raw Drive API service
 │   ├── export_inspector.py        # Slack export analysis (channel/user/message stats)
 │   ├── files/                     # Slack file handling
 │   │   ├── file.py                # FileHandler class (delegates to download/permissions)
 │   │   ├── file_download.py       # Slack file download logic
-│   │   └── file_permissions.py    # Drive file ownership/sharing
+│   │   ├── file_permissions.py    # Drive file ownership/sharing
+│   │   └── temp_files.py          # Locked temp dirs for downloads, swept after crashes
 │   ├── messages/                  # Message migration pipeline
 │   │   ├── message_attachments.py # Attachment processing
 │   │   ├── message_builder.py     # Message payload construction (Slack → Chat format)
@@ -863,6 +873,7 @@ src/slack_chat_migrator/
 │   └── user_resolver.py           # User identity resolution and impersonation
 └── utils/                         # Shared utilities
     ├── api.py                     # API retry logic, credential handling
+    ├── domains.py                 # Internal domains: admin's domain + workspace_domains
     ├── emoji.py                   # Slack emoji names → Unicode (skin tones, custom map)
     ├── formatting.py              # Slack blocks/mrkdwn → Chat text, message splitting
     ├── logging.py                 # Logging setup and utilities
@@ -870,9 +881,11 @@ src/slack_chat_migrator/
     ├── permissions.py             # Permission validation
     ├── slack_emoji_data.py        # Generated by scripts/generate_slack_emoji_data.py
     └── user_validation.py         # User data validation
+scripts/
+└── generate_slack_emoji_data.py   # Regenerates utils/slack_emoji_data.py
 tests/
 ├── unit/                          # Fast, isolated tests
-└── integration/                   # Tests requiring external services
+└── integration/                   # Dry-run pipeline and CLI tests (no credentials needed)
 ```
 
 ### Setting Up Permissions
@@ -888,7 +901,7 @@ The wizard guides you through six steps:
 1. **GCP project** — create or select a project
 2. **Enable APIs** — enable Chat, Drive, and Admin APIs
 3. **Service account** — create a service account for delegation
-4. **Download key** — download credentials JSON (saved with mode `0600`). If the key file you name already holds an active key for the service account, it's reused instead of creating another key (a service account can have at most 10). Any other existing file is only overwritten after you confirm.
+4. **Download key** — download credentials JSON (saved with mode `0600`). If the key file you name already holds an active key of the service account (one that isn't deleted, disabled or expired), it's reused instead of creating another key (a service account can have at most 10). If that file starts with a UTF-8 byte order mark, which google-auth can't read (some editors add one), the wizard offers to rewrite it without one, keeping the same key (for a symlink, it rewrites the file the link points to; a file with several hard links is left for you to re-save). If the file can't be read, or the key can't be checked (for example because the IAM API isn't enabled, you may not list the account's keys, or the network fails), the file is kept and the reason is shown (a byte order mark can still be removed). Any other existing file is only overwritten after you confirm. The wizard opens the output file before it creates a key, and deletes the new key again if it can't be saved (if deleting it fails or is interrupted, it names the key and prints the `gcloud` command that deletes it). If the create request fails in a way that leaves the outcome unknown (a timeout, a network error or a server error), it says that a key may have been created and prints the `gcloud` commands to find and delete it; when IAM refuses the request, it says why (a missing permission or account, an organization policy that forbids key creation, the 10-key limit, a quota).
 5. **Configure Chat app** — set up the Chat app in GCP Console (required by the Chat API)
 6. **Test delegation** — verify domain-wide delegation works, requesting every scope the migration needs, so a delegation entry that's missing a scope fails here
 
@@ -897,7 +910,7 @@ A step that fails or that you skip (for example enabling the APIs) is offered ag
 Progress is saved between runs, so you can resume if interrupted.
 
 **Alternative approaches:**
-- Use the `setup_permissions.sh` script (requires Google Cloud SDK installed as a system component). It enables the APIs, creates the service account (without granting it any project-level IAM roles: everything comes from domain-wide delegation) and a key file, or checks that an existing key file belongs to the service account and is still active. It stops with a non-zero exit status if any step fails.
+- Use the `setup_permissions.sh` script (requires Google Cloud SDK installed as a system component). It enables the APIs, creates the service account (without granting it any project-level IAM roles: everything comes from domain-wide delegation) and a key file, or checks that an existing key file belongs to the service account and that its key is still active (not deleted, disabled or expired); a key it can't check is left in place. It stops with a non-zero exit status if any step fails.
 - Follow the [manual setup steps](#manual-google-cloud-setup-without-using-the-script) in the Troubleshooting section
 
 > **Note:** After any setup method, you still need to complete domain-wide delegation in your Google Workspace Admin Console.

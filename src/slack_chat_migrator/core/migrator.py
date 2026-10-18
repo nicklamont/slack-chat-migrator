@@ -324,6 +324,9 @@ class SlackToChatMigrator:
             user_resolver=self.user_resolver,
             state=self.state,
             dry_run=self.dry_run,
+            # Lets the handler tell public channels (open folders) from
+            # private conversations (limited-access folders).
+            channels_meta=self.ctx.channels_meta,
         )
         # FileHandler now handles its own drive folder initialization automatically
 
@@ -415,6 +418,71 @@ class SlackToChatMigrator:
         if self._progress_tracker:
             self._progress_tracker.phase_change(phase)
 
+    def _migrate_channels(
+        self,
+        processor: ChannelProcessor,
+        channel_dirs: list[Path],
+        checkpoint: CheckpointData,
+        checkpoint_path: Path,
+    ) -> MigrationAbortedError | None:
+        """Migrate each channel not done yet, checkpointing the clean ones.
+
+        Returns:
+            The abort to raise once the run is wrapped up, when a channel
+            failed with ``abort_on_error`` set; None otherwise.
+        """
+        for ch in channel_dirs:
+            channel_name = ch.name
+            if channel_name in checkpoint.completed_channels:
+                log_with_context(
+                    logging.INFO,
+                    f"Skipping channel {channel_name} (already completed in previous run)",
+                )
+                continue
+
+            result = processor.process_channel(ch)
+            if (
+                result.had_errors
+                and channel_name not in self.state.errors.channels_with_errors
+            ):
+                self.state.errors.channels_with_errors.append(channel_name)
+            if result.should_abort:
+                # abort_on_error: the run fails after the sweep; the failure
+                # path logs it and the checkpoint is kept.
+                return MigrationAbortedError(
+                    f"Migration aborted after errors in channel '{channel_name}'"
+                    " (abort_on_error is enabled)"
+                )
+
+            # Only checkpoint channels that completed without errors
+            if not result.had_errors:
+                checkpoint.completed_channels[channel_name] = now_iso()
+                save_checkpoint(checkpoint_path, checkpoint)
+        return None
+
+    def _retry_pending_permissions(self) -> None:
+        """Run the file handler's sweep of pending Drive grants and transfers.
+
+        The run's outcome is decided when this runs, so nothing the sweep
+        raises may change it: an error is logged, counted in the report's
+        ``pending_sweep_failures``, and the flags stay on the files for the
+        next run.  Ctrl-C (KeyboardInterrupt) is not caught.
+        """
+        file_handler = getattr(self, "file_handler", None)
+        if file_handler is None:
+            return
+        try:
+            file_handler.retry_pending_permissions()
+        except Exception as e:
+            log_with_context(
+                logging.ERROR,
+                "Retrying pending Drive grants and transfers failed"
+                f" ({type(e).__name__}: {e}); their flags stay on the files"
+                " for the next run",
+                exc_info=True,
+            )
+            file_handler.count_sweep_failure()
+
     def migrate(self, progress_tracker: ProgressTracker | None = None) -> bool:
         """Main migration function that orchestrates the entire process.
 
@@ -429,7 +497,8 @@ class SlackToChatMigrator:
 
         Raises:
             MigrationAbortedError: If a channel failed and ``abort_on_error``
-                is enabled.
+                is enabled; raised after the sweep of pending Drive grants,
+                which runs either way (Ctrl-C skips it).
         """
         self._progress_tracker = progress_tracker
         migration_start_time = time.time()
@@ -521,35 +590,19 @@ class SlackToChatMigrator:
                 attachment_processor=self.attachment_processor,
                 progress_tracker=self._progress_tracker,
             )
-            for ch in all_channel_dirs:
-                channel_name = ch.name
-                if channel_name in checkpoint.completed_channels:
-                    log_with_context(
-                        logging.INFO,
-                        f"Skipping channel {channel_name} (already completed in previous run)",
-                    )
-                    continue
+            aborted = self._migrate_channels(
+                self.channel_processor, all_channel_dirs, checkpoint, checkpoint_path
+            )
 
-                result = self.channel_processor.process_channel(ch)
-                if (
-                    result.had_errors
-                    and channel_name not in self.state.errors.channels_with_errors
-                ):
-                    self.state.errors.channels_with_errors.append(channel_name)
-                if result.should_abort:
-                    # abort_on_error: the run fails here; the failure path
-                    # below logs it and the checkpoint is kept.
-                    raise MigrationAbortedError(
-                        f"Migration aborted after errors in channel '{channel_name}'"
-                        " (abort_on_error is enabled)"
-                    )
+            if aborted is None:
+                self._emit_phase("Finalizing")
 
-                # Only checkpoint channels that completed without errors
-                if not result.had_errors:
-                    checkpoint.completed_channels[channel_name] = now_iso()
-                    save_checkpoint(checkpoint_path, checkpoint)
-
-            self._emit_phase("Finalizing")
+            # Retry Drive grants and transfers that failed, in this run or an
+            # earlier one (a resumed run never links already-sent files).
+            # Also after an abort; Ctrl-C (KeyboardInterrupt) skips it.
+            self._retry_pending_permissions()
+            if aborted is not None:
+                raise aborted
 
             # Log any space mapping conflicts that should be added to config
             log_space_mapping_conflicts(self.state, self.ctx.dry_run)

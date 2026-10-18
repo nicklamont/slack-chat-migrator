@@ -25,7 +25,7 @@ from slack_chat_migrator.constants import (
 from slack_chat_migrator.exceptions import PermissionCheckError
 from slack_chat_migrator.services.chat_adapter import ChatAdapter
 from slack_chat_migrator.services.drive_adapter import DriveAdapter
-from slack_chat_migrator.utils.api import REQUIRED_SCOPES, get_gcp_service
+from slack_chat_migrator.utils.api import REQUIRED_SCOPES, get_gcp_service, http_status
 from slack_chat_migrator.utils.logging import log_with_context
 
 #: Display name of the throwaway space the permission check creates.  It
@@ -39,10 +39,11 @@ TEST_FILE_NAME = "slack-chat-migrator-permission-test.txt"
 
 def _is_scope_error(error: HttpError) -> bool:
     """Return True if *error* means the token lacks a required scope."""
-    if error.resp.status == HTTP_UNAUTHORIZED:
+    status = http_status(error)
+    if status == HTTP_UNAUTHORIZED:
         return True
     text = f"{error} {error.content!r}".lower()
-    return error.resp.status == HTTP_FORBIDDEN and (
+    return status == HTTP_FORBIDDEN and (
         "insufficient" in text or "access_token_scope_insufficient" in text
     )
 
@@ -263,7 +264,7 @@ class PermissionValidator:
                 logging.INFO, "    ✓ Member creation: PASSED (historical membership)"
             )
         except HttpError as e:
-            if e.resp.status == HTTP_CONFLICT:  # Already a member
+            if http_status(e) == HTTP_CONFLICT:  # Already a member
                 log_with_context(
                     logging.INFO, "    ✓ Member creation: PASSED (already member)"
                 )

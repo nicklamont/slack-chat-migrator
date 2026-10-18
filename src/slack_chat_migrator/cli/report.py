@@ -674,7 +674,7 @@ def generate_report(
     file_stats: dict[str, Any] = {}
     if file_handler is not None and hasattr(file_handler, "get_file_statistics"):
         try:
-            file_stats = file_handler.get_file_statistics()
+            file_stats = dict(file_handler.get_file_statistics())
         except Exception as e:
             log_with_context(
                 logging.WARNING,

@@ -32,6 +32,7 @@ from slack_chat_migrator.utils.emoji import (
     apply_skin_tone,
     chat_custom_emoji_name,
     emoji_from_codepoints,
+    is_custom_mapped,
     is_emoji_modifier_or_joiner,
     slack_emoji_to_unicode,
     split_skin_tone,
@@ -1042,7 +1043,9 @@ def _replace_shortcodes(text: str, custom_map: Mapping[str, object] | None) -> s
             continue
         name = match.group(1)
         replacement = slack_emoji_to_unicode(name, custom_map)
-        if replacement is None and custom_map:
+        if replacement is None and is_custom_mapped(name, custom_map):
+            # Only names the user mapped are rewritten; anything else stays
+            # exactly as typed (skin tone included).
             replacement = f":{chat_custom_emoji_name(name, custom_map)}:"
         if replacement is not None:
             out.append(text[copied:start])

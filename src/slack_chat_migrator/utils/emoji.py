@@ -270,6 +270,19 @@ def slack_emoji_to_unicode(
     return _resolve_name(name)
 
 
+def is_custom_mapped(name: str, custom_map: Mapping[str, object] | None) -> bool:
+    """Return True if ``custom_emoji_map`` has an entry for *name*.
+
+    Args:
+        name: The Slack emoji name, with or without colons or skin tone.
+        custom_map: ``config.custom_emoji_map``.
+
+    Returns:
+        Whether the name, or the name without its skin tone, is mapped.
+    """
+    return _custom_value(_strip_colons(name), custom_map) is not None
+
+
 def chat_custom_emoji_name(
     name: str, custom_map: Mapping[str, object] | None = None
 ) -> str:

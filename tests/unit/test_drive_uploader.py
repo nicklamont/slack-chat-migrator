@@ -1,31 +1,30 @@
 """Unit tests for the DriveFileUploader class."""
 
 import hashlib
+from types import MappingProxyType
 from unittest.mock import MagicMock, patch
 
 import pytest
+from google.auth.exceptions import RefreshError
 from googleapiclient.errors import HttpError
 
 from slack_chat_migrator.constants import DRIVE_UPLOAD_CHUNK_BYTES
 from slack_chat_migrator.services.drive.drive_uploader import (
     DriveFileUploader,
     DriveUpload,
+    DriveUploadFailure,
+    DriveUploadSource,
 )
+from slack_chat_migrator.services.drive.pending import Target
 
 # -------------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------------
 
 
-def _make_uploader(
-    workspace_domain="example.com",
-):
+def _make_uploader():
     """Build a DriveFileUploader with a mocked drive service."""
-    drive_service = MagicMock()
-    return DriveFileUploader(
-        drive_service=drive_service,
-        workspace_domain=workspace_domain,
-    )
+    return DriveFileUploader(drive_service=MagicMock())
 
 
 def _http_error(status=404, reason="Not Found"):
@@ -306,19 +305,19 @@ class TestFindFileByHash:
             "https://found_link",
         )
         query = uploader.drive_service.list_files.call_args.kwargs["q"]
-        assert "'folder1' in parents" in query
-        assert "trashed=false" in query
+        assert query == (
+            "appProperties has { key='slackMd5' and value='new_hash' }"
+            " and 'folder1' in parents and trashed=false"
+        )  # md5Checksum is a field, not a search term
 
-    def test_http_error_returns_none(self):
-        """HttpError during search returns (None, None)."""
+    def test_failed_search_is_raised_not_read_as_not_found(self):
+        """Reading it as "not found" would upload a duplicate (#118)."""
         uploader = _make_uploader()
 
         uploader.drive_service.list_files.side_effect = _http_error(500)
 
-        file_id, link = uploader._find_file_by_hash("hash_err", "test.txt", "folder1")
-
-        assert file_id is None
-        assert link is None
+        with pytest.raises(HttpError):
+            uploader._find_file_by_hash("hash_err", "test.txt", "folder1")
 
 
 # -------------------------------------------------------------------
@@ -350,7 +349,8 @@ class TestUploadFileToDrive:
 
         upload = uploader.upload_file_to_drive(str(test_file), "upload.txt", "folder1")
 
-        assert upload == DriveUpload("new_file_id", "https://new_link", reused=False)
+        assert upload == DriveUpload("new_file_id", "https://new_link")
+        assert not upload.reused
         uploader.drive_service.create_permission.assert_not_called()
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
@@ -368,8 +368,84 @@ class TestUploadFileToDrive:
         # create raises HttpError
         uploader.drive_service.create_file.side_effect = _http_error(500)
 
-        assert (
-            uploader.upload_file_to_drive(str(test_file), "fail.txt", "folder1") is None
+        failure = uploader.upload_file_to_drive(str(test_file), "fail.txt", "folder1")
+
+        assert isinstance(failure, DriveUploadFailure)
+        assert "HttpError 500" in failure.reason
+        assert not failure.conversion_failed  # no target type: not a conversion
+        assert failure.retryable  # a server error may go away
+
+    @pytest.mark.parametrize(
+        ("status", "retryable"), [(400, False), (403, False), (404, False), (429, True)]
+    )
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_http_failures_are_retryable_only_when_transient(
+        self, mock_media_cls, tmp_path, status, retryable
+    ):
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        test_file = tmp_path / "a.txt"
+        test_file.write_bytes(b"data")
+        uploader.drive_service.create_file.side_effect = _http_error(status)
+
+        failure = uploader.upload_file_to_drive(str(test_file), "a.txt", "folder1")
+
+        assert isinstance(failure, DriveUploadFailure)
+        assert failure.retryable is retryable
+
+    @pytest.mark.parametrize(
+        ("status", "conversion"), [(400, True), (413, True), (500, True), (403, False)]
+    )
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_conversion_failure_is_flagged(
+        self, mock_media_cls, tmp_path, status, conversion
+    ):
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        test_file = tmp_path / "doc.html"
+        test_file.write_bytes(b"<p>x</p>")
+        uploader.drive_service.create_file.side_effect = _http_error(status)
+
+        failure = uploader.upload_file_to_drive(
+            str(test_file),
+            "Doc",
+            "folder1",
+            target_mime_type="application/vnd.google-apps.document",
+        )
+
+        assert isinstance(failure, DriveUploadFailure)
+        assert failure.conversion_failed is conversion
+
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_local_read_error_is_permanent(self, mock_media_cls, tmp_path):
+        """EACCES on the temp file won't go away on a retry."""
+        import errno
+
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        test_file = tmp_path / "a.txt"
+        test_file.write_bytes(b"data")
+        uploader.drive_service.create_file.side_effect = PermissionError(
+            errno.EACCES, "Permission denied"
+        )
+
+        failure = uploader.upload_file_to_drive(str(test_file), "a.txt", "folder1")
+
+        assert isinstance(failure, DriveUploadFailure)
+        assert failure.retryable is False
+
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_network_error_is_a_failure_with_its_cause(self, mock_media_cls, tmp_path):
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        test_file = tmp_path / "a.txt"
+        test_file.write_bytes(b"data")
+        uploader.drive_service.create_file.side_effect = ConnectionResetError("reset")
+
+        failure = uploader.upload_file_to_drive(str(test_file), "a.txt", "folder1")
+
+        assert failure == DriveUploadFailure(
+            "ConnectionResetError: reset", retryable=True
         )
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
@@ -392,7 +468,7 @@ class TestUploadFileToDrive:
         upload = uploader.upload_file_to_drive(str(test_file), "dup.txt", "folder1")
 
         assert upload == DriveUpload(
-            "existing_id", "https://existing_link", reused=True, source="hash"
+            "existing_id", "https://existing_link", source=DriveUploadSource.HASH
         )
         # create should NOT have been called
         uploader.drive_service.create_file.assert_not_called()
@@ -426,6 +502,20 @@ class TestSetMessagePosterPermission:
 
         assert result is False
 
+    @pytest.mark.parametrize(
+        "error",
+        [ConnectionResetError("reset"), TimeoutError("slow")],
+        ids=["reset", "timeout"],
+    )
+    def test_network_error_returns_false(self, error):
+        """A network error after the upload doesn't escape (#98)."""
+        uploader = _make_uploader()
+        uploader.drive_service.create_permission.side_effect = error
+
+        assert (
+            uploader.set_message_poster_permission("file1", "user@example.com") is False
+        )
+
     @pytest.mark.parametrize("shared_drive_id", [None, "drive1"])
     def test_role_is_writer_in_both_modes(self, shared_drive_id):
         """Drive v3 has no "editor" role; posters always get "writer" (I12)."""
@@ -451,14 +541,57 @@ class TestSetMessagePosterPermission:
 # -------------------------------------------------------------------
 
 
+#: appProperties of a file with a pending grant (Bob) and transfer (Alice).
+PENDING_FLAGS = MappingProxyType(
+    {
+        "slackFileId": "F1",
+        "slackGrantPending": "true",
+        "slackGrant.0123abcd": "UB bob@example.com",
+        "slackOwnerPending": "true",
+        "slackOwner": "UA alice@example.com",
+    }
+)
+
+
+class TestPendingFlagsAreRead:
+    """Pending grants are learned wherever a file's appProperties are read."""
+
+    FLAGS = PENDING_FLAGS
+
+    def test_pre_cache_reads_the_flags(self):
+        uploader = _make_uploader()
+        uploader.drive_service.list_files.return_value = {
+            "files": [
+                {"id": "a", "md5Checksum": "m", "appProperties": dict(self.FLAGS)},
+                {"id": "b", "md5Checksum": "n"},
+            ]
+        }
+
+        uploader.pre_cache_folder_file_hashes("folder1")
+
+        assert uploader.pending.grants == {
+            "a": {"slackGrant.0123abcd": Target("UB", "bob@example.com")}
+        }
+        assert uploader.pending.owners == {"a": Target("UA", "alice@example.com")}
+
+    def test_hash_search_reads_the_flags(self):
+        uploader = _make_uploader()
+        uploader.drive_service.list_files.return_value = {
+            "files": [{"id": "a", "appProperties": dict(self.FLAGS)}]
+        }
+
+        uploader._find_file_by_hash("m", "a.txt", "folder1")
+
+        assert uploader.pending.owner("a") == Target("UA", "alice@example.com")
+
+
 class TestInit:
     """Tests for __init__."""
 
     def test_default_state(self):
         """Initializes with expected default attributes."""
-        uploader = _make_uploader(workspace_domain="test.com")
+        uploader = _make_uploader()
 
-        assert uploader.workspace_domain == "test.com"
         assert uploader.file_hash_cache == {}
         assert uploader.folders_pre_cached == set()
         assert uploader.current_channel is None
@@ -658,9 +791,127 @@ class TestSlackFileIndex:
         assert uploader.pre_cache_folder_file_hashes("folder1") == 1
         found = uploader.find_uploaded_slack_file("folder1", "F1")
         assert found == DriveUpload(
-            "doc1", "https://doc", reused=True, source="slack_id"
+            "doc1", "https://doc", source=DriveUploadSource.SLACK_ID
         )
+        uploader.folders_pre_cached.add("other_folder")
         assert uploader.find_uploaded_slack_file("other_folder", "F1") is None
+
+    def test_folder_that_failed_to_list_is_searched_by_slack_id(self):
+        """A failed listing doesn't turn off deduplication by Slack ID (#125)."""
+        failures = []
+        uploader = DriveFileUploader(
+            MagicMock(), on_listing_failure=lambda f, e: failures.append(f)
+        )
+        uploader.drive_service.list_files.side_effect = [
+            _http_error(500),
+            {
+                "files": [
+                    {
+                        "id": "doc1",
+                        "webViewLink": "https://doc",
+                        "appProperties": {
+                            "slackFileId": "F'1",
+                            "slackGrantPending": "true",
+                            "slackGrant.0123abcd": "bob@example.com",
+                        },
+                    }
+                ]
+            },
+        ]
+
+        assert uploader.pre_cache_folder_file_hashes("folder1", "SD") == 0
+        found = uploader.find_uploaded_slack_file("folder1", "F'1", "SD")
+
+        assert found == DriveUpload(
+            "doc1", "https://doc", source=DriveUploadSource.SLACK_ID
+        )
+        assert failures == ["folder1"]
+        assert "folder1" not in uploader.folders_pre_cached  # listed again later
+        search = uploader.drive_service.list_files.call_args.kwargs
+        assert search["q"] == (
+            "appProperties has { key='slackFileId' and value='F\\'1' }"
+            " and 'folder1' in parents and trashed=false"
+        )
+        assert search["drive_id"] == "SD"
+        assert uploader.pending.grants == {
+            "doc1": {"slackGrant.0123abcd": Target(email="bob@example.com")}
+        }
+        # Remembered: no second search.
+        assert uploader.find_uploaded_slack_file("folder1", "F'1") == found
+        assert uploader.drive_service.list_files.call_count == 2
+
+    def test_failed_search_is_raised_with_a_warning(self, caplog):
+        uploader = _make_uploader()
+        uploader.drive_service.list_files.side_effect = ConnectionResetError("x")
+
+        with pytest.raises(ConnectionResetError):
+            uploader.find_uploaded_slack_file("folder1", "F1")
+        assert any(
+            r.levelname == "WARNING" and "F1" in r.getMessage() for r in caplog.records
+        )
+
+    def test_a_miss_is_searched_once(self):
+        uploader = _make_uploader()
+        uploader.drive_service.list_files.return_value = {"files": []}
+
+        assert uploader.find_uploaded_slack_file("folder1", "F1") is None
+        assert uploader.find_uploaded_slack_file("folder1", "F1") is None
+
+        assert uploader.drive_service.list_files.call_count == 1
+
+    @pytest.mark.parametrize(
+        "error",
+        [_http_error(500), ConnectionResetError("reset"), RefreshError("revoked")],
+        ids=["http", "network", "refresh"],
+    )
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_failed_dedup_search_fails_the_upload(
+        self, mock_media_cls, tmp_path, error
+    ):
+        """No upload when Drive can't say whether the file is already there."""
+        uploader = _make_uploader()
+        test_file = tmp_path / "a.txt"
+        test_file.write_bytes(b"data")
+        uploader.drive_service.list_files.side_effect = error
+
+        failure = uploader.upload_file_to_drive(
+            str(test_file), "a.txt", "folder1", slack_file_id="F1"
+        )
+
+        assert isinstance(failure, DriveUploadFailure)
+        assert "earlier upload" in failure.reason
+        assert failure.retryable
+        uploader.drive_service.create_file.assert_not_called()
+
+    @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
+    def test_refresh_error_on_create_is_a_failure(self, mock_media_cls, tmp_path):
+        uploader = _make_uploader()
+        uploader.folders_pre_cached.add("folder1")
+        test_file = tmp_path / "a.txt"
+        test_file.write_bytes(b"data")
+        uploader.drive_service.create_file.side_effect = RefreshError("invalid_grant")
+
+        failure = uploader.upload_file_to_drive(str(test_file), "a.txt", "folder1")
+
+        assert failure == DriveUploadFailure(
+            "RefreshError: invalid_grant", retryable=True
+        )
+
+    def test_listing_failure_warns_and_reports_once_per_folder(self, caplog):
+        reported = []
+        uploader = DriveFileUploader(
+            MagicMock(), on_listing_failure=lambda f, e: reported.append(f)
+        )
+        uploader.drive_service.list_files.side_effect = TimeoutError("slow")
+
+        uploader.pre_cache_folder_file_hashes("folder1")
+        uploader.pre_cache_folder_file_hashes("folder1")
+        uploader.pre_cache_folder_file_hashes("folder2")
+
+        assert uploader.listing_failures == {"folder1": 2, "folder2": 1}
+        assert reported == ["folder1", "folder2"]
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 2
 
     @patch("slack_chat_migrator.services.drive.drive_uploader.MediaFileUpload")
     def test_upload_is_tagged_and_remembered(self, mock_media_cls, tmp_path):
@@ -683,7 +934,11 @@ class TestSlackFileIndex:
         )
 
         body = uploader.drive_service.create_file.call_args.kwargs["body"]
-        assert body["appProperties"] == {"slackFileId": "F9", "slackChannel": "general"}
+        assert body["appProperties"] == {
+            "slackMd5": "h1",
+            "slackFileId": "F9",
+            "slackChannel": "general",
+        }
         assert uploader.file_hash_cache[("folder1", "h1")] == ("new", "l")
         assert uploader.find_uploaded_slack_file("folder1", "F9").file_id == "new"
 
@@ -727,3 +982,19 @@ def test_long_channel_names_fit_app_property_limit(mock_media_cls, tmp_path):
     for key, value in props.items():
         assert len(key.encode()) + len(value.encode()) <= 124
     assert channel.startswith(props["slackChannel"])
+
+
+class TestDriveQueryTerms:
+    """The fake answers only valid files.list terms, like Drive (#125)."""
+
+    def test_md5checksum_is_not_a_query_term(self):
+        from slack_chat_migrator.services.drive_adapter import DriveAdapter
+        from tests.unit.drive_fakes import FakeDrive
+
+        adapter = DriveAdapter(FakeDrive())
+
+        with pytest.raises(HttpError, match="md5Checksum"):
+            adapter.list_files(q="md5Checksum='abc' and 'F' in parents")
+        adapter.list_files(
+            q="appProperties has { key='slackMd5' and value='abc' } and 'F' in parents"
+        )

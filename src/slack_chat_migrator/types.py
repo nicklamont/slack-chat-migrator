@@ -129,16 +129,101 @@ class UserWithoutEmail(TypedDict):
     deleted: bool
 
 
-class FileUploadStats(TypedDict):
-    """File upload statistics returned by FileHandler."""
+class LostPermissions(TypedDict):
+    """A file's grant or transfer that a Drive quota stop left undone.
 
+    It couldn't be flagged on the file either, so it must be made by hand.
+    """
+
+    drive_file_id: str
+    url: str
+    slack_file_id: str
+    channel: str | None
+    #: Posters who should have ``writer`` access.
+    grant_to: list[str]
+    #: Who should own the file, if its ownership was to be transferred.
+    transfer_to: str | None
+
+
+class FileUploadStats(TypedDict):
+    """File upload statistics returned by ``FileHandler.get_file_statistics``.
+
+    They appear as ``file_upload_details`` in the migration report.
+    """
+
+    #: Attachments handled, one per ``upload_attachment`` call.
     total_files_processed: int
+    #: Files uploaded to Drive or Chat, or linked again from Drive.
     successful_uploads: int
+    #: Files that exist but couldn't be uploaded (see ``UploadResult.retryable``).
     failed_uploads: int
+    #: Files no retry or token can fetch: deleted, hidden, external, no
+    #: URL, or answering 404/410.
+    unavailable_files: int
+    #: Files deliberately not uploaded (Google Docs and Sheets links).
+    skipped_files: int
+    #: Successful uploads (and relinks) that went to Drive.
     drive_uploads: int
+    #: Successful uploads that went to Chat directly.
     direct_uploads: int
+    #: Attachments uploaded to Slack by users outside the workspace.
     external_user_files: int
+    #: Ownership transfers (``transfer_file_ownership``) that worked.
     ownership_transferred: int
+    #: Ownership transfers that failed (flagged for the end-of-run sweep).
+    ownership_transfer_failed: int
+    #: Poster writer grants that failed (flagged for the end-of-run sweep).
+    poster_grant_failures: int
+    #: Sweep attempts (grants and transfers) that now worked.
+    pending_retried: int
+    #: Sweep attempts that still failed; their flags are kept.
+    pending_retry_failed: int
+    #: Pending flags that couldn't be stored on their Drive file.
+    pending_flag_failures: int
+    #: Flags of successful retries that couldn't be cleared (cleared by the
+    #: next run's sweep).
+    pending_clear_failures: int
+    #: Sweeps whose search for flagged files failed, that a used-up quota
+    #: ended, or that crashed.
+    pending_sweep_failures: int
+    #: Flags kept without a retry because the recipient wasn't stored.
+    pending_skipped_unknown: int
+    #: Flags kept because the Slack user is no longer mapped.
+    pending_skipped_unmapped: int
+    #: Flags kept because the recipient is now external.
+    pending_skipped_external: int
+    #: Pending transfers kept because transfers are off (or on a shared drive).
+    pending_skipped_transfers_off: int
+    #: Pending transfers kept because someone other than the admin owns the
+    #: file, and only its owner can transfer it.
+    pending_skipped_not_owner: int
+    #: Files whose grant or transfer a Drive quota stop left undone and
+    #: unflagged (details in ``permissions_lost_details``).
+    permissions_lost_on_quota_stop: int
+    #: What to make by hand for each of those files.
+    permissions_lost_details: list[LostPermissions]
+    #: Drive folders whose file listing failed at least once.
+    folder_listing_failures: int
+    #: Channel-folder grants to external members that Drive refused.
+    external_folder_grant_failures: int
+    #: Channel-folder permission syncs that failed (one per channel).
+    folder_sync_failures: int
+    #: Channel-folder grants to internal members that failed.
+    folder_grant_failures: int
+    #: Channel-folder removals of former members that failed.
+    folder_removal_failures: int
+    #: Files not uploaded because their private conversation's folder
+    #: couldn't be made limited-access.
+    restricted_folder_failures: int
+    #: Files not uploaded because their channel folder couldn't be found or
+    #: created.
+    channel_folder_failures: int
+    #: Downloads refused with 401/403 or a sign-in page.
+    download_auth_failures: int
+    #: Files per channel.
+    files_by_channel: dict[str, int]
+    #: Share of uploads that succeeded, out of those that succeeded or
+    #: failed (unavailable and skipped files don't lower it).
     success_rate: float
 
 
@@ -200,6 +285,17 @@ class UploadResult:
     error: str | None = None
     cached: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: For a failed upload: True when a later attempt may succeed (a network
+    #: or server error, a rate limit, a folder or Drive unavailable for such
+    #: a reason, a dedup search that failed), so the message should be held
+    #: back and retried.  False for permanent failures (a refused or
+    #: wrong-sized download, a host off the allow-list, a 4xx refusal).
+    retryable: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject ``retryable`` on an upload that didn't fail."""
+        if self.retryable and (self.success or self.skipped):
+            raise ValueError("only a failed upload can be retryable")
 
     @property
     def success(self) -> bool:

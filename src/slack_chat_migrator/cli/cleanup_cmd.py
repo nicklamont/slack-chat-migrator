@@ -8,11 +8,15 @@ from pathlib import Path
 import click
 
 from slack_chat_migrator.cli.common import (
+    EXIT_FAILURE,
+    EXIT_INTERRUPTED,
+    PromptCancelled,
     cli,
     common_options,
     config_was_given,
     deprecated_command,
     handle_exception,
+    report_prompt_cancel,
     yes_option,
 )
 from slack_chat_migrator.cli.migrate_cmd import (
@@ -47,7 +51,11 @@ def cleanup(
     Lists this tool's spaces (named "Slack #...") that are still in import
     mode, asks for confirmation (skip with --yes), and calls completeImport()
     on each.  Does not add members — use ``migrate --resume`` for that.
-    Exits non-zero if any space could not be completed.
+    Exits 1 if the config, the credentials or the list of spaces can't be
+    loaded, if the user declines at the prompt, if a confirmation is
+    needed without a terminal (use --yes), or if any space could not be
+    completed.  Exits 130 on Ctrl-C (also at the prompt) or end of input
+    at the prompt.
 
     Args:
         creds_path: Path to service account credentials JSON.
@@ -77,9 +85,12 @@ def cleanup(
         result = cleanup_import_mode_spaces(
             ChatAdapter(chat), confirm=completion_confirmer(yes)
         )
-    except Exception as e:
+    except PromptCancelled:
+        report_prompt_cancel("No spaces were changed.")
+        raise click.exceptions.Exit(EXIT_INTERRUPTED) from None
+    except Exception as e:  # other Ctrl-C is left to the CLI group (exit 130)
         handle_exception(e)
-        sys.exit(1)
+        sys.exit(EXIT_FAILURE)
 
     exit_code = report_import_completion(result)
     if exit_code:

@@ -228,6 +228,17 @@ class TestSetupLogger:
         handler = result.handlers[0]
         assert isinstance(handler.formatter, EnhancedFormatter)
 
+    def test_console_false_reaches_the_log_file_only(self, tmp_path, capsys):
+        setup_logger(output_dir=str(tmp_path))
+        log_module.log_with_context(logging.WARNING, "file only", console=False)
+        log_module.log_with_context(logging.WARNING, "everywhere")
+        err = capsys.readouterr().err
+        assert "file only" not in err
+        assert "everywhere" in err
+        text = (tmp_path / "migration.log").read_text()
+        assert "file only" in text
+        assert "everywhere" in text
+
 
 # --- log_with_context tests ---
 
@@ -916,6 +927,31 @@ SLACK_FILE_URL = (
 )
 
 
+XOXE_TAIL = "tail9f8e7d"
+
+
+def _console_handler() -> logging.StreamHandler:
+    """The console handler setup_logger added (a StreamHandler, not a file)."""
+    return next(
+        h
+        for h in logging.getLogger("slack_chat_migrator").handlers
+        if type(h) is logging.StreamHandler
+    )
+
+
+def _main_log_handler() -> logging.FileHandler:
+    return next(
+        h
+        for h in logging.getLogger("slack_chat_migrator").handlers
+        if isinstance(h, logging.FileHandler)
+        and h.baseFilename.endswith("migration.log")
+        and "channel_logs" not in h.baseFilename
+    )
+
+
+XOXE_URL = f"https://files.slack.com/files-pri/T1-F1/a.pdf?t=xoxe-1-{XOXE_TAIL}"
+
+
 class TestSlackTokenRedaction:
     """sanitize_for_log() and the RedactingFilter remove Slack tokens."""
 
@@ -953,14 +989,86 @@ class TestSlackTokenRedaction:
         assert "1234567890-abcdef" not in result
 
     def test_redacts_rotating_token(self):
-        result = sanitize_for_log(
-            "refresh xoxe.xoxp-1-Mi0yLTE2 done"
-        )  # pragma: allowlist secret
-        assert "Mi0yLTE2" not in result
+        text = "refresh xoxe.xoxp-1-Mi0yLTE2 done"  # pragma: allowlist secret
+        assert "Mi0yLTE2" not in sanitize_for_log(text)
 
     def test_does_not_touch_ordinary_words(self):
         text = "Processing channel xoxo-party and taxonomy=fine"
         assert sanitize_for_log(text) == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            SLACK_FILE_URL,
+            "https://x.slack.com/f?a=1&t=abc.def-123&b=2",
+            "GET /api?token=abc&access_token=def&key=ghi#frag",
+            "[?t=xoxe-1-abc] and [&key=K]",
+            "Authorization: Bearer ya29.abc-DEF_ghi==",
+            "token=abc123 key=xyz access_token=q",
+            "xoxb-12345-67890-AbCdEf and xapp-1-A0-123-abc",  # pragma: allowlist secret
+            "refresh xoxe.xoxp-1-Mi0yLTE2 done",  # pragma: allowlist secret
+            "already ?t=[REDACTED] and Bearer [REDACTED] and xoxb-[REDACTED]",
+        ],
+    )
+    def test_sanitizing_twice_changes_nothing(self, text):
+        """Each record is sanitised once per handler and again when formatted."""
+        once = sanitize_for_log(text)
+        assert sanitize_for_log(once) == once
+        assert sanitize_for_log(sanitize_for_log(once)) == once
+        # Redaction adds exactly one "]" per new marker and drops none.
+        assert once.count("]") - once.count("[REDACTED]") == text.count(
+            "]"
+        ) - text.count("[REDACTED]")
+
+    def test_exact_lines_through_every_handler(self, tmp_path):
+        """One channel ERROR record reaches the console, migration.log and the
+        channel log: three filters and three formatter passes."""
+        import io
+        import re
+
+        setup_logger(output_dir=str(tmp_path))
+        stream = io.StringIO()
+        _console_handler().setStream(stream)
+        channel_handler = setup_channel_logger(str(tmp_path), "general")
+        log_with_context(
+            logging.ERROR,
+            "Download failed for https://files.slack.com/f/x.png?t=xoxe-1-A2b"
+            " (https://slack.com/api/x?token=S3&page=2, Bearer ya29.Q)",
+            channel="general",
+        )
+        logging.getLogger("slack_chat_migrator").warning(
+            "fetch %s?key=%s (%d)", "https://files.slack.com/f/y.png", "K9", "x"
+        )
+        channel_handler.close()
+        expected = (
+            "Download failed for https://files.slack.com/f/x.png?t=[REDACTED]"
+            " (https://slack.com/api/x?token=[REDACTED]&page=2, Bearer [REDACTED])"
+        )
+        prefix = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3} - ERROR - "
+        outputs = {
+            "console": stream.getvalue(),
+            "main": (tmp_path / "migration.log").read_text(),
+            "channel": (
+                tmp_path / "channel_logs" / "general_migration.log"
+            ).read_text(),
+        }
+        for name, text in outputs.items():
+            lines = [ln for ln in text.splitlines() if "Download failed" in ln]
+            assert len(lines) == 1, name
+            assert re.fullmatch(prefix + re.escape(expected), lines[0]), (
+                name,
+                lines[0],
+            )
+        for name in ("console", "main"):
+            [line] = [ln for ln in outputs[name].splitlines() if "fetch https://" in ln]
+            message = line.split(" - WARNING - ", 1)[1]
+            assert message.startswith(
+                "fetch https://files.slack.com/f/y.png?key=[REDACTED] (x) [TypeError at "
+            ), (name, message)
+            assert message.endswith("a real number is required, not str]"), (
+                name,
+                message,
+            )
 
     def test_filter_redacts_message_args_and_extras(self):
         record = logging.LogRecord(
@@ -977,13 +1085,164 @@ class TestSlackTokenRedaction:
         assert "xoxe-1234567890" not in record.getMessage()
         assert "xoxe-1234567890" not in record.error_details
 
+    @staticmethod
+    def _record(msg, args, lineno=1):
+        return logging.LogRecord(
+            "slack_chat_migrator", logging.WARNING, __file__, lineno, msg, args, None
+        )
+
+    def _filtered(self, msg, args, lineno=1):
+        record = self._record(msg, args, lineno)
+        assert RedactingFilter().filter(record) is True
+        assert record.args is None
+        return record.getMessage()
+
+    def test_filter_fails_closed_when_args_do_not_match_format(self):
+        message = self._filtered("download failed for %s", (XOXE_URL, "extra"), 42)
+        assert XOXE_TAIL not in message
+        # With a count mismatch nothing is filled in: format plus types.
+        assert message == (
+            f"download failed for %s [TypeError at {__file__}:42: not all"
+            " arguments converted during string formatting; arguments:"
+            " <str>, <str>]"
+        )
+
+    @pytest.mark.parametrize(
+        ("msg", "args", "secret", "kept"),
+        [
+            # Same number of arguments as placeholders, wrong type: each
+            # value is put next to its prefix before redacting.
+            (
+                "Authorization: Bearer %d",
+                ("ya29.SECRETBEARER",),
+                "SECRETBEARER",
+                "Authorization: Bearer [REDACTED]",
+            ),
+            (
+                "refreshing token=%s for %d",
+                ("SECRETTOKEN", "alice"),
+                "SECRETTOKEN",
+                "refreshing token=[REDACTED] for alice",
+            ),
+            (
+                "fetch %s?key=%s (%d)",
+                ("https://x.example/api", "SECRETKEY", "three"),
+                "SECRETKEY",
+                "fetch https://x.example/api?key=[REDACTED] (three)",
+            ),
+            (
+                "file %s?t=%s %d",
+                ("https://files.slack.com/f", "abc.def", "x"),
+                "abc.def",
+                "?t=[REDACTED] x",
+            ),
+            (
+                "Bearer %(token)s for %(user)s",
+                ({"token": "ya29.SECRETMAP"},),
+                "SECRETMAP",
+                "Bearer [REDACTED] for %(user)s",
+            ),
+        ],
+    )
+    def test_prefix_secrets_are_redacted_after_substitution(
+        self, msg, args, secret, kept
+    ):
+        """Bearer/token=/key=/?t= are only recognisable next to their value."""
+        message = self._filtered(msg, args)
+        assert secret not in message
+        assert kept in message
+
+    def test_mapping_marker_names_the_error_and_unused_keys(self):
+        message = self._filtered(
+            "%(url)s %(missing)s", ({"url": XOXE_URL, "spare": "x"},), 7
+        )
+        assert XOXE_TAIL not in message
+        assert message.startswith("https://files.slack.com/")
+        assert (
+            f"[KeyError at {__file__}:7: 'missing'; unused arguments: spare=<str>]"
+            in message
+        )
+
+    @pytest.mark.parametrize(
+        ("msg", "args"),
+        [
+            # A forgotten placeholder separates the value from its prefix.
+            ("Authorization: Bearer", ("ya29.a0SECRETBEARER",)),
+            ("refreshing token=", ("SECRETTOKEN1",)),
+            ("Using API key", ("AIzaSyD-SECRETAPIKEY",)),
+            # Too few arguments: filling by position would move the token.
+            ("GET %s Authorization: Bearer %s", ("ya29.SECRET-A",)),
+            ("Fetching %s with token=%s", ("SECRET-B",)),
+            ("token=%(tok)s", ({"access": "SECRETMAPVAL"},)),
+        ],
+    )
+    def test_arguments_without_a_known_placeholder_are_types_only(self, msg, args):
+        message = self._filtered(msg, args)
+        assert "SECRET" not in message
+        assert "arguments: " in message
+        assert "<str>" in message
+        assert message.startswith(msg)  # the format is shown as it is
+
+    def test_star_width_takes_its_own_argument(self):
+        message = self._filtered("%*d items for token=%s", (5, "x", "SECRETSTAR"))
+        assert message.startswith("x items for token=[REDACTED] [TypeError at ")
+        assert "SECRETSTAR" not in message
+        assert "arguments" not in message
+
+    def test_percent_escapes_with_mapping_args(self):
+        message = self._filtered("100%% of %(n)s %(missing)s", ({"n": "files"},))
+        assert message.startswith("100% of files %(missing)s [KeyError at ")
+
+    def test_star_precision_takes_its_own_argument(self):
+        message = self._filtered("%.*s and token=%d", (3, "abcdef", "SECRETP"))
+        assert message.startswith("abcdef and token=[REDACTED] [TypeError at ")
+        assert "SECRETP" not in message
+
+    def test_dot_precision_without_digits_is_a_placeholder(self):
+        """``%.s`` takes an argument, so the token stays after Bearer."""
+        message = self._filtered("%.s Bearer %s n=%d", ("x", "ya29.SECRET-E", "y"))
+        assert message.startswith("x Bearer [REDACTED] n=y [TypeError at ")
+        assert "SECRET-E" not in message
+
+    def test_percent_escapes_and_type_errors(self):
+        message = self._filtered("100%% of %s and %d", ("files", "many"))
+        assert message.startswith("100% of files and many [TypeError at ")
+        assert "arguments" not in message
+
+    def test_filter_survives_unprintable_args(self):
+        class Unprintable:
+            def __str__(self):
+                raise RuntimeError("no")
+
+        message = self._filtered("%d %s", (Unprintable(), XOXE_URL))
+        assert "<unprintable Unprintable>" in message
+        assert XOXE_TAIL not in message
+
+    def test_mismatched_args_never_reach_stderr(self, tmp_path, capsys):
+        """logging.Handler.handleError would print the raw args to stderr."""
+        import io
+
+        setup_logger(output_dir=str(tmp_path))
+        stream = io.StringIO()
+        _console_handler().setStream(stream)
+        logging.getLogger("slack_chat_migrator").warning(
+            "download failed for %s", XOXE_URL, "extra"
+        )
+        _main_log_handler().flush()
+        err = capsys.readouterr().err
+        assert XOXE_TAIL not in err
+        assert "--- Logging error ---" not in err
+        for text in (stream.getvalue(), (tmp_path / "migration.log").read_text()):
+            assert XOXE_TAIL not in text
+            assert "download failed for" in text
+
     def test_no_token_in_any_log_file(self, tmp_path):
         """End to end: main log, channel log and console are all redacted."""
         import io
 
         setup_logger(output_dir=str(tmp_path), debug_api=True)
         stream = io.StringIO()
-        console = logging.getLogger("slack_chat_migrator").handlers[0]
+        console = _console_handler()
         console.setStream(stream)
         channel_handler = setup_channel_logger(str(tmp_path), "general", debug_api=True)
         log_with_context(logging.ERROR, f"Failed to download {SLACK_FILE_URL}")

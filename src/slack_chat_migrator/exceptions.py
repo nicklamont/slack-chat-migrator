@@ -29,8 +29,29 @@ class UserMappingError(MigratorError):
     """Raised when user mapping fails (no valid users, missing files, etc.)."""
 
 
+class DriveQuotaError(MigratorError):
+    """Raised when Drive says a quota is used up; it stops the run.
+
+    Every later Drive call would fail the same way, as with a full disk, so
+    the run stops instead of failing each file in turn.  The file being
+    handled gets no result, so it isn't marked as failed: a later run
+    (``migrate --resume``) brings it over once the quota allows.
+
+    Attributes:
+        reason: Drive's error reason, e.g. ``dailyLimitExceeded``.
+    """
+
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class MigrationAbortedError(MigratorError):
-    """Raised when the migration is aborted due to errors exceeding thresholds."""
+    """Raised to stop the migration after a channel with errors.
+
+    Only raised with ``abort_on_error: true``; the remaining channels are
+    not processed and the run fails.
+    """
 
 
 class ConfirmationRequiredError(MigratorError):
