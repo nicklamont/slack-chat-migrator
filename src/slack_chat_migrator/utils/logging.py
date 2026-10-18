@@ -155,7 +155,6 @@ def _unformattable_message(record: logging.LogRecord, error: Exception) -> str:
             text = msg
             unused_label = "arguments"
         else:
-            unused_label = "unused arguments"
 
             def substitute(match: re.Match[str]) -> str:
                 if match.group(0) == "%%":
