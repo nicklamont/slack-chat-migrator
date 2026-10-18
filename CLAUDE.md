@@ -47,6 +47,7 @@ src/slack_chat_migrator/
 │   │   ├── drive_uploader.py      # Drive file upload logic
 │   │   ├── dry_run_service.py     # No-op Drive API for dry-run mode
 │   │   ├── folder_manager.py      # Drive folder creation and management
+│   │   ├── pending.py             # Failed grants/transfers flagged on files, retried by the end-of-run sweep
 │   │   └── shared_drive_manager.py
 │   ├── drive_adapter.py     # Typed wrapper over raw Drive API service
 │   ├── export_inspector.py  # Slack export analysis (pure I/O, no API calls)
@@ -75,6 +76,7 @@ src/slack_chat_migrator/
 │   └── user_resolver.py     # User identity resolution and impersonation
 └── utils/          # Shared utilities
     ├── api.py      # API retry policy (RetryWrapper), bounded client cache, scopes, credentials
+    ├── domains.py  # Internal-domain helpers (admin's domain plus workspace_domains)
     ├── emoji.py    # Slack emoji names → Unicode (skin tones, custom_emoji_map)
     ├── formatting.py
     ├── logging.py  # Logger setup, secret redaction, private log files
