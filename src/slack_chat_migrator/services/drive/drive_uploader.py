@@ -62,6 +62,7 @@ class DriveUploadSource(str, enum.Enum):
     SLACK_ID = "slack_id"
 
 
+# Aliases of the members, for code that imports the older constants.
 SOURCE_NEW = DriveUploadSource.NEW
 SOURCE_HASH = DriveUploadSource.HASH
 SOURCE_SLACK_ID = DriveUploadSource.SLACK_ID
@@ -388,8 +389,8 @@ class DriveFileUploader:
         new upload gets.
 
         Returns:
-            The existing upload (``source == SOURCE_SLACK_ID``, or ``NEW``
-            as above), or None.
+            The existing upload (source ``DriveUploadSource.SLACK_ID``, or
+            ``NEW`` as above), or None.
 
         Raises:
             A Drive call error (see ``is_drive_call_error``) if the search
@@ -414,7 +415,7 @@ class DriveFileUploader:
             cached = self._search_slack_file(folder_id, slack_file_id, shared_drive_id)
         if cached is None:
             return None
-        return DriveUpload(cached[0], cached[1], source=SOURCE_SLACK_ID)
+        return DriveUpload(cached[0], cached[1], source=DriveUploadSource.SLACK_ID)
 
     def _search_slack_file(
         self, folder_id: str, slack_file_id: str, shared_drive_id: str | None
@@ -699,7 +700,9 @@ class DriveFileUploader:
             f"Reusing existing file with same hash: {filename} (ID: {existing_file_id})",
             channel=self._get_current_channel(),
         )
-        return DriveUpload(existing_file_id, existing_url, source=SOURCE_HASH)
+        return DriveUpload(
+            existing_file_id, existing_url, source=DriveUploadSource.HASH
+        )
 
     def _create(
         self,
