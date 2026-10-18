@@ -1732,36 +1732,17 @@ class FileHandler:
         """
         pending = self.drive_uploader.pending
         poster = sender_email if self._is_internal_email(sender_email) else None
-        can_transfer = bool(
-            self.config.transfer_file_ownership
-            and not self._shared_drive_id
-            and self._is_internal_email(owner_email)
-        )
         from_earlier_run = (
             source is DriveUploadSource.SLACK_ID
             and drive_file_id not in self.drive_uploader.created_this_run
         )
-        pending_owner = pending.owner(drive_file_id)
-        owner = (
-            owner_email
-            if can_transfer
-            and owner_email
-            and (
-                source is DriveUploadSource.NEW
-                or (
-                    from_earlier_run
-                    and pending_owner is not None
-                    and pending_owner.is_for(owner_id, owner_email)
-                )
-            )
-            else None
+        owner = self._transfer_target(
+            drive_file_id,
+            source,
+            owner_email,
+            owner_id,
+            from_earlier_run=from_earlier_run,
         )
-        if (
-            owner
-            and from_earlier_run
-            and not self._repeat_transfer_needed(drive_file_id, owner)
-        ):
-            owner = None
         if from_earlier_run and poster and not pending.has_grant(drive_file_id, poster):
             poster = None  # the earlier run made this grant
 
@@ -1795,6 +1776,41 @@ class FileHandler:
                 owner_id=owner_id,
             )
             raise
+
+    def _transfer_target(
+        self,
+        drive_file_id: str,
+        source: DriveUploadSource,
+        owner_email: str | None,
+        owner_id: str | None,
+        *,
+        from_earlier_run: bool,
+    ) -> str | None:
+        """The internal user to transfer the file's ownership to now, or None.
+
+        Only with ``config.transfer_file_ownership`` set and in regular
+        Drive: for a new upload, its uploader (*owner_email*); for a file an
+        earlier run uploaded, the uploader its pending transfer is for, while
+        that transfer is still due (:meth:`_repeat_transfer_needed`).  Any
+        other file keeps its owner.
+        """
+        if not (
+            self.config.transfer_file_ownership
+            and not self._shared_drive_id
+            and owner_email
+            and self._is_internal_email(owner_email)
+        ):
+            return None
+        if source is DriveUploadSource.NEW:
+            return owner_email
+        if not from_earlier_run:
+            return None
+        pending_owner = self.drive_uploader.pending.owner(drive_file_id)
+        if pending_owner is None or not pending_owner.is_for(owner_id, owner_email):
+            return None
+        if not self._repeat_transfer_needed(drive_file_id, owner_email):
+            return None
+        return owner_email
 
     def _make_file_permissions(
         self,
