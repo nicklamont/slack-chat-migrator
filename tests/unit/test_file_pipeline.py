@@ -1761,6 +1761,24 @@ class TestLimitedAccessFolders:
 
         assert handler.get_file_statistics()["folder_sync_failures"] == 1
 
+    def test_step_6_is_logged_only_for_a_channel_with_a_folder(
+        self, tmp_path, downloads, caplog
+    ):
+        from slack_chat_migrator.services.spaces.regular_membership import (
+            _update_folder_permissions,
+        )
+
+        handler = make_handler(FakeDrive(), tmp_path)
+        upload(handler, downloads, "c", "F1", "UA", b"x")
+
+        with caplog.at_level("INFO"):
+            _update_folder_permissions(handler, "c", ["alice@example.com"])
+            _update_folder_permissions(handler, "no-files", ["alice@example.com"])
+
+        steps = [r.getMessage() for r in caplog.records if "Step 6/6" in r.getMessage()]
+        assert len(steps) == 1
+        assert "Synced the c Drive folder with its 1 active members" in steps[0]
+
     def test_channel_without_folder_needs_no_sync(self, tmp_path):
         handler = make_meta_handler(FakeDrive(), tmp_path)
 

@@ -448,12 +448,21 @@ def _update_folder_permissions(
     if file_handler is None:
         return
 
-    log_with_context(
-        logging.INFO,
-        f"Step 6/6: Updating file permissions for {channel} folder to match {len(active_user_emails)} active members",
-        channel=channel,
-    )
-    file_handler.sync_channel_folder_permissions(channel, active_user_emails)
+    result = file_handler.sync_channel_folder_permissions(channel, active_user_emails)
+    if result.folder_id:
+        log_with_context(
+            logging.INFO,
+            f"Step 6/6: Synced the {channel} Drive folder with its"
+            f" {len(active_user_emails)} active members ({result.granted}"
+            f" granted, {result.removed} removed)",
+            channel=channel,
+        )
+    elif not result.lookup_error:
+        log_with_context(
+            logging.DEBUG,
+            f"No Drive folder for {channel}: no folder permissions to sync",
+            channel=channel,
+        )
 
 
 def add_regular_members(
