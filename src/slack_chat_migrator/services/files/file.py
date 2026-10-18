@@ -1810,12 +1810,7 @@ class FileHandler:
             poster_id: The poster's Slack user ID, for a flag.
             owner_id: The new owner's Slack user ID, for a flag.
         """
-        # The new owner needs no separate writer grant.
-        grant_poster = bool(
-            poster
-            and poster != owner
-            and not self._already_granted(drive_file_id, poster)
-        )
+        grant_poster = self._poster_grant_due(drive_file_id, poster, owner)
 
         if grant_poster and owner and poster:
             # Two calls on one file: send them as one batch request.
@@ -1882,11 +1877,7 @@ class FileHandler:
         ``permissions_lost_details`` for a manual fix.
         """
         grant_to = (
-            poster
-            if poster
-            and poster != owner
-            and not self._already_granted(drive_file_id, poster)
-            else None
+            poster if self._poster_grant_due(drive_file_id, poster, owner) else None
         )
         transfer_to = (
             owner if owner and not self._already_granted(drive_file_id, owner) else None
@@ -1989,6 +1980,20 @@ class FileHandler:
     def _already_granted(self, drive_file_id: str, email: str) -> bool:
         """Whether *email* got writer access (or ownership) this run."""
         return (drive_file_id, email) in self._granted_posters
+
+    def _poster_grant_due(
+        self, drive_file_id: str, poster: str | None, owner: str | None
+    ) -> bool:
+        """Whether *poster* still needs ``writer`` access to the file.
+
+        Not when there is no poster, when the poster is the new *owner* (who
+        needs no separate grant), or when this run already made the grant.
+        """
+        return bool(
+            poster
+            and poster != owner
+            and not self._already_granted(drive_file_id, poster)
+        )
 
     def _mark_granted(self, drive_file_id: str, email: str) -> None:
         """Remember a successful poster grant."""
