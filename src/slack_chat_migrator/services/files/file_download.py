@@ -43,8 +43,6 @@ from slack_chat_migrator.constants import (
     HTTP_FORBIDDEN,
     HTTP_NOT_FOUND,
     HTTP_OK,
-    HTTP_RATE_LIMIT,
-    HTTP_SERVER_ERROR_MIN,
     HTTP_UNAUTHORIZED,
     SLACK_FILE_HOST_SUFFIXES,
 )
@@ -54,7 +52,7 @@ from slack_chat_migrator.services.files.temp_files import (
     safe_temp_suffix,
 )
 from slack_chat_migrator.types import UploadResult
-from slack_chat_migrator.utils.api import HTTP_REQUEST_TIMEOUT
+from slack_chat_migrator.utils.api import is_retryable_status
 from slack_chat_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_chat_migrator")
@@ -162,11 +160,7 @@ class DownloadResult:
             return False
         if (self.reason or "").startswith(f"{REASON_NETWORK_ERROR}:"):
             return True
-        status = self.http_status
-        return status is not None and (
-            status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
-            or status >= HTTP_SERVER_ERROR_MIN
-        )
+        return self.http_status is not None and is_retryable_status(self.http_status)
 
     @property
     def file_path(self) -> str:

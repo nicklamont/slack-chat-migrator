@@ -249,6 +249,21 @@ def is_rate_limit_error(error: BaseException) -> bool:
     )
 
 
+def is_retryable_status(status: int) -> bool:
+    """Return True for HTTP 408, 429 and 5xx: a later attempt may succeed.
+
+    Args:
+        status: An HTTP status code.
+
+    Returns:
+        True if a request that got *status* is worth trying again.
+    """
+    return (
+        status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
+        or status >= HTTP_SERVER_ERROR_MIN
+    )
+
+
 def is_retryable_http_error(error: HttpError) -> bool:
     """Return True for 408, 429, 5xx and rate-limit 403 responses.
 
@@ -265,11 +280,7 @@ def is_retryable_http_error(error: HttpError) -> bool:
     status = http_status(error)
     if status is None:
         return False
-    return (
-        status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
-        or status >= HTTP_SERVER_ERROR_MIN
-        or is_rate_limit_error(error)
-    )
+    return is_retryable_status(status) or is_rate_limit_error(error)
 
 
 def retry_after_seconds(error: HttpError) -> float | None:

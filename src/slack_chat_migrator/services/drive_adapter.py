@@ -36,16 +36,14 @@ from googleapiclient.errors import HttpError
 from slack_chat_migrator.constants import (
     DRIVE_BATCH_MAX_REQUESTS,
     HTTP_FORBIDDEN,
-    HTTP_RATE_LIMIT,
-    HTTP_SERVER_ERROR_MIN,
 )
 from slack_chat_migrator.exceptions import DriveQuotaError
 from slack_chat_migrator.utils.api import (
-    HTTP_REQUEST_TIMEOUT,
     RETRYABLE_NETWORK_ERRORS,
     http_error_reasons,
     http_status,
-    is_rate_limit_error,
+    is_retryable_http_error,
+    is_retryable_status,
 )
 
 #: Network failures with a class of their own.  Built from the shared retry
@@ -210,15 +208,9 @@ def is_transient_error(error: BaseException) -> bool:
     local errors.
     """
     if isinstance(error, HttpError):
-        status = http_status(error)
-        if status is None:
+        if http_status(error) is None:
             return False
-        return (
-            status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
-            or status >= HTTP_SERVER_ERROR_MIN
-            or is_rate_limit_error(error)
-            or quota_reason(error) is not None
-        )
+        return is_retryable_http_error(error) or quota_reason(error) is not None
     return isinstance(error, RefreshError) or is_network_error(error)
 
 
@@ -264,10 +256,7 @@ def _retry_individually(error: BaseException) -> bool:
     """
     if isinstance(error, HttpError):
         status = http_status(error) or 0
-        return (
-            status in (HTTP_FORBIDDEN, HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
-            or status >= HTTP_SERVER_ERROR_MIN
-        )
+        return status == HTTP_FORBIDDEN or is_retryable_status(status)
     # Credentials that can't be refreshed won't work on a second try.
     return not isinstance(error, RefreshError)
 
