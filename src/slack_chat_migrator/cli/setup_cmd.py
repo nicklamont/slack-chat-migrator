@@ -852,8 +852,8 @@ def _step_delegation(state):  # type: ignore[no-untyped-def]
         "In the [bold]Google Admin Console[/bold], authorize the service account:\n",
         "  1. Go to https://admin.google.com/ac/owl/domainwidedelegation",
         "  2. Click [bold]Add new[/bold] and enter:",
+        f"     Client ID: [bold]{escape(client_id)}[/bold]",
     ]
-    prereq_lines.append(f"     Client ID: [bold]{escape(client_id)}[/bold]")
     # Try to copy scopes to clipboard
     copied = _copy_to_clipboard(scopes_csv)
 

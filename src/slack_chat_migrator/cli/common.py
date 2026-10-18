@@ -68,11 +68,11 @@ def report_prompt_cancel(unchanged: str = "") -> None:
         unchanged: What the cancel left untouched, as a sentence (for
             example "Nothing was migrated."); empty to say nothing more.
     """
-    click.echo("\nCancelled." + (f" {unchanged}" if unchanged else ""), err=True)
+    suffix = f" {unchanged}" if unchanged else ""
+    click.echo(f"\nCancelled.{suffix}", err=True)
     log_with_context(
         logging.WARNING,
-        "Cancelled at a prompt (Ctrl-C or end of input)."
-        + (f" {unchanged}" if unchanged else ""),
+        f"Cancelled at a prompt (Ctrl-C or end of input).{suffix}",
         console=False,
     )
 
