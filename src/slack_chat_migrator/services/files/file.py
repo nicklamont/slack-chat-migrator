@@ -21,7 +21,11 @@ from slack_chat_migrator.constants import (
     GOOGLE_SHEETS_MIME_TYPE,
     SLACK_FILE_HOST_SUFFIXES,
 )
-from slack_chat_migrator.core.config import ConversationType, MigrationConfig
+from slack_chat_migrator.core.config import (
+    DEFAULT_SHARED_DRIVE_NAME,
+    ConversationType,
+    MigrationConfig,
+)
 from slack_chat_migrator.core.state import MigrationState
 from slack_chat_migrator.exceptions import APIError, DriveQuotaError
 from slack_chat_migrator.services.chat import ChatFileUploader
@@ -118,6 +122,11 @@ def _normalize_email(email: str) -> str:
 def _conversion_failed(result: UploadResult) -> bool:
     """Whether *result* failed only because Drive refused the conversion."""
     return bool(result.metadata.get(META_CONVERSION_FAILED))
+
+
+def _drive_file_url(drive_file_id: str) -> str:
+    """The Drive link of a file, for when Drive returned no ``webViewLink``."""
+    return f"https://drive.google.com/file/d/{drive_file_id}/view"
 
 
 #: What a Slack canvas or list becomes; see :class:`SlackDocument`.
@@ -480,7 +489,7 @@ class FileHandler:
             PermissionCheckError: If the admin can't add files to the
                 shared drive.
         """
-        fallback_name = "Imported Slack Attachments"
+        fallback_name = DEFAULT_SHARED_DRIVE_NAME
         try:
             # SharedDriveManager handles: validate configured ID → find by
             # name → create new drive.  No need to duplicate that here.
@@ -977,8 +986,7 @@ class FileHandler:
         )
         return UploadResult(
             upload_type="drive",
-            url=existing.url
-            or f"https://drive.google.com/file/d/{existing.file_id}/view",
+            url=existing.url or _drive_file_url(existing.file_id),
             drive_id=existing.file_id,
             name=name,
             mime_type=file_obj.get("mimetype"),
@@ -1606,7 +1614,7 @@ class FileHandler:
 
         return UploadResult(
             upload_type="drive",
-            url=upload.url or f"https://drive.google.com/file/d/{upload.file_id}/view",
+            url=upload.url or _drive_file_url(upload.file_id),
             drive_id=upload.file_id,
             name=name,
             mime_type=target_mime_type or mime_type,
@@ -1907,7 +1915,7 @@ class FileHandler:
                 )
             except DriveQuotaError:
                 flagged = False
-        url = f"https://drive.google.com/file/d/{drive_file_id}/view"
+        url = _drive_file_url(drive_file_id)
         undone = []
         if grant_to:
             undone.append(f"writer access for {grant_to}")

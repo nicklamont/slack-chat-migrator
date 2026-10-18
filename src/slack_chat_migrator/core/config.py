@@ -34,6 +34,8 @@ SPACE_MANAGER_CHOICES = ("admin", "creator")
 
 #: Shared drive name used when neither ``shared_drive.id`` nor
 #: ``shared_drive.name`` is set (a configured ``id`` wins over any name).
+#: It also names the regular Drive folder used when this account can't use
+#: shared drives.
 DEFAULT_SHARED_DRIVE_NAME = "Imported Slack Attachments"
 
 
