@@ -1290,6 +1290,75 @@ class TestPendingSweep:
         props = fake.files_db[result.drive_id]["appProperties"]
         assert props["slackGrantPending"] == "true"  # the next run grants again
 
+    def test_transfer_whose_flag_could_not_be_cleared_is_found_done(
+        self, tmp_path, downloads
+    ):
+        """After a transfer the admin is only a writer and can't transfer again."""
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        result = upload(run1, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+        fake.failing["files.update"] = ConnectionResetError("reset")
+        run1.retry_pending_permissions()  # transfers, but can't clear the flag
+        del fake.failing["files.update"]
+        assert fake.owners_of(result.drive_id) == ["alice@example.com"]
+        assert run1.get_file_statistics()["pending_clear_failures"] == 1
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        assert not [kw for kw in fake.permission_calls() if kw.get("transferOwnership")]
+        stats = run2.get_file_statistics()
+        assert stats["pending_retried"] == 1
+        assert stats["pending_retry_failed"] == 0
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert "slackOwnerPending" not in props
+
+    def test_transfer_of_a_file_someone_else_owns_is_kept_and_counted(
+        self, tmp_path, downloads, caplog
+    ):
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        result = upload(run1, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+        fake.files_db[result.drive_id]["owners_emails"] = ["carol@example.com"]
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.calls.clear()
+        run2.retry_pending_permissions()
+
+        assert not [kw for kw in fake.permission_calls() if kw.get("transferOwnership")]
+        stats = run2.get_file_statistics()
+        assert stats["pending_skipped_not_owner"] == 1
+        assert stats["pending_retry_failed"] == 0
+        props = fake.files_db[result.drive_id]["appProperties"]
+        assert props["slackOwnerPending"] == "true"
+        assert any("no longer owns" in r.getMessage() for r in caplog.records)
+
+    def test_relink_does_not_repeat_a_transfer_that_went_through(
+        self, tmp_path, downloads
+    ):
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        result = upload(run1, downloads, "c", "F1", "UA", b"mine")
+        fake.fail_transfer = False
+        fake.failing["files.update"] = ConnectionResetError("reset")
+        run1.retry_pending_permissions()
+        del fake.failing["files.update"]
+
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.calls.clear()
+        relinked = upload(run2, downloads, "c", "F1", "UA", b"mine")
+
+        assert relinked.drive_id == result.drive_id
+        assert not [kw for kw in fake.permission_calls() if kw.get("transferOwnership")]
+        stats = run2.get_file_statistics()
+        assert stats["ownership_transfer_failed"] == 0
+        assert (
+            "slackOwnerPending" not in (fake.files_db[result.drive_id]["appProperties"])
+        )
+
     def test_transfer_owner_is_mapped_again_by_slack_user_id(self, tmp_path, downloads):
         fake = FakeDrive(fail_transfer=True)
         run1 = make_handler(fake, tmp_path, shared=False, transfer=True)

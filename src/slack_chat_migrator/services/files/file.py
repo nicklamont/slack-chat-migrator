@@ -305,6 +305,7 @@ class FileHandler:
             "pending_skipped_unmapped": 0,
             "pending_skipped_external": 0,
             "pending_skipped_transfers_off": 0,
+            "pending_skipped_not_owner": 0,
             "folder_listing_failures": 0,
             "external_folder_grant_failures": 0,
             "folder_sync_failures": 0,
@@ -1675,6 +1676,12 @@ class FileHandler:
             )
             else None
         )
+        if (
+            owner
+            and from_earlier_run
+            and not self._repeat_transfer_needed(drive_file_id, owner)
+        ):
+            owner = None
         if from_earlier_run and poster and not pending.has_grant(drive_file_id, poster):
             poster = None  # the earlier run made this grant
 
@@ -1861,7 +1868,10 @@ class FileHandler:
         success clears the flag.  ``pending_retried`` and
         ``pending_retry_failed`` count grant and transfer attempts;
         ``pending_skipped_*`` count flags kept without an attempt (unknown
-        recipient, unmapped, external, transfers off).
+        recipient, unmapped, external, transfers off, or a file the admin no
+        longer owns).  A flagged transfer whose recipient already owns the
+        file (its flag couldn't be cleared) is cleared and counted as
+        retried, without a second transfer.
 
         Never raises a Drive error: a failed search is logged at ERROR and
         counted in ``pending_sweep_failures``, and this run's own flags are
@@ -1876,6 +1886,7 @@ class FileHandler:
             "unknown": [],
             "unmapped": [],
             "external": [],
+            "not_owner": [],
         }
         tally: Counter[str] = Counter()
         try:
@@ -1965,11 +1976,77 @@ class FileHandler:
             email = self._sweep_recipient(drive_file_id, target, skipped)
             if email is None:
                 continue
+            ownership = self._ownership(drive_file_id, email)
+            if ownership == "recipient":
+                self._transfer_found_done(drive_file_id, email)
+                self._count_retry(True, tally)
+                continue
+            if ownership == "other":
+                skipped["not_owner"].append(drive_file_id)
+                self._increment_stat("pending_skipped_not_owner")
+                continue
             transferred = self._transfer_file_ownership(drive_file_id, email)
             if transferred:
                 self._mark_granted(drive_file_id, email)
                 pending.set_owner(drive_file_id, email, False)
             self._count_retry(transferred, tally)
+
+    def _ownership(
+        self, drive_file_id: str, email: str
+    ) -> Literal["admin", "recipient", "other", "unknown"]:
+        """Who owns a file whose transfer to *email* is flagged.
+
+        A transfer that went through but whose flag couldn't be cleared
+        must not be sent again: Drive makes the previous owner a writer,
+        and only the owner can transfer.
+
+        Returns:
+            ``recipient`` if *email* already owns the file, ``admin`` if the
+            workspace admin still does, ``other`` if someone else does, and
+            ``unknown`` if Drive couldn't say (the transfer is then tried).
+        """
+        try:
+            file = self.drive_service.get_file(
+                drive_file_id, fields="ownedByMe, owners(emailAddress)"
+            )
+        except DRIVE_CALL_CANDIDATES as e:
+            if not is_drive_call_error(e):
+                raise
+            return "unknown"
+        owners = {
+            _normalize_email(owner["emailAddress"])
+            for owner in file.get("owners") or []
+            if isinstance(owner, Mapping) and isinstance(owner.get("emailAddress"), str)
+        }
+        if _normalize_email(email) in owners:
+            return "recipient"
+        if file.get("ownedByMe") is True:
+            return "admin"
+        if owners or file.get("ownedByMe") is False:
+            return "other"
+        return "unknown"
+
+    def _transfer_found_done(self, drive_file_id: str, email: str) -> None:
+        """Clear a pending transfer that an earlier attempt already made."""
+        log_with_context(
+            logging.DEBUG,
+            f"{email} already owns Drive file {drive_file_id}; clearing its"
+            " pending transfer",
+            drive_file_id=drive_file_id,
+        )
+        self._mark_granted(drive_file_id, email)
+        self.drive_uploader.pending.set_owner(drive_file_id, email, False)
+
+    def _repeat_transfer_needed(self, drive_file_id: str, email: str) -> bool:
+        """Whether a relinked file's pending transfer to *email* is still due.
+
+        False if *email* already owns it (the flag is cleared) or someone
+        other than the admin does (the flag is kept for the sweep).
+        """
+        ownership = self._ownership(drive_file_id, email)
+        if ownership == "recipient":
+            self._transfer_found_done(drive_file_id, email)
+        return ownership in ("admin", "unknown")
 
     def _sweep_recipient(
         self, drive_file_id: str, target: Target, skipped: dict[str, list[str]]
@@ -2021,6 +2098,11 @@ class FileHandler:
                 "Slack users",
             ),
             "external": ("their recipient is now outside the workspace", "emails"),
+            "not_owner": (
+                "the workspace admin no longer owns the file, and only its owner"
+                " can transfer it",
+                "Drive files",
+            ),
         }
         for kind, items in skipped.items():
             if not items:
@@ -2101,6 +2183,7 @@ class FileHandler:
             "pending_skipped_transfers_off": self.file_stats[
                 "pending_skipped_transfers_off"
             ],
+            "pending_skipped_not_owner": self.file_stats["pending_skipped_not_owner"],
             "folder_listing_failures": self.file_stats["folder_listing_failures"],
             "external_folder_grant_failures": self.file_stats[
                 "external_folder_grant_failures"

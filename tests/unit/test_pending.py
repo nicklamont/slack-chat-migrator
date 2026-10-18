@@ -123,7 +123,7 @@ class TestGrantFlags:
         assert pending.grants == {}
         (warning,) = [r.getMessage() for r in caplog.records]
         assert "Could not clear the pending flag on Drive file f1" in warning
-        assert "the next run's sweep makes it again" in warning
+        assert "the next run's sweep clears it" in warning
 
 
 class TestEncoding:

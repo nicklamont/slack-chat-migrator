@@ -9,6 +9,10 @@ Like Drive, it answers 404 for a shared drive's file (or for creating a file
 in a shared drive's folder) unless ``supportsAllDrives=True`` is passed,
 lists shared drive items only with ``includeItemsFromAllDrives=True``, and
 rejects ``corpora="drive"`` without ``driveId`` and both of those flags.
+
+Files outside shared drives are owned by ``admin`` (the impersonated user)
+until a transfer.  As in Drive, only the owner can transfer a file, and the
+previous owner becomes a writer.
 """
 
 from __future__ import annotations
@@ -82,6 +86,7 @@ class FakeDrive:
         honor_drive_query: bool = True,
         reject_grants_to: set[str] | None = None,
         fail_restriction: bool = False,
+        admin: str = "admin@example.com",
     ):
         self.files_db: dict[str, dict[str, Any]] = {}
         self.permissions_db: dict[str, list[dict[str, Any]]] = {}
@@ -103,6 +108,8 @@ class FakeDrive:
         self.failing: dict[str, BaseException] = {}
         # files.list query -> error to raise, or None to answer it.
         self.fail_query: Callable[[str], BaseException | None] | None = None
+        # The impersonated user: the owner of new files outside shared drives.
+        self.admin = admin
 
     # -- helpers ------------------------------------------------------------
 
@@ -131,6 +138,22 @@ class FakeDrive:
             seen.add(current)
             pending.extend((self.files_db.get(current) or {}).get("parents", []))
         return None
+
+    def owners_of(self, file_id: str) -> list[str]:
+        """The file's owners: none in a shared drive, else the admin by default."""
+        if self.drive_of(file_id):
+            return []
+        record = self.files_db.get(file_id) or {}
+        return list(record.get("owners_emails", [self.admin]))
+
+    def with_owners(self, record: dict[str, Any]) -> dict[str, Any]:
+        """A copy of *record* as Drive returns it, with owners and ownedByMe."""
+        out = {k: v for k, v in record.items() if k != "owners_emails"}
+        if not self.drive_of(record["id"]):
+            owners = self.owners_of(record["id"])
+            out["owners"] = [{"emailAddress": email} for email in owners]
+            out["ownedByMe"] = self.admin in owners
+        return out
 
     def check_access(self, file_id: str, kw: dict[str, Any]) -> None:
         """Answer 404 for a shared drive's file without supportsAllDrives."""
@@ -261,7 +284,7 @@ class _Files:
                 if drive and not all_drives:
                     continue
                 if _matches(f, q):
-                    matched.append(dict(f))
+                    matched.append(self.d.with_owners(f))
             page, token = _page(matched, kw, 100, self.d.file_page_cap)
             out: dict[str, Any] = {"files": page}
             if token:
@@ -332,7 +355,7 @@ class _Files:
             if not record:
                 raise http_error(404, "not found")
             self.d.check_access(kw["fileId"], kw)
-            return dict(record)
+            return self.d.with_owners(record)
 
         return Req(run, "files.get", kw, self.d)
 
@@ -358,7 +381,7 @@ class _Files:
                         props[key] = value
                 record["appProperties"] = props
             record.update(body)
-            return dict(record)
+            return self.d.with_owners(record)
 
         return Req(run, "files.update", kw, self.d)
 
@@ -390,9 +413,25 @@ class _Permissions:
                     )
                 if self.d.fail_transfer:
                     raise http_error(403, "forbidden")
+                if self.d.admin not in self.d.owners_of(kw["fileId"]):
+                    # Drive: only the owner can transfer ownership.
+                    raise http_error(403, "insufficientFilePermissions")
             if body.get("emailAddress") in self.d.reject_grants_to:
                 raise http_error(400, "Sharing outside the domain is not allowed")
             perms = self.d.permissions_db.setdefault(kw["fileId"], [])
+            if kw.get("transferOwnership"):
+                # The previous owner is downgraded to writer.
+                record = self.d.files_db.setdefault(kw["fileId"], {"id": kw["fileId"]})
+                record["owners_emails"] = [body.get("emailAddress")]
+                perms.append(
+                    {
+                        "id": f"perm{len(perms) + 1}-{kw['fileId']}",
+                        "type": "user",
+                        "role": "writer",
+                        "emailAddress": self.d.admin,
+                        "permissionDetails": [{"inherited": False}],
+                    }
+                )
             perm = {
                 "id": f"perm{len(perms) + 1}-{kw['fileId']}",
                 "type": body.get("type", "user"),

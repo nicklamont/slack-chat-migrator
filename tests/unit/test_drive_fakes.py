@@ -81,3 +81,37 @@ class TestListScope:
         )
 
         assert {f["id"] for f in listed} == {"CH", "in_drive"}
+
+
+class TestOwnership:
+    """Only the owner can transfer, and the old owner becomes a writer."""
+
+    def _transfer(self, fake, file_id, email):
+        body = {"type": "user", "role": "owner", "emailAddress": email}
+        return fake.permissions().create(
+            fileId=file_id, body=body, transferOwnership=True
+        )
+
+    def test_transfer_moves_ownership_and_downgrades_the_admin(self):
+        fake = FakeDrive()
+        fake.add_file("F", parents=["ROOT"])
+
+        self._transfer(fake, "F", "alice@example.com").execute()
+
+        got = fake.files().get(fileId="F").execute()
+        assert got["owners"] == [{"emailAddress": "alice@example.com"}]
+        assert got["ownedByMe"] is False
+        roles = {p["emailAddress"]: p["role"] for p in fake.permissions_db["F"]}
+        assert roles == {"admin@example.com": "writer", "alice@example.com": "owner"}
+
+    def test_a_non_owner_cannot_transfer(self):
+        fake = FakeDrive()
+        fake.add_file("F", parents=["ROOT"])
+        self._transfer(fake, "F", "alice@example.com").execute()
+
+        assert _status(self._transfer(fake, "F", "bob@example.com")) == 403
+
+    def test_shared_drive_files_have_no_owners(self):
+        got = _fake().files().get(fileId="in_drive", supportsAllDrives=True).execute()
+
+        assert "owners" not in got

@@ -164,8 +164,8 @@ class FileUploadStats(TypedDict):
     pending_retry_failed: int
     #: Pending flags that couldn't be stored on their Drive file.
     pending_flag_failures: int
-    #: Flags of successful retries that couldn't be cleared (made again
-    #: by the next run's sweep).
+    #: Flags of successful retries that couldn't be cleared (cleared by the
+    #: next run's sweep).
     pending_clear_failures: int
     #: Sweeps whose search for flagged files failed.
     pending_sweep_failures: int
@@ -177,6 +177,9 @@ class FileUploadStats(TypedDict):
     pending_skipped_external: int
     #: Pending transfers kept because transfers are off (or on a shared drive).
     pending_skipped_transfers_off: int
+    #: Pending transfers kept because someone other than the admin owns the
+    #: file, and only its owner can transfer it.
+    pending_skipped_not_owner: int
     #: Drive folders whose file listing failed at least once.
     folder_listing_failures: int
     #: Channel-folder grants to external members that Drive refused.

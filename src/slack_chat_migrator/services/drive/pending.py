@@ -339,7 +339,8 @@ class PendingPermissions:
                 message = (
                     f"Could not clear the pending flag on Drive file {file_id}"
                     f" after its grant or transfer succeeded ({e}); the next"
-                    " run's sweep makes it again, which is harmless"
+                    " run's sweep clears it (a grant is made again, which is"
+                    " harmless; a transfer is found done)"
                 )
             else:
                 message = (
