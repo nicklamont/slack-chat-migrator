@@ -2020,7 +2020,7 @@ class FileHandler:
             "pending_clear_failures" if clearing else "pending_flag_failures"
         )
 
-    def get_file_statistics(self) -> dict[str, Any]:
+    def get_file_statistics(self) -> FileUploadStats:
         """Get detailed file upload statistics.
 
         Returns:
@@ -2070,7 +2070,7 @@ class FileHandler:
             "files_by_channel": dict(self.file_stats["files_by_channel"]),
             "success_rate": successful / max(1, successful + failed) * 100,
         }
-        return dict(stats)
+        return stats
 
     def _transfer_file_ownership(self, file_id: str, new_owner_email: str) -> bool:
         """Transfer ownership of a file to a new owner.
