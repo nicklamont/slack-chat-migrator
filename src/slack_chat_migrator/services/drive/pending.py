@@ -188,6 +188,9 @@ class PendingPermissions:
         self._owners: dict[str, Target] = {}
         # (file ID, grant key) pending in memory only (too many on the file).
         self._unstored: set[tuple[str, str]] = set()
+        # (file ID, grant key or OWNER_TARGET) whose pending flag is known to
+        # be on the file: written by this run or read from the file.
+        self._on_file: set[tuple[str, str]] = set()
 
     @property
     def grants(self) -> Mapping[str, Mapping[str, Target]]:
@@ -213,12 +216,14 @@ class PendingPermissions:
                     known = targets.get(key)
                     targets[key] = known.merged(stored) if known else stored
                     self._unstored.discard((file_id, key))
+                    self._on_file.add((file_id, key))
             if not targets:
                 del self._grants[file_id]
         if app_properties.get(OWNER_MARKER) == MARKER_VALUE:
             stored = decode_target(app_properties.get(OWNER_TARGET))
             known = self._owners.get(file_id)
             self._owners[file_id] = known.merged(stored) if known else stored
+            self._on_file.add((file_id, OWNER_TARGET))
 
     def has_grant(self, file_id: str, email: str) -> bool:
         """Whether *email*'s grant on the file is pending."""
@@ -239,10 +244,11 @@ class PendingPermissions:
     ) -> bool:
         """Flag *email*'s grant on the file as pending, or clear the flag.
 
-        Nothing is sent when the flag doesn't change; a flag that is already
-        set only learns *user_id* and *email*.  Storing it is best effort: a
-        failure is logged as a warning and reported to *on_write_failure*,
-        and only this run remembers the flag.
+        Nothing is sent when the flag is already on the file; it only learns
+        *user_id* and *email*.  A flag this run holds but couldn't store is
+        written again.  Storing it is best effort: a failure is logged as a
+        warning and reported to *on_write_failure*, and only this run
+        remembers the flag.
 
         Args:
             file_id: The Drive file.
@@ -266,8 +272,12 @@ class PendingPermissions:
         targets = self._grants.setdefault(file_id, {})
         known = targets.get(key)
         if known is not None:
-            targets[key] = known.merged(target)
-            return True
+            target = targets[key] = known.merged(target)
+            if (file_id, key) in self._on_file:
+                return True
+            if (file_id, key) in self._unstored:
+                return False
+            return self._store_grant(file_id, key, target, shared_drive_id)
         stored = sum(1 for k in targets if (file_id, k) not in self._unstored)
         targets[key] = target
         if stored >= MAX_PENDING_GRANTS:
@@ -283,11 +293,20 @@ class PendingPermissions:
             )
             self._on_write_failure(file_id, False)
             return False
+        return self._store_grant(file_id, key, target, shared_drive_id)
+
+    def _store_grant(
+        self, file_id: str, key: str, target: Target, shared_drive_id: str | None
+    ) -> bool:
+        """Write a pending grant's flag; True if it is now on the file."""
         props: dict[str, str | None] = {
             GRANT_MARKER: MARKER_VALUE,
             key: encode_target(key, target),
         }
-        return self._write(file_id, props, shared_drive_id, clearing=False)
+        if not self._write(file_id, props, shared_drive_id, clearing=False):
+            return False
+        self._on_file.add((file_id, key))
+        return True
 
     def clear_grant(
         self, file_id: str, key: str, shared_drive_id: str | None = None
@@ -302,6 +321,7 @@ class PendingPermissions:
         del targets[key]
         if not targets:
             del self._grants[file_id]
+        self._on_file.discard((file_id, key))
         props: dict[str, str | None] = {}
         if (file_id, key) in self._unstored:
             self._unstored.discard((file_id, key))
@@ -332,20 +352,27 @@ class PendingPermissions:
             if known is None:
                 return True
             del self._owners[file_id]
+            self._on_file.discard((file_id, OWNER_TARGET))
             self._write(
                 file_id, {OWNER_MARKER: None, OWNER_TARGET: None}, None, clearing=True
             )
             return True
         target = Target(user_id, email)
         if known is not None and known.is_for(user_id, email):
-            self._owners[file_id] = known.merged(target)
-            return True
-        self._owners[file_id] = target
+            target = self._owners[file_id] = known.merged(target)
+            if (file_id, OWNER_TARGET) in self._on_file:
+                return True
+        else:
+            self._owners[file_id] = target
+            self._on_file.discard((file_id, OWNER_TARGET))
         props: dict[str, str | None] = {
             OWNER_MARKER: MARKER_VALUE,
             OWNER_TARGET: encode_target(OWNER_TARGET, target),
         }
-        return self._write(file_id, props, None, clearing=False)
+        if not self._write(file_id, props, None, clearing=False):
+            return False
+        self._on_file.add((file_id, OWNER_TARGET))
+        return True
 
     def _write(
         self,
