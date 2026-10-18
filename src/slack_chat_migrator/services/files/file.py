@@ -1980,6 +1980,10 @@ class FileHandler:
                 " (their flags are kept, and the next run retries them)",
             )
 
+    def count_sweep_failure(self) -> None:
+        """Count a sweep that ended on an unexpected error (logged by the caller)."""
+        self._increment_stat("pending_sweep_failures")
+
     def _find_flagged_files(self) -> None:
         """Read the flags earlier runs left on this migration's Drive files.
 

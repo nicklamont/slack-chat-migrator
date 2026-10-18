@@ -2085,6 +2085,7 @@ class TestPendingSweepNeverFailsTheRun:
         mock_clear_cp.assert_called_once()  # the run finished
         errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
         assert any("Retrying pending Drive grants" in msg for msg in errors)
+        m.file_handler.count_sweep_failure.assert_called_once_with()
 
     def test_sweep_error_does_not_hide_an_abort(
         self,

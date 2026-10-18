@@ -167,7 +167,8 @@ class FileUploadStats(TypedDict):
     #: Flags of successful retries that couldn't be cleared (cleared by the
     #: next run's sweep).
     pending_clear_failures: int
-    #: Sweeps whose search for flagged files failed.
+    #: Sweeps whose search for flagged files failed, that a used-up quota
+    #: ended, or that crashed.
     pending_sweep_failures: int
     #: Flags kept without a retry because the recipient wasn't stored.
     pending_skipped_unknown: int

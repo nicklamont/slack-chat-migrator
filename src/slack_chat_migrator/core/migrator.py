@@ -464,8 +464,9 @@ class SlackToChatMigrator:
         """Run the file handler's sweep of pending Drive grants and transfers.
 
         The run's outcome is decided when this runs, so nothing the sweep
-        raises may change it: an error is logged and the flags stay on the
-        files for the next run.
+        raises may change it: an error is logged, counted in the report's
+        ``pending_sweep_failures``, and the flags stay on the files for the
+        next run.  Ctrl-C (KeyboardInterrupt) is not caught.
         """
         file_handler = getattr(self, "file_handler", None)
         if file_handler is None:
@@ -480,6 +481,7 @@ class SlackToChatMigrator:
                 " for the next run",
                 exc_info=True,
             )
+            file_handler.count_sweep_failure()
 
     def migrate(self, progress_tracker: ProgressTracker | None = None) -> bool:
         """Main migration function that orchestrates the entire process.

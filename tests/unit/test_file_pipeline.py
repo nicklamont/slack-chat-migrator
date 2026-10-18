@@ -1530,6 +1530,13 @@ class TestPendingSweep:
         assert retry["body"]["emailAddress"] == "alice.new@example.com"
         assert run2.get_file_statistics()["pending_retried"] == 1
 
+    def test_a_crashed_sweep_is_counted(self, tmp_path):
+        handler = make_handler(FakeDrive(), tmp_path)
+
+        handler.count_sweep_failure()
+
+        assert handler.get_file_statistics()["pending_sweep_failures"] == 1
+
     def test_nothing_to_do_without_drive(self, tmp_path):
         handler = make_handler(FakeDrive(), tmp_path)
         handler.folder_id = None
