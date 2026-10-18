@@ -839,13 +839,15 @@ src/slack_chat_migrator/
 │   │   ├── drive_uploader.py      # Drive file upload logic
 │   │   ├── dry_run_service.py     # No-op Drive API for dry-run mode
 │   │   ├── folder_manager.py      # Drive folder creation and management
+│   │   ├── pending.py             # Failed grants/transfers flagged on files for the sweep
 │   │   └── shared_drive_manager.py # Shared drive creation and management
 │   ├── drive_adapter.py           # Typed wrapper over raw Drive API service
 │   ├── export_inspector.py        # Slack export analysis (channel/user/message stats)
 │   ├── files/                     # Slack file handling
 │   │   ├── file.py                # FileHandler class (delegates to download/permissions)
 │   │   ├── file_download.py       # Slack file download logic
-│   │   └── file_permissions.py    # Drive file ownership/sharing
+│   │   ├── file_permissions.py    # Drive file ownership/sharing
+│   │   └── temp_files.py          # Per-run temp dir for downloads, stale-dir cleanup
 │   ├── messages/                  # Message migration pipeline
 │   │   ├── message_attachments.py # Attachment processing
 │   │   ├── message_builder.py     # Message payload construction (Slack → Chat format)
