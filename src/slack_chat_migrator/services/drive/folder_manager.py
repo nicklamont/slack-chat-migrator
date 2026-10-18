@@ -21,11 +21,10 @@ from slack_chat_migrator.constants import (
 from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_CANDIDATES,
     PermissionChange,
-    http_status,
     is_drive_call_error,
     is_transient_error,
 )
-from slack_chat_migrator.utils.api import escape_drive_query_value
+from slack_chat_migrator.utils.api import escape_drive_query_value, http_status
 from slack_chat_migrator.utils.domains import (
     internal_domains,
     is_external_email,

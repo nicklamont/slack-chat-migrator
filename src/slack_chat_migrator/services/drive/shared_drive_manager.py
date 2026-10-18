@@ -26,12 +26,12 @@ from slack_chat_migrator.exceptions import (
 from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_CANDIDATES,
     drive_quota_error,
-    http_status,
     is_drive_call_error,
     quota_reason,
 )
 from slack_chat_migrator.utils.api import (
     escape_drive_query_value,
+    http_status,
     is_rate_limit_error,
 )
 from slack_chat_migrator.utils.logging import (

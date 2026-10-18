@@ -44,6 +44,7 @@ from slack_chat_migrator.utils.api import (
     HTTP_REQUEST_TIMEOUT,
     RETRYABLE_NETWORK_ERRORS,
     http_error_reasons,
+    http_status,
     is_rate_limit_error,
 )
 
@@ -179,20 +180,6 @@ def drive_quota_error(
         " this run stopped.",
         reason,
     )
-
-
-def http_status(error: BaseException) -> int | None:
-    """The HTTP status of an API error, or None when it has none.
-
-    A ``BatchError`` may have no ``resp``.  Note: stands in for
-    ``utils.api.http_status``, which arrives with the CLI branch; swap the
-    callers over when it does.
-    """
-    status = getattr(getattr(error, "resp", None), "status", None)
-    try:
-        return int(status) if status is not None else None
-    except (TypeError, ValueError):
-        return None
 
 
 def is_network_error(error: BaseException) -> bool:

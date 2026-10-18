@@ -17,7 +17,6 @@ from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_CANDIDATES,
     DRIVE_CALL_ERRORS,
     PermissionChange,
-    http_status,
     is_drive_call_error,
     is_fatal_local_error,
     is_network_error,
@@ -43,6 +42,7 @@ from slack_chat_migrator.constants import (
 )
 from slack_chat_migrator.utils.api import (
     escape_drive_query_value,
+    http_status,
 )
 from slack_chat_migrator.utils.logging import (
     log_with_context,
