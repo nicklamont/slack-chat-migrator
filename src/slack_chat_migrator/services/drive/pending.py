@@ -79,6 +79,9 @@ def _normalize(email: str) -> str:
 class Target:
     """Who a pending grant or transfer is for.
 
+    The email is normalized (stripped and lower-cased), and an empty value
+    becomes None.  A flag stored as ``"-"`` reads as :meth:`unknown`.
+
     Attributes:
         user_id: The Slack user ID, when known; a later run maps it again.
         email: The email the flagging run used, when known.
@@ -86,6 +89,23 @@ class Target:
 
     user_id: str | None = None
     email: str | None = None
+
+    def __post_init__(self) -> None:
+        """Normalize the email; turn empty values into None."""
+        user_id = self.user_id.strip() if isinstance(self.user_id, str) else ""
+        email = _normalize(self.email) if isinstance(self.email, str) else ""
+        object.__setattr__(self, "user_id", user_id or None)
+        object.__setattr__(self, "email", email or None)
+
+    @classmethod
+    def unknown(cls) -> Target:
+        """The target of a flag whose recipient wasn't stored."""
+        return cls(None, None)
+
+    @property
+    def is_known(self) -> bool:
+        """Whether a Slack user ID or an email is known."""
+        return bool(self.user_id or self.email)
 
     def merged(self, other: Target) -> Target:
         """This target, with what only *other* knows filled in."""
@@ -125,10 +145,10 @@ def encode_target(key: str, target: Target) -> str:
 def decode_target(value: object) -> Target:
     """Read a stored target; an email alone is how earlier versions stored it."""
     if not isinstance(value, str):
-        return Target()
+        return Target.unknown()
     value = value.strip()
     if not value or value == UNKNOWN_TARGET:
-        return Target()
+        return Target.unknown()
     if " " in value:
         user_id, email = value.split(" ", 1)
         return Target(user_id or None, email.strip() or None)

@@ -163,7 +163,7 @@ class TestEncoding:
             (Target("U1", "a" * 100 + "@example.com"), "U1"),
             (Target(None, "bob@example.com"), "bob@example.com"),
             (Target("U1", None), "U1"),
-            (Target(), UNKNOWN_TARGET),
+            (Target.unknown(), UNKNOWN_TARGET),
         ],
         ids=["both", "id-when-both-dont-fit", "email-only", "id-only", "nothing"],
     )
@@ -176,8 +176,8 @@ class TestEncoding:
             ("U1 bob@example.com", Target("U1", "bob@example.com")),
             ("U1", Target("U1", None)),
             ("bob@example.com", Target(None, "bob@example.com")),  # older runs
-            (UNKNOWN_TARGET, Target()),
-            (None, Target()),
+            (UNKNOWN_TARGET, Target.unknown()),
+            (None, Target.unknown()),
         ],
     )
     def test_stored_values_are_read_back(self, value, target):
@@ -219,6 +219,18 @@ class TestEncoding:
 
         assert _last_props(pending)["slackOwner"] == "UC carol@example.com"
         assert pending.owner("f1") == Target("UC", "carol@example.com")
+
+
+class TestTarget:
+    def test_email_is_normalized_when_built(self):
+        assert Target(" U1 ", " Bob@Example.COM ") == Target("U1", "bob@example.com")
+
+    def test_empty_values_are_unknown(self):
+        target = Target("", "  ")
+
+        assert target == Target.unknown()
+        assert not target.is_known
+        assert Target(email="a@example.com").is_known
 
 
 class TestUserIdFirst:
@@ -304,7 +316,7 @@ class TestRead:
         pending.set_owner("f1", "alice@example.com", True)
 
         with pytest.raises(TypeError):
-            pending.owners["f2"] = Target()  # type: ignore[index]
+            pending.owners["f2"] = Target.unknown()  # type: ignore[index]
         with pytest.raises(TypeError):
             pending.grants["f2"] = {}  # type: ignore[index]
 
