@@ -115,3 +115,13 @@ class TestOwnership:
         got = _fake().files().get(fileId="in_drive", supportsAllDrives=True).execute()
 
         assert "owners" not in got
+
+
+def test_a_pagination_loop_fails_fast():
+    fake = FakeDrive(file_page_cap=1)
+    fake.add_file("A", parents=["ROOT"])
+    fake.add_file("B", parents=["ROOT"])
+
+    with pytest.raises(AssertionError, match="pagination loop"):
+        for _ in range(1000):  # never passes the nextPageToken it gets
+            fake.files().list(q="trashed=false").execute()

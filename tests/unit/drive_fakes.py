@@ -26,6 +26,9 @@ from googleapiclient.errors import HttpError
 from httplib2 import Response
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
+#: A list request repeated this often with the same page token is a
+#: pagination loop: fail the test instead of hanging it.
+MAX_SAME_PAGE_REQUESTS = 100
 VALID_ROLES = {"owner", "organizer", "fileOrganizer", "writer", "commenter", "reader"}
 
 
@@ -110,6 +113,8 @@ class FakeDrive:
         self.fail_query: Callable[[str], BaseException | None] | None = None
         # The impersonated user: the owner of new files outside shared drives.
         self.admin = admin
+        # (method, request) -> how often it was listed; see check_page_loop.
+        self._page_requests: dict[tuple[str, str], int] = {}
 
     # -- helpers ------------------------------------------------------------
 
@@ -159,6 +164,17 @@ class FakeDrive:
         """Answer 404 for a shared drive's file without supportsAllDrives."""
         if self.drive_of(file_id) and kw.get("supportsAllDrives") is not True:
             raise http_error(404, f"File not found: {file_id}.")
+
+    def check_page_loop(self, method: str, kw: dict[str, Any]) -> None:
+        """Fail fast when the same page is requested over and over."""
+        key = (method, repr(sorted(kw.items(), key=lambda item: item[0])))
+        seen = self._page_requests.get(key, 0) + 1
+        self._page_requests[key] = seen
+        if seen > MAX_SAME_PAGE_REQUESTS:
+            raise AssertionError(
+                f"{method} was asked for the same page {seen} times: a"
+                " pagination loop that doesn't pass nextPageToken"
+            )
 
     def count(self, method: str) -> int:
         return sum(1 for name, _ in self.calls if name == method)
@@ -255,6 +271,7 @@ class _Files:
 
     def list(self, **kw):
         self.d.calls.append(("files.list", kw))
+        self.d.check_page_loop("files.list", kw)
 
         def run():
             q = kw.get("q", "")
@@ -446,6 +463,7 @@ class _Permissions:
 
     def list(self, **kw):
         self.d.calls.append(("permissions.list", kw))
+        self.d.check_page_loop("permissions.list", kw)
 
         def run():
             self.d.check_access(kw["fileId"], kw)
@@ -490,6 +508,7 @@ class _Drives:
 
     def list(self, **kw):
         self.d.calls.append(("drives.list", kw))
+        self.d.check_page_loop("drives.list", kw)
 
         def run():
             drives = [_with_capabilities(d) for d in self.d.drives_db]
