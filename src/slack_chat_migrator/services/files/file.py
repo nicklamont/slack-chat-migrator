@@ -2048,12 +2048,8 @@ class FileHandler:
             error: Why the transfer failed, when known.
             user_id: The new owner's Slack user ID, stored with the flag.
         """
-        self.drive_uploader.pending.set_owner(
-            drive_file_id,
-            new_owner_email,
-            not transferred,
-            user_id=None if transferred else user_id,
-        )
+        # Counted and logged before the flag is written: that write can
+        # raise DriveQuotaError.
         if transferred:
             # The owner needs no writer grant when the file is linked again.
             self._mark_granted(drive_file_id, new_owner_email)
@@ -2065,6 +2061,7 @@ class FileHandler:
                 file_id=file_id,
                 drive_file_id=drive_file_id,
             )
+            self.drive_uploader.pending.set_owner(drive_file_id, new_owner_email, False)
             return
 
         self._increment_stat("ownership_transfer_failed")
@@ -2076,6 +2073,9 @@ class FileHandler:
             channel=channel,
             file_id=file_id,
             drive_file_id=drive_file_id,
+        )
+        self.drive_uploader.pending.set_owner(
+            drive_file_id, new_owner_email, True, user_id=user_id
         )
 
     def retry_pending_permissions(self) -> None:

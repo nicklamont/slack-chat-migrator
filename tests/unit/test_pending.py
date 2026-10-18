@@ -84,6 +84,24 @@ class TestGrantFlags:
         pending.drive_service.update_file.assert_not_called()
         assert pending.grants["f1"][key] == Target("UB", "bob@example.com")
 
+    def test_a_flag_that_could_not_be_stored_is_written_again(self):
+        """Being in memory isn't being on the file."""
+        pending = _pending([])
+        update = pending.drive_service.update_file
+        update.side_effect = ConnectionResetError("reset")
+
+        assert pending.set_grant("f1", "bob@example.com", True) is False
+        assert pending.set_owner("f1", "alice@example.com", True) is False
+        update.side_effect = None
+
+        assert pending.set_grant("f1", "bob@example.com", True) is True
+        assert pending.set_owner("f1", "alice@example.com", True) is True
+        assert update.call_count == 4
+        # Now on the file: nothing more is sent.
+        assert pending.set_grant("f1", "bob@example.com", True) is True
+        assert pending.set_owner("f1", "alice@example.com", True) is True
+        assert update.call_count == 4
+
     def test_clear_by_key_clears_a_grant_stored_for_an_old_email(self):
         pending = _pending()
         key = grant_key("old@example.com")

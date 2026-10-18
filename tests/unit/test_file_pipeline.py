@@ -822,6 +822,49 @@ class TestQuotaStopsTheRun:
         assert fake.owners_of(drive_id) == ["alice@example.com"]
         assert "bob@example.com" in self._writers(fake, drive_id)
 
+    def test_grant_whose_flag_write_hit_the_quota_is_listed(
+        self, tmp_path, downloads, caplog
+    ):
+        """The grant fails (a 400), then its flag write hits the quota."""
+        fake = FakeDrive(reject_grants_to={"bob@example.com"})
+        run1 = make_handler(fake, tmp_path)
+        fake.failing["files.update"] = quota_error("dailyLimitExceeded")
+
+        with pytest.raises(DriveQuotaError):
+            upload(run1, downloads, "c", "F1", "UA", b"1", sender="bob@example.com")
+
+        record = self._file(fake, "F1")
+        assert "slackGrantPending" not in record["appProperties"]
+        stats = run1.get_file_statistics()
+        assert stats["poster_grant_failures"] == 1
+        assert stats["permissions_lost_on_quota_stop"] == 1
+        assert stats["permissions_lost_details"][0]["grant_to"] == ["bob@example.com"]
+        (error,) = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert "make them by hand" in error
+        assert "flagged on the file, so" not in error
+
+    def test_transfer_whose_flag_write_hit_the_quota_is_counted_and_listed(
+        self, tmp_path, downloads, caplog
+    ):
+        """The transfer fails (a 403), then its flag write hits the quota."""
+        fake = FakeDrive(fail_transfer=True)
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.failing["files.update"] = quota_error("dailyLimitExceeded")
+
+        with pytest.raises(DriveQuotaError):
+            upload(run1, downloads, "c", "F1", "UA", b"1")
+
+        assert "slackOwnerPending" not in self._file(fake, "F1")["appProperties"]
+        stats = run1.get_file_statistics()
+        assert stats["ownership_transfer_failed"] == 1
+        assert stats["permissions_lost_on_quota_stop"] == 1
+        assert stats["permissions_lost_details"][0]["transfer_to"] == (
+            "alice@example.com"
+        )
+        assert any(
+            "Could not transfer ownership" in r.getMessage() for r in caplog.records
+        )
+
     def test_unflagged_loss_is_logged_and_listed_for_a_manual_fix(
         self, tmp_path, downloads, caplog
     ):
