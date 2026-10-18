@@ -271,6 +271,11 @@ class UploadResult:
     #: wrong-sized download, a host off the allow-list, a 4xx refusal).
     retryable: bool = False
 
+    def __post_init__(self) -> None:
+        """Reject ``retryable`` on an upload that didn't fail."""
+        if self.retryable and (self.success or self.skipped):
+            raise ValueError("only a failed upload can be retryable")
+
     @property
     def success(self) -> bool:
         """True when the file was uploaded (direct or Drive)."""

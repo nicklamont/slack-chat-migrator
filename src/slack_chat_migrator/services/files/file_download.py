@@ -43,6 +43,8 @@ from slack_chat_migrator.constants import (
     HTTP_FORBIDDEN,
     HTTP_NOT_FOUND,
     HTTP_OK,
+    HTTP_RATE_LIMIT,
+    HTTP_SERVER_ERROR_MIN,
     HTTP_UNAUTHORIZED,
     SLACK_FILE_HOST_SUFFIXES,
 )
@@ -52,6 +54,7 @@ from slack_chat_migrator.services.files.temp_files import (
     safe_temp_suffix,
 )
 from slack_chat_migrator.types import UploadResult
+from slack_chat_migrator.utils.api import HTTP_REQUEST_TIMEOUT
 from slack_chat_migrator.utils.logging import log_with_context
 
 logger = logging.getLogger("slack_chat_migrator")
@@ -78,13 +81,16 @@ REASON_NO_ACCESS = "no_access"
 REASON_NO_URL = "no_url"
 
 # Reasons a download FAILED although the file exists.  Other failures are
-# ``http_<status>`` (429, 5xx and other 4xx), ``network_error:<Type>`` and
-# ``write_error``.
+# ``http_<status>`` (429, 5xx and other 4xx; ``http_status`` is set),
+# ``network_error:<Type>`` and ``write_error``.
 REASON_AUTH = "auth"  # HTTP 401/403: missing, expired or wrong token
 REASON_HTML_PAGE = "html_page"  # a sign-in page instead of the file
-REASON_DISALLOWED_HOST = "disallowed_host"  # off SLACK_FILE_HOST_SUFFIXES
+# Off SLACK_FILE_HOST_SUFFIXES, or a link (or redirect) that isn't HTTPS.
+REASON_DISALLOWED_HOST = "disallowed_host"
 REASON_TOO_MANY_REDIRECTS = "too_many_redirects"
 REASON_SIZE_MISMATCH = "size_mismatch"
+#: Prefix of the reason for a download that failed on the network.
+REASON_NETWORK_ERROR = "network_error"
 
 #: Failures that point at a missing or rejected Slack token.
 AUTH_FAILURE_REASONS = frozenset({REASON_AUTH, REASON_HTML_PAGE})
@@ -147,19 +153,20 @@ class DownloadResult:
     def retryable(self) -> bool:
         """For ``FAILED``: whether a later attempt may succeed.
 
-        True for network errors and HTTP 408, 429 and 5xx.  Refusals (401,
-        403, a sign-in page, a host off the allow-list), a wrong length,
-        too many redirects, other 4xx and local write errors are permanent.
+        True for network errors and a final HTTP status of 408, 429 or 5xx
+        (read from :attr:`http_status`).  Refusals (401, 403, a sign-in
+        page, a host off the allow-list), a wrong length, too many
+        redirects, other 4xx and local write errors are permanent.
         """
-        reason = self.reason or ""
         if self.status is not DownloadStatus.FAILED:
             return False
-        if reason.startswith("network_error:"):
+        if (self.reason or "").startswith(f"{REASON_NETWORK_ERROR}:"):
             return True
-        if reason.startswith("http_") and reason[5:].isdigit():
-            status = int(reason[5:])
-            return status in (408, 429) or status >= 500
-        return False
+        status = self.http_status
+        return status is not None and (
+            status in (HTTP_REQUEST_TIMEOUT, HTTP_RATE_LIMIT)
+            or status >= HTTP_SERVER_ERROR_MIN
+        )
 
     @property
     def file_path(self) -> str:
@@ -579,7 +586,7 @@ def download_file(
         )
         return DownloadResult(
             DownloadStatus.FAILED,
-            reason=f"network_error:{type(e).__name__}",
+            reason=f"{REASON_NETWORK_ERROR}:{type(e).__name__}",
             url=target,
             http_status=status_code,
         )
@@ -647,7 +654,7 @@ def download_file(
             )
             return DownloadResult(
                 DownloadStatus.FAILED,
-                reason=f"network_error:{type(e).__name__}",
+                reason=f"{REASON_NETWORK_ERROR}:{type(e).__name__}",
                 url=target,
             )
         except OSError as e:

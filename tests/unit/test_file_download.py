@@ -793,25 +793,32 @@ class TestRetryable:
     """Which failed downloads a later attempt may fix (#96)."""
 
     @pytest.mark.parametrize(
-        ("reason", "retryable"),
+        ("reason", "status", "retryable"),
         [
-            ("network_error:ConnectionError", True),
-            ("http_500", True),
-            ("http_503", True),
-            ("http_429", True),
-            ("http_408", True),
-            ("http_400", False),
-            ("auth", False),
-            ("html_page", False),
-            ("disallowed_host", False),
-            ("size_mismatch", False),
-            ("too_many_redirects", False),
-            ("write_error", False),
+            ("network_error:ConnectionError", None, True),
+            ("network_error:RetryError", 503, True),
+            ("http_500", 500, True),
+            ("http_503", 503, True),
+            ("http_429", 429, True),
+            ("http_408", 408, True),
+            ("http_400", 400, False),
+            ("auth", 403, False),
+            ("html_page", 200, False),
+            ("disallowed_host", None, False),
+            ("size_mismatch", None, False),
+            ("too_many_redirects", None, False),
+            ("write_error", 200, False),
         ],
     )
-    def test_failed_reasons(self, reason, retryable):
-        result = fd.DownloadResult(DownloadStatus.FAILED, reason=reason)
+    def test_failed_reasons(self, reason, status, retryable):
+        result = fd.DownloadResult(
+            DownloadStatus.FAILED, reason=reason, http_status=status
+        )
         assert result.retryable is retryable
+
+    def test_the_status_decides_not_the_reason_text(self):
+        result = fd.DownloadResult(DownloadStatus.FAILED, reason="http_503")
+        assert result.retryable is False  # no status received
 
     def test_unavailable_is_not_a_failure(self):
         result = fd.DownloadResult(DownloadStatus.UNAVAILABLE, reason="http_500")

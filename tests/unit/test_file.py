@@ -1985,6 +1985,16 @@ class TestRefusedDownloads:
         assert handler.get_file_statistics()["download_auth_failures"] == 0
 
 
+class TestUploadResultInvariants:
+    @pytest.mark.parametrize("upload_type", ["drive", "direct", "skip"])
+    def test_only_a_failure_can_be_retryable(self, upload_type):
+        with pytest.raises(ValueError, match="only a failed upload"):
+            UploadResult(upload_type=upload_type, retryable=True)
+
+    def test_a_failure_can_be_retryable(self):
+        assert UploadResult(error="boom", retryable=True).retryable
+
+
 class TestClosedSets:
     """Literal types stay in step with the values they stand for (#118)."""
 

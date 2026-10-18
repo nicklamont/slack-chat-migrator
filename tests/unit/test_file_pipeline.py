@@ -623,13 +623,21 @@ class TestRetryableFailures:
         assert result.retryable
 
     @pytest.mark.parametrize(
-        ("reason", "retryable"),
-        [("network_error:ConnectionError", True), ("http_503", True), ("auth", False)],
+        ("reason", "status", "retryable"),
+        [
+            ("network_error:ConnectionError", None, True),
+            ("http_503", 503, True),
+            ("auth", 403, False),
+        ],
     )
-    def test_download_failures_carry_the_flag(self, tmp_path, reason, retryable):
+    def test_download_failures_carry_the_flag(
+        self, tmp_path, reason, status, retryable
+    ):
         handler = make_handler(FakeDrive(), tmp_path)
         handler._download_file = MagicMock(
-            return_value=DownloadResult(DownloadStatus.FAILED, reason=reason)
+            return_value=DownloadResult(
+                DownloadStatus.FAILED, reason=reason, http_status=status
+            )
         )
 
         result = handler.upload_attachment(
