@@ -80,6 +80,8 @@ DRIVE_BATCH_MAX_REQUESTS = 100  # calls per Drive batch request
 # can find an already-uploaded file without downloading it again.
 DRIVE_APP_PROPERTY_SLACK_FILE_ID = "slackFileId"
 DRIVE_APP_PROPERTY_SLACK_CHANNEL = "slackChannel"
+# Drive limits each appProperties entry to 124 bytes of key plus value (UTF-8).
+DRIVE_APP_PROPERTY_MAX_BYTES = 124
 
 # --- Membership Time Offsets ---
 DEFAULT_FALLBACK_JOIN_TIME = "2020-01-01T00:00:00Z"

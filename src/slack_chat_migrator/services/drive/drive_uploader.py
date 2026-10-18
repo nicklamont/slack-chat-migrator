@@ -32,6 +32,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from slack_chat_migrator.constants import (
+    DRIVE_APP_PROPERTY_MAX_BYTES,
     DRIVE_APP_PROPERTY_SLACK_CHANNEL,
     DRIVE_APP_PROPERTY_SLACK_FILE_ID,
     DRIVE_FILES_PAGE_SIZE,
@@ -132,13 +133,10 @@ APP_PROPERTY_SLACK_MD5 = "slackMd5"
 #: Cached Drive file: (file_id, webViewLink).
 _CachedFile = tuple[str, str | None]
 
-#: Drive limits each appProperties entry to 124 bytes of key plus value.
-_APP_PROPERTY_MAX_BYTES = 124
-
 
 def _fit_app_property(key: str, value: str) -> str:
     """Truncate *value* so ``key + value`` fits in an appProperties entry."""
-    budget = _APP_PROPERTY_MAX_BYTES - len(key.encode("utf-8"))
+    budget = DRIVE_APP_PROPERTY_MAX_BYTES - len(key.encode("utf-8"))
     return value.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
 
 

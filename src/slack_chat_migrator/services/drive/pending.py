@@ -42,6 +42,10 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+from slack_chat_migrator.constants import (
+    DRIVE_APP_PROPERTY_MAX_BYTES,
+    DRIVE_FILES_PAGE_SIZE,
+)
 from slack_chat_migrator.services.drive_adapter import (
     DRIVE_CALL_CANDIDATES,
     is_drive_call_error,
@@ -59,8 +63,6 @@ MARKER_VALUE = "true"
 #: Stored when neither the Slack user ID nor the email fits (or is known).
 UNKNOWN_TARGET = "-"
 
-#: Drive limits each appProperties entry to 124 bytes of key plus value.
-APP_PROPERTY_MAX_BYTES = 124
 #: Drive allows this many private properties per file and app.
 MAX_APP_PROPERTIES = 30
 #: Keys a flagged upload has besides its grant entries: the upload's tags
@@ -69,8 +71,6 @@ MAX_APP_PROPERTIES = 30
 FIXED_APP_PROPERTIES = 6
 #: The most poster grants that can be flagged on one file.
 MAX_PENDING_GRANTS = MAX_APP_PROPERTIES - FIXED_APP_PROPERTIES
-#: The largest page Drive serves for files.list.
-_SWEEP_PAGE_SIZE = 1000
 
 
 def _normalize(email: str) -> str:
@@ -130,7 +130,7 @@ def grant_key(email: str) -> str:
 
 def _fits(key: str, value: str) -> bool:
     size = len(key.encode("utf-8")) + len(value.encode("utf-8"))
-    return size <= APP_PROPERTY_MAX_BYTES
+    return size <= DRIVE_APP_PROPERTY_MAX_BYTES
 
 
 def encode_target(key: str, target: Target) -> str:
@@ -419,7 +419,7 @@ class PendingPermissions:
                     f" value='{MARKER_VALUE}' }} and trashed=false"
                 ),
                 "fields": "nextPageToken, files(id, parents, appProperties)",
-                "page_size": _SWEEP_PAGE_SIZE,
+                "page_size": DRIVE_FILES_PAGE_SIZE,
             }
             if shared_drive_id:
                 list_kwargs.update(
