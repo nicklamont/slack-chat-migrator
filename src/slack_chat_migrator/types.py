@@ -129,6 +129,22 @@ class UserWithoutEmail(TypedDict):
     deleted: bool
 
 
+class LostPermissions(TypedDict):
+    """A file's grant or transfer that a Drive quota stop left undone.
+
+    It couldn't be flagged on the file either, so it must be made by hand.
+    """
+
+    drive_file_id: str
+    url: str
+    slack_file_id: str
+    channel: str | None
+    #: Posters who should have ``writer`` access.
+    grant_to: list[str]
+    #: Who should own the file, if its ownership was to be transferred.
+    transfer_to: str | None
+
+
 class FileUploadStats(TypedDict):
     """File upload statistics returned by ``FileHandler.get_file_statistics``.
 
@@ -181,6 +197,11 @@ class FileUploadStats(TypedDict):
     #: Pending transfers kept because someone other than the admin owns the
     #: file, and only its owner can transfer it.
     pending_skipped_not_owner: int
+    #: Files whose grant or transfer a Drive quota stop left undone and
+    #: unflagged (details in ``permissions_lost_details``).
+    permissions_lost_on_quota_stop: int
+    #: What to make by hand for each of those files.
+    permissions_lost_details: list[LostPermissions]
     #: Drive folders whose file listing failed at least once.
     folder_listing_failures: int
     #: Channel-folder grants to external members that Drive refused.

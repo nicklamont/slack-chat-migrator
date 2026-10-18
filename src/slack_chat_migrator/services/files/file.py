@@ -68,7 +68,7 @@ from slack_chat_migrator.services.files.temp_files import (
     remove_temp_file,
     sweep_stale_temp_dirs,
 )
-from slack_chat_migrator.types import FileUploadStats, UploadResult
+from slack_chat_migrator.types import FileUploadStats, LostPermissions, UploadResult
 from slack_chat_migrator.utils.domains import (
     internal_domains,
     is_external_email,
@@ -306,6 +306,8 @@ class FileHandler:
             "pending_skipped_external": 0,
             "pending_skipped_transfers_off": 0,
             "pending_skipped_not_owner": 0,
+            "permissions_lost_on_quota_stop": 0,
+            "permissions_lost_details": [],
             "folder_listing_failures": 0,
             "external_folder_grant_failures": 0,
             "folder_sync_failures": 0,
@@ -1581,7 +1583,8 @@ class FileHandler:
                 retryable=upload.retryable,
             )
 
-        # Never raises: a failed grant doesn't make the upload fail.
+        # A failed grant doesn't make the upload fail; only a quota stop
+        # (DriveQuotaError) is raised.
         self._apply_file_permissions(
             upload.file_id,
             upload.source,
@@ -1708,10 +1711,16 @@ class FileHandler:
         (``poster_grant_failures``, ``ownership_transfer_failed``) and
         flagged per poster on the file (see
         :class:`~slack_chat_migrator.services.drive.pending.PendingPermissions`),
-        never raised: the upload stays a success.  :meth:`retry_pending_permissions`
+        not raised: the upload stays a success.  :meth:`retry_pending_permissions`
         retries the flagged ones at the end of the run.  A flag stores the
         Slack user ID (*poster_id* for the poster, *owner_id* for the new
         owner), so a later run can map that user again.
+
+        Raises:
+            DriveQuotaError: If a Drive quota stops the run before the grant
+                or transfer is made.  What wasn't made is flagged first if
+                that write still works, else logged and listed for a manual
+                fix (:meth:`_note_permissions_cut_short`).
         """
         pending = self.drive_uploader.pending
         poster = sender_email if self._is_internal_email(sender_email) else None
@@ -1756,6 +1765,51 @@ class FileHandler:
                 file_id=file_id,
             )
 
+        try:
+            self._make_file_permissions(
+                drive_file_id,
+                poster,
+                owner,
+                channel,
+                file_id,
+                poster_id=poster_id,
+                owner_id=owner_id,
+            )
+        except DriveQuotaError as e:
+            self._note_permissions_cut_short(
+                drive_file_id,
+                poster,
+                owner,
+                channel,
+                file_id,
+                error=e,
+                poster_id=poster_id,
+                owner_id=owner_id,
+            )
+            raise
+
+    def _make_file_permissions(
+        self,
+        drive_file_id: str,
+        poster: str | None,
+        owner: str | None,
+        channel: str | None,
+        file_id: str,
+        *,
+        poster_id: str | None,
+        owner_id: str | None,
+    ) -> None:
+        """Make the grant and transfer :meth:`_apply_file_permissions` chose.
+
+        Args:
+            drive_file_id: The Drive file.
+            poster: Who gets ``writer`` access, if anyone.
+            owner: Who gets ownership, if anyone.
+            channel: Channel name for logging context.
+            file_id: Slack file ID for logging context.
+            poster_id: The poster's Slack user ID, for a flag.
+            owner_id: The new owner's Slack user ID, for a flag.
+        """
         # The new owner needs no separate writer grant.
         grant_poster = bool(
             poster
@@ -1805,6 +1859,97 @@ class FileHandler:
             if not transferred and poster == owner:
                 # Keep the poster able to edit their file.
                 self._grant_poster(drive_file_id, poster, user_id=poster_id)
+
+    def _note_permissions_cut_short(
+        self,
+        drive_file_id: str,
+        poster: str | None,
+        owner: str | None,
+        channel: str | None,
+        file_id: str,
+        *,
+        error: DriveQuotaError,
+        poster_id: str | None,
+        owner_id: str | None,
+    ) -> None:
+        """Record a grant or transfer that a quota stop left unconfirmed.
+
+        A later run links the file as an earlier run's upload and only makes
+        what is flagged on it, so the flags are written now, best effort
+        (the quota may refuse them too).  Either way an ERROR names the file
+        and the recipients; what couldn't be flagged is counted in
+        ``permissions_lost_on_quota_stop`` and listed in
+        ``permissions_lost_details`` for a manual fix.
+        """
+        grant_to = (
+            poster
+            if poster
+            and poster != owner
+            and not self._already_granted(drive_file_id, poster)
+            else None
+        )
+        transfer_to = (
+            owner if owner and not self._already_granted(drive_file_id, owner) else None
+        )
+        if not grant_to and not transfer_to:
+            return
+        pending = self.drive_uploader.pending
+        flagged = True
+        if grant_to:
+            try:
+                flagged = pending.set_grant(
+                    drive_file_id,
+                    grant_to,
+                    True,
+                    self._shared_drive_id,
+                    user_id=poster_id,
+                )
+            except DriveQuotaError:
+                flagged = False
+        if transfer_to:
+            try:
+                flagged = (
+                    pending.set_owner(
+                        drive_file_id, transfer_to, True, user_id=owner_id
+                    )
+                    and flagged
+                )
+            except DriveQuotaError:
+                flagged = False
+        url = f"https://drive.google.com/file/d/{drive_file_id}/view"
+        undone = []
+        if grant_to:
+            undone.append(f"writer access for {grant_to}")
+        if transfer_to:
+            undone.append(f"ownership transfer to {transfer_to}")
+        if flagged:
+            outcome = (
+                "They are flagged on the file, so the next run's sweep makes them."
+            )
+        else:
+            outcome = (
+                "They couldn't be flagged on the file either, so no later run"
+                " knows about them: make them by hand."
+            )
+            details: LostPermissions = {
+                "drive_file_id": drive_file_id,
+                "url": url,
+                "slack_file_id": file_id,
+                "channel": channel,
+                "grant_to": [grant_to] if grant_to else [],
+                "transfer_to": transfer_to,
+            }
+            self._increment_stat("permissions_lost_on_quota_stop")
+            self.file_stats["permissions_lost_details"].append(details)
+        log_with_context(
+            logging.ERROR,
+            f"A Drive quota stopped the run before the permissions of Drive file"
+            f" {drive_file_id} ({url}) were confirmed: {', '.join(undone)}"
+            f" ({error.reason}). {outcome}",
+            channel=channel,
+            file_id=file_id,
+            drive_file_id=drive_file_id,
+        )
 
     def _grant_poster(
         self, drive_file_id: str, poster: str, *, user_id: str | None = None
@@ -2289,6 +2434,12 @@ class FileHandler:
                 "pending_skipped_transfers_off"
             ],
             "pending_skipped_not_owner": self.file_stats["pending_skipped_not_owner"],
+            "permissions_lost_on_quota_stop": self.file_stats[
+                "permissions_lost_on_quota_stop"
+            ],
+            "permissions_lost_details": list(
+                self.file_stats["permissions_lost_details"]
+            ),
             "folder_listing_failures": self.file_stats["folder_listing_failures"],
             "external_folder_grant_failures": self.file_stats[
                 "external_folder_grant_failures"

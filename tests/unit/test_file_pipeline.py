@@ -726,13 +726,117 @@ class TestQuotaStopsTheRun:
 
         assert handler.get_file_statistics()["channel_folder_failures"] == 0
 
-    def test_quota_on_the_poster_grant(self, tmp_path, downloads):
+    @staticmethod
+    def _file(fake, slack_id):
+        return next(
+            f
+            for f in fake.files_db.values()
+            if (f.get("appProperties") or {}).get("slackFileId") == slack_id
+        )
+
+    @staticmethod
+    def _writers(fake, drive_id):
+        return {
+            p["emailAddress"]
+            for p in fake.permissions_db.get(drive_id, [])
+            if p["role"] == "writer"
+        }
+
+    def test_quota_on_the_grant_flags_it_for_the_next_run(
+        self, tmp_path, downloads, caplog
+    ):
+        """The run stops after the upload; the grant isn't lost with it."""
         fake = FakeDrive()
-        handler = make_handler(fake, tmp_path)
+        run1 = make_handler(fake, tmp_path)
         fake.failing["permissions.create"] = quota_error("dailyLimitExceeded")
 
         with pytest.raises(DriveQuotaError, match="dailyLimitExceeded"):
-            upload(handler, downloads, "c", "F1", "UA", b"one")
+            upload(run1, downloads, "c", "F1", "UA", b"1", sender="bob@example.com")
+
+        record = self._file(fake, "F1")
+        assert record["appProperties"]["slackGrantPending"] == "true"
+        assert run1.get_file_statistics()["permissions_lost_on_quota_stop"] == 0
+        (error,) = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert record["id"] in error and "bob@example.com" in error
+        assert f"https://drive.google.com/file/d/{record['id']}/view" in error
+        assert "the next run's sweep makes them" in error
+
+        del fake.failing["permissions.create"]
+        run2 = make_handler(fake, tmp_path)  # migrate --resume
+        again = upload(run2, downloads, "c", "F1", "UA", b"1", sender="bob@example.com")
+        run2.retry_pending_permissions()
+
+        assert again.drive_id == record["id"]
+        assert "bob@example.com" in self._writers(fake, record["id"])
+
+    def test_quota_on_the_transfer_flags_it_for_the_next_run(self, tmp_path, downloads):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.failing["permissions.create"] = quota_error("dailyLimitExceeded")
+
+        with pytest.raises(DriveQuotaError):
+            upload(run1, downloads, "c", "F1", "UA", b"mine")
+
+        record = self._file(fake, "F1")
+        assert record["appProperties"]["slackOwnerPending"] == "true"
+
+        del fake.failing["permissions.create"]
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        upload(run2, downloads, "c", "F1", "UA", b"mine")
+        run2.retry_pending_permissions()
+
+        assert fake.owners_of(record["id"]) == ["alice@example.com"]
+
+    def test_quota_on_a_grant_and_transfer_batch_flags_both(self, tmp_path, downloads):
+        fake = FakeDrive()
+        run1 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.failing["permissions.create"] = quota_error("dailyLimitExceeded")
+
+        with pytest.raises(DriveQuotaError):
+            upload(run1, downloads, "c", "F1", "UA", b"1", sender="bob@example.com")
+
+        props = self._file(fake, "F1")["appProperties"]
+        assert props["slackGrantPending"] == "true"
+        assert props["slackOwnerPending"] == "true"
+
+        del fake.failing["permissions.create"]
+        run2 = make_handler(fake, tmp_path, shared=False, transfer=True)
+        run2.retry_pending_permissions()
+
+        drive_id = self._file(fake, "F1")["id"]
+        assert fake.owners_of(drive_id) == ["alice@example.com"]
+        assert "bob@example.com" in self._writers(fake, drive_id)
+
+    def test_unflagged_loss_is_logged_and_listed_for_a_manual_fix(
+        self, tmp_path, downloads, caplog
+    ):
+        """The daily limit refuses the flag write too."""
+        fake = FakeDrive()
+        handler = make_handler(fake, tmp_path, shared=False, transfer=True)
+        fake.failing["permissions.create"] = quota_error("dailyLimitExceeded")
+        fake.failing["files.update"] = quota_error("dailyLimitExceeded")
+
+        with pytest.raises(DriveQuotaError):
+            upload(handler, downloads, "c", "F1", "UA", b"1", sender="bob@example.com")
+
+        record = self._file(fake, "F1")
+        assert "slackGrantPending" not in record["appProperties"]
+        stats = handler.get_file_statistics()
+        assert stats["permissions_lost_on_quota_stop"] == 1
+        assert stats["permissions_lost_details"] == [
+            {
+                "drive_file_id": record["id"],
+                "url": f"https://drive.google.com/file/d/{record['id']}/view",
+                "slack_file_id": "F1",
+                "channel": "c",
+                "grant_to": ["bob@example.com"],
+                "transfer_to": "alice@example.com",
+            }
+        ]
+        (error,) = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert "make them by hand" in error
+        assert "writer access for bob@example.com" in error
+        assert "ownership transfer to alice@example.com" in error
 
     def test_rate_limit_still_fails_one_file_as_retryable(self, tmp_path, downloads):
         fake = FakeDrive()

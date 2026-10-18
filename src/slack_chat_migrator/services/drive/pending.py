@@ -236,7 +236,7 @@ class PendingPermissions:
         shared_drive_id: str | None = None,
         *,
         user_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Flag *email*'s grant on the file as pending, or clear the flag.
 
         Nothing is sent when the flag doesn't change; a flag that is already
@@ -250,17 +250,24 @@ class PendingPermissions:
             pending: Whether the grant is pending (else it was made).
             shared_drive_id: The shared drive, if the file is in one.
             user_id: The poster's Slack user ID, when known.
+
+        Returns:
+            False if a pending flag couldn't be stored on the file (a failed
+            write, or too many flagged posters); True otherwise.
+
+        Raises:
+            DriveQuotaError: If a Drive quota is used up.
         """
         key = grant_key(email)
         if not pending:
             self.clear_grant(file_id, key, shared_drive_id)
-            return
+            return True
         target = Target(user_id, email)
         targets = self._grants.setdefault(file_id, {})
         known = targets.get(key)
         if known is not None:
             targets[key] = known.merged(target)
-            return
+            return True
         stored = sum(1 for k in targets if (file_id, k) not in self._unstored)
         targets[key] = target
         if stored >= MAX_PENDING_GRANTS:
@@ -275,12 +282,12 @@ class PendingPermissions:
                 drive_file_id=file_id,
             )
             self._on_write_failure(file_id, False)
-            return
+            return False
         props: dict[str, str | None] = {
             GRANT_MARKER: MARKER_VALUE,
             key: encode_target(key, target),
         }
-        self._write(file_id, props, shared_drive_id, clearing=False)
+        return self._write(file_id, props, shared_drive_id, clearing=False)
 
     def clear_grant(
         self, file_id: str, key: str, shared_drive_id: str | None = None
@@ -312,32 +319,33 @@ class PendingPermissions:
         pending: bool,
         *,
         user_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Flag the file's ownership transfer to *email* as pending, or clear it.
 
-        See :meth:`set_grant`.  Transfers only happen in regular Drive.  A
-        pending transfer to someone else replaces the stored one.  Clearing
-        removes the new owner from the file too.
+        See :meth:`set_grant` (also for the return value).  Transfers only
+        happen in regular Drive.  A pending transfer to someone else
+        replaces the stored one.  Clearing removes the new owner from the
+        file too.
         """
         known = self._owners.get(file_id)
         if not pending:
             if known is None:
-                return
+                return True
             del self._owners[file_id]
             self._write(
                 file_id, {OWNER_MARKER: None, OWNER_TARGET: None}, None, clearing=True
             )
-            return
+            return True
         target = Target(user_id, email)
         if known is not None and known.is_for(user_id, email):
             self._owners[file_id] = known.merged(target)
-            return
+            return True
         self._owners[file_id] = target
         props: dict[str, str | None] = {
             OWNER_MARKER: MARKER_VALUE,
             OWNER_TARGET: encode_target(OWNER_TARGET, target),
         }
-        self._write(file_id, props, None, clearing=False)
+        return self._write(file_id, props, None, clearing=False)
 
     def _write(
         self,
@@ -346,8 +354,12 @@ class PendingPermissions:
         shared_drive_id: str | None,
         *,
         clearing: bool,
-    ) -> None:
-        """Store *props* on the file; a failure is logged and reported."""
+    ) -> bool:
+        """Store *props* on the file; a failure is logged and reported.
+
+        Returns:
+            Whether the write worked.
+        """
         try:
             self.drive_service.update_file(
                 file_id,
@@ -372,6 +384,8 @@ class PendingPermissions:
                 )
             log_with_context(logging.WARNING, message, drive_file_id=file_id)
             self._on_write_failure(file_id, clearing)
+            return False
+        return True
 
     def find_flagged(
         self,
