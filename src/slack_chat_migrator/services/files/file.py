@@ -9,7 +9,7 @@ import logging
 import mimetypes
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, get_args
 
 import requests
 from googleapiclient.errors import HttpError
@@ -154,7 +154,9 @@ class DriveStatus:
     detail: str = ""
 
     def __post_init__(self) -> None:
-        """Reject a root folder for a mode without one, and the reverse."""
+        """Reject an unknown mode, and a root folder that doesn't fit the mode."""
+        if self.mode not in get_args(DriveMode):
+            raise ValueError(f"unknown DriveStatus mode {self.mode!r}")
         if (self.mode in _NO_ROOT_MODES) != (not self.root_folder_id):
             raise ValueError(
                 f"a DriveStatus in mode {self.mode!r} must"

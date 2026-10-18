@@ -901,6 +901,10 @@ class TestDriveStatus:
         with pytest.raises(ValueError, match="root folder"):
             DriveStatus(mode, root)
 
+    def test_unknown_mode_is_rejected(self):
+        with pytest.raises(ValueError, match="unknown DriveStatus mode 'bogus'"):
+            DriveStatus("bogus", "F")  # type: ignore[arg-type]
+
     def test_ready_and_shared_drive_are_derived(self):
         assert DriveStatus("shared_drive", "SD").ready
         assert DriveStatus("shared_drive", "SD").shared_drive_id == "SD"
